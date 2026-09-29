@@ -432,8 +432,37 @@
   function setIfChanged(el, html) {
     if (el._html === html) return;
     const open = el.querySelector('.menu.open');
-    el.innerHTML = html; el._html = html;
+    swapHtml(el, html); el._html = html;
     if (open) el.querySelector('.menu')?.classList.add('open');
+  }
+  // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
+  // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
+  const touched = new Set();
+  const ANCHORS = ['rid', 'gid', 'remember', 'key'];
+  function uiKey(root, n) {
+    const path = [];
+    for (; n && n !== root; n = n.parentElement) {
+      const a = ANCHORS.find(k => n.dataset[k] != null);
+      if (a) return { a, v: n.dataset[a], path };
+      path.unshift([...n.parentElement.children].indexOf(n));
+    }
+    return { path };
+  }
+  function swapHtml(el, html) {
+    const keep = [];
+    for (const n of touched) {
+      if (!n.isConnected) { touched.delete(n); continue; }
+      if (el.contains(n) && n !== el) keep.push({ ...uiKey(el, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null });
+    }
+    el.innerHTML = html;
+    for (const k of keep) {
+      let n = k.a ? el.querySelector(`[data-${k.a}="${CSS.escape(k.v)}"]`) : el;
+      for (const i of k.path) n = n?.children[i];
+      if (!n) continue;
+      if (k.open != null && n.tagName === 'DETAILS') n.open = k.open;
+      n.scrollTop = k.top; n.scrollLeft = k.left;
+      touched.add(n);
+    }
   }
 
   // ---------- activity: tool calls and thinking ----------
@@ -626,14 +655,14 @@
         continue;
       }
       if (m.role === 'advisor-update') {
-        parts.push(`<details class="advisor-update"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
+        parts.push(`<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
         continue;
       }
       const user = m.role === 'user';
       const image = m.imagePreview ? `<img class="msg-image" src="${esc(m.imagePreview)}" alt="Attached image">` : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
       const steer = user && m.steer === 'pending' ? '<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>'
         : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
-      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
+      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
         <div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div></div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
@@ -650,7 +679,7 @@
     }
     if (opts.tail) parts.push(opts.tail);
     if (!messages.length && !pending && status !== 'history' && !opts.head) parts.push(`<div class="history-note">This session is ready. Send the first message below.</div>`);
-    $('#thread').innerHTML = parts.join('');
+    swapHtml($('#thread'), parts.join(''));
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
@@ -789,8 +818,8 @@
     if (!messages.length && file && !pv) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session…</div>'; return; }
     if (!byFile.size) { $('#thread').innerHTML = '<div class="history-note">No file edits recorded in this session yet.</div>'; return; }
     const files = [...byFile];
-    $('#thread').innerHTML = `<div class="changes-index">${files.map(([p, list], i) => { const st = diffStat(list); return `<a href="#" data-jump="fd-${i}"><span class="fd-path">${esc(shortPath(p))}</span><span class="muted">${list.length > 1 ? list.length + ' edits' : ''}</span><span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></a>`; }).join('')}</div>`
-      + files.map(([p, list], i) => `<section class="change-file" id="fd-${i}">${list.map((f, j) => fileDiff(f, { meta: list.length > 1 ? `<span class="muted fd-when">edit ${j + 1}/${list.length} · ${esc(clock(f.at))}</span>` : `<span class="muted fd-when">${esc(clock(f.at))}</span>` })).join('')}</section>`).join('');
+    swapHtml($('#thread'), `<div class="changes-index">${files.map(([p, list], i) => { const st = diffStat(list); return `<a href="#" data-jump="fd-${i}"><span class="fd-path">${esc(shortPath(p))}</span><span class="muted">${list.length > 1 ? list.length + ' edits' : ''}</span><span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></a>`; }).join('')}</div>`
+      + files.map(([p, list], i) => `<section class="change-file" id="fd-${i}">${list.map((f, j) => fileDiff(f, { meta: list.length > 1 ? `<span class="muted fd-when">edit ${j + 1}/${list.length} · ${esc(clock(f.at))}</span>` : `<span class="muted fd-when">${esc(clock(f.at))}</span>` })).join('')}</section>`).join(''));
   }
 
   // ---------- background tasks & plan (side panel) ----------
@@ -928,7 +957,7 @@
     const liveLine = running ? [live.currentTool && `▸ ${live.currentTool}`, live.lastIntent || live.intent, live.toolCount && `${live.toolCount} tools`].filter(Boolean).join(' · ') : '';
     const desc = j.type === 'bash' ? '' : firstLine(j.title !== j.id ? j.title : j.task).replace(/^#+\s*/, '');
     const output = j.output || j.summary || '';
-    return `<div class="job ${esc(j.status)}">
+    return `<div class="job ${esc(j.status)}" data-key="job:${esc(j.id)}">
       <div class="job-top"><span class="dot ${running ? 'running' : j.status === 'error' ? 'error' : j.status === 'stale' ? 'paused' : 'done'}"></span><b title="${esc(j.id)}">${esc(j.type === 'bash' ? (j.title || j.id) : j.id)}</b><span class="dur">${esc(time)}</span></div>
       <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelName(j.model)) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
       ${desc ? `<div class="job-desc">${esc(desc.slice(0, 220))}</div>` : ''}
@@ -1761,7 +1790,7 @@
       const s = S.store?.sessions.find(x => x.id === c.id);
       if (!s) return null;
       return { model: sessionModel(s), thinking: s.thinking, allowDefault: false, apply: async (sel, th) => {
-        try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); toast(`Model: ${modelLabel(sel, th)}${['running', 'queued'].includes(s.status) ? ' (applies from the next turn)' : ''}`); }
+        try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); }
         catch (err) { toast(err.message, 'err'); }
         $('#input')?.focus();
       } };
@@ -1929,7 +1958,9 @@
     else if (d.classList?.contains('row')) remember(rowOpen, d.dataset.rid);
     else if (d.hasAttribute?.('data-finished')) S.finishedOpen = d.open;
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
+    else if (d.tagName === 'DETAILS') touched.add(d);
   }, true);
+  document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); }, true);
   document.addEventListener('input', e => {
     const t = e.target;
     if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); update(); }
