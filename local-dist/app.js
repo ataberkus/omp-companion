@@ -1099,7 +1099,7 @@
     return all.sort((a, b) => (pref.has(b) - pref.has(a)) || (a === 'openrouter') - (b === 'openrouter') || a.localeCompare(b));
   }
   async function openPicker(ctx) {
-    S.picker = { ctx, q: '', provider: '', hi: 0, thinking: ctx.thinking || thinkGet(ctx.model) || '', thinkSel: ctx.model, mem: {}, flat: [] };
+    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [] };
     let el = $('#picker');
     if (!el) { el = document.createElement('div'); el.id = 'picker'; el.className = 'picker-wrap'; document.body.appendChild(el); }
     el.innerHTML = `<div class="picker" role="dialog" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
@@ -1138,7 +1138,7 @@
   function renderThink() {
     const P = S.picker;
     const r = P.flat[P.hi];
-    if (r && P.thinkSel !== r.sel) { P.thinkSel = r.sel; const m = P.mem[r.sel] ?? thinkGet(r.sel); if (m !== undefined && (!m || (r.m?.thinking || []).includes(m))) P.thinking = m; }
+    if (r && P.thinkSel !== r.sel) { if (P.thinkSel) P.mem[P.thinkSel] = P.thinking; P.thinkSel = r.sel; const m = P.mem[r.sel] ?? thinkGet(r.sel) ?? ''; P.thinking = (!m || (r.m?.thinking || []).includes(m)) ? m : ''; }
     const levels = r?.m?.thinking || [];
     const defLevel = r?.thinking || (r?.isDefault ? splitSel(S.models.roles.default).thinking : '') || S.models.defaultThinking || '';
     $('#pickerThink').innerHTML = !r ? '' : !r.m || !r.m.reasoning || !levels.length
