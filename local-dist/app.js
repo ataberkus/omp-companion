@@ -1757,6 +1757,7 @@
     if (d.classList?.contains('activity')) remember(groupOpen, d.dataset.gid);
     else if (d.classList?.contains('row')) remember(rowOpen, d.dataset.rid);
     else if (d.hasAttribute?.('data-finished')) S.finishedOpen = d.open;
+    else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
   }, true);
   document.addEventListener('input', e => {
     const t = e.target;
