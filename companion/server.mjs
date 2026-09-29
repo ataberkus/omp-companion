@@ -142,6 +142,8 @@ export async function createCompanion(options={}){
  const queuedImageFile=id=>path.join(dataDir,'queued-images',id+'.json');
  let store;
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
+ // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
+ store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
  for(const s of store.sessions){delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
@@ -560,6 +562,7 @@ async function pluginAction(body){
     const file=sessionFileParam(body.file);const images=chatImages(body);const message=typeof body.message==='string'?body.message.trim().slice(0,200000):'';
     const submitted=!!message||body.images!==undefined;
     const existing=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));
+    store.archived=store.archived.filter(k=>k!=='f:'+file&&k!=='f:'+body.file);
     if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(),existing));return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
@@ -569,6 +572,11 @@ async function pluginAction(body){
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
     if(!selector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}if(!thinking&&head.thinking)s.thinking=head.thinking;
     json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,preview:body.preview},images)):s,201);return;
+   }
+   if(url.pathname==='/api/archive'){
+    const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
+    if(key.startsWith('s:')){const s=store.sessions.find(s=>s.id===key.slice(2));if(!s)throw error('Session not found.',404);if(body.archived!==false&&['running','queued'].includes(s.status))throw error('Stop the session before archiving it.');}
+    const set=new Set(store.archived);if(body.archived===false)set.delete(key);else set.add(key);store.archived=[...set];await persist();json({archived:store.archived});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await lock(s.id,()=>command(s,body)));return;}

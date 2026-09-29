@@ -179,10 +179,11 @@
     if (!t) { S.store = null; S.native = []; S.online = null; }
     route();
   }
-  function toast(msg, kind = '') {
+  function toast(msg, kind = '', action) {
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
     el.textContent = msg;
+    if (action) { const b = document.createElement('button'); b.className = 'toast-act'; b.textContent = action.label; b.onclick = () => { el.remove(); action.run(); }; el.appendChild(b); }
     $('#toasts').appendChild(el);
     setTimeout(() => el.remove(), kind === 'err' ? 6000 : 3500);
   }
@@ -195,6 +196,7 @@
   const modelInfo = sel => S.models?.models.find(m => m.selector === sel);
   const modelName = sel => { if (!sel) return ''; const m = modelInfo(sel); return m ? m.name : sel.slice(sel.indexOf('/') + 1); };
   const modelLabel = (sel, thinking) => sel ? modelName(sel) + (thinking && thinking !== 'off' ? ' · ' + thinking : '') : '';
+  const archivedKeys = () => new Set(S.store?.archived || []);
   function items() {
     const panel = panelSessions();
     const out = panel.map(s => {
@@ -207,6 +209,8 @@
       if (n.managedId && ids.has(n.managedId)) continue;
       out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: base(n.cwd), cwd: n.cwd, status: 'history', updatedAt: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
     }
+    const arch = archivedKeys();
+    for (const it of out) it.archived = arch.has(it.key);
     return out.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   }
   function current() {
@@ -229,6 +233,7 @@
     let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
     if (S.filter === 'active') all = all.filter(it => ['running', 'queued', 'review', 'error'].includes(it.status));
     if (S.filter === 'panel') all = all.filter(it => it.panel);
+    all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.status === 'running' || it.status === 'queued');
     const groups = [];
     const add = (label, arr) => arr.length && groups.push([label, arr]);
     const working = all.filter(it => it.status === 'running' || it.status === 'queued');
@@ -244,11 +249,24 @@
     const sel = selKey();
     list.innerHTML = groups.map(([label, arr]) => `<div class="group-label">${label}</div>` + arr.map(it => `
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}">
-        <span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
+        <span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>${it.status === 'running' || it.status === 'queued' ? '' : `<span class="arch" role="button" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</span>`}
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
-      </button>`).join('')).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : 'No sessions yet. Start one with “New session”.'}</div>`;
+      </button>`).join('')).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
     $('#conn').title = S.online ? 'Connected to the local companion' : 'Companion not reachable';
+  }
+
+  const ICON_ARCHIVE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>';
+  const ICON_RESTORE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+  async function setArchived(key, archived, undoable = true) {
+    const prev = S.store.archived || [];
+    S.store.archived = archived ? [...new Set([...prev, key])] : prev.filter(k => k !== key);
+    renderList(); if (current().kind === 'home') renderHome();
+    try {
+      S.store.archived = (await api('/archive', { key, archived })).archived;
+      renderList();
+      if (undoable) toast(archived ? 'Session archived' : 'Session restored', '', { label: 'Undo', run: () => setArchived(key, !archived, false) });
+    } catch (e) { S.store.archived = prev; renderList(); toast(e.message, 'err'); }
   }
 
   // ---------- views ----------
@@ -1474,7 +1492,7 @@
     if (!el) return;
     const h = S.home, l = h.listing;
     const f = h.filter.toLowerCase();
-    const recentSessions = items().slice(0, 5);
+    const recentSessions = items().filter(it => !it.archived).slice(0, 5);
     el.innerHTML = `
       <div><h2>Where do you want to work?</h2></div>
       <p class="sub">Pick a folder, say what to do, press Enter. Earlier sessions are in the sidebar.</p>
@@ -1671,6 +1689,8 @@
     if (copyBtn) { copy(copyBtn.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
     const ct = t.closest('[data-copy-text]');
     if (ct) { copy(ct.dataset.copyText); ct.closest('.menu')?.classList.remove('open'); return; }
+    const ar = t.closest('[data-archive]');
+    if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const item = t.closest('[data-key]');
     if (item) { openItem(item.dataset.key); return; }
     const go = t.closest('[data-go]');
