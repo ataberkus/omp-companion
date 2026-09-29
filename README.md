@@ -8,10 +8,8 @@
 
 **One browser tab for all your [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.** Run, watch and review OMP agents across many projects without juggling terminals. OMP itself stays unchanged.
 
-<!-- For an inline player, upload docs/showreel-web.mp4 through GitHub's web editor and put the resulting https://github.com/user-attachments/assets/... URL on its own line here, replacing this link. -->
-<a href="docs/showreel-web.mp4"><img src="docs/showreel-poster.jpg" alt="Watch the 30-second showreel" width="100%"/></a>
-
-<p align="center"><sub>▶ <a href="docs/showreel-web.mp4">Watch the 30-second showreel</a></sub></p>
+<!-- Animated preview (plays inline, no sound). For a real player with sound, upload the MP4 through GitHub's web editor and put the resulting https://github.com/user-attachments/assets/... URL on its own line here. -->
+<p align="center"><img src="docs/showreel.webp" alt="30-second showreel of OMP Control Room: sessions sidebar, chat, diffs, live plan, composer and more" width="100%"/></p>
 
 ![A session ready for review: chat with rendered Markdown, a folded activity summary, and the plan panel](docs/screenshots/dashboard-session.png)
 
