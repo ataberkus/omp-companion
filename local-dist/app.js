@@ -205,7 +205,7 @@
     const out = panel.map(s => {
       const p = projectOf(s);
       const model = sessionModel(s);
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, updatedAt: s.updatedAt, panel: true, model, thinking: s.thinking, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, panel: true, model, thinking: s.thinking, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
     });
     const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
@@ -238,13 +238,13 @@
     if (!S.store) { list.innerHTML = ''; return; }
     const q = S.search.trim().toLowerCase();
     let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
-    if (S.filter === 'active') all = all.filter(it => ['running', 'queued', 'review', 'error'].includes(it.status));
+    if (S.filter === 'active') all = all.filter(it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status));
     if (S.filter === 'panel') all = all.filter(it => it.panel);
-    all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.status === 'running' || it.status === 'queued');
+    all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.needsReview || it.status === 'running' || it.status === 'queued');
     const groups = [];
     const add = (label, arr) => arr.length && groups.push([label, arr]);
-    const working = all.filter(it => it.status === 'running' || it.status === 'queued');
-    const review = all.filter(it => it.status === 'review' || it.status === 'error');
+    const working = all.filter(it => !it.needsReview && (it.status === 'running' || it.status === 'queued'));
+    const review = all.filter(it => it.needsReview || it.status === 'review' || it.status === 'error');
     const rest = all.filter(it => !working.includes(it) && !review.includes(it));
     add('Working now', working);
     add('Needs your review', review);
@@ -256,8 +256,8 @@
     const sel = selKey();
     list.innerHTML = groups.map(([label, arr]) => `<div class="group-label">${label}</div>` + arr.map(it => `
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}">
-        <span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>${it.status === 'running' || it.status === 'queued' ? '' : `<span class="arch" role="button" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</span>`}
-        <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
+        <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>${it.status === 'running' || it.status === 'queued' ? '' : `<span class="arch" role="button" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</span>`}
+        <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
       </button>`).join('')).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
     $('#conn').title = S.online ? 'Connected to the local companion' : 'Companion not reachable';
