@@ -8,6 +8,10 @@
 
 **One browser tab for all your [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.** Run, watch and review OMP agents across many projects without juggling terminals. OMP itself stays unchanged.
 
+<video src="docs/showreel.mp4" controls muted width="100%"></video>
+
+▶ [Watch the showreel](docs/showreel.mp4)
+
 ![A session ready for review: chat with rendered Markdown, a folded activity summary, and the plan panel](docs/screenshots/dashboard-session.png)
 
 <table>
