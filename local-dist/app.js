@@ -149,7 +149,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '',
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
-    pending: null, attachment: null, editQueue: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
+    pending: null, attachment: null, editQueue: null, queueOpen: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
   };
@@ -1133,15 +1133,31 @@
     el.hidden = !items.length;
     if (!items.length) { setIfChanged(el, ''); return; }
     const waiting = !['running', 'queued'].includes(s.status);
-    setIfChanged(el, `<div class="queued-head"><strong>Send later <span>${items.length}</span></strong><span>${waiting ? 'Sends after your next message' : 'Sends when OMP finishes'}</span></div>`
+    const when = waiting ? 'Sends after your next message' : 'Sends when OMP finishes';
+    const editingAny = S.editQueue?.view === S.view && items.some(q => q.id === S.editQueue.id);
+    const open = editingAny || (S.queueOpen === S.view && items.length > 1);
+    const count = `${items.length} ${items.length === 1 ? 'message' : 'messages'} queued`;
+    const toggle = items.length > 1 ? `<button class="btn sm ghost queued-toggle" data-qtoggle aria-expanded="${open}" aria-label="${open ? 'Collapse' : 'Show all'} queued messages" title="${open ? 'Collapse' : 'Show all'}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${open ? 'm6 15 6-6 6 6' : 'm6 9 6 6 6-6'}"/></svg></button>` : '';
+    // Collapsed: one row like a chat app's queue: the count, the next message to go out, and its actions.
+    if (!open) {
+      const q = items[0];
+      el.classList.add('compact');
+      setIfChanged(el, `<div class="queued-row" title="${esc(when)}"><strong>${count}</strong><span class="queued-preview">${q.hasImage ? '<span class="queued-tag">[Image]</span> ' : ''}${esc(q.text)}</span>${queuedActions(q, waiting)}${toggle}</div>`);
+      return;
+    }
+    el.classList.remove('compact');
+    setIfChanged(el, `<div class="queued-head"><strong>${count}</strong><span>${when}</span>${toggle}</div>`
       + items.map((q, i) => {
         const editing = S.editQueue?.view === S.view && S.editQueue.id === q.id;
         return `<div class="queued-item"><span class="queued-number">${i + 1}</span><div class="queued-content">
           ${editing ? `<textarea data-qinput="${esc(q.id)}" rows="3" aria-label="Edit queued message">${esc(q.text)}</textarea>
             <div class="queued-edit-actions"><button class="btn sm primary" data-qsave="${esc(q.id)}">Save</button><button class="btn sm ghost" data-qclose>Cancel</button></div>`
           : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${q.imagePreview ? `<img src="${esc(q.imagePreview)}" alt="Queued image">` : ''}<span>Image attached</span></div>` : ''}`}</div>
-          <div class="queued-actions"><button class="btn sm ghost" data-qsend="${esc(q.id)}" aria-label="${waiting ? 'Send now' : 'Steer now'}" title="${waiting ? 'Send now' : 'Steer now: redirect the current work with this message'}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button><button class="btn sm ghost" data-qedit="${esc(q.id)}" aria-label="Edit queued message" title="Edit queued message"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button><button class="btn sm ghost" data-qremove="${esc(q.id)}" aria-label="Remove queued message" title="Remove queued message">✕</button></div></div>`;
+          ${queuedActions(q, waiting)}</div>`;
       }).join(''));
+  }
+  function queuedActions(q, waiting) {
+    return `<div class="queued-actions"><button class="btn sm ghost" data-qsend="${esc(q.id)}" aria-label="${waiting ? 'Send now' : 'Steer now'}" title="${waiting ? 'Send now' : 'Steer now: redirect the current work with this message'}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button><button class="btn sm ghost" data-qedit="${esc(q.id)}" aria-label="Edit queued message" title="Edit queued message"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button><button class="btn sm ghost" data-qremove="${esc(q.id)}" aria-label="Remove queued message" title="Remove queued message">✕</button></div>`;
   }
   async function queuedAction(type, id, message) {
     const c = current();
@@ -1607,6 +1623,7 @@
     if (cancelQuestion) { answerQuestion(cancelQuestion.dataset.uicancel, { cancelled: true }, cancelQuestion); return; }
     const qedit = t.closest('[data-qedit]');
     if (qedit) { S.editQueue = { view: S.view, id: qedit.dataset.qedit }; renderQueue(S.store.sessions.find(s => s.id === current().id)); $('#queued textarea')?.focus(); return; }
+    if (t.closest('[data-qtoggle]')) { S.queueOpen = S.queueOpen === S.view ? null : S.view; renderQueue(S.store.sessions.find(s => s.id === current().id)); return; }
     const qclose = t.closest('[data-qclose]');
     if (qclose) { S.editQueue = null; renderQueue(S.store.sessions.find(s => s.id === current().id)); return; }
     const qsave = t.closest('[data-qsave]');

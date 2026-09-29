@@ -1,13 +1,19 @@
-# OMP Control Room
+<p align="center"><img src="docs/banner.svg" alt="OMP Control Room" width="100%"/></p>
+
+<p align="center">
+  <img alt="Node.js 22+" src="https://img.shields.io/badge/node-22%2B-8b5cf6?style=flat-square&labelColor=09090b"/>
+  <img alt="Runs locally on 127.0.0.1" src="https://img.shields.io/badge/runs-locally-ec4fbf?style=flat-square&labelColor=09090b"/>
+  <img alt="No build step" src="https://img.shields.io/badge/build-none-3fd0e6?style=flat-square&labelColor=09090b"/>
+</p>
 
 **One browser tab for all your [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.** Run, watch and review OMP agents across many projects without juggling terminals. OMP itself stays unchanged.
 
-![A session ready for review: chat with rendered Markdown, a folded activity summary, and the plan panel](docs/screenshots/session.png)
+![A session ready for review: chat with rendered Markdown, a folded activity summary, and the plan panel](docs/screenshots/dashboard-session.png)
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/diff.png" alt="Side-by-side diff of every file the session changed"/></td>
-    <td width="50%"><img src="docs/screenshots/home.png" alt="New session screen with recent folders and sessions to pick up"/></td>
+    <td width="50%"><img src="docs/screenshots/dashboard-diff.png" alt="Side-by-side diff of every file the session changed"/></td>
+    <td width="50%"><img src="docs/screenshots/dashboard-home.png" alt="New session screen with recent folders and sessions to pick up"/></td>
   </tr>
   <tr>
     <td align="center"><sub>Review every change as a unified or split diff</sub></td>
