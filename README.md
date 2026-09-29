@@ -12,6 +12,8 @@ A local web control panel for [oh-my-pi](https://github.com/can1357/oh-my-pi). O
 node companion/server.mjs
 ```
 
+On Windows you can double-click `start.bat` instead; it checks that `node` and `omp` are on PATH and keeps the window open after the companion stops.
+
 4. The dashboard opens automatically and connects itself (the printed link carries the token in the URL fragment, which is never sent to the server). Set `OMP_WEB_NO_OPEN=1` to skip opening the browser. The token is kept in the tab's `sessionStorage`, so reloading the tab stays connected.
 5. Click **New session** in the sidebar (or press `Alt+N`): pick a recently used folder or browse to any folder, optionally type a prompt, and press Enter. The project is registered automatically. Each session has an independent OMP process.
 
@@ -25,7 +27,7 @@ The dashboard at `/` is organised around sessions:
 - **New session** (`Alt+N`): pick a recent folder or browse to one, optionally type what to do, press Enter. The project is registered automatically.
 - **Conversation:** a compact plan line above chat shows the active todo and progress; click it to open the full plan in the right-hand panel. Below it, rendered Markdown includes code blocks with copy, tables, lists and links. Each stretch of tool calls and thinking folds into one activity block, open while OMP works and collapsed afterward with tool counts, failures and changed-file summaries. Replies show the model that wrote them. Automatic context compaction shows “Compacting context…” while it runs and records the outcome in chat.
 - **Questions:** OMP's built-in `ask` tool and extension selection, confirmation, text and editor prompts appear above the composer. Choose an option, type an answer, decline, or cancel; only the matching live session receives the reply.
-- **Advisor:** assign `modelRoles.advisor` in Settings, then enable `advisor.enabled` globally or use **⋯ → Enable advisor** in a chat. The menu also offers **Disable advisor** and **Advisor status**; these are session-scoped and do not change OMP settings. Advice appears inline with its severity and reviewer name. Without a configured advisor model, OMP reports that no model is assigned.
+- **Advisor:** set an advisor model with **◆ Change advisor model…** in the advisor panel, then enable `advisor.enabled` globally or use **⋯ → Enable advisor** in a chat. The model comes from `advisors[].model` in `WATCHDOG.yml` (in the OMP agent directory) when present, otherwise from the `advisor` model role; changing it updates that source for all sessions and restarts the current session's OMP while it is idle. The menu also offers **Disable advisor** and **Advisor status**; these are session-scoped and do not change OMP settings. Advice appears inline with its severity and reviewer name. Without a configured advisor model, OMP reports that no model is assigned.
 - **Diffs:** edits appear as GitHub/VS Code-style diffs with old and new line numbers, syntax colors and word-level highlights. Switch between **Unified** and **Split** (your choice is remembered). **± N files changed** in the header opens every change in the session, grouped by file.
 - **Plan & Activity:** tabs in the right-hand panel keep the full plan (all phases and tasks) separate from running and finished subagents, background bash jobs, and read-only advisor transcripts. The panel overlays chat on narrow screens. **Open transcript** shows a subagent or advisor's history with a link back to its parent.
 - **Models:** the **◆** chip in the composer opens a searchable model picker. It lists your OMP roles, recently used models and every provider, with a reasoning-level choice for each model. It works for new sessions, running sessions (from the next turn) and saved sessions you continue.
@@ -34,7 +36,7 @@ The dashboard at `/` is organised around sessions:
   - Saved OMP session: **Continue** resumes that exact session file and sends your message.
   - Images: click **＋ Image** or paste an image into the composer. One PNG, JPEG, WebP or GIF at a time; image-only messages work. Files up to 25 MB are resized when needed to meet the companion's 5 MB attachment limit. Remove a selected image before sending with **✕**.
   - Idle, finished or stopped: **Send** continues the conversation.
-  - Working: **Enter steers** the current turn. **Alt+Enter / Queue** adds a message to **Send later** above the composer; it does not interrupt or split the live chat. Click the pencil to edit its text (an attached image stays attached) or **✕** to remove it. The companion sends queued messages after the current work settles, one turn at a time. **■** stops the turn; queued messages wait until you resume and finish another turn. If the companion closes before OMP acknowledges a queued send, that item remains queued for retry. You cannot mark a session done or remove it from the panel while it has queued messages.
+  - Working: **Enter steers** the current turn; the steer stays pending above the composer until OMP reads it. **Alt+Enter / Queue** adds a message to **Send later** above the composer; it does not interrupt or split the live chat. Click the pencil to edit its text (an attached image stays attached), **✕** to remove it, or the send button to **Steer now** (while OMP works) or **Send now** (while it waits). The companion sends queued messages after the current work settles, one turn at a time, and notices when a session goes idle even if OMP never reports it settled. **■** stops the turn; queued messages wait until you resume and finish another turn. If the companion closes before OMP acknowledges a queued send, that item remains queued for retry. You cannot mark a session done or remove it from the panel while it has queued messages.
   - Error: the error is shown above the composer with **Retry last message**. For an image message, reattach the image if it is no longer selected before sending again.
 - **Header:** status, branch, model, tokens, cost and context use; **Stop**, **Mark done** and a **⋯** menu (new session in this folder, copy paths or the `omp --resume` command, compact context, remove from panel).
 
@@ -75,22 +77,19 @@ Use `http://127.0.0.1:4545` as the companion address and paste its token. Your b
 | `OMP_WEB_PORT` | `4545` | Companion HTTP port |
 | `OMP_WEB_DATA_DIR` | `~/.omp-web` | Persistent control-panel state, OMP sessions and worktrees |
 | `OMP_ALLOWED_ORIGINS` | none | Comma-separated exact browser origins allowed to connect |
-| `OMP_SESSIONS_DIR` | `~/.omp/agent/sessions` | OMP's native session store, listed under Recent OMP sessions |
+| `OMP_SESSIONS_DIR` | `<agent dir>/sessions` | OMP's native session store, listed under Recent OMP sessions |
+| `PI_CODING_AGENT_DIR` | `~/.omp/agent` | OMP agent directory; read for `config.yml`, `WATCHDOG.yml` and the default session store |
 | `OMP_WEB_NO_OPEN` | unset | Set to skip opening the dashboard in a browser on start |
 
 The companion binds only to `127.0.0.1`. Every API call requires a random per-launch bearer token. Host and Origin checks prevent arbitrary websites from controlling it. The API intentionally exposes a small set of session commands; raw shell commands are not an HTTP endpoint. OMP itself still has its normal coding tools and permissions, so prompts can edit files and run commands just as they do in the CLI.
 
-## Develop from source
+## Tests
 
 ```sh
-npx --yes pnpm@11.25.0 install --frozen-lockfile
-npx pnpm run typecheck
-npx pnpm test
-npx pnpm run build:local
-node companion/server.mjs
+node --test "tests/*.test.mjs"
 ```
 
-The hosted frontend uses Vinext; the local frontend uses the same React components through Vite. `npm run build` builds the hosted version. `npm run build:local` produces `local-dist/` for the dependency-free Node companion. Copy `public/favicon.svg` into `local-dist/` after a manual local build if you want its icon; the packaging script handles this automatically.
+This repository contains the companion (`companion/`) and the prebuilt dashboard (`local-dist/`). The frontend source and its build tooling are not included here; edit `local-dist/` directly or rebuild it from the frontend project.
 
 ## Verification and compatibility
 

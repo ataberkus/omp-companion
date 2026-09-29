@@ -13,13 +13,16 @@ test('advisor controls and notes work in live and saved chat', async t => {
   const fake = join(dir, 'omp.mjs');
   await writeFile(fake, `import { createInterface } from 'node:readline';
 process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
+let advisorOn = true;
 for await (const line of createInterface({ input: process.stdin })) {
   const c = JSON.parse(line);
   let data = {};
   if (c.type === 'get_state') data = { todoPhases: [], model: { provider: 'test', id: 'test' } };
   if (c.type === 'get_subagents') data = { subagents: [] };
   if (c.type === 'prompt' && c.message.startsWith('/advisor ')) {
-    const text = c.message === '/advisor status' ? 'Advisor is enabled (test/advisor). Context: 1,000 / 10,000 tokens (10%). Spend: 5 input, 6 output, $0.0100.' : 'Advisor ' + c.message.slice(9);
+    if (c.message !== '/advisor status') advisorOn = c.message === '/advisor on';
+    // Real OMP replies: '/advisor on|off' -> 'Advisor enabled.' / 'Advisor disabled.'
+    const text = c.message !== '/advisor status' ? (advisorOn ? 'Advisor enabled.' : 'Advisor disabled.') : advisorOn ? 'Advisor is enabled (test/advisor). Context: 1,000 / 10,000 tokens (10%). Spend: 5 input, 6 output, $0.0100.' : 'Advisor is disabled.';
     process.stdout.write(JSON.stringify({ type: 'command_output', text }) + '\\n');
     data = { agentInvoked: false };
   } else if (c.type === 'prompt') {
@@ -56,10 +59,11 @@ for await (const line of createInterface({ input: process.stdin })) {
     const [code, session] = await request('/sessions/session/command', { type: 'advisor', action });
     assert.equal(code, 200);
     assert.equal(session.status, 'paused');
-    // on/off replies land in chat; status is read silently into session.advisor for the composer chip.
-    if (action !== 'status') assert.ok(session.messages.some(m => m.role === 'assistant' && m.text === `Advisor ${action}`));
+    // on/off replies land in chat as status lines; status is read silently into session.advisor for the composer chip.
+    if (action !== 'status') assert.ok(session.messages.some(m => m.role === 'system' && m.text === (action === 'on' ? 'Advisor enabled.' : 'Advisor disabled.')));
     assert.ok(!session.messages.some(m => m.text?.startsWith('Advisor is enabled')));
-    assert.deepEqual({ model: session.advisor?.model, contextTokens: session.advisor?.contextTokens, contextWindow: session.advisor?.contextWindow, cost: session.advisor?.cost }, { model: 'test/advisor', contextTokens: 1000, contextWindow: 10000, cost: 0.01 });
+    if (action === 'off') assert.deepEqual(session.advisor?.enabled, false);
+    else assert.deepEqual({ enabled: session.advisor?.enabled, model: session.advisor?.model, contextTokens: session.advisor?.contextTokens, contextWindow: session.advisor?.contextWindow, cost: session.advisor?.cost }, { enabled: true, model: 'test/advisor', contextTokens: 1000, contextWindow: 10000, cost: 0.01 });
     assert.equal(session.messages.filter(m => m.role === 'user').length, 0);
   }
   const [promptCode, prompted] = await request('/sessions/session/command', { type: 'prompt', message: 'Review this' });

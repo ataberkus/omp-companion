@@ -313,7 +313,7 @@
       renderSide(s);
       renderTopbarSession(s);
       loadAdvisorTx(s.sessionFile || '');
-      renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting });
+      renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt });
       renderQuestions(s);
       renderQueue(s);
       renderComposer(s);
@@ -403,7 +403,38 @@
     const i = text.indexOf('  ');
     return { kind: 'call', name: i > 0 ? text.slice(0, i) : text, body: i > 0 ? text.slice(i + 2) : '' };
   }
-  const TOOL_ICON = { read: '▤', write: '✎', edit: '✎', bash: '❯', eval: 'ƒ', grep: '⌕', glob: '⌕', find: '⌕', web_search: '⊕', web_fetch: '⊕', fetch: '⊕', task: '◈', todo: '☑', hub: '⇄', wait: '◷', ask: '?', lsp: '⌘', subagent: '◈' };
+  const baseName = p => String(p).split(/[\\/]/).filter(Boolean).pop() || String(p);
+  const line1 = x => String(x || '').split('\n')[0];
+  // One-line past-tense description of a tool call: k = summary bucket, v = verb, b = bold object, d = plain detail, c = code detail.
+  function toolLine(t, a) {
+    const n = t.name, p = a && (a.path || a.file_path || a.file || a.filePath), files = realFiles(t);
+    if (n === 'read' && p) return { k: 'read', v: 'Read', b: baseName(p).replace(/:.*$/, ''), keys: [String(p).replace(/(?<=[^\\/]):[^\\/]*$/, '')] };
+    if (files.length) return { k: 'edit', v: 'Edited', b: [...new Set(files.map(f => baseName(f.path)))].join(', '), keys: files.map(f => f.path) };
+    if (['grep', 'glob', 'find'].includes(n)) return { k: 'search', v: 'Searched', d: line1(a?.pattern || a?.query || a?.path) };
+    if (n === 'web_search') return { k: 'web', v: 'Searched the web for', d: line1(a?.query) };
+    if (n === 'bash') return { k: 'run', v: 'Ran', c: line1(a?.command) };
+    if (n === 'eval') return { k: 'run', v: 'Ran code', d: t.intent };
+    if (n === 'task') return { k: 'task', v: 'Delegated', b: keyArg(n, a) || 'a task' };
+    const verb = { todo: 'Updated the plan', write: 'Wrote', ask: 'Asked', fetch: 'Fetched', web_fetch: 'Fetched', wait: 'Waited' }[n];
+    return verb ? { k: 'other', v: verb, d: t.intent || keyArg(n, a), name: n } : { k: 'other', v: 'Used', b: n, d: t.intent || keyArg(n, a), name: n };
+  }
+  const plural = (n, one, many) => n === 1 ? one : `${n} ${many}`;
+  function groupPhrase(lines) {
+    const by = new Map();
+    for (const l of lines) { if (!by.has(l.k)) by.set(l.k, []); by.get(l.k).push(l); }
+    const uniq = ls => new Set(ls.flatMap(l => l.keys)).size;
+    const text = [...by].map(([k, ls]) => ({
+      think: 'thought',
+      search: 'searched code',
+      web: 'searched the web',
+      read: `read ${plural(uniq(ls), '1 file', 'files')}`,
+      edit: `edited ${plural(uniq(ls), '1 file', 'files')}`,
+      run: `ran ${plural(ls.length, 'a command', 'commands')}`,
+      task: `delegated ${plural(ls.length, 'a task', 'tasks')}`,
+      other: `used ${[...new Set(ls.map(l => l.name))].join(', ')}`,
+    })[k]).join(', ');
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
   const fmtMs = ms => !ms && ms !== 0 ? '' : ms < 1000 ? ms + 'ms' : ms < 60000 ? (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's' : Math.floor(ms / 60000) + 'm ' + Math.round(ms % 60000 / 1000) + 's';
   const parseArgs = s => { if (s && typeof s === 'object') return s; try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch { return null; } };
   const shortPath = p => { const parts = String(p).split(/[\\/]/).filter(Boolean); return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : String(p); };
@@ -456,27 +487,27 @@
     const line = String(text).split('\n').map(l => l.replace(/[*_#`>]/g, '').trim()).find(Boolean) || 'Thinking';
     return line.length > 110 ? line.slice(0, 110) + '…' : line;
   };
-  function activityRow(m, live, lastInLive) {
+  function activityRow(m, live, lastInLive, L) {
     const rid = m.id;
     if (m.role === 'thinking') {
       const def = live && lastInLive;
       const open = rowOpen.has(rid) ? rowOpen.get(rid) : def;
       return `<details class="row think" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
-        <summary><span class="ic">✱</span><span class="nm">Thinking</span><span class="ds">${esc(thinkTitle(m.text))}</span>${def ? '<span class="spinner"></span>' : ''}</summary>
+        <summary><span class="ln">Thought <span class="ds">${esc(thinkTitle(m.text))}</span></span>${def ? '<span class="spinner"></span>' : ''}</summary>
         <div class="row-body md thought">${md(m.text)}</div></details>`;
     }
     const t = m.tool;
     const a = parseArgs(t.args);
     const running = t.status === 'running' && live;
     const bad = t.status === 'error';
-    const target = keyArg(t.name, a);
     const edits = realFiles(t).length ? diffStat(realFiles(t)) : null;
     const def = !!edits && !S.collapseDiffs;
     const open = rowOpen.has(rid) ? rowOpen.get(rid) : def;
     const bg = a?.async === true;
+    const tip = [t.intent, t.ms ? fmtMs(t.ms) : ''].filter(Boolean).join(' · ');
     return `<details class="row tool ${bad ? 'bad' : ''} ${edits ? 'edit' : ''}" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary><span class="ic">${esc(TOOL_ICON[t.name] || '•')}</span><span class="nm">${esc(t.name)}</span><span class="ds">${esc(t.intent || target)}${t.intent && target ? ` <code>${esc(target.slice(0, 90))}</code>` : ''}</span>
-      ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}<span class="st">${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕</span>' : t.ms ? esc(fmtMs(t.ms)) : ''}</span></summary>
+      <summary title="${esc(tip)}"><span class="ln">${esc(L.v)}${L.b ? ` <b>${esc(L.b)}</b>` : ''}${L.d ? ` <span class="ds">${esc(L.d)}</span>` : ''}${L.c ? ` <code>${esc(L.c.slice(0, 120))}</code>` : ''}</span>
+      ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕</span>' : ''}</summary>
       <div class="row-body">${toolBody(t, a)}</div></details>`;
   }
   function legacyTools(group) {
@@ -496,24 +527,17 @@
   function activityBlock(group, live) {
     const rows = legacyTools(group);
     const gid = group[0].id;
-    const tools = rows.filter(r => r.tool);
-    const thoughts = rows.length - tools.length;
-    const failed = tools.filter(r => r.tool.status === 'error').length;
-    const counts = new Map();
-    for (const r of tools) counts.set(r.tool.name, (counts.get(r.tool.name) || 0) + 1);
-    const names = [...counts].sort((x, y) => y[1] - x[1]).slice(0, 5).map(([n, c]) => c > 1 ? `${n} ×${c}` : n).join(' · ');
-    const ms = tools.reduce((s, r) => s + (r.tool.ms || 0), 0);
-    const changed = tools.flatMap(r => realFiles(r.tool));
+    const lines = rows.map(r => r.tool ? toolLine(r.tool, parseArgs(r.tool.args)) : { k: 'think' });
+    const failed = rows.filter(r => r.tool?.status === 'error').length;
+    const changed = rows.flatMap(r => realFiles(r.tool));
     const cst = changed.length ? diffStat(changed) : null;
     const lastRow = rows[rows.length - 1];
     const now = live ? (lastRow.tool ? (lastRow.tool.intent || keyArg(lastRow.tool.name, parseArgs(lastRow.tool.args)) || lastRow.tool.name) : 'Thinking') : '';
     const def = S.expandAll || live;
     const open = groupOpen.has(gid) ? groupOpen.get(gid) : def;
-    const label = [tools.length ? `${tools.length} tool ${tools.length === 1 ? 'call' : 'calls'}` : '', thoughts ? `${thoughts === 1 ? 'thought' : thoughts + ' thoughts'}` : ''].filter(Boolean).join(' · ');
     return `<details class="activity ${live ? 'live' : ''}" data-gid="${esc(gid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary>${live ? '<span class="spinner"></span>' : failed ? `<span class="bad">✕ ${failed}</span>` : '<span class="ok">✓</span>'}
-        <span class="lbl">${live ? esc(now) : esc(label)}</span><span class="names">${esc(live ? label : names)}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}">${new Set(changed.map(f => f.path)).size} ${new Set(changed.map(f => f.path)).size === 1 ? 'file' : 'files'} <span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${ms && !live ? `<span class="dur">${esc(fmtMs(ms))}</span>` : ''}</summary>
-      <div class="rows">${rows.map((r, j) => activityRow(r, live, j === rows.length - 1)).join('')}</div></details>`;
+      <summary>${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}</summary>
+      <div class="rows">${rows.map((r, j) => activityRow(r, live, j === rows.length - 1, lines[j])).join('')}</div></details>`;
   }
 
   function renderThread(messages, status, ownerId, opts = {}) {
@@ -521,7 +545,9 @@
     const last = messages[messages.length - 1];
     const runningTools = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? 1 : 0), 0);
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, steers, status, opts.compacting, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), opts.extra || ''].join('|');
+    // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
+    const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, steers, status, opts.compacting, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), opts.extra || ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     const scroller = $('#scroller');
@@ -571,8 +597,13 @@
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
       parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${pending.imagePreview ? `<img class="msg-image" src="${esc(pending.imagePreview)}" alt="Attached image">` : ''}</div></div>`);
     }
-    if (opts.compacting || (status === 'running' && last?.role !== 'tool' && last?.role !== 'thinking') || status === 'queued' || (pending && status !== 'history')) {
-      parts.push(`<div class="working" role="status"><span class="spinner"></span> ${opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…'}</div>`);
+    if (opts.compacting || (status === 'running' && ((last?.role !== 'tool' && last?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
+      let label = opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
+      if (!opts.compacting && !pending && status === 'running' && idle >= 20) {
+        const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : last?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
+        label = `${waitingOn} · no activity for ${idle < 60 ? Math.floor(idle) + 's' : Math.floor(idle / 60) + 'm ' + Math.floor(idle % 60) + 's'}`;
+      }
+      parts.push(`<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
     }
     if (opts.tail) parts.push(opts.tail);
     if (!messages.length && !pending && status !== 'history' && !opts.head) parts.push(`<div class="history-note">This session is ready. Send the first message below.</div>`);
@@ -1667,6 +1698,22 @@
     else if (act === 'resumeOnly') api('/omp-sessions/resume', { file: c.file }).then(async s => { await refreshNative(); location.hash = '#/s/' + s.id; }).catch(err => toast(err.message, 'err'));
     else if (act === 'start') startSession();
   });
+  // Click any chat, queued or not-yet-sent image to see it full size.
+  function openLightbox(src, alt) {
+    closeLightbox();
+    const el = document.createElement('div');
+    el.id = 'lightbox'; el.className = 'lightbox'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Image preview');
+    el.innerHTML = `<img src="${esc(src)}" alt="${esc(alt || 'Image')}"><div class="lb-bar"><a class="btn sm" href="${esc(src)}" download="image">Download</a><button class="btn sm" data-lb-close>Close <kbd>Esc</kbd></button></div>`;
+    document.body.appendChild(el);
+  }
+  const closeLightbox = () => $('#lightbox')?.remove();
+  document.addEventListener('click', e => {
+    const lb = e.target.closest?.('#lightbox');
+    if (lb) { if (e.target.tagName !== 'IMG' && !e.target.closest('a')) closeLightbox(); return; }
+    const img = e.target.closest?.('img.msg-image, .attach-preview img, .queued-image img');
+    if (img) { e.preventDefault(); e.stopPropagation(); openLightbox(img.src, img.alt); }
+  }, true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#lightbox')) { e.stopPropagation(); closeLightbox(); } }, true);
   document.addEventListener('toggle', e => {
     const d = e.target;
     const remember = (map, key) => { if (!key) return; if (d.open === (d.dataset.def === '1')) map.delete(key); else map.set(key, d.open); };

@@ -15,7 +15,8 @@ function text(value,name,max=10000){if(typeof value!=='string'||!value.trim()||v
 function contentText(content){if(typeof content==='string')return content;return Array.isArray(content)?content.filter(c=>c?.type==='text').map(c=>c.text).join('\n'):'';}
 function parseAdvisorStatus(text){
  const t=String(text||'').trim();const num=v=>v===undefined?undefined:Number(String(v).replace(/[^\d]/g,''))||0;
- if(/^Advisor is disabled\./.test(t))return {enabled:false};
+ if(/^Advisor (is )?disabled\./.test(t))return {enabled:false};
+ if(/^Advisor enabled\.$/.test(t))return {enabled:true};
  if(/no model is assigned to the 'advisor' role/.test(t))return {enabled:true,noModel:true};
  let m=t.match(/^Advisor is enabled \(([^)]+)\)\.(?: Context: ([\d.,\s\u00a0]+) \/ ([\d.,\s\u00a0]+) tokens)?[\s\S]*?\$(\d+(?:\.\d+)?)/);
  if(m)return {enabled:true,model:m[1],contextTokens:num(m[2]),contextWindow:num(m[3]),cost:Number(m[4])||0};
@@ -157,6 +158,8 @@ export async function createCompanion(options={}){
  }
  function event(s,f){
   s.updatedAt=now();if(f.type!=='response')s._lastEvent=Date.now();
+  // Advisor toggles print command_output, which is not progress on the turn itself.
+  if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
   if(f.type==='agent_start'){s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
   if(f.type==='auto_compaction_end'){
@@ -181,7 +184,7 @@ export async function createCompanion(options={}){
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
-  if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={...adv,at:now()};if(!s._silentAdvisor)append(s,adv?'system':'assistant',text);}
+  if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={...adv,at:now()};if(adv&&s._silentAdvisorUntil>Date.now())s._silentAdvisorUntil=0;else append(s,adv?'system':'assistant',text);}
   if(f.type==='prompt_result'){
    if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
@@ -219,7 +222,8 @@ export async function createCompanion(options={}){
    try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'progress'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});await refresh(s,rpc);return rpc;}catch(e){runners.delete(s.id);rpc.kill();throw e;}
   })();launches.set(s.id,promise);try{return await promise;}finally{launches.delete(s.id);}
  }
- async function advisorStatus(s,rpc){s._silentAdvisor=true;try{await rpc.send({type:'prompt',message:'/advisor status'});}catch{}finally{s._silentAdvisor=false;}}
+ // The status reply can arrive after send() resolves, so stay silent until it shows up (or a few seconds pass).
+ async function advisorStatus(s,rpc){s._silentAdvisorUntil=Date.now()+5000;try{await rpc.send({type:'prompt',message:'/advisor status'});}catch{s._silentAdvisorUntil=0;}}
  async function refresh(s,rpc){try{const state=await rpc.send({type:'get_state'});
   // OMP only emits session_settled right after a terminal agent_end; if async work finished later, nothing re-announces it.
   if(state?.isSettled===true&&s.status==='running'&&!s._compacting&&Date.now()-(s._lastEvent||0)>3000)settle(s);
