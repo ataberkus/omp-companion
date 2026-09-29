@@ -30,7 +30,7 @@
 - **Readable conversations:** Markdown, tables and code blocks with copy. Tool calls and thinking fold into one activity summary.
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents, background jobs and advisor transcripts.
-- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level, complete `/commands` as you type, and run `!command` in the session's shell.
+- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` as you type, and run `!command` in the session's shell.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser, and see extension notifications, status lines, widgets and sign-in links.
 - **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.

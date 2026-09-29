@@ -1826,18 +1826,16 @@
     try { await ensureModels(); } catch (e) { toast(e.message, 'err'); return; }
     const ctx = pickerCtx();
     if (!ctx) return;
-    const all = Object.entries(S.models?.roles || {}).filter(([r]) => !['image', 'vision'].includes(r));
-    if (!all.length) { toast('No OMP roles in config', 'err'); return; }
-    const entries = ['default', 'smol', 'slow'].map(w => all.find(([r]) => r.toLowerCase() === w)).filter(Boolean);
-    const list = entries.length ? entries : all;
+    const list = ['default', 'smol', 'slow'].map(name => [name, S.models.roles?.[name]])
+      .filter(([, value]) => value && modelInfo(splitSel(value).sel));
+    if (!list.length) { toast('No available default, smol, or slow models', 'err'); return; }
     const cur = ctx.model || splitSel(S.models.roles.default || '').sel;
-    const curTh = ctx.thinking || '';
+    const curTh = ctx.thinking || (!ctx.model ? splitSel(S.models.roles.default || '').thinking : '');
     const i = list.findIndex(([, v]) => { const s = splitSel(v); return s.sel === cur && (s.thinking || '') === curTh; });
-    const [name, val] = list[i < 0 ? (dir < 0 ? list.length - 1 : 0) : (i + dir + list.length) % list.length];
+    const [, val] = list[i < 0 ? (dir < 0 ? list.length - 1 : 0) : (i + dir + list.length) % list.length];
     const s = splitSel(val);
     closePicker();
     ctx.apply(s.sel, s.thinking);
-    toast(`${name} · ${modelLabel(s.sel, s.thinking) || s.sel}`);
   }
   document.addEventListener('click', e => {
     const t = e.target;
