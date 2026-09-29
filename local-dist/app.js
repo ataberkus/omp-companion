@@ -149,7 +149,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '',
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
-    pending: null, attachment: null, editQueue: null, queueOpen: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
+    pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
     noticeSeen: new Map(), cmds: new Map(), slash: null,
@@ -297,7 +297,7 @@
         <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
         <div class="composer">
           <textarea id="input" rows="1"></textarea>
-          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
           <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span class="hint" id="hint"></span><span id="buttons" style="display:flex;gap:6px"></span></div>
         </div>
@@ -659,14 +659,14 @@
         continue;
       }
       const user = m.role === 'user';
-      const image = m.imagePreview ? `<img class="msg-image" src="${esc(m.imagePreview)}" alt="Attached image">` : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
+      const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
       const steer = user && m.steer === 'pending' ? '<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>'
         : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
       parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
         <div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div></div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
-      parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${pending.imagePreview ? `<img class="msg-image" src="${esc(pending.imagePreview)}" alt="Attached image">` : ''}</div></div>`);
+      parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
     }
     if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((last?.role !== 'tool' && last?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
       let label = opts.task ? esc(opts.task) : opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
@@ -1224,7 +1224,7 @@
         return `<div class="queued-item"><span class="queued-number">${i + 1}</span><div class="queued-content">
           ${editing ? `<textarea data-qinput="${esc(q.id)}" rows="3" aria-label="Edit queued message">${esc(q.text)}</textarea>
             <div class="queued-edit-actions"><button class="btn sm primary" data-qsave="${esc(q.id)}">Save</button><button class="btn sm ghost" data-qclose>Cancel</button></div>`
-          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${q.imagePreview ? `<img src="${esc(q.imagePreview)}" alt="Queued image">` : ''}<span>Image attached</span></div>` : ''}`}</div>
+          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<img src="${esc(src)}" alt="Queued image">`).join('')}<span>Image attached</span></div>` : ''}`}</div>
           ${queuedActions(q, waiting)}</div>`;
       }).join(''));
   }
@@ -1243,10 +1243,8 @@
 
   function renderComposer(s, native) {
     const input = $('#input'), hint = $('#hint'), buttons = $('#buttons'), line = $('#statusLine');
-    const attachment = S.attachment?.view === S.view ? S.attachment : null;
-    const preview = $('#imagePreview');
-    preview.hidden = !attachment;
-    setIfChanged(preview, attachment ? `<img src="${esc(attachment.preview)}" alt=""><span>${esc(attachment.name)}</span><button class="btn sm ghost" data-act="removeImage" type="button" aria-label="Remove attached image">✕</button>` : '');
+    const attachment = attached().length > 0;
+    renderAttachments();
     let placeholder, hintText, btns, status = '';
     const has = !!input.value.trim() || !!attachment;
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
@@ -1402,9 +1400,14 @@
   }
 
   // ---------- actions ----------
+  // Message previews: one data URL (older saved messages) or a list.
+  const images = list => [].concat(list || []).map(src => `<img class="msg-image" src="${esc(src)}" alt="Attached image">`).join('');
+  const attached = () => S.attachments.filter(a => a.view === S.view);
+  const imagePayload = list => list.length ? { images: list.map(a => a.image), preview: list.map(a => a.preview) } : {};
   async function attachImage(file) {
     if (!file) return;
     if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) || file.size > 25 * 1024 * 1024) return toast('Choose a PNG, JPEG, WebP or GIF under 25 MB.', 'err');
+    if (attached().length >= 6) return toast('Attach up to 6 images per message.', 'err');
     const view = S.view;
     try {
       const bitmap = await createImageBitmap(file);
@@ -1425,10 +1428,10 @@
           if (!blob) throw new Error('Could not resize this image.');
           mimeType = 'image/jpeg';
         }
-        draw(176);
-        preview = canvas.toDataURL('image/jpeg', .72);
+        draw(1024);
+        preview = canvas.toDataURL('image/jpeg', .8);
       } finally { bitmap.close(); }
-      if (blob.size > 5 * 1024 * 1024 || preview.length > 64 * 1024) throw new Error('Image is too large to send.');
+      if (blob.size > 5 * 1024 * 1024 || preview.length > 1024 * 1024) throw new Error('Image is too large to send.');
       const data = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result).split(',')[1]);
@@ -1439,8 +1442,8 @@
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[mimeType];
       const stem = (file.name || 'pasted-image').replace(/\.[A-Za-z0-9]+$/, '') || 'pasted-image';
       const name = `${stem}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-      S.attachment = { view, image: { type: 'image', mimeType, data }, preview, name };
-      update(); renderHomeAttachment();
+      S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name });
+      update(); renderAttachments();
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
   }
 
@@ -1448,32 +1451,32 @@
     const c = current();
     const input = $('#input');
     const text = input?.value.trim();
-    const attachment = S.attachment?.view === S.view ? S.attachment : null;
-    if ((!text && !attachment) || S.busy) return;
+    const attachment = attached();
+    if ((!text && !attachment.length) || S.busy) return;
     // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
-    if (c.kind === 'session' && !attachment && /^!\S/.test(text)) {
+    if (c.kind === 'session' && !attachment.length && /^!\S/.test(text)) {
       input.value = ''; drafts.delete(S.view); autosize(input);
       if (!await sessionAction({ type: 'bash', command: text.slice(1) })) { input.value = text; drafts.set(S.view, text); autosize(input); }
       return;
     }
     S.busy = true;
-    S.pending = { view: S.view, text, imagePreview: attachment?.preview, queued: kind === 'follow_up', at: Date.now() };
-    S.attachment = null;
+    S.pending = { view: S.view, text, imagePreview: attachment.map(a => a.preview), queued: kind === 'follow_up', at: Date.now() };
+    S.attachments = S.attachments.filter(a => a.view !== S.view);
     input.value = ''; drafts.delete(S.view); autosize(input);
     S.lastSig = ''; update();
     let retryView = S.view;
     try {
       if (c.kind === 'native') {
         const ch = S.nativeChoice.get(c.file);
-        const s = await api('/omp-sessions/resume', { file: c.file, message: text, ...(attachment ? { images: [attachment.image], preview: attachment.preview } : {}), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}) });
+        const s = await api('/omp-sessions/resume', { file: c.file, message: text, ...imagePayload(attachment), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}) });
         if (s.status === 'error') { retryView = 'session:' + s.id; await refresh(); location.hash = '#/s/' + s.id; throw new Error(s.error || 'OMP could not send this message.'); }
         await refresh();
-        S.pending = { view: 'session:' + s.id, text, imagePreview: attachment?.preview, at: S.pending.at };
+        S.pending = { view: 'session:' + s.id, text, imagePreview: S.pending.imagePreview, at: S.pending.at };
         location.hash = '#/s/' + s.id;
       } else {
         const s = S.store.sessions.find(x => x.id === c.id);
         const type = kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
-        const response = await api(`/sessions/${c.id}/command`, { type, message: text, ...(attachment ? { images: [attachment.image], preview: attachment.preview } : {}) });
+        const response = await api(`/sessions/${c.id}/command`, { type, message: text, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
         if (type === 'follow_up') toast((response.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now');
         await refresh();
@@ -1481,7 +1484,7 @@
     } catch (e) {
       toast(e.message, 'err');
       if (text) { drafts.set(retryView, text); const target = S.view === retryView ? $('#input') : null; if (target && !target.value) { target.value = text; autosize(target); } }
-      if (attachment) S.attachment = { ...attachment, view: retryView };
+      S.attachments.push(...attachment.map(a => ({ ...a, view: retryView })));
     } finally {
       S.busy = false; S.pending = null; S.lastSig = ''; update();
     }
@@ -1696,27 +1699,28 @@
       <div>
         <div class="picked" style="margin-bottom:8px"><span>Working in</span><b>${esc(base(l.path))}</b>${l.isGit ? '<span class="tag">git</span>' : ''}</div>
         <div class="composer">
-          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
           <textarea id="homePrompt" rows="3" placeholder="What should OMP do in ${esc(base(l.path))}? (optional)">${esc(h.prompt)}</textarea>
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
-            <span class="hint">${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : 'Enter to start · Shift+Enter for a new line'}</span>
+            <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
           </div>
         </div>
       </div>` : ''}
       ${recentSessions.length ? `<div><div class="section-label">Pick up where you left off</div><div class="session-list" style="margin:0">${recentSessions.map(it => `
         <button class="item ${it.status === 'history' ? 'history' : ''}" data-key="${esc(it.key)}"><span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span><span></span><span class="m">${esc(it.folder)}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span></button>`).join('')}</div></div>` : ''}`;
-    renderHomeAttachment();
+    renderAttachments();
+    if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
   }
-  function renderHomeAttachment() {
+  function renderAttachments() {
     const preview = $('#imagePreview');
     if (!preview) return;
-    const attachment = S.attachment?.view === S.view ? S.attachment : null;
-    preview.hidden = !attachment;
-    setIfChanged(preview, attachment ? `<img src="${esc(attachment.preview)}" alt=""><span>${esc(attachment.name)}</span><button class="btn sm ghost" data-act="removeImage" type="button" aria-label="Remove attached image">✕</button>` : '');
+    const list = attached();
+    preview.hidden = !list.length;
+    setIfChanged(preview, list.map(a => `<div class="attach-item"><img src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join(''));
   }
   async function goFolder(dir) {
     if (!dir) return;
@@ -1731,15 +1735,15 @@
     const l = S.home.listing;
     if (!l || S.busy) return;
     S.busy = true; renderHome();
-    const attachment = S.attachment?.view === S.view ? S.attachment : null;
-    S.attachment = null;
+    const attachment = attached();
+    S.attachments = S.attachments.filter(a => a.view !== S.view);
     try {
-      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, ...(attachment ? { images: [attachment.image], preview: attachment.preview } : {}) });
+      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...imagePayload(attachment) });
       S.home.prompt = '';
       await refresh();
       location.hash = '#/s/' + s.id;
     } catch (e) {
-      if (attachment) S.attachment = { ...attachment, view: S.view };
+      S.attachments.push(...attachment.map(a => ({ ...a, view: S.view })));
       toast(e.message, 'err');
     }
     S.busy = false;
@@ -1896,7 +1900,7 @@
     else if (act === 'menu') a.closest('.menu').classList.toggle('open');
     else if (act === 'advisor') { a.closest('.menu')?.classList.remove('open'); advisorCommand(a.dataset.advisor); }
     else if (act === 'attach') $('#imageInput')?.click();
-    else if (act === 'removeImage') { S.attachment = null; update(); renderHomeAttachment(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
+    else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.name !== a.dataset.name); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
     else if (act === 'abort' || act === 'complete' || act === 'compact') sessionCommand(act);
@@ -1925,7 +1929,7 @@
     else if (act === 'retry') {
       const s = S.store.sessions.find(x => x.id === c.id);
       const lastUser = [...s.messages].reverse().find(m => m.role === 'user');
-      if (lastUser?.hasImage) { if (lastUser.text !== 'Image attached') $('#input').value = lastUser.text; update(); toast(S.attachment?.view === S.view ? 'Image is still attached; press Send to retry.' : 'Reattach the image before retrying.', 'err'); }
+      if (lastUser?.hasImage) { if (lastUser.text !== 'Image attached') $('#input').value = lastUser.text; update(); toast(attached().length ? 'Image is still attached; press Send to retry.' : 'Reattach the image before retrying.', 'err'); }
       else if (lastUser) { $('#input').value = lastUser.text; send('prompt'); }
     }
     else if (act === 'newHere') {
@@ -1970,6 +1974,7 @@
     else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
     else if (t.id === 'homePrompt') S.home.prompt = t.value;
     else if (t.id === 'isolate') S.home.isolate = t.checked;
+    else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
     else if (t.id === 'folderFilter') {
       S.home.filter = t.value;
       const pos = t.selectionStart;
@@ -1979,14 +1984,14 @@
   });
   document.addEventListener('change', e => {
     if (e.target.matches?.('[data-advset]')) { advisorAction(e.target.checked ? 'on' : 'off'); return; }
-    if (e.target.id === 'imageInput') { const file = e.target.files?.[0]; e.target.value = ''; attachImage(file); }
+    if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
   });
   document.addEventListener('paste', e => {
     if (e.target.id !== 'input' && e.target.id !== 'homePrompt') return;
-    const file = [...(e.clipboardData?.items || [])].find(item => item.type.startsWith('image/'))?.getAsFile();
-    if (file) { e.preventDefault(); attachImage(file); }
+    const files = [...(e.clipboardData?.items || [])].filter(item => item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
+    if (files.length) { e.preventDefault(); files.forEach(attachImage); }
   });
   document.addEventListener('submit', e => {
     e.preventDefault();

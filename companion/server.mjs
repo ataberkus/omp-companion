@@ -30,21 +30,23 @@ function advisorMessage(m,id,at){
  const notes=m.details.notes.slice(0,32).filter(n=>typeof n?.note==='string'&&n.note.trim()).map(n=>({note:n.note.slice(0,10000),severity:['nit','concern','blocker'].includes(n.severity)?n.severity:'nit',...(typeof n.advisor==='string'?{advisor:n.advisor.slice(0,80)}:{})}));
  return notes.length?{id,role:'advisor',text:notes.map(n=>n.note).join('\n').slice(-100000),notes,at}:null;
 }
-const MAX_IMAGE_BYTES=5*1024*1024;
+const MAX_IMAGE_BYTES=5*1024*1024,MAX_IMAGES=6;
 function chatImages(body){
  if(body.images===undefined)return [];
- if(!Array.isArray(body.images)||body.images.length!==1)throw error('Attach one image at a time.');
- const image=body.images[0],data=image?.data;
- if(image?.type!=='image'||!['image/png','image/jpeg','image/webp','image/gif'].includes(image.mimeType)||typeof data!=='string'||data.length>Math.ceil(MAX_IMAGE_BYTES/3)*4||!data.length||data.length%4||!/^[A-Za-z0-9+/]+={0,2}$/.test(data))throw error('Use a PNG, JPEG, WebP or GIF image up to 5 MB.');
- const bytes=Buffer.from(data,'base64');
- const valid=image.mimeType==='image/png' ? bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
-  :image.mimeType==='image/jpeg' ? bytes[0]===255&&bytes[1]===216&&bytes[2]===255
-  :image.mimeType==='image/webp' ? bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP'
-  :['GIF87a','GIF89a'].includes(bytes.toString('ascii',0,6));
- if(!bytes.length||bytes.length>MAX_IMAGE_BYTES||!valid)throw error('Image data does not match its file type or exceeds 5 MB.');
- delete image.name;delete image.filename;
- if(body.preview!==undefined&&(typeof body.preview!=='string'||body.preview.length>64*1024||!/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(body.preview)))throw error('Invalid image preview.');
- return [{type:'image',mimeType:image.mimeType,data}];
+ if(!Array.isArray(body.images)||!body.images.length||body.images.length>MAX_IMAGES)throw error(`Attach 1 to ${MAX_IMAGES} images.`);
+ const images=body.images.map(image=>{const data=image?.data;
+  if(image?.type!=='image'||!['image/png','image/jpeg','image/webp','image/gif'].includes(image.mimeType)||typeof data!=='string'||data.length>Math.ceil(MAX_IMAGE_BYTES/3)*4||!data.length||data.length%4||!/^[A-Za-z0-9+/]+={0,2}$/.test(data))throw error('Use a PNG, JPEG, WebP or GIF image up to 5 MB.');
+  const bytes=Buffer.from(data,'base64');
+  const valid=image.mimeType==='image/png' ? bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+   :image.mimeType==='image/jpeg' ? bytes[0]===255&&bytes[1]===216&&bytes[2]===255
+   :image.mimeType==='image/webp' ? bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP'
+   :['GIF87a','GIF89a'].includes(bytes.toString('ascii',0,6));
+  if(!bytes.length||bytes.length>MAX_IMAGE_BYTES||!valid)throw error('Image data does not match its file type or exceeds 5 MB.');
+  return {type:'image',mimeType:image.mimeType,data};});
+ // preview: one data URL or one per image; stored on the message as-is.
+ const previews=body.preview===undefined?[]:[].concat(body.preview);
+ if(previews.length>images.length||previews.some(p=>typeof p!=='string'||p.length>1024*1024||!/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(p)))throw error('Invalid image preview.');
+ return images;
 }
 async function git(cwd,args){return (await exec('git',['-C',cwd,...args],{timeout:15000,maxBuffer:1024*1024,windowsHide:true})).stdout.trim();}
 const samePath=(a,b)=>{const n=v=>path.resolve(v||'');return process.platform==='win32'?n(a).toLowerCase()===n(b).toLowerCase():n(a)===n(b);};
@@ -490,9 +492,10 @@ async function pluginAction(body){
  async function watchdogFile(){for(const n of ['WATCHDOG.yml','WATCHDOG.yaml']){const f=path.join(agentDir(),n);try{return {file:f,text:await fs.readFile(f,'utf8')};}catch{}}return null;}
  async function advisorConfig(){
   const w=await watchdogFile();const m=w?.text.match(/^advisors:[\s\S]*?^\s+model:\s*["']?([^"'\s#]+)/m);
-  if(m)return {model:m[1],source:'WATCHDOG.yml',file:w.file};
-  let role;try{role=(await configList()).schema.modelRoles?.value?.advisor;}catch{}
-  return {model:role||'',source:'advisor role',file:w?.file};
+  let schema={};try{schema=(await configList()).schema;}catch{}
+  const enabled=schema['advisor.enabled']?.value!==false;
+  if(m)return {model:m[1],source:'WATCHDOG.yml',file:w.file,enabled};
+  return {model:schema.modelRoles?.value?.advisor||'',source:'advisor role',file:w?.file,enabled};
  }
  async function setAdvisorModel(sel){
   if(!/^[\w.~@:/+-]+$/.test(sel))throw error('That does not look like a model selector.');
@@ -611,7 +614,7 @@ async function pluginAction(body){
    if(req.method==='GET'&&url.pathname==='/api/browse'){json(await browse(url.searchParams.get('path')||''));return;}
    if(req.method!=='POST')throw error('Route not found.',404);
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);
-   const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?8*1024*1024:256*1024;
+   const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
    const buffers=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>cap)throw error('Request body too large.',413);buffers.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(buffers).toString());}catch{throw error('Invalid JSON.');}
    if(!body||typeof body!=='object'||Array.isArray(body))throw error('JSON object required.');
    if(url.pathname==='/api/projects'){
@@ -635,6 +638,7 @@ async function pluginAction(body){
     const title=(typeof body.title==='string'&&body.title.trim().slice(0,120))||raw.split('\n')[0].slice(0,70)||`New session · ${p.name}`;
     const {selector,thinking}=modelChoice(body);
     const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking});
+    if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
     json(images.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,preview:body.preview},images)):s,201);return;
    }
    if(url.pathname==='/api/omp-sessions/resume'){

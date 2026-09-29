@@ -16,14 +16,16 @@ test('image-only, steered and resumed chat messages reach OMP while invalid imag
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
   const fake = join(dir, 'omp.mjs');
   await writeFile(fake, `import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
 process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
 for await (const line of createInterface({ input: process.stdin })) {
   const c = JSON.parse(line);
   let data = {};
   if (c.type === 'get_state') data = { todoPhases: [], model: { provider: 'test', id: 'test' } };
   if (c.type === 'get_subagents') data = { subagents: [] };
+  if (typeof c.message === 'string' && c.message.startsWith('/advisor')) { appendFileSync(${JSON.stringify(join(dir, 'advisor.log'))}, c.message + '\\n'); process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data: {} }) + '\\n'); continue; }
   if (['prompt', 'steer', 'follow_up'].includes(c.type)) {
-    const accepted = c.images?.length === 1 && c.images[0].type === 'image' && c.images[0].mimeType === 'image/png' && c.images[0].data === '${png}' && !('name' in c.images[0]) && !('filename' in c.images[0]) && (c.message === '' || c.message === 'With text');
+    const accepted = c.images?.length >= 1 && c.images.every(i => i.type === 'image' && i.mimeType === 'image/png' && i.data === '${png}' && !('name' in i) && !('filename' in i)) && (c.message === '' || c.message === 'With text');
     process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: accepted, command: c.type, data: { agentInvoked: false }, error: accepted ? undefined : 'Image was not forwarded to OMP' }) + '\\n');
   } else process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data }) + '\\n');
 }`);
@@ -65,6 +67,14 @@ for await (const line of createInterface({ input: process.stdin })) {
   const [quickStatus, quick] = await post('/quick-start', { path: dir, prompt: '', images: [image], preview });
   assert.equal(quickStatus, 201);
   assert.equal(quick.messages.find(m => m.role === 'user')?.imagePreview, preview);
+  // Several images in one message all reach OMP, each with its own preview; the advisor choice applies before the prompt.
+  const [multiStatus, multi] = await post('/quick-start', { path: dir, prompt: '', advisor: false, images: [image, image, image], preview: [preview, preview, preview] });
+  assert.equal(multiStatus, 201);
+  assert.notEqual(multi.status, 'error');
+  assert.deepEqual(multi.messages.find(m => m.role === 'user')?.imagePreview, [preview, preview, preview]);
+  assert.match(await readFile(join(dir, 'advisor.log'), 'utf8'), /^\/advisor off$/m);
+  const [tooMany] = await post('/sessions/session/command', { type: 'prompt', message: '', images: Array(7).fill(image) });
+  assert.equal(tooMany, 400);
   await app.flush();
   const saved = JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8'));
   assert.equal(saved.sessions.find(s => s.id === resumed.id).messages.find(m => m.role === 'user' && m.imagePreview)?.imagePreview, preview);
