@@ -1059,6 +1059,9 @@
   const newest = (a, b) => b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' });
   const favs = () => { try { return JSON.parse(localStorage.getItem('omp-fav-models') || '[]'); } catch { return []; } };
   const toggleFav = sel => { const f = favs(), i = f.indexOf(sel); i >= 0 ? f.splice(i, 1) : f.unshift(sel); try { localStorage.setItem('omp-fav-models', JSON.stringify(f)); } catch {} };
+  const thinkMem = () => { try { return JSON.parse(localStorage.getItem('omp-think-levels') || '{}'); } catch { return {}; } };
+  const thinkGet = sel => sel ? thinkMem()[sel] : undefined;
+  const thinkSet = (sel, th) => { if (!sel) return; try { const m = thinkMem(); m[sel] = th || ''; localStorage.setItem('omp-think-levels', JSON.stringify(m)); } catch {} };
   function pickerRows() {
     const P = S.picker, M = S.models;
     const q = P.q.trim().toLowerCase();
@@ -1096,7 +1099,7 @@
     return all.sort((a, b) => (pref.has(b) - pref.has(a)) || (a === 'openrouter') - (b === 'openrouter') || a.localeCompare(b));
   }
   async function openPicker(ctx) {
-    S.picker = { ctx, q: '', provider: '', hi: 0, thinking: ctx.thinking || '', flat: [] };
+    S.picker = { ctx, q: '', provider: '', hi: 0, thinking: ctx.thinking || thinkGet(ctx.model) || '', thinkSel: ctx.model, mem: {}, flat: [] };
     let el = $('#picker');
     if (!el) { el = document.createElement('div'); el.id = 'picker'; el.className = 'picker-wrap'; document.body.appendChild(el); }
     el.innerHTML = `<div class="picker" role="dialog" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
@@ -1135,6 +1138,7 @@
   function renderThink() {
     const P = S.picker;
     const r = P.flat[P.hi];
+    if (r && P.thinkSel !== r.sel) { P.thinkSel = r.sel; const m = P.mem[r.sel] ?? thinkGet(r.sel); if (m !== undefined && (!m || (r.m?.thinking || []).includes(m))) P.thinking = m; }
     const levels = r?.m?.thinking || [];
     const defLevel = r?.thinking || (r?.isDefault ? splitSel(S.models.roles.default).thinking : '') || S.models.defaultThinking || '';
     $('#pickerThink').innerHTML = !r ? '' : !r.m || !r.m.reasoning || !levels.length
@@ -1793,12 +1797,12 @@
   // ---------- events ----------
   function pickerCtx() {
     const c = current();
-    if (c.kind === 'home') return { model: S.home.model, thinking: S.home.thinking, allowDefault: true, apply: (sel, th) => { S.home.model = sel; S.home.thinking = th; renderHome(); $('#homePrompt')?.focus(); } };
+    if (c.kind === 'home') return { model: S.home.model, thinking: S.home.thinking, allowDefault: true, apply: (sel, th) => { S.home.model = sel; S.home.thinking = th; thinkSet(sel, th); renderHome(); $('#homePrompt')?.focus(); } };
     if (c.kind === 'session') {
       const s = S.store?.sessions.find(x => x.id === c.id);
       if (!s) return null;
       return { model: sessionModel(s), thinking: s.thinking, allowDefault: false, apply: async (sel, th) => {
-        try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); }
+        try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); thinkSet(sel, th); }
         catch (err) { toast(err.message, 'err'); }
         $('#input')?.focus();
       } };
@@ -1806,7 +1810,7 @@
     if (c.kind === 'native') {
       const n = S.native.find(x => x.file === c.file);
       const ch = S.nativeChoice.get(c.file) || { model: n?.model || '', thinking: n?.thinking || '' };
-      return { model: ch.model, thinking: ch.thinking, allowDefault: false, apply: (sel, th) => { S.nativeChoice.set(c.file, { model: sel, thinking: th }); update(); $('#input')?.focus(); } };
+      return { model: ch.model, thinking: ch.thinking, allowDefault: false, apply: (sel, th) => { S.nativeChoice.set(c.file, { model: sel, thinking: th }); thinkSet(sel, th); update(); $('#input')?.focus(); } };
     }
     return null;
   }
@@ -1818,7 +1822,7 @@
       const row = t.closest('[data-pi]'), prov = t.closest('[data-prov]'), th = t.closest('[data-think]');
       if (row) pickModel(+row.dataset.pi);
       else if (prov) { S.picker.provider = prov.dataset.prov; S.picker.hi = 0; renderPicker(); $('#pickerQ').focus(); }
-      else if (th) { S.picker.thinking = th.dataset.think; renderThink(); $('#pickerQ').focus(); }
+      else if (th) { S.picker.thinking = th.dataset.think; const k = S.picker.flat[S.picker.hi]?.sel; if (k) S.picker.mem[k] = S.picker.thinking; renderThink(); $('#pickerQ').focus(); }
       else if (!t.closest('.picker')) closePicker();
       return;
     }
@@ -1855,7 +1859,7 @@
     const aa = t.closest('[data-advact]');
     if (aa) {
       if (aa.dataset.advact === 'status') advisorAction('status');
-      else { closeThinkMenu(); const role = splitSel(S.advCfg?.model || ''); openPicker({ model: role.sel, thinking: role.thinking, allowDefault: false, apply: (sel, th) => advisorAction('model', sel + (th ? ':' + th : '')) }); }
+      else { closeThinkMenu(); const role = splitSel(S.advCfg?.model || ''); openPicker({ model: role.sel, thinking: role.thinking, allowDefault: false, apply: (sel, th) => { thinkSet(sel, th); advisorAction('model', sel + (th ? ':' + th : '')); } }); }
       return;
     }
     const ts = t.closest('[data-thinkset]');
@@ -2042,6 +2046,7 @@
     row.classList.add('hi'); S.picker.hi = +row.dataset.pi; renderThink();
   });
   document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') { e.preventDefault(); if (S.picker) closePicker(); else { const ctx = pickerCtx(); if (ctx) openPicker(ctx); } return; }
     if (e.key === 'Escape' && $('#modal')) { e.stopPropagation(); closeModal(); return; }
     if (e.key === 'Escape' && $('#thinkMenu')) { closeThinkMenu(); return; }
     const t = e.target;
