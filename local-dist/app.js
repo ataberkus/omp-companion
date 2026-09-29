@@ -158,6 +158,8 @@
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
   S.home.model = ''; S.home.thinking = '';
   try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; } catch {}
+  S.advReviews = true; S.advImportant = false;
+  try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; } catch {}
   try { S.token = sessionStorage.getItem(KEY) || ''; } catch {}
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
@@ -622,7 +624,7 @@
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
     // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
     const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), opts.extra || ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, opts.extra || ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     const scroller = $('#scroller');
@@ -652,7 +654,8 @@
         continue;
       }
       if (m.role === 'advisor') {
-        for (const note of m.notes || []) {
+        const shown = (m.notes || []).filter(n => !S.advImportant || n.severity === 'concern' || n.severity === 'blocker');
+        for (const note of shown) {
           const level = ['nit', 'concern', 'blocker'].includes(note.severity) ? note.severity : 'nit';
           parts.push(`<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
         }
@@ -853,6 +856,7 @@
   S.advTx = new Map();
   function advisorFiles(file) { return (S.bg.get(file)?.data?.subagents || []).filter(x => x.advisor); }
   async function loadAdvisorTx(file) {
+    if (!S.advReviews) return;
     for (const a of advisorFiles(file)) {
       const e = S.advTx.get(a.file) || {};
       if (e.loading || (e.updatedAt === a.updatedAt && e.data) || (e.at && Date.now() - e.at < 4000)) continue;
@@ -864,6 +868,7 @@
   }
   function withAdvisor(messages, file) {
     if (!file) return messages;
+    if (!S.advReviews) return messages;
     const extra = [];
     for (const a of advisorFiles(file)) {
       const name = a.name === '__advisor' || a.name === '__advisor.default' ? '' : a.name.slice('__advisor.'.length);
@@ -875,6 +880,7 @@
     return [...messages, ...extra.filter(m => t(m) >= since)].map((m, i) => [m, i]).sort((a, b) => t(a[0]) - t(b[0]) || a[1] - b[1]).map(x => x[0]);
   }
   function advisorReview(group) {
+    if (!S.advReviews) return '';
     const thoughts = group.filter(m => m.role === 'thinking').length, tools = group.filter(m => m.role === 'tool').length, replies = group.filter(m => m.role === 'assistant');
     const who = [...new Set(group.map(m => m.adv))].join(', ');
     const open = rowOpen.get('adv:' + group[0].id);
@@ -907,6 +913,8 @@
     const el = document.createElement('div');
     el.id = 'thinkMenu'; el.className = 'think-menu adv-menu';
     el.innerHTML = `<div class="tm-head">Advisor</div>
+      <label class="adv-toggle"><span>Show advisor reviews in chat</span><span class="switch"><input type="checkbox" data-advreviews ${S.advReviews ? 'checked' : ''}><span></span></span></label>
+      <label class="adv-toggle"><span>Important notes only (concern + blocker)</span><span class="switch"><input type="checkbox" data-advimportant ${S.advImportant ? 'checked' : ''}><span></span></span></label>
       <label class="adv-toggle"><span>${a.enabled && !a.noModel ? 'On for this session' : a.noModel ? 'On, but no model set' : s.advisor ? 'Off for this session' : 'Status unknown'}</span><span class="switch"><input type="checkbox" data-advset ${a.enabled ? 'checked' : ''}><span></span></span></label>
       <div class="adv-info">${a.model ? `<div>Model <b>${esc(a.model)}</b></div>` : role ? `<div>Model <b>${esc(role)}</b> <span class="muted">from ${esc(S.advCfg.source)}</span></div>` : '<div>No advisor model set yet.</div>'}
         ${pct != null ? `<div>Context ${fmtTokens(a.contextTokens)} / ${fmtTokens(a.contextWindow)} (${pct}%)</div>` : ''}${typeof a.cost === 'number' ? `<div>Spend $${a.cost.toFixed(4)}</div>` : ''}${a.state && a.enabled ? `<div>State: ${esc(a.state)}</div>` : ''}</div>
@@ -2033,6 +2041,8 @@
   });
   document.addEventListener('change', e => {
     if (e.target.matches?.('[data-advset]')) { advisorAction(e.target.checked ? 'on' : 'off'); return; }
+    if (e.target.matches?.('[data-advreviews]')) { S.advReviews = e.target.checked; try { localStorage.setItem('omp-adv-reviews', S.advReviews ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
+    if (e.target.matches?.('[data-advimportant]')) { S.advImportant = e.target.checked; try { localStorage.setItem('omp-adv-important', S.advImportant ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
