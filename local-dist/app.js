@@ -833,7 +833,7 @@
     el.innerHTML = `<div class="tm-head">Advisor</div>
       <label class="adv-toggle"><span>${a.enabled && !a.noModel ? 'On for this session' : a.noModel ? 'On, but no model set' : s.advisor ? 'Off for this session' : 'Status unknown'}</span><span class="switch"><input type="checkbox" data-advset ${a.enabled ? 'checked' : ''}><span></span></span></label>
       <div class="adv-info">${a.model ? `<div>Model <b>${esc(a.model)}</b></div>` : role ? `<div>Model <b>${esc(role)}</b> <span class="muted">from ${esc(S.advCfg.source)}</span></div>` : '<div>No advisor model set yet.</div>'}
-        ${pct != null ? `<div>Context ${fmtTokens(a.contextTokens)} / ${fmtTokens(a.contextWindow)} (${pct}%)</div>` : ''}${typeof a.cost === 'number' ? `<div>Spend $${a.cost.toFixed(4)}</div>` : ''}${a.state ? `<div>State: ${esc(a.state)}</div>` : ''}</div>
+        ${pct != null ? `<div>Context ${fmtTokens(a.contextTokens)} / ${fmtTokens(a.contextWindow)} (${pct}%)</div>` : ''}${typeof a.cost === 'number' ? `<div>Spend $${a.cost.toFixed(4)}</div>` : ''}${a.state && a.enabled ? `<div>State: ${esc(a.state)}</div>` : ''}</div>
       <button data-advact="model">◆ Change advisor model…</button>
       <button data-advact="status">↻ Refresh status</button>
       ${files.map(f => `<button data-sub="${esc(f.file)}">▸ Open ${esc(f.name === '__advisor' ? 'advisor' : f.name.slice(10))} transcript</button>`).join('')}
@@ -847,7 +847,7 @@
     const c = current();
     if (c.kind !== 'session') return;
     closeThinkMenu();
-    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action, model }); await refresh(); const a = S.store.sessions.find(x => x.id === c.id)?.advisor; toast(!a ? 'Advisor updated' : !a.enabled ? 'Advisor off' : a.noModel ? 'Advisor on, but no model is set' : 'Advisor on' + (a.model ? ' · ' + a.model : '')); }
+    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action, model }); await refresh(); }
     catch (err) { toast(err.message, 'err'); }
   }
   async function loadBg(file, force) {

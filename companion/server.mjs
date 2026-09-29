@@ -20,7 +20,8 @@ function parseAdvisorStatus(text){
  if(/no model is assigned to the 'advisor' role/.test(t))return {enabled:true,noModel:true};
  let m=t.match(/^Advisor is enabled \(([^)]+)\)\.(?: Context: ([\d.,\s\u00a0]+) \/ ([\d.,\s\u00a0]+) tokens)?[\s\S]*?\$(\d+(?:\.\d+)?)/);
  if(m)return {enabled:true,model:m[1],contextTokens:num(m[2]),contextWindow:num(m[3]),cost:Number(m[4])||0};
- if((m=t.match(/^Advisor "([^"]+)" is ([^.]+)\./)))return {enabled:true,name:m[1],state:m[2]};
+ // OMP prints this only when no advisor runtime is live; after '/advisor off' it can still read "running", so it says nothing about on/off.
+ if((m=t.match(/^Advisor "([^"]+)" is ([^.]+)\./)))return {name:m[1],state:m[2]};
  if((m=t.match(/^Advisors enabled \((\d+)\):/))){const models=[...t.matchAll(/\u2022 [^(\[\n]+\(([^)]+)\)/g)].map(x=>x[1]);const c=t.match(/\$([\d.]+)\.\s*$/);return {enabled:true,count:Number(m[1]),model:models.join(', '),cost:c?Number(c[1]):undefined};}
  return null;
 }
@@ -184,7 +185,7 @@ export async function createCompanion(options={}){
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
-  if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={...adv,at:now()};if(adv&&s._silentAdvisorUntil>Date.now())s._silentAdvisorUntil=0;else append(s,adv?'system':'assistant',text);}
+  if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={enabled:adv.enabled??s.advisor?.enabled??adv.state==='running',...adv,at:now()};if(!(adv&&s._silentAdvisorUntil>Date.now()))append(s,adv?'system':'assistant',text);}
   if(f.type==='prompt_result'){
    if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
@@ -285,11 +286,12 @@ export async function createCompanion(options={}){
     const prev=s.status;runners.get(s.id)?.kill();
     for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));
     const fresh=await start(s);s.status=prev;s.error=undefined;
-    await fresh.send({type:'prompt',message:'/advisor on'});
+    s._silentAdvisorUntil=Date.now()+5000;await fresh.send({type:'prompt',message:'/advisor on'});
     append(s,'system',`Advisor model set to ${body.model} (${where}).`);
     await advisorStatus(s,fresh);await persist();return s;
    }
-   if(body.action!=='status')await rpc.send({type:'prompt',message:`/advisor ${body.action}`});
+   // The composer's advisor chip shows the result, so the on/off reply stays out of the chat.
+   if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await rpc.send({type:'prompt',message:`/advisor ${body.action}`});}
    await advisorStatus(s,rpc);await persist();return s;}
   if(body.type==='abort'&&!runners.has(s.id)){s.status='paused';await persist();return s;}
   if(body.type==='prompt'&&s.status==='running')throw error('This session is running. Use Steer or Queue follow-up.');

@@ -22,7 +22,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (c.type === 'prompt' && c.message.startsWith('/advisor ')) {
     if (c.message !== '/advisor status') advisorOn = c.message === '/advisor on';
     // Real OMP replies: '/advisor on|off' -> 'Advisor enabled.' / 'Advisor disabled.'
-    const text = c.message !== '/advisor status' ? (advisorOn ? 'Advisor enabled.' : 'Advisor disabled.') : advisorOn ? 'Advisor is enabled (test/advisor). Context: 1,000 / 10,000 tokens (10%). Spend: 5 input, 6 output, $0.0100.' : 'Advisor is disabled.';
+    // With WATCHDOG.yml advisors, '/advisor status' after off still reports the stale config entry as running.
+    const text = c.message !== '/advisor status' ? (advisorOn ? 'Advisor enabled.' : 'Advisor disabled.') : advisorOn ? 'Advisor is enabled (test/advisor). Context: 1,000 / 10,000 tokens (10%). Spend: 5 input, 6 output, $0.0100.' : 'Advisor "Architecture" is running.';
     process.stdout.write(JSON.stringify({ type: 'command_output', text }) + '\\n');
     data = { agentInvoked: false };
   } else if (c.type === 'prompt') {
@@ -59,8 +60,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     const [code, session] = await request('/sessions/session/command', { type: 'advisor', action });
     assert.equal(code, 200);
     assert.equal(session.status, 'paused');
-    // on/off replies land in chat as status lines; status is read silently into session.advisor for the composer chip.
-    if (action !== 'status') assert.ok(session.messages.some(m => m.role === 'system' && m.text === (action === 'on' ? 'Advisor enabled.' : 'Advisor disabled.')));
+    // Advisor replies are read silently into session.advisor; the composer chip shows it instead of chat lines.
+    assert.ok(!session.messages.some(m => /^Advisor (enabled|disabled)\.$/.test(m.text)));
     assert.ok(!session.messages.some(m => m.text?.startsWith('Advisor is enabled')));
     if (action === 'off') assert.deepEqual(session.advisor?.enabled, false);
     else assert.deepEqual({ enabled: session.advisor?.enabled, model: session.advisor?.model, contextTokens: session.advisor?.contextTokens, contextWindow: session.advisor?.contextWindow, cost: session.advisor?.cost }, { enabled: true, model: 'test/advisor', contextTokens: 1000, contextWindow: 10000, cost: 0.01 });
