@@ -142,6 +142,10 @@ async function importMessages(file,limit=400){
 
 export async function createCompanion(options={}){
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
+ // OMP_BIN may point at the native executable or a source checkout's cli.ts.
+ const ompEntry=options.ompCommand||process.env.OMP_BIN||'omp',ompSource=/\.ts$/i.test(ompEntry);
+ const ompExecutable=ompSource?'bun':ompEntry,ompPrefix=ompSource?[path.resolve(ompEntry)]:[];
+ const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
  const stateFile=path.join(dataDir,'workspace.json');
  const queuedImageFile=id=>path.join(dataDir,'queued-images',id+'.json');
@@ -166,6 +170,7 @@ export async function createCompanion(options={}){
  function settle(s){
   void lock(s.id,async()=>{
    if(s.status!=='running')return;
+   if(s._planReview||s.planMode?.reviewPending){s.status='review';return;}
    if(s.queuedMessages?.length)await sendQueued(s);
    else{s.status='review';activity(s,`${s.title} is ready for review`,'review');}
   }).catch(e=>{s.status='error';s.error=`Could not send queued message: ${e.message}`;void persist();});
@@ -236,6 +241,9 @@ export async function createCompanion(options={}){
   if(f.type==='irc_message'){const v=contentText(f.message?.content);if(v)append(s,'system',v);}
   if(f.type==='todo_auto_clear')s.todos=[];
   if(f.type==='goal_updated')s.goal=f.goal?{objective:String(f.goal.objective||'').slice(0,500),status:String(f.goal.status||''),tokensUsed:f.goal.tokensUsed,tokenBudget:f.goal.tokenBudget}:undefined;
+  if(f.type==='plan_mode_changed'){s.planMode=f.planMode;s._planSupported=true;}
+  if(f.type==='plan_review')s._planReview=f.proposal;
+  if(f.type==='plan_review_clear'&&s._planReview?.id===f.proposalId)delete s._planReview;
   if(f.type==='available_commands_update'&&Array.isArray(f.commands))commands.set(s.id,slashList(f.commands));
   if(f.type==='response'&&!f.success){s.error=f.error;if(['prompt','steer','follow_up'].includes(f.command))s.status='error';}
   scheduleSave();
@@ -253,7 +261,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[])];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(options.ompCommand||process.env.OMP_BIN||'omp',args,s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
    try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'progress'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
     // Per-session toggles live in the OMP process, so a restarted runner gets them back.
@@ -267,11 +275,12 @@ export async function createCompanion(options={}){
   // OMP only emits session_settled right after a terminal agent_end; if async work finished later, nothing re-announces it.
   if(state?.isSettled===true&&s.status==='running'&&!s._compacting&&Date.now()-(s._lastEvent||0)>3000)settle(s);
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,interrupt:state.interruptMode};}
+  if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   const prompting=['prompt','steer','follow_up'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
   if(prompting&&s._task)throw error('Wait for the handoff to finish first.');
@@ -309,6 +318,31 @@ export async function createCompanion(options={}){
    await persist();return s;
   }
   const busy=()=>{if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');};
+  if(['plan_mode','plan_review','plan_approve'].includes(body.type)){
+   let request;
+   if(body.type==='plan_mode'){
+    if(typeof body.enabled!=='boolean')throw error('Plan mode enabled must be true or false.');
+    if(body.workflow!==undefined&&!['parallel','iterative'].includes(body.workflow))throw error('Choose parallel or iterative planning.');
+    request={type:'set_plan_mode',enabled:body.enabled,...(body.workflow?{workflow:body.workflow}:{})};
+   }else if(body.type==='plan_approve'){
+    const proposalId=text(body.proposalId,'Proposal ID',200);
+    if(!['preserve','fresh','compact','refine'].includes(body.action))throw error('Choose an approval action or request refinement.');
+    if(body.feedback!==undefined&&(typeof body.feedback!=='string'||body.feedback.length>20000))throw error('Feedback must be text under 20,000 characters.');
+    if(body.action==='refine'&&!body.feedback?.trim())throw error('Refinement requires feedback describing what should change.');
+    if(body.action!=='refine'&&body.feedback?.trim())throw error('Feedback is only supported for refinement.');
+    if(body.executionModel!==undefined&&(typeof body.executionModel!=='string'||!/^[\w.~@+-]+\/[\w.~@:+\/-]+$/.test(body.executionModel)))throw error('Invalid execution model.');
+    if(body.action==='refine'&&body.executionModel!==undefined)throw error('Refinement keeps the planning model; do not select an execution model.');
+    if(s._planReview?.id!==proposalId)throw error('This plan is no longer pending. Reopen the current plan before approving.',409);
+    request={type:'approve_plan',proposalId,action:body.action,...(body.feedback?.trim()?{feedback:body.feedback.trim()}:{}),...(body.executionModel?{executionModel:body.executionModel}:{})};
+   }else request={type:'review_plan'};
+   busy();const rpc=await start(s);
+   if(!s._planSupported)throw error('This OMP build does not expose plan mode over RPC. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts.',409);
+   try{const result=await rpc.send(request);
+    if(body.type==='plan_review')s._planReview=result?.proposal;
+    if(body.type==='plan_approve'){if(s._planReview?.id===request.proposalId)delete s._planReview;if(body.action!=='refine'||request.feedback)s.status='running';}
+    await refresh(s,rpc);await persist();return body.type==='plan_review'?{proposal:s._planReview}:s;
+   }catch(e){throw error(e.message,e.code==='stale_proposal'?409:400);}
+  }
   if(body.type==='rename'){const name=text(body.name,'Session name',120);const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'set_session_name',name});s.title=name;await persist();return s;}
   if(body.type==='pref'){
    if(!Object.hasOwn(PREF_VALUES,body.key)||!PREF_VALUES[body.key].includes(body.value))throw error('Invalid session setting.');
@@ -379,10 +413,11 @@ export async function createCompanion(options={}){
   if(body.type==='prompt'&&s.status==='running')throw error('This session is running. Use Steer or Queue follow-up.');
   try{
    const rpc=await start(s);
+   if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
    if(prompting){if(body.type==='prompt')delete s._streamId;s.status='running';s.error=undefined;const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer')msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const result=await rpc.send({type:body.type,...(prompting?{message:body.message,...(images.length?{images}:{})}:{})});
    if(body.type==='prompt'&&result?.agentInvoked===false)s.status='review';
-   if(body.type==='abort'){s.status='paused';delete s.uiRequests;}
+   if(body.type==='abort'){s.status='paused';delete s.uiRequests;delete s._planReview;}
    await persist();return s;
   }catch(e){s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
  }
@@ -408,14 +443,13 @@ export async function createCompanion(options={}){
   return {selector:THINKING.includes(suffix)?raw.slice(0,-suffix.length-1):raw,thinking};
  }
  // OMP settings: `omp config list --json` has values, types and descriptions; the plain listing adds groups and enum options.
- const ompBin=()=>options.ompCommand||process.env.OMP_BIN||'omp';
  let updateState={status:'idle'};
  const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
  async function runUpdate(startedAt){
-  const bin=ompBin(),env={...process.env};
+  const bin=ompEntry,env={...process.env};
   if(path.isAbsolute(bin)){const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';env[key]=path.dirname(bin)+path.delimiter+(env[key]||'');}
   try{
-   const {stdout,stderr}=await exec(bin,['update'],{cwd:dataDir,env,timeout:20*60*1000,maxBuffer:8*1024*1024,windowsHide:true});
+   const {stdout,stderr}=await execOmp(['update'],{cwd:dataDir,env,timeout:20*60*1000,maxBuffer:8*1024*1024,windowsHide:true});
    updateState={status:'done',startedAt,finishedAt:now(),output:cleanUpdateOutput(stdout,stderr)||'OMP update finished without output.'};
    modelCache=undefined;configDefaults=undefined;
   }catch(e){updateState={status:'error',startedAt,finishedAt:now(),exitCode:typeof e.code==='number'?e.code:null,output:cleanUpdateOutput(e.stdout,e.stderr,e.killed?'Update timed out.':e.message)||'OMP update failed.'};}
@@ -424,7 +458,7 @@ export async function createCompanion(options={}){
  const SECRET=/(token|secret|password|apikey|api_key|credentials?)$/i;
  const isSecret=key=>SECRET.test(key.split('.').pop());
  async function configList(env){
-  const run=args=>exec(ompBin(),args,{timeout:30000,maxBuffer:16*1024*1024,windowsHide:true,env:env?{...process.env,...env}:process.env});
+  const run=args=>execOmp(args,{timeout:30000,maxBuffer:16*1024*1024,windowsHide:true,env:env?{...process.env,...env}:process.env});
   const [j,t]=await Promise.all([run(['config','list','--json']),run(['config','list'])]);
   const meta=new Map();let group='other';
   for(const line of t.stdout.split(/\r?\n/)){const g=line.match(/^\[(.+)\]$/);if(g){group=g[1];continue;}const m=line.match(/^\s{2}(\S+) = .* \(([^()]*)\)\s*$/);if(m&&!meta.has(m[1]))meta.set(m[1],{group,options:m[2].includes('|')?m[2].split('|'):undefined});}
@@ -441,7 +475,7 @@ export async function createCompanion(options={}){
   const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
   const settings=Object.entries(schema).map(([key,e])=>{const sensitive=!!e.redacted||isSecret(key);const d=defaults[key];const m=meta.get(key)||{};
    return {key,type:e.type,group:m.group||'other',options:m.options,description:e.description||'',sensitive,value:sensitive?undefined:e.value,isSet:e.value!==undefined&&e.value!==''&&e.value!==null,default:sensitive?undefined:d?.value,modified:d?!same(e.value,d.value):e.value!==undefined};});
-  let file='';try{file=(await exec(ompBin(),['config','path'],{timeout:15000,windowsHide:true})).stdout.trim();}catch{}
+  let file='';try{file=(await execOmp(['config','path'],{timeout:15000,windowsHide:true})).stdout.trim();}catch{}
   return {file,settings};
  }
  async function changeSetting(body,reset){
@@ -455,7 +489,7 @@ export async function createCompanion(options={}){
    else if(e.type==='record'){if(!v||typeof v!=='object'||Array.isArray(v))throw error('Expected an object.');out=JSON.stringify(v);}
    else{if(typeof v!=='string'||v.length>20000)throw error('Expected text.');out=v;}
    args=['config','set',key,out];}
-  try{await exec(ompBin(),args,{timeout:30000,windowsHide:true});}
+  try{await execOmp(args,{timeout:30000,windowsHide:true});}
   catch(err){throw error(String(err.stderr||err.stdout||err.message).replace(/^Error:\s*/,'').trim().slice(0,500)||'OMP rejected the setting.');}
   modelCache=undefined;
   const all=await listSettings();return {...all,changed:key};
@@ -463,7 +497,7 @@ export async function createCompanion(options={}){
 // Installed + discoverable OMP plugins. `plugin list --json` is structured;
 // `plugin discover` prints plain text even with --json, so parse its listing.
 async function listPlugins(){
- const run=args=>exec(ompBin(),args,{cwd:dataDir,timeout:30000,maxBuffer:16*1024*1024,windowsHide:true});
+ const run=args=>execOmp(args,{cwd:dataDir,timeout:30000,maxBuffer:16*1024*1024,windowsHide:true});
  const [j,t]=await Promise.all([run(['plugin','list','--json']),run(['plugin','discover']).catch(()=>({stdout:''}))]);
  let installed;
  try{const d=JSON.parse(j.stdout);installed=[...(d.npm||[]),...(d.marketplace||[])].map(p=>{const e=p.entries?.[0]||{};return {id:String(p.id),version:e.version||'',scope:e.scope||p.scope||'',enabled:e.enabled!==false};}).filter(p=>p.id);}catch{throw error('Could not parse plugin list.');}
@@ -483,7 +517,7 @@ async function pluginAction(body){
  let scope;
  if(body.scope!==undefined){scope=text(body.scope,'Scope',20).toLowerCase();if(scope!=='user'&&scope!=='project')throw error('Scope must be user or project.');}
  const args=['plugin',action,id,...(scope?['--scope',scope]:[])];
- try{await exec(ompBin(),args,{cwd:dataDir,timeout:20*60*1000,maxBuffer:16*1024*1024,windowsHide:true});}
+ try{await execOmp(args,{cwd:dataDir,timeout:20*60*1000,maxBuffer:16*1024*1024,windowsHide:true});}
  catch(err){throw error(cleanUpdateOutput(err.stderr,err.stdout,err.killed?'Plugin action timed out.':err.message)||`Could not ${action} the plugin.`);}
  return listPlugins();
 }
@@ -510,7 +544,7 @@ async function pluginAction(body){
  let modelCache;
  async function listModels(){
   if(modelCache&&Date.now()-modelCache.at<10*60000)return modelCache.data;
-  const {stdout}=await exec(options.ompCommand||process.env.OMP_BIN||'omp',['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true});
+  const {stdout}=await execOmp(['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true});
   const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow}));
   const roles={};let defaultThinking='';
   try{const cfg=await fs.readFile(path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'config.yml'),'utf8');let inRoles=false;

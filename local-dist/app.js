@@ -153,6 +153,7 @@
     models: null, picker: null, nativeChoice: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
     noticeSeen: new Map(), cmds: new Map(), slash: null,
+    planBusy: new Set(), planSubmitted: new Set(),
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -842,10 +843,13 @@
   function renderChatPlan(s) {
     const el = $('#chatPlan');
     const { total, done } = countTasks(s);
-    el.hidden = !total;
-    if (!total) return;
-    const active = (s.todos || []).flatMap(ph => ph.tasks || []).filter(t => t.status === 'in_progress');
-    setIfChanged(el, `<button class="chat-plan-link" type="button" data-act="openPlan" title="Open plan tab"><strong>Plan <span>${done}/${total}</span></strong><span class="chat-plan-current">${active.length ? active.map(t => esc(t.content)).join(' · ') : 'No task in progress'}</span><span aria-hidden="true">→</span></button>`);
+    el.hidden = !s && !total;
+    if (el.hidden) return;
+    const active = (s?.todos || []).flatMap(ph => ph.tasks || []).filter(t => t.status === 'in_progress');
+    const mode = s?.planMode, supported = mode?.available === true, busy = S.planBusy.has(s?.id) || ['running', 'queued'].includes(s?.status) || s?._task || s?._bash;
+    const proposal = s?._planReview, pending = proposal && !S.planSubmitted.has(s.id + ':' + proposal.id);
+    const modeLabel = supported ? pending ? 'Awaiting approval · read-only' : mode.enabled ? 'On · read-only planning' : mode.paused ? 'Paused' : 'Off' : s?._planSupported === false ? 'Requires updated OMP RPC support' : mode?.available === false ? 'Disabled in OMP settings (plan.enabled)' : 'Enable read-only planning before your first prompt';
+    setIfChanged(el, `${s ? `<div class="native-plan"><span class="grow"><strong>Plan mode</strong> <span class="muted">${modeLabel}${supported && mode.workflow ? ' · ' + esc(mode.workflow) : ''}</span></span>${s._planSupported !== false && mode?.available !== false ? `<button class="btn sm" data-plan-toggle="${esc(s.id)}" ${supported ? `aria-pressed="${!!mode.enabled}"` : ''} title="Toggle native plan mode (Alt+Shift+P)" ${busy ? 'disabled' : ''}>${supported ? mode.enabled ? 'Turn off' : 'Turn on' : 'Enable plan mode'}</button>` : ''}${supported ? `<button class="btn sm ${pending ? 'primary' : 'ghost'}" data-plan-review="${esc(s.id)}" ${busy || !mode.enabled && !pending ? 'disabled' : ''}>${pending ? 'Review plan' : 'Reopen review'}</button>` : ''}</div>` : ''}${total ? `<button class="chat-plan-link" type="button" data-act="openPlan" title="Open task plan tab"><strong>Task plan <span>${done}/${total}</span></strong><span class="chat-plan-current">${active.length ? active.map(t => esc(t.content)).join(' · ') : 'No task in progress'}</span><span aria-hidden="true">→</span></button>` : ''}`);
   }
   const bgFile = () => {
     const c = current();
@@ -1287,6 +1291,10 @@
       else if (s.status === 'review') status = `<span class="grow">OMP finished. Review the result, reply to keep going, or mark it done.</span>`;
       else if (s.status === 'paused' && !fresh) status = `<span class="grow">Idle. Reply to continue from where it left off.</span>`;
     }
+    if (s?._planReview) {
+      status = `<span class="grow">Plan ready for review. Approval is required before implementation.</span><button class="btn sm primary" data-plan-review="${esc(s.id)}" ${S.planBusy.has(s.id) ? 'disabled' : ''}>Review plan</button>`;
+      placeholder = 'Type feedback to keep planning without approving…';
+    }
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once.
     if (s?._editorText && S.editorApplied !== s._editorText.id) { S.editorApplied = s._editorText.id; input.value = s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
@@ -1327,8 +1335,68 @@
     document.body.appendChild(el);
     (el.querySelector('.modal-body textarea, .modal-body button:not([disabled])') || el.querySelector('[data-modal-close]')).focus();
   }
-  const closeModal = () => $('#modal')?.remove();
+  const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected) focus.focus(); };
   const sessionApi = body => api(`/sessions/${current().id}/command`, body);
+  async function togglePlan(id) {
+    const s = S.store?.sessions.find(x => x.id === id);
+    if (!s || s._planSupported === false || s.planMode?.available === false) return toast('Plan mode requires updated OMP RPC support.', 'err');
+    if (S.planBusy.has(id)) return;
+    S.planBusy.add(id); update();
+    try { await api(`/sessions/${id}/command`, { type: 'plan_mode', enabled: !s.planMode?.enabled }); await refresh(); }
+    catch (e) { toast(e.message, 'err'); }
+    finally { S.planBusy.delete(id); update(); }
+  }
+  async function openPlanReview(id) {
+    if (S.planBusy.has(id)) return;
+    const s = S.store?.sessions.find(x => x.id === id);
+    if (!s?.planMode?.available) return toast('Plan review requires updated OMP RPC support.', 'err');
+    S.planBusy.add(id); update();
+    try {
+      let proposal = s._planReview;
+      if (!proposal || S.planSubmitted.has(id + ':' + proposal.id)) proposal = (await api(`/sessions/${id}/command`, { type: 'plan_review' })).proposal;
+      if (!proposal) throw new Error('No plan is ready for review yet.');
+      const owner = S.store?.sessions.find(x => x.id === id);
+      if (owner) owner._planReview = proposal;
+      if (current().kind !== 'session' || current().id !== id) return;
+      const key = id + ':' + proposal.id;
+      if (S.planSubmitted.has(key)) throw new Error('This proposal has already been submitted. Wait for the next plan.');
+      const returnFocus = document.activeElement;
+      modal(proposal.title || 'Review native plan', `<div class="plan-review-intro"><p>Read the plan before choosing how to continue. Closing this review does not approve or implement it.</p><p class="muted plan-review-path">${esc(proposal.planFilePath || '')}</p></div><article class="md plan-review-content" tabindex="0" aria-label="Proposed plan">${md(proposal.content || '')}</article><form data-plan-approval><fieldset><legend>Execution context</legend><label class="plan-context"><input type="radio" name="action" value="preserve" required><span><strong>Keep context</strong><small>Implement with the current conversation intact.</small></span></label><label class="plan-context"><input type="radio" name="action" value="fresh"><span><strong>Fresh context</strong><small>Start implementation in a fresh context with the plan.</small></span></label><label class="plan-context"><input type="radio" name="action" value="compact"><span><strong>Compact context</strong><small>Summarize the conversation before implementation.</small></span></label><label class="plan-context"><input type="radio" name="action" value="refine"><span><strong>Request refinement</strong><small>Stay in read-only planning and revise the plan using your feedback.</small></span></label></fieldset><label class="plan-feedback">Feedback <span class="muted">(required for refinement)</span><textarea name="feedback" rows="3" maxlength="20000" placeholder="What should change or guide implementation?"></textarea></label><div class="plan-model"><span>Execution model</span><button class="model-chip" type="button" data-plan-model>OMP default ▾</button></div><p class="plan-review-error" role="alert" hidden></p><div class="question-actions"><button class="btn" type="button" data-modal-close>Review later</button><button class="btn primary" type="submit">Confirm selected action</button></div></form>`);
+      const dialog = $('#modal'), form = dialog.querySelector('[data-plan-approval]');
+      dialog.classList.add('plan-review-modal');
+      dialog._planOwner = id; dialog._returnFocus = returnFocus;
+      dialog.querySelector('.modal-body').scrollTop = 0;
+      dialog.querySelector('.plan-review-content').focus({ preventScroll: true });
+      let executionModel = '';
+      dialog.querySelector('[data-plan-model]').onclick = () => openPicker({ model: splitSel(executionModel).sel, thinking: splitSel(executionModel).thinking, allowDefault: true, apply: (sel, th) => {
+        if (!dialog.isConnected) return;
+        executionModel = sel ? sel + (th ? ':' + th : '') : '';
+        dialog.querySelector('[data-plan-model]').textContent = (sel ? modelLabel(sel, th) : 'OMP default') + ' ▾';
+        dialog.querySelector('[data-plan-model]').focus();
+      } });
+      form.onsubmit = async e => {
+        e.preventDefault();
+        if (S.planBusy.has(id) || S.planSubmitted.has(key)) return;
+        const action = form.elements.action.value, feedback = form.elements.feedback.value.trim();
+        const error = form.querySelector('[role="alert"]');
+        if (!action || action === 'refine' && !feedback) { error.hidden = false; error.textContent = !action ? 'Choose an execution context or request refinement.' : 'Add feedback describing the refinement.'; return; }
+        if (action !== 'refine' && feedback) { error.hidden = false; error.textContent = 'Feedback is for Request refinement. Clear it to approve implementation.'; return; }
+        const live = S.store?.sessions.find(x => x.id === id)?._planReview;
+        if (!live || live.id !== proposal.id || live.content !== proposal.content) { error.hidden = false; error.textContent = 'This proposal is no longer current. Close this review and reopen the latest plan.'; return; }
+        S.planBusy.add(id); error.hidden = true;
+        dialog.querySelectorAll('button,input,textarea').forEach(x => x.disabled = true); update();
+        try {
+          await api(`/sessions/${id}/command`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' ? { executionModel } : {}) });
+          S.planSubmitted.add(key);
+          S.planBusy.delete(id);
+          if ($('#modal') === dialog) closeModal();
+          await refresh();
+        } catch (err) { error.hidden = false; error.textContent = err.message; }
+        finally { S.planBusy.delete(id); dialog.querySelectorAll('button,input,textarea').forEach(x => x.disabled = false); update(); }
+      };
+    } catch (e) { toast(e.message, 'err'); }
+    finally { S.planBusy.delete(id); update(); }
+  }
   async function openBranch() {
     try {
       const r = await sessionApi({ type: 'branch_messages' });
@@ -1839,6 +1907,9 @@
   }
   document.addEventListener('click', e => {
     const t = e.target;
+    const planToggle = t.closest('[data-plan-toggle]'), planReview = t.closest('[data-plan-review]');
+    if (planToggle) { togglePlan(planToggle.dataset.planToggle); return; }
+    if (planReview) { openPlanReview(planReview.dataset.planReview); return; }
     if (t.closest('#picker')) {
       const fav = t.closest('[data-fav]');
       if (fav) { toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top; return; }
@@ -2071,8 +2142,16 @@
     row.classList.add('hi'); S.picker.hi = +row.dataset.pi; renderThink();
   });
   document.addEventListener('keydown', e => {
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'p') { e.preventDefault(); if (!S.picker && !$('#modal') && current().kind === 'session') togglePlan(current().id); return; }
+    const planDialog = $('#modal.plan-review-modal');
+    if (planDialog && !S.picker && e.key === 'Tab') {
+      const nodes = [...planDialog.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex="0"]')];
+      const first = nodes[0], last = nodes[nodes.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
-    if (e.key === 'Escape' && $('#modal')) { e.stopPropagation(); closeModal(); return; }
+    if (e.key === 'Escape' && $('#modal') && !S.picker) { e.stopPropagation(); closeModal(); return; }
     if (e.key === 'Escape' && $('#thinkMenu')) { closeThinkMenu(); return; }
     const t = e.target;
     if (S.picker) {
@@ -2105,6 +2184,8 @@
   $('#scrim').addEventListener('click', () => document.getElementById('app').classList.remove('nav-open'));
   $('#disconnect').addEventListener('click', () => setToken(''));
   window.addEventListener('hashchange', () => {
+    const planDialog = $('#modal.plan-review-modal');
+    if (planDialog && (current().kind !== 'session' || current().id !== planDialog._planOwner)) { closePicker(); planDialog.remove(); }
     const t = new URLSearchParams(location.hash.slice(1)).get('token');
     if (t) { history.replaceState(null, '', location.pathname); setToken(t); refreshNative(); return; }
     route();

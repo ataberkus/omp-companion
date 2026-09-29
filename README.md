@@ -30,6 +30,7 @@
 - **Readable conversations:** Markdown, tables and code blocks with copy. Tool calls and thinking fold into one activity summary.
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents, background jobs and advisor transcripts.
+- **Native plan mode:** enable read-only planning before your first prompt, review the proposed Markdown plan, request refinement, or approve implementation with the current, fresh or compacted context. Requires an OMP build with plan-mode RPC support.
 - **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` as you type, and run `!command` in the session's shell.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
 - **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
@@ -56,11 +57,28 @@ The dashboard opens in your browser, already connected. Press **Alt+N** (or clic
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
 - **Security:** the companion listens only on `127.0.0.1`. It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions.
 
+### Native plan mode
+
+Click **Enable plan mode** before sending your task, or toggle it with **Alt+Shift+P**. `/plan` and `/plan-review` use OMP's native planning workflow, not a planning-only prompt or automatic approval.
+
+The project stays read-only until you explicitly approve implementation or turn plan mode off. **Review plan** offers **Keep context**, **Fresh context**, **Compact context**, an optional execution model, and **Request refinement** with required feedback. Closing the review leaves it unapproved. Stale proposals must be reviewed again.
+
+The installed OMP must expose `set_plan_mode`, `review_plan` and `approve_plan`. Older builds show **Requires updated OMP RPC support**; the companion does not simulate planning or silently approve it.
+
+To run the patched sibling checkout on Windows, with Bun on PATH and the checkout's dependencies, generated tool views and native bindings prepared:
+
+```bat
+set "OMP_BIN=%CD%\..\oh-my-pi\packages\coding-agent\src\cli.ts"
+start.bat
+```
+
+`OMP_BIN` can also point to a compiled OMP executable containing the same RPC changes. Restart companion sessions after changing the runtime.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OMP_BIN` | `omp` | Path to OMP if it's not on PATH |
+| `OMP_BIN` | `omp` | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
 | `OMP_WEB_PORT` | `4545` | Companion port |
 | `OMP_WEB_DATA_DIR` | `~/.omp-web` | Panel state, sessions and worktrees |
 | `OMP_SESSIONS_DIR` | `<agent dir>/sessions` | OMP's native session store |
@@ -84,6 +102,6 @@ Your browser may block HTTPS-to-localhost requests. If it does, use the local da
 node --test "tests/*.test.mjs"
 ```
 
-`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it) and needs no upstream fork.
+`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan mode requires the RPC commands described above.
 
 **Not supported:** attaching to already-running terminal sessions, automatic Git merges, and custom extension TUIs beyond select, confirm, text and editor prompts.
