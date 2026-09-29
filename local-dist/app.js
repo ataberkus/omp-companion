@@ -224,7 +224,11 @@
     return { kind: 'home' };
   }
   const selKey = () => { const c = current(); return c.kind === 'session' ? 's:' + c.id : c.kind === 'native' ? 'f:' + c.file : ''; };
-  const openItem = key => { location.hash = key.startsWith('s:') ? '#/s/' + key.slice(2) : '#/f/' + encodeURIComponent(key.slice(2)); };
+  const itemHash = key => key.startsWith('s:') ? '#/s/' + key.slice(2) : '#/f/' + encodeURIComponent(key.slice(2));
+  const openItem = key => { location.hash = itemHash(key); };
+  // Plain window.open (no noopener) so the new tab inherits sessionStorage, which holds the token.
+  const openItemTab = key => window.open(location.pathname + location.search + itemHash(key), '_blank');
+  const closeCtx = () => $('#ctxMenu')?.remove();
 
   // ---------- sidebar ----------
   function renderList() {
@@ -1887,7 +1891,11 @@
     if (ct) { copy(ct.dataset.copyText); ct.closest('.menu')?.classList.remove('open'); return; }
     const ar = t.closest('[data-archive]');
     if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
-    const item = t.closest('[data-key]');
+    const nt = t.closest('[data-newtab]');
+    if (nt) { closeCtx(); openItemTab(nt.dataset.newtab); return; }
+    closeCtx();
+    // Messages and jobs also carry data-key (render keying); only session rows navigate.
+    const item = t.closest('.item[data-key]');
     if (item) { openItem(item.dataset.key); return; }
     const go = t.closest('[data-go]');
     if (go) { goFolder(go.dataset.go); return; }
@@ -1939,6 +1947,26 @@
     else if (act === 'resumeOnly') api('/omp-sessions/resume', { file: c.file }).then(async s => { await refreshNative(); location.hash = '#/s/' + s.id; }).catch(err => toast(err.message, 'err'));
     else if (act === 'start') startSession();
   });
+  document.addEventListener('auxclick', e => {
+    const item = e.button === 1 && e.target.closest('.item[data-key]');
+    if (item && !e.target.closest('[data-archive]')) { e.preventDefault(); openItemTab(item.dataset.key); }
+  });
+  document.addEventListener('contextmenu', e => {
+    closeCtx();
+    const item = e.target.closest('.item[data-key]');
+    if (!item) return;
+    e.preventDefault();
+    const m = document.createElement('div');
+    m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu';
+    m.innerHTML = `<button data-newtab="${esc(item.dataset.key)}">Open in new tab</button>`;
+    document.body.appendChild(m);
+    m.style.left = Math.min(e.clientX, innerWidth - m.offsetWidth - 4) + 'px';
+    m.style.top = Math.min(e.clientY, innerHeight - m.offsetHeight - 4) + 'px';
+  });
+  addEventListener('blur', closeCtx);
+  addEventListener('resize', closeCtx);
+  document.addEventListener('scroll', closeCtx, true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
   // Click any chat, queued or not-yet-sent image to see it full size.
   function openLightbox(src, alt) {
     closeLightbox();

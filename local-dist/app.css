@@ -95,6 +95,7 @@ input,textarea{font:inherit;color:inherit}
 .menu-pop button{display:block;width:100%;padding:7px 10px;border:0;border-radius:6px;background:none;text-align:left;cursor:pointer;font-size:13px}
 .menu-pop button:hover{background:var(--hover)}
 .menu-pop button.danger{color:var(--red)}
+.menu-pop.ctx-menu{display:block;position:fixed;right:auto;top:0;min-width:160px}
 
 .body{flex:1;display:flex;min-height:0}
 .scroller{flex:1;overflow-y:auto;min-width:0}
