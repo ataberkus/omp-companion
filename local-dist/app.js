@@ -1814,6 +1814,23 @@
     }
     return null;
   }
+  async function cycleRole(dir) {
+    try { await ensureModels(); } catch (e) { toast(e.message, 'err'); return; }
+    const ctx = pickerCtx();
+    if (!ctx) return;
+    const all = Object.entries(S.models?.roles || {}).filter(([r]) => !['image', 'vision'].includes(r));
+    if (!all.length) { toast('No OMP roles in config', 'err'); return; }
+    const entries = ['default', 'smol', 'slow'].map(w => all.find(([r]) => r.toLowerCase() === w)).filter(Boolean);
+    const list = entries.length ? entries : all;
+    const cur = ctx.model || splitSel(S.models.roles.default || '').sel;
+    const curTh = ctx.thinking || '';
+    const i = list.findIndex(([, v]) => { const s = splitSel(v); return s.sel === cur && (s.thinking || '') === curTh; });
+    const [name, val] = list[i < 0 ? (dir < 0 ? list.length - 1 : 0) : (i + dir + list.length) % list.length];
+    const s = splitSel(val);
+    closePicker();
+    ctx.apply(s.sel, s.thinking);
+    toast(`${name} · ${modelLabel(s.sel, s.thinking) || s.sel}`);
+  }
   document.addEventListener('click', e => {
     const t = e.target;
     if (t.closest('#picker')) {
@@ -2046,7 +2063,7 @@
     row.classList.add('hi'); S.picker.hi = +row.dataset.pi; renderThink();
   });
   document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') { e.preventDefault(); if (S.picker) closePicker(); else { const ctx = pickerCtx(); if (ctx) openPicker(ctx); } return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Escape' && $('#modal')) { e.stopPropagation(); closeModal(); return; }
     if (e.key === 'Escape' && $('#thinkMenu')) { closeThinkMenu(); return; }
     const t = e.target;
