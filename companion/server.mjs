@@ -96,6 +96,8 @@ const editFiles=d=>{if(!d||typeof d!=='object')return undefined;const list=Array
  for(const f of list.slice(0,30)){if(typeof f?.diff!=='string'||budget<=0)continue;const diff=f.diff.length>budget?f.diff.slice(0,budget)+'\n… (diff truncated)':f.diff;budget-=diff.length;out.push({path:String(f.path||d.path||''),op:String(f.op||d.op||''),diff});}
  return out.length?out:undefined;};
 const toolSummary=t=>`${t.status==='running'?'':t.status==='error'?'Error · ':'Done · '}${t.name}  ${t.intent||t.args.slice(0,300)}`;
+// `!command` runs from the composer: OMP records them as bashExecution messages ({command, output, exitCode, cancelled}).
+const shellRecord=(command,r)=>{const t=toolRecord('bash',{command:String(command||'')},'You ran this command');t.user=true;if(r){t.status=r.cancelled||(typeof r.exitCode==='number'&&r.exitCode!==0)?'error':'done';t.result=clip(String(r.output||'')+(r.cancelled?'\n(cancelled)':typeof r.exitCode==='number'&&r.exitCode!==0?`\n(exit code ${r.exitCode})`:''),8000);}return t;};
 // Native OMP session files: first lines hold {type:'title'} and {type:'session',cwd,id,timestamp}; model changes can appear anywhere.
 function scanModel(head,f){
  if(f.type==='model_change'&&f.model)head.model=String(f.model).replace(/:.*$/,'');
@@ -131,6 +133,7 @@ async function importMessages(file,limit=400){
   }
   else if(f.type==='custom_message'||m.role==='custom'){const card=advisorMessage(m,f.id||randomUUID(),at);if(card)out.push(card);}
   else if(m.role==='toolResult'){const msg=tools.get(m.toolCallId);if(msg){msg.tool.result=clip(contentText(m.content),8000);msg.tool.status=m.isError?'error':'done';const files=editFiles(m.details);if(files)msg.tool.files=files;msg.text=toolSummary(msg.tool);}}
+  else if(m.role==='bashExecution'){const tool=shellRecord(m.command,m);out.push({id:'tool-'+(f.id||randomUUID()),role:'tool',tool,text:toolSummary(tool),at});}
  }
  return out.slice(-limit);
 }
@@ -152,6 +155,12 @@ export async function createCompanion(options={}){
  const persist=()=>{const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);saveChain=saveChain.catch(()=>{}).then(async()=>{await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600});await fs.rename(stateFile+'.tmp',stateFile);});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
+ // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
+ const commands=new Map();
+ const slashList=list=>list.slice(0,500).filter(c=>typeof c?.name==='string').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}));
+ // Session toggles the dashboard can change; values are validated in command().
+ const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
+ const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
  function settle(s){
   void lock(s.id,async()=>{
    if(s.status!=='running')return;
@@ -205,13 +214,35 @@ export async function createCompanion(options={}){
     if(f.method==='input')q.placeholder=String(f.placeholder||'').slice(0,500);
     if(f.method==='editor')q.prefill=String(f.prefill||'').slice(0,20000);
     (s.uiRequests??=[]).push(q);
-   }else if(!['notify','setStatus','setWidget','setTitle','set_editor_text','open_url'].includes(f.method))void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
+   }else if(f.method==='notify')notice(s,f.notifyType,f.message);
+   else if(f.method==='setStatus'){s._status??={};const key=String(f.statusKey||'').slice(0,80);if(f.statusText)s._status[key]=String(f.statusText).slice(0,300);else delete s._status[key];}
+   else if(f.method==='setWidget'){s._widgets??={};const key=String(f.widgetKey||'').slice(0,80);if(Array.isArray(f.widgetLines)&&f.widgetLines.length)s._widgets[key]=f.widgetLines.slice(0,40).map(l=>String(l).slice(0,500));else delete s._widgets[key];}
+   else if(f.method==='set_editor_text')s._editorText={id:f.id,text:String(f.text??'').slice(0,200000)};
+   // Login flows: the browser can't be opened for the user without a click, so the dashboard shows the link.
+   else if(f.method==='open_url'){const url=[f.launchUrl,f.url].find(u=>typeof u==='string'&&/^https?:\/\//i.test(u));if(url)s._openUrl={id:f.id,url:url.slice(0,4000),instructions:String(f.instructions||'').slice(0,1000)};}
+   else if(f.method!=='setTitle')void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
   }
+  if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'&&out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;}
+  if(f.type==='extension_error')notice(s,'error',`Extension ${path.basename(String(f.extensionPath||'extension'))} failed${f.event?` in ${f.event}`:''}: ${f.error}`);
+  if(f.type==='notice')notice(s,f.level,f.source?`${f.source}: ${f.message}`:f.message);
+  if(f.type==='auto_retry_start')s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};
+  if(f.type==='auto_retry_end'){delete s._retry;if(!f.success)append(s,'system',`Retries stopped after attempt ${f.attempt}${f.finalError?`: ${f.finalError}`:'.'}`);}
+  if(f.type==='retry_fallback_applied')append(s,'system',`Switched from ${f.from} to fallback model ${f.to}${f.reason?` (${f.reason})`:''}.`);
+  if(f.type==='model_changed'){const rpc=runners.get(s.id);if(rpc)void refresh(s,rpc);}
+  if(f.type==='thinking_level_changed'&&f.thinkingLevel)s.thinking=f.thinkingLevel;
+  if(f.type==='ttsr_triggered'&&Array.isArray(f.rules)&&f.rules.length)append(s,'system',`Rule applied: ${f.rules.map(r=>r?.name||r?.id||'rule').join(', ')}`);
+  if(f.type==='irc_message'){const v=contentText(f.message?.content);if(v)append(s,'system',v);}
+  if(f.type==='todo_auto_clear')s.todos=[];
+  if(f.type==='goal_updated')s.goal=f.goal?{objective:String(f.goal.objective||'').slice(0,500),status:String(f.goal.status||''),tokensUsed:f.goal.tokensUsed,tokenBudget:f.goal.tokenBudget}:undefined;
+  if(f.type==='available_commands_update'&&Array.isArray(f.commands))commands.set(s.id,slashList(f.commands));
   if(f.type==='response'&&!f.success){s.error=f.error;if(['prompt','steer','follow_up'].includes(f.command))s.status='error';}
   scheduleSave();
  }
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
  function dropSteers(s){for(const m of s.messages)if(m.steer==='pending')m.steer='dropped';}
+ // Info toasts in the dashboard; warnings and errors also stay in the chat.
+ function notice(s,level,message){const text=String(message||'').trim().slice(0,2000);if(!text)return;level=['warning','error'].includes(level)?level:'info';
+  s._notices=[...(s._notices||[]),{id:randomUUID(),level,text,at:now()}].slice(-20);if(level!=='info')append(s,'system',text);if(level==='error')activity(s,`${s.title}: ${text}`,'error');}
  async function start(s){
   if(runners.get(s.id)?.alive)return runners.get(s.id);
   if(launches.has(s.id))return launches.get(s.id);
@@ -220,9 +251,12 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[])];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(options.ompCommand||process.env.OMP_BIN||'omp',args,s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);delete s._streamId;delete s._compacting;delete s.uiRequests;dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
+   const rpc=new RpcProcess(options.ompCommand||process.env.OMP_BIN||'omp',args,s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
-   try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'progress'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});await refresh(s,rpc);return rpc;}catch(e){runners.delete(s.id);rpc.kill();throw e;}
+   try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'progress'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
+    // Per-session toggles live in the OMP process, so a restarted runner gets them back.
+    for(const [key,value] of Object.entries(s.prefs||{}))await rpc.send(PREFS[key](value)).catch(e=>notice(s,'warning',e.message));
+    await refresh(s,rpc);return rpc;}catch(e){runners.delete(s.id);rpc.kill();throw e;}
   })();launches.set(s.id,promise);try{return await promise;}finally{launches.delete(s.id);}
  }
  // The status reply can arrive after send() resolves, so stay silent until it shows up (or a few seconds pass).
@@ -230,11 +264,15 @@ export async function createCompanion(options={}){
  async function refresh(s,rpc){try{const state=await rpc.send({type:'get_state'});
   // OMP only emits session_settled right after a terminal agent_end; if async work finished later, nothing re-announces it.
   if(state?.isSettled===true&&s.status==='running'&&!s._compacting&&Date.now()-(s._lastEvent||0)>3000)settle(s);
+  if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,interrupt:state.interruptMode};}
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
+ // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
+ async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   const prompting=['prompt','steer','follow_up'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
+  if(prompting&&s._task)throw error('Wait for the handoff to finish first.');
   if(body.type==='answer'){
    const rpc=runners.get(s.id),id=text(body.id,'Question ID',200),q=s.uiRequests?.find(q=>q.id===id);
    if(!rpc?.alive||!q)throw error('This question is no longer pending.');
@@ -267,6 +305,46 @@ export async function createCompanion(options={}){
    const rpc=runners.get(s.id);if(rpc?.alive){const i=selector.indexOf('/');if(selector)await rpc.send({type:'set_model',provider:selector.slice(0,i),modelId:selector.slice(i+1)});if(thinking)await rpc.send({type:'set_thinking_level',level:thinking});await refresh(s,rpc);}
    else{if(selector){const i=selector.indexOf('/');s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking)s.thinking=thinking;}
    await persist();return s;
+  }
+  const busy=()=>{if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');};
+  if(body.type==='rename'){const name=text(body.name,'Session name',120);const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'set_session_name',name});s.title=name;await persist();return s;}
+  if(body.type==='pref'){
+   if(!Object.hasOwn(PREF_VALUES,body.key)||!PREF_VALUES[body.key].includes(body.value))throw error('Invalid session setting.');
+   const rpc=await start(s);try{await rpc.send(PREFS[body.key](body.value));}catch(e){throw error(e.message);}
+   (s.prefs??={})[body.key]=body.value;await refresh(s,rpc);await persist();return s;
+  }
+  if(body.type==='abort_retry'||body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
+  // Runs outside the session lock (timeout 0) so Stop, answers and other commands still get through while it works.
+  if(body.type==='bash'){
+   const cmd=text(body.command,'Command',20000);if(s._bash)throw error('A shell command is already running.');
+   const rpc=await start(s);const msg=append(s,'tool','bash','tool-bash-'+randomUUID());msg.tool=shellRecord(cmd);msg.startedAt=now();msg.text=toolSummary(msg.tool);s._bash=msg.id;
+   rpc.send({type:'bash',command:cmd},0).then(r=>Object.assign(msg.tool,shellRecord(cmd,r)),e=>{msg.tool.status='error';msg.tool.result=e.message;})
+    .finally(()=>{msg.tool.ms=Date.now()-new Date(msg.startedAt).getTime();msg.text=toolSummary(msg.tool);delete s._bash;scheduleSave();});
+   await persist();return s;
+  }
+  if(body.type==='stats'){const rpc=await start(s);return {stats:await rpc.send({type:'get_session_stats'})};}
+  if(body.type==='export'){
+   const rpc=await start(s);const dir=path.join(dataDir,'exports');await fs.mkdir(dir,{recursive:true,mode:0o700});
+   const r=await rpc.send({type:'export_html',outputPath:path.join(dir,s.id+'.html')},120000);
+   return {name:(s.title.replace(/[^\w.-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'omp-session')+'.html',html:await fs.readFile(r?.path||path.join(dir,s.id+'.html'),'utf8')};
+  }
+  if(body.type==='branch_messages'){busy();const rpc=await start(s);const r=await rpc.send({type:'get_branch_messages'});return {messages:(Array.isArray(r?.messages)?r.messages:[]).map(m=>({entryId:String(m.entryId),text:String(m.text||'').slice(0,300)})).reverse()};}
+  if(body.type==='branch'){
+   busy();const rpc=await start(s);const r=await rpc.send({type:'branch',entryId:text(body.entryId,'Message',200)});if(r?.cancelled)throw error('An extension cancelled the branch.');
+   await reload(s,rpc);append(s,'system','Branched into a new session from this point. The message you picked is back in the composer.');s.status='paused';await persist();return {session:s,text:String(r?.text||'')};
+  }
+  if(body.type==='handoff'){
+   busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Writing the handoff…';
+   rpc.send({type:'handoff',...(instructions?{customInstructions:instructions}:{})},0).then(async r=>{await reload(s,rpc);append(s,'system',`Handed off to a fresh session${r?.savedPath?`. Handoff document: ${r.savedPath}`:''}.`);},e=>append(s,'system',`Handoff failed: ${e.message}`))
+    .finally(()=>{delete s._task;void persist();});
+   await persist();return s;
+  }
+  if(body.type==='login_providers'){const rpc=await start(s);const r=await rpc.send({type:'get_login_providers'});return {providers:(Array.isArray(r?.providers)?r.providers:[]).map(p=>({id:String(p.id),name:String(p.name||p.id),available:p.available!==false,authenticated:!!p.authenticated}))};}
+  // OAuth runs until the user finishes in the browser; the link arrives as open_url, pasted codes as input questions.
+  if(body.type==='login'){
+   const id=text(body.provider,'Provider',100);const rpc=await start(s);notice(s,'info',`Starting ${id} login…`);
+   rpc.send({type:'login',providerId:id},0).then(()=>notice(s,'info',`Logged in to ${id}.`),e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave();});
+   return s;
   }
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
@@ -525,6 +603,7 @@ async function pluginAction(body){
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
+   if(req.method==='GET'&&url.pathname==='/api/commands'){json({commands:commands.get(String(url.searchParams.get('session')))||[]});return;}
    if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const live=store.sessions.some(s=>s.sessionFile&&samePath(s.sessionFile,file)&&runners.has(s.id));const bg=await background(file,live);
     const own=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));json({...bg,live,agents:own?.subagentList||[]});return;}
    if(req.method==='GET'&&url.pathname==='/api/transcript'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}const st=await fs.stat(file);json({...head,file,result,updatedAt:st.mtime.toISOString(),messages:await importMessages(file,600)});return;}

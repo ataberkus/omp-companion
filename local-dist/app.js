@@ -152,6 +152,7 @@
     pending: null, attachment: null, editQueue: null, queueOpen: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
+    noticeSeen: new Map(), cmds: new Map(), slash: null,
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -289,9 +290,11 @@
       <div class="chat-plan" id="chatPlan" hidden></div>
       <div class="body"><div class="scroller" id="scroller"><div class="thread" id="thread"></div></div><aside class="tasks" id="tasks" hidden></aside></div>
       <div class="composer-wrap">
+        <div class="extras" id="extras" hidden></div>
         <div class="questions" id="questions" aria-live="polite" hidden></div>
         <div class="queued-messages" id="queued" hidden></div>
         <div class="status-line" id="statusLine"></div>
+        <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
         <div class="composer">
           <textarea id="input" rows="1"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
@@ -331,7 +334,9 @@
       renderSide(s);
       renderTopbarSession(s);
       loadAdvisorTx(s.sessionFile || '');
-      renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt });
+      renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt, retry: s._retry, task: s._task });
+      renderExtras(s);
+      showNotices(s);
       renderQuestions(s);
       renderQueue(s);
       renderComposer(s);
@@ -346,6 +351,7 @@
       if (!pv) $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session history…</div>';
       else if (pv.error) $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(pv.error)}</div></div>`;
       else { loadAdvisorTx(c.file); renderThread(withAdvisor(pv.messages, c.file), 'history', c.file); }
+      renderExtras(null);
       renderQuestions(null);
       renderQueue(null);
       renderComposer(null, n || pv);
@@ -370,10 +376,15 @@
       sessionModel(s) ? `<span class="mdl-meta" data-act="model" title="Change model">◆ ${esc(modelLabel(sessionModel(s), s.thinking))}</span>` : '',
       s.tokens ? `<span>${fmtTokens(s.tokens)} tokens${s.cost ? ' · $' + s.cost.toFixed(2) : ''}</span>` : '',
       contextMeta(s.contextTokens, s.contextWindow || modelInfo(sessionModel(s))?.contextWindow, s.contextPercent),
+      s.status === 'running' && s.tps ? `<span title="Output speed">${s.tps.toFixed(0)} tok/s</span>` : '',
+      s.fast?.active ? '<span class="pill" title="Fast mode is active">⚡ Fast</span>' : '',
+      s.goal?.objective ? `<span class="goal" title="${esc(`Goal (${s.goal.status}): ${s.goal.objective}`)}">🎯 ${esc(s.goal.objective.slice(0, 60))}</span>` : '',
     ].join('');
     const btn = [changesButton(s.messages, 's:' + s.id), sideButton()];
     if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort">■ <span class="lbl">Stop</span></button>`);
     if (['review', 'paused', 'error'].includes(s.status) && s.messages.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete">✓ <span class="lbl">Mark done</span></button>`);
+    const idle = s.status !== 'running' && s.status !== 'queued';
+    const pref = (key, on, label, yes = true, no = false) => `<button data-pref="${key}" data-value="${esc(JSON.stringify(on ? no : yes))}" role="menuitemcheckbox" aria-checked="${!!on}"><span class="check">${on ? '✓' : ''}</span>${esc(label)}</button>`;
     const html = `<button class="btn sm ghost menu-btn" data-act="nav">☰</button>
       <div class="title-block"><h1 title="${esc(s.title)}">${esc(s.title)}</h1>${metaHtml(p?.path || s.cwd, extra)}</div>
       <div class="actions">${btn.join('')}
@@ -383,8 +394,20 @@
           ${s.sessionFile ? `<button data-copy-text="${esc(s.sessionFile)}">Copy OMP session file path</button>` : ''}
           ${s.sessionFile ? `<button data-copy-text="omp --resume &quot;${esc(s.sessionFile)}&quot;">Copy terminal resume command</button>` : ''}
           <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button>
-          ${s.status !== 'running' && s.status !== 'queued' ? '<button data-act="compact">Compact context</button>' : ''}
-          ${s.status !== 'running' && s.status !== 'queued' ? '<button class="danger" data-act="hide">Remove from panel</button>' : ''}
+          ${idle ? '<button data-act="compact">Compact context</button>' : ''}
+          <button data-act="rename">Rename session…</button>
+          ${idle ? '<button data-act="branch">Branch from an earlier message…</button><button data-act="handoff">Hand off to a fresh session…</button>' : ''}
+          <button data-act="export">Export as HTML</button>
+          <button data-act="stats">Session stats</button>
+          <div class="menu-sep"></div>
+          ${pref('fast', s.fast?.enabled, 'Fast mode')}
+          ${pref('autoCompaction', s.autoCompaction !== false, 'Auto-compact when context is full')}
+          ${pref('autoRetry', s.prefs?.autoRetry !== false, 'Retry failed requests automatically')}
+          ${pref('steeringMode', s.modes?.steering === 'all', 'Deliver all steers at once', 'all', 'one-at-a-time')}
+          ${pref('interruptMode', s.modes?.interrupt === 'wait', 'Hold steers until the turn ends', 'wait', 'immediate')}
+          <div class="menu-sep"></div>
+          <button data-act="login">Log in to a provider…</button>
+          ${idle ? '<button class="danger" data-act="hide">Remove from panel</button>' : ''}
         </div></div>
       </div>`;
     setIfChanged($('#topbar'), html);
@@ -516,7 +539,7 @@
     }
     const t = m.tool;
     const a = parseArgs(t.args);
-    const running = t.status === 'running' && live;
+    const running = t.status === 'running' && (live || t.user);
     const bad = t.status === 'error';
     const edits = realFiles(t).length ? diffStat(realFiles(t)) : null;
     const def = !!edits && !S.collapseDiffs;
@@ -562,10 +585,11 @@
     const pending = S.pending && S.pending.view === S.view && !S.pending.queued ? S.pending : null;
     const last = messages[messages.length - 1];
     const runningTools = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? 1 : 0), 0);
+    const liveOutput = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? m.tool.result?.length || 0 : 0), 0);
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
     // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
     const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, steers, status, opts.compacting, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), opts.extra || ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), opts.extra || ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     const scroller = $('#scroller');
@@ -615,9 +639,10 @@
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
       parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${pending.imagePreview ? `<img class="msg-image" src="${esc(pending.imagePreview)}" alt="Attached image">` : ''}</div></div>`);
     }
-    if (opts.compacting || (status === 'running' && ((last?.role !== 'tool' && last?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
-      let label = opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
-      if (!opts.compacting && !pending && status === 'running' && idle >= 20) {
+    if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((last?.role !== 'tool' && last?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
+      let label = opts.task ? esc(opts.task) : opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
+      if (opts.retry) label = `Retrying after an error (attempt ${+opts.retry.attempt} of ${+opts.retry.maxAttempts})${opts.retry.error ? ': ' + esc(opts.retry.error.slice(0, 200)) : ''} <button class="btn sm ghost" data-act="abortRetry">Stop retrying</button>`;
+      if (!opts.compacting && !opts.retry && !opts.task && !pending && status === 'running' && idle >= 20) {
         const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : last?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
         label = `${waitingOn} · no activity for ${idle < 60 ? Math.floor(idle) + 's' : Math.floor(idle / 60) + 'm ' + Math.floor(idle % 60) + 's'}`;
       }
@@ -1213,17 +1238,138 @@
     } else {
       const fresh = !s.messages.some(m => m.role === 'user');
       placeholder = fresh ? 'What should OMP do?' : s.status === 'done' ? 'Send a message to reopen this session…' : 'Reply to continue…';
-      hintText = 'Enter to send · Shift+Enter for a new line';
+      hintText = 'Enter to send · Shift+Enter new line · / commands · !cmd shell';
       btns = `<button class="btn primary" data-act="send" ${has && !S.busy ? '' : 'disabled'}>${S.busy ? 'Sending…' : 'Send ↵'}</button>`;
       if (s.status === 'error') status = `<span class="grow">⚠ ${esc(s.error || 'OMP reported an error.')}</span><button class="btn sm" data-act="retry">Retry last message</button>`;
       else if (s.status === 'review') status = `<span class="grow">OMP finished. Review the result, reply to keep going, or mark it done.</span>`;
       else if (s.status === 'paused' && !fresh) status = `<span class="grow">Idle. Reply to continue from where it left off.</span>`;
     }
+    if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
+    // Extensions can pre-fill the composer (set_editor_text); apply each request once.
+    if (s?._editorText && S.editorApplied !== s._editorText.id) { S.editorApplied = s._editorText.id; input.value = s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
     setIfChanged(line, status);
+  }
+
+  // ---------- extension UI: links, widgets, status, notifications ----------
+  const plain = v => String(v).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+  function renderExtras(s) {
+    const el = $('#extras'), parts = [];
+    const link = s?._openUrl && S.urlDismissed !== s._openUrl.id ? s._openUrl : null;
+    if (link) parts.push(`<div class="extra-link"><span class="grow">${esc(link.instructions || 'OMP needs you to open this link to continue.')}</span><a class="btn sm primary" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">Open link</a><button class="btn sm ghost" data-copy-text="${esc(link.url)}">Copy</button><button class="btn sm ghost" data-act="dismissUrl" data-id="${esc(link.id)}" aria-label="Dismiss link">✕</button></div>`);
+    for (const [key, lines] of Object.entries(s?._widgets || {})) parts.push(`<pre class="extra-widget" title="${esc(key)}">${esc(plain(lines.join('\n')))}</pre>`);
+    const status = Object.entries(s?._status || {});
+    if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
+    el.hidden = !parts.length;
+    setIfChanged(el, parts.join(''));
+  }
+  // Toast notifications that arrived since this session was last on screen; the first look only records where we are.
+  function showNotices(s) {
+    const list = s._notices || [], seen = S.noticeSeen.get(s.id);
+    S.noticeSeen.set(s.id, list.length ? list[list.length - 1].id : '');
+    if (seen === undefined) return;
+    const from = list.findIndex(n => n.id === seen) + 1;
+    for (const n of list.slice(from)) toast(n.text, n.level === 'info' ? '' : 'err');
+  }
+
+  // ---------- dialogs ----------
+  function modal(title, body) {
+    closeModal();
+    const el = document.createElement('div');
+    el.id = 'modal'; el.className = 'modal'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', title);
+    el.innerHTML = `<div class="modal-card"><div class="modal-head"><strong>${esc(title)}</strong><button class="btn sm ghost" data-modal-close aria-label="Close">✕</button></div><div class="modal-body">${body}</div></div>`;
+    document.body.appendChild(el);
+    (el.querySelector('.modal-body textarea, .modal-body button:not([disabled])') || el.querySelector('[data-modal-close]')).focus();
+  }
+  const closeModal = () => $('#modal')?.remove();
+  const sessionApi = body => api(`/sessions/${current().id}/command`, body);
+  async function openBranch() {
+    try {
+      const r = await sessionApi({ type: 'branch_messages' });
+      if (!r.messages.length) return toast('There are no earlier messages to branch from.');
+      modal('Branch from an earlier message', `<p class="muted">OMP starts a new session with everything before the message you pick. That message goes back into the composer so you can change it.</p><div class="modal-list">${r.messages.map(m => `<button data-branch="${esc(m.entryId)}">${esc(m.text || 'Image attached')}</button>`).join('')}</div>`);
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  async function doBranch(entryId) {
+    closeModal();
+    try {
+      const r = await sessionApi({ type: 'branch', entryId });
+      await refresh(); S.lastSig = '';
+      const input = $('#input');
+      if (input && r.text) { input.value = r.text; drafts.set(S.view, r.text); autosize(input); input.focus(); }
+      update(); toast('Branched into a new session');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  const openHandoff = () => modal('Hand off to a fresh session', `<form data-handoff><p class="muted">OMP writes a summary of this session, then continues in a fresh context that starts from that summary.</p><textarea name="instructions" rows="3" maxlength="5000" placeholder="Optional: what the handoff should focus on"></textarea><div class="question-actions"><button class="btn sm primary" type="submit">Hand off</button></div></form>`);
+  async function exportHtml() {
+    try {
+      toast('Exporting…');
+      const r = await sessionApi({ type: 'export' });
+      const url = URL.createObjectURL(new Blob([r.html], { type: 'text/html' }));
+      const a = document.createElement('a'); a.href = url; a.download = r.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  async function showStats() {
+    try {
+      const { stats: x } = await sessionApi({ type: 'stats' });
+      const t = x.tokens || {};
+      const rows = [
+        ['Messages', `${x.userMessages} from you · ${x.assistantMessages} from OMP · ${x.totalMessages} total`],
+        ['Tool calls', x.toolCalls],
+        ['Tokens', `${fmtTokens(t.total)} total · ${fmtTokens(t.input)} in · ${fmtTokens(t.output)} out`],
+        ['Cache', `${fmtTokens(t.cacheRead)} read · ${fmtTokens(t.cacheWrite)} written`],
+        ...(t.reasoning ? [['Reasoning', fmtTokens(t.reasoning) + ' tokens']] : []),
+        ['Cost', '$' + (x.cost || 0).toFixed(4)],
+        ...(x.premiumRequests ? [['Premium requests', x.premiumRequests]] : []),
+        ...(x.contextUsage?.tokens ? [['Context', `${fmtTokens(x.contextUsage.tokens)} of ${fmtTokens(x.contextUsage.contextWindow)}`]] : []),
+        ...Object.entries(x.routedModels || {}).map(([m, n]) => [m, `${n} ${n === 1 ? 'turn' : 'turns'}`]),
+      ];
+      modal('Session stats', `<dl class="stats">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(String(v ?? ''))}</dd>`).join('')}</dl>`);
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  async function openLogin() {
+    try {
+      const { providers } = await sessionApi({ type: 'login_providers' });
+      modal('Log in to a provider', providers.length
+        ? `<div class="modal-list">${providers.map(p => `<button data-login="${esc(p.id)}" ${p.available ? '' : 'disabled'}>${esc(p.name)}${p.authenticated ? ' <small>✓ logged in</small>' : ''}</button>`).join('')}</div><p class="muted">A sign-in link appears above the composer once OMP starts the login.</p>`
+        : '<p class="muted">OMP has no OAuth providers to log in to.</p>');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  async function sessionAction(body) {
+    try { await sessionApi(body); await refresh(); return true; }
+    catch (e) { toast(e.message, 'err'); return false; }
+  }
+
+  // ---------- slash command completion ----------
+  async function loadCommands(id) {
+    try { const r = await api('/commands?session=' + encodeURIComponent(id)); S.cmds.set(id, { at: Date.now(), list: r.commands }); }
+    catch { S.cmds.set(id, { at: Date.now(), list: [] }); }
+    renderSlash();
+  }
+  function slashMatches() {
+    const c = current(), m = ($('#input')?.value || '').match(/^\/(\S*)$/);
+    if (c.kind !== 'session' || !m) return null;
+    const cached = S.cmds.get(c.id);
+    if (!cached || Date.now() - cached.at > 30000) { if (!S.cmdsLoading) { S.cmdsLoading = true; loadCommands(c.id).finally(() => { S.cmdsLoading = false; }); } if (!cached) return null; }
+    const q = m[1].toLowerCase();
+    return cached.list.filter(x => x.name.toLowerCase().startsWith(q) || x.aliases.some(a => a.toLowerCase().startsWith(q))).slice(0, 8);
+  }
+  function renderSlash() {
+    const el = $('#slash');
+    if (!el) return;
+    const items = slashMatches();
+    S.slash = items?.length ? { items, hi: Math.min(S.slash?.hi || 0, items.length - 1) } : null;
+    el.hidden = !S.slash;
+    el.innerHTML = S.slash ? items.map((x, i) => `<button type="button" role="option" aria-selected="${i === S.slash.hi}" class="${i === S.slash.hi ? 'hi' : ''}" data-slash="${esc(x.name)}"><b>/${esc(x.name)}</b>${x.hint ? ` <span class="muted">${esc(x.hint)}</span>` : ''}${x.description ? `<small>${esc(x.description)}</small>` : ''}</button>`).join('') : '';
+  }
+  function pickSlash(name) {
+    const input = $('#input');
+    input.value = '/' + name + ' '; drafts.set(S.view, input.value); autosize(input);
+    renderSlash(); input.focus(); update();
   }
 
   // ---------- actions ----------
@@ -1275,6 +1421,12 @@
     const text = input?.value.trim();
     const attachment = S.attachment?.view === S.view ? S.attachment : null;
     if ((!text && !attachment) || S.busy) return;
+    // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
+    if (c.kind === 'session' && !attachment && /^!\S/.test(text)) {
+      input.value = ''; drafts.delete(S.view); autosize(input);
+      if (!await sessionAction({ type: 'bash', command: text.slice(1) })) { input.value = text; drafts.set(S.view, text); autosize(input); }
+      return;
+    }
     S.busy = true;
     S.pending = { view: S.view, text, imagePreview: attachment?.preview, queued: kind === 'follow_up', at: Date.now() };
     S.attachment = null;
@@ -1633,6 +1785,17 @@
       else if (!t.closest('.picker')) closePicker();
       return;
     }
+    if (t.closest('#modal')) {
+      if (t.id === 'modal' || t.closest('[data-modal-close]')) closeModal();
+      const br = t.closest('[data-branch]'), lg = t.closest('[data-login]');
+      if (br) doBranch(br.dataset.branch);
+      if (lg) { closeModal(); sessionAction({ type: 'login', provider: lg.dataset.login }); }
+      return;
+    }
+    const sl = t.closest('[data-slash]');
+    if (sl) { pickSlash(sl.dataset.slash); return; }
+    const pf = t.closest('[data-pref]');
+    if (pf) { pf.closest('.menu')?.classList.remove('open'); sessionAction({ type: 'pref', key: pf.dataset.pref, value: JSON.parse(pf.dataset.value) }); return; }
     const choice = t.closest('[data-uichoice]');
     if (choice) { answerQuestion(choice.dataset.uichoice, { value: choice.dataset.uivalue }, choice); return; }
     const yesNo = t.closest('[data-uiconfirm]');
@@ -1708,6 +1871,14 @@
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
     else if (act === 'abort' || act === 'complete' || act === 'compact') sessionCommand(act);
+    else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
+    else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
+    else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
+    else if (['rename', 'branch', 'handoff', 'export', 'stats', 'login'].includes(act)) {
+      a.closest('.menu')?.classList.remove('open');
+      if (act === 'rename') { const s = S.store.sessions.find(x => x.id === c.id); const name = prompt('Session name', s?.title || ''); if (name?.trim() && name.trim() !== s?.title) sessionAction({ type: 'rename', name: name.trim() }); }
+      else ({ branch: openBranch, handoff: openHandoff, export: exportHtml, stats: showStats, login: openLogin })[act]();
+    }
     else if (act === 'hide') { if (confirm('Remove this session from the panel? The OMP session file is kept, so you can continue it later from history.')) sessionCommand('hide').then(ok => { if (ok) { refreshNative(); location.hash = '#/new'; } }); }
     else if (['side', 'openPlan', 'sideTab', 'closeSide'].includes(act)) {
       const shown = S.sideCounts?.total && S.sideTab === 'plan' ? 'plan' : 'activity';
@@ -1761,7 +1932,7 @@
   }, true);
   document.addEventListener('input', e => {
     const t = e.target;
-    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); update(); }
+    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); update(); }
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
@@ -1788,6 +1959,7 @@
   });
   document.addEventListener('submit', e => {
     e.preventDefault();
+    if (e.target.hasAttribute('data-handoff')) { const instructions = e.target.elements.instructions.value.trim(); closeModal(); sessionAction({ type: 'handoff', instructions }); return; }
     if (e.target.hasAttribute('data-uiform')) { answerQuestion(e.target.dataset.uiform, { value: e.target.elements.answer.value }, e.target); return; }
     if (e.target.dataset.mmadd) { const name = e.target.querySelector('input').value.trim(); if (!/^[\w.-]{1,60}$/.test(name)) return toast('Use letters, numbers, dots, dashes or underscores', 'err'); pickMapModel(e.target.dataset.mmadd, name); return; }
     if (e.target.hasAttribute('data-plugininstall')) { const v = e.target.querySelector('input').value.trim(); if (v) savePlugin('install', v); return; }
@@ -1806,6 +1978,7 @@
     row.classList.add('hi'); S.picker.hi = +row.dataset.pi; renderThink();
   });
   document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && $('#modal')) { e.stopPropagation(); closeModal(); return; }
     if (e.key === 'Escape' && $('#thinkMenu')) { closeThinkMenu(); return; }
     const t = e.target;
     if (S.picker) {
@@ -1813,6 +1986,13 @@
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.picker.hi = Math.max(0, Math.min(S.picker.flat.length - 1, S.picker.hi + (e.key === 'ArrowDown' ? 1 : -1))); $('#pickerList .hi')?.classList.remove('hi'); const r = $(`#pickerList [data-pi="${S.picker.hi}"]`); r?.classList.add('hi'); r?.scrollIntoView({ block: 'nearest' }); renderThink(); return; }
       if (e.key === 'Enter') { e.preventDefault(); pickModel(S.picker.hi); return; }
       return;
+    }
+    if (t.id === 'input' && S.slash) {
+      const n = S.slash.items.length, hi = S.slash.items[S.slash.hi];
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.slash.hi = (S.slash.hi + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; renderSlash(); return; }
+      // Enter completes a partial name; on a full name it falls through and sends.
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && t.value !== '/' + hi.name)) { e.preventDefault(); pickSlash(hi.name); return; }
+      if (e.key === 'Escape') { e.preventDefault(); S.slash = null; $('#slash').hidden = true; return; }
     }
     if (t.id === 'input' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();

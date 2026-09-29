@@ -30,8 +30,10 @@
 - **Readable conversations:** Markdown, tables and code blocks with copy. Tool calls and thinking fold into one activity summary.
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents, background jobs and advisor transcripts.
-- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, and switch model or reasoning level.
-- **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser.
+- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level, complete `/commands` as you type, and run `!command` in the session's shell.
+- **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser, and see extension notifications, status lines, widgets and sign-in links.
+- **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
+- **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
 - **Settings UI** for every `omp config` value and for plugins, plus one-click `omp update`.
 - **Isolated git worktrees** so parallel sessions don't overwrite each other's files.
 
@@ -52,7 +54,7 @@ The dashboard opens in your browser, already connected. Press **Alt+N** (or clic
 - **Don't continue a session in the panel while it's still open in a terminal.** Both would write to the same file.
 - **Worktrees:** tick **Isolated git worktree** when starting a session in a Git repo. You get an `omp-web/<id>` branch off HEAD. Uncommitted changes and dependencies are not copied. Worktrees are never merged or deleted automatically.
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
-- **Security:** the companion listens only on `127.0.0.1`. It uses a random per-launch token and checks Host and Origin. The HTTP API has no raw shell endpoint, but OMP keeps its usual tools and permissions.
+- **Security:** the companion listens only on `127.0.0.1`. It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions.
 
 ## Configuration
 
@@ -82,6 +84,6 @@ Your browser may block HTTPS-to-localhost requests. If it does, use the local da
 node --test "tests/*.test.mjs"
 ```
 
-`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol v1 (`--mode rpc-ui`) and needs no upstream fork.
+`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it) and needs no upstream fork.
 
 **Not supported:** attaching to already-running terminal sessions, automatic Git merges, and custom extension TUIs beyond select, confirm, text and editor prompts.
