@@ -879,13 +879,15 @@
   function renderChatPlan(s) {
     const el = $('#chatPlan');
     const { total, done } = countTasks(s);
-    el.hidden = !s && !total;
+    const mode = s?.planMode, supported = mode?.available === true;
+    const showPlan = s && (supported || s._planSupported === true && mode?.available !== false);
+    el.hidden = !showPlan && !total;
     if (el.hidden) return;
     const active = (s?.todos || []).flatMap(ph => ph.tasks || []).filter(t => t.status === 'in_progress');
-    const mode = s?.planMode, supported = mode?.available === true, busy = S.planBusy.has(s?.id) || ['running', 'queued'].includes(s?.status) || s?._task || s?._bash;
+    const busy = S.planBusy.has(s?.id) || ['running', 'queued'].includes(s?.status) || s?._task || s?._bash;
     const proposal = s?._planReview, pending = proposal && !S.planSubmitted.has(s.id + ':' + proposal.id);
     const modeLabel = supported ? pending ? 'Awaiting approval · read-only' : mode.enabled ? 'On · read-only planning' : mode.paused ? 'Paused' : 'Off' : s?._planSupported === false ? 'Requires updated OMP RPC support' : mode?.available === false ? 'Disabled in OMP settings (plan.enabled)' : 'Enable read-only planning before your first prompt';
-    setIfChanged(el, `${s ? `<div class="native-plan"><span class="grow"><strong>Plan mode</strong> <span class="muted">${modeLabel}${supported && mode.workflow ? ' · ' + esc(mode.workflow) : ''}</span></span>${s._planSupported !== false && mode?.available !== false ? `<button class="btn sm" data-plan-toggle="${esc(s.id)}" ${supported ? `aria-pressed="${!!mode.enabled}"` : ''} title="Toggle native plan mode (Alt+Shift+P)" ${busy ? 'disabled' : ''}>${supported ? mode.enabled ? 'Turn off' : 'Turn on' : 'Enable plan mode'}</button>` : ''}${supported ? `<button class="btn sm ${pending ? 'primary' : 'ghost'}" data-plan-review="${esc(s.id)}" ${busy || !mode.enabled && !pending ? 'disabled' : ''}>${pending ? 'Review plan' : 'Reopen review'}</button>` : ''}</div>` : ''}${total ? `<button class="chat-plan-link" type="button" data-act="openPlan" title="Open task plan tab"><strong>Task plan <span>${done}/${total}</span></strong><span class="chat-plan-current">${active.length ? active.map(t => esc(t.content)).join(' · ') : 'No task in progress'}</span><span aria-hidden="true">→</span></button>` : ''}`);
+    setIfChanged(el, `${showPlan ? `<div class="native-plan"><span class="grow"><strong>Plan mode</strong> <span class="muted">${modeLabel}${supported && mode.workflow ? ' · ' + esc(mode.workflow) : ''}</span></span>${s._planSupported !== false && mode?.available !== false ? `<button class="btn sm" data-plan-toggle="${esc(s.id)}" ${supported ? `aria-pressed="${!!mode.enabled}"` : ''} title="Toggle native plan mode (Alt+Shift+P)" ${busy ? 'disabled' : ''}>${supported ? mode.enabled ? 'Turn off' : 'Turn on' : 'Enable plan mode'}</button>` : ''}${supported ? `<button class="btn sm ${pending ? 'primary' : 'ghost'}" data-plan-review="${esc(s.id)}" ${busy || !mode.enabled && !pending ? 'disabled' : ''}>${pending ? 'Review plan' : 'Reopen review'}</button>` : ''}</div>` : ''}${total ? `<button class="chat-plan-link" type="button" data-act="openPlan" title="Open task plan tab"><strong>Task plan <span>${done}/${total}</span></strong><span class="chat-plan-current">${active.length ? active.map(t => esc(t.content)).join(' · ') : 'No task in progress'}</span><span aria-hidden="true">→</span></button>` : ''}`);
   }
   const bgFile = () => {
     const c = current();
