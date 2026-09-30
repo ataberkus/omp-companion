@@ -31,7 +31,7 @@
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents, background jobs and advisor transcripts.
 - **Native plan mode:** enable read-only planning before your first prompt, review the proposed Markdown plan, request refinement, or approve implementation with the current, fresh or compacted context. Requires an OMP build with plan-mode RPC support.
-- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` as you type, and run `!command` in the session's shell.
+- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` as you type (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), and run `!command` in the session's shell.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
 - **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.

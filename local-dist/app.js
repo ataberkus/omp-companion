@@ -1467,7 +1467,10 @@
     const cached = S.cmds.get(c.id);
     if (!cached || Date.now() - cached.at > 30000) { if (!S.cmdsLoading) { S.cmdsLoading = true; loadCommands(c.id).finally(() => { S.cmdsLoading = false; }); } if (!cached) return null; }
     const q = m[1].toLowerCase();
-    return cached.list.filter(x => x.name.toLowerCase().startsWith(q) || x.aliases.some(a => a.toLowerCase().startsWith(q))).slice(0, 8);
+    return cached.list.filter(x => {
+      const name = x.name.toLowerCase();
+      return name.startsWith(q) || (name.startsWith('skill:') && name.startsWith(q, 6)) || x.aliases.some(a => a.toLowerCase().startsWith(q));
+    }).slice(0, 8);
   }
   function renderSlash() {
     const el = $('#slash');
