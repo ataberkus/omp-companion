@@ -476,6 +476,8 @@ details.raw>*:not(summary){margin-top:6px}
 .set-key:hover{color:var(--muted)}
 .set-info{flex:1 1 300px;min-width:0}
 .set-desc{color:var(--muted);font-size:12.5px;margin-top:4px;line-height:1.45}
+.set-desc code{font:11.5px var(--mono)}
+.set-group>p.set-desc{max-width:72ch;margin:0 0 10px}
 .set-def{color:var(--faint);font-size:12px;margin-top:4px}
 .set-def code{font:11.5px var(--mono)}
 .set-ctl{flex:1 1 220px;max-width:360px;display:flex;gap:8px;align-items:flex-start;justify-content:flex-end}
