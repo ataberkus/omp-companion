@@ -560,6 +560,11 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 .btn.primary:disabled{opacity:1;background:var(--hover);border-color:var(--border);color:var(--faint);box-shadow:none;filter:none}
 .group-label{padding-top:16px}
+.group-label{display:flex;align-items:center;gap:6px;width:100%;border:0;background:none;text-align:left;cursor:pointer}
+.group-label:hover{color:var(--fg)}
+.group-label .chev{flex:none;transition:transform .12s}
+.group-label[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.gcount{float:none;margin-left:auto;font-weight:500;color:var(--faint)}
 .filters{padding:3px;border:1px solid var(--border);border-radius:9px}
 .filters button{border-radius:6px}
 .filters button.on{background:var(--active)}

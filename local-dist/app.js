@@ -283,11 +283,12 @@
       add('Older', rest.filter(it => new Date(it.updatedAt) < startToday - 7 * day));
     }
     const sel = selKey();
-    const html = groups.map(([label, arr, cwd]) => `<div class="group-label"${cwd ? ` title="${esc(cwd)}"` : ''}>${esc(label)}${cwd ? `<span class="gcount">${arr.length}</span>` : ''}</div>` + arr.map(it => `<div class="item-row">
+    const collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]'));
+    const html = groups.map(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return `<button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>${esc(label)}<span class="gcount">${arr.length}</span></button>` + (shut ? [] : arr).map(it => `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
-      </button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</div>`).join('')).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
+      </button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</div>`).join(''); }).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
     setIfChanged(list, html); // rebuilding every poll would reset hover, focus and scroll
     document.querySelectorAll('#filters [data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === S.filter)));
     $('#groupBy')?.setAttribute('aria-pressed', String(S.groupBy === 'project'));
@@ -2062,6 +2063,8 @@
     if (copyBtn) { copy(copyBtn.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
     const ct = t.closest('[data-copy-text]');
     if (ct) { copy(ct.dataset.copyText); ct.closest('.menu')?.classList.remove('open'); return; }
+    const gl = t.closest('[data-group]');
+    if (gl) { const c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); localStorage.setItem('omp-collapsed', JSON.stringify([...c])); renderList(); return; }
     const ar = t.closest('[data-archive]');
     if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const nt = t.closest('[data-newtab]');
