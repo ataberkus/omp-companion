@@ -9,7 +9,7 @@ test('pending questions take review priority until the last question clears', as
   const store = { projects: [], sessions: [session], archived: [] };
   const listeners = new Map(), timers = new Map();
   const node = () => ({ innerHTML: '', value: '', style: {}, scrollHeight: 20, classList: { remove() {}, toggle() {} }, addEventListener() {}, focus() {} });
-  const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'disconnect'].map(id => [id, node()]));
+  const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect'].map(id => [id, node()]));
   const document = {
     hidden: false,
     getElementById: id => elements.get(id),

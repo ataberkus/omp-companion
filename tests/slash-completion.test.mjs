@@ -12,7 +12,7 @@ test('slash completion finds skills by bare name and inserts the qualified comma
   ];
   const listeners = new Map();
   const node = id => ({ id, tagName: 'TEXTAREA', innerHTML: '', value: '', style: {}, dataset: {}, scrollHeight: 20, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], focus() {} });
-  const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'disconnect', 'slash', 'scroller', 'tasks', 'chatPlan', 'extras', 'questions', 'queued', 'statusLine', 'modelSlot', 'hint', 'buttons', 'imagePreview'].map(id => [id, node(id)]));
+  const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect', 'slash', 'scroller', 'tasks', 'chatPlan', 'extras', 'questions', 'queued', 'statusLine', 'modelSlot', 'hint', 'buttons', 'imagePreview'].map(id => [id, node(id)]));
   const document = {
     hidden: false,
     getElementById: id => elements.get(id),

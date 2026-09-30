@@ -167,6 +167,23 @@ export async function createCompanion(options={}){
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
  const commands=new Map();
  const slashList=list=>list.slice(0,500).filter(c=>typeof c?.name==='string').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}));
+ const commandProbes=new Set();
+ async function discoverCommands(dir){
+  let list;
+  const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...(options.ompArgs??['--mode','rpc-ui','--no-session'])],dir,f=>{if(f.type==='available_commands_update'&&Array.isArray(f.commands))list=slashList(f.commands);},()=>{});
+  commandProbes.add(rpc);
+  try{
+   // Startup publishes the catalog before handling get_state; no prompt or saved session is needed.
+   await rpc.send({type:'get_state'});
+   if(!list)throw error('OMP did not provide its slash commands. Update OMP and try again.',502);
+   return list;
+  }finally{
+   const stopped=new Promise(resolve=>rpc.child.once('close',resolve));
+   if(!rpc.stopping)rpc.kill();
+   if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;
+   commandProbes.delete(rpc);
+  }
+ }
  // Session toggles the dashboard can change; values are validated in command().
  const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
  const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
@@ -663,6 +680,7 @@ async function pluginAction(body){
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
+    if(url.searchParams.has('path')){json({commands:await discoverCommands(await resolveDir(url.searchParams.get('path')))});return;}
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
     await lock(s.id,async()=>{await start(s);await persist();});json({commands:commands.get(s.id)||[]});return;
    }
@@ -732,7 +750,7 @@ async function pluginAction(body){
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(eventSaveTimer);const stops=[...runners.values()].map(r=>new Promise(resolve=>{r.child.once('close',resolve);r.kill();}));for(const s of store.sessions){delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(eventSaveTimer);const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

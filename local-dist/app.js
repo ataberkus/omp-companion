@@ -147,12 +147,12 @@
   // ---------- state & api ----------
   const KEY = 'omp-web-token';
   const S = {
-    token: '', store: null, native: [], online: null, filter: 'all', search: '',
+    token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: localStorage.getItem('omp-group-by') || 'time',
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
-    noticeSeen: new Map(), cmds: new Map(), slash: null,
+    noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
     planBusy: new Set(), planSubmitted: new Set(),
   };
   S.sideOpen = innerWidth > 1100;
@@ -247,15 +247,22 @@
     const working = all.filter(it => !it.needsReview && (it.status === 'running' || it.status === 'queued'));
     const review = all.filter(it => it.needsReview || it.status === 'review' || it.status === 'error');
     const rest = all.filter(it => !working.includes(it) && !review.includes(it));
-    add('Working now', working);
-    add('Needs your review', review);
-    const day = 86400000, startToday = new Date().setHours(0, 0, 0, 0);
-    add('Today', rest.filter(it => new Date(it.updatedAt) >= startToday));
-    add('Yesterday', rest.filter(it => { const t = new Date(it.updatedAt); return t < startToday && t >= startToday - day; }));
-    add('Previous 7 days', rest.filter(it => { const t = new Date(it.updatedAt); return t < startToday - day && t >= startToday - 7 * day; }));
-    add('Older', rest.filter(it => new Date(it.updatedAt) < startToday - 7 * day));
+    if (S.groupBy === 'project') {
+      const by = new Map();
+      for (const it of all) (by.get(it.cwd) || by.set(it.cwd, []).get(it.cwd)).push(it);
+      for (const arr of by.values()) groups.push([arr[0].folder, arr, arr[0].cwd]);
+      groups.sort((a, b) => Math.max(...b[1].map(i => +new Date(i.updatedAt))) - Math.max(...a[1].map(i => +new Date(i.updatedAt))));
+    } else {
+      add('Working now', working);
+      add('Needs your review', review);
+      const day = 86400000, startToday = new Date().setHours(0, 0, 0, 0);
+      add('Today', rest.filter(it => new Date(it.updatedAt) >= startToday));
+      add('Yesterday', rest.filter(it => { const t = new Date(it.updatedAt); return t < startToday && t >= startToday - day; }));
+      add('Previous 7 days', rest.filter(it => { const t = new Date(it.updatedAt); return t < startToday - day && t >= startToday - 7 * day; }));
+      add('Older', rest.filter(it => new Date(it.updatedAt) < startToday - 7 * day));
+    }
     const sel = selKey();
-    list.innerHTML = groups.map(([label, arr]) => `<div class="group-label">${label}</div>` + arr.map(it => `
+    list.innerHTML = groups.map(([label, arr, cwd]) => `<div class="group-label"${cwd ? ` title="${esc(cwd)}"` : ''}>${esc(label)}${cwd ? `<span class="gcount">${arr.length}</span>` : ''}</div>` + arr.map(it => `
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}">
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>${it.status === 'running' || it.status === 'queued' ? '' : `<span class="arch" role="button" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</span>`}
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
@@ -284,7 +291,7 @@
     if (!S.token) return renderConnect();
     const c = current();
     const view = c.kind + ':' + (c.id || c.file || c.parent || '');
-    if (view !== S.view) { S.view = view; S.lastSig = ''; S.sideCounts = null; build(c); }
+    if (view !== S.view) { S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null; build(c); }
     if (!S.models && !S.modelsLoading) { S.modelsLoading = true; ensureModels().then(() => { S.lastSig = ''; renderList(); update(); if (current().kind === 'home') renderHome(); }).catch(() => { S.modelsLoading = false; }); }
     update();
     renderList();
@@ -303,7 +310,7 @@
         <div class="status-line" id="statusLine"></div>
         <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
         <div class="composer">
-          <textarea id="input" rows="1"></textarea>
+          <textarea id="input" rows="1" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
           <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span class="hint" id="hint"></span><span id="buttons" style="display:flex;gap:6px"></span></div>
@@ -1457,34 +1464,40 @@
   }
 
   // ---------- slash command completion ----------
-  async function loadCommands(id) {
-    try { const r = await api('/commands?session=' + encodeURIComponent(id)); S.cmds.set(id, { at: Date.now(), list: r.commands }); }
-    catch { S.cmds.set(id, { at: Date.now(), list: [] }); }
+  async function loadCommands(key) {
+    try { const r = await api('/commands?' + key); S.cmds.set(key, { at: Date.now(), list: r.commands }); }
+    catch (e) { S.cmds.set(key, { at: Date.now(), list: [] }); toast('Could not load slash commands: ' + e.message, 'err'); }
+    finally { S.cmdsLoading.delete(key); }
     renderSlash();
   }
-  function slashMatches() {
-    const c = current(), m = ($('#input')?.value || '').match(/^\/(\S*)$/);
-    if (c.kind !== 'session' || !m) return null;
-    const cached = S.cmds.get(c.id);
-    if (!cached || Date.now() - cached.at > 30000) { if (!S.cmdsLoading) { S.cmdsLoading = true; loadCommands(c.id).finally(() => { S.cmdsLoading = false; }); } if (!cached) return null; }
+  function renderSlash() {
+    const el = $('#slash'), input = $('#homePrompt') || $('#input'), c = current();
+    if (!el) return;
+    const m = (input?.value || '').match(/^\/(\S*)$/);
+    const key = c.kind === 'session' ? 'session=' + encodeURIComponent(c.id)
+      : c.kind === 'home' && S.home.listing ? 'path=' + encodeURIComponent(S.home.listing.path) : '';
+    if (!key || !m) { S.slash = null; el.hidden = true; input?.removeAttribute('aria-activedescendant'); return; }
+    const cached = S.cmds.get(key);
+    if ((!cached || Date.now() - cached.at > 30000) && !S.cmdsLoading.has(key)) {
+      S.cmdsLoading.add(key); loadCommands(key);
+    }
     const q = m[1].toLowerCase();
-    return cached.list.filter(x => {
+    const items = (cached?.list || []).filter(x => {
       const name = x.name.toLowerCase();
       return name.startsWith(q) || (name.startsWith('skill:') && name.startsWith(q, 6)) || x.aliases.some(a => a.toLowerCase().startsWith(q));
-    }).slice(0, 8);
-  }
-  function renderSlash() {
-    const el = $('#slash');
-    if (!el) return;
-    const items = slashMatches();
-    S.slash = items?.length ? { items, hi: Math.min(S.slash?.hi || 0, items.length - 1) } : null;
-    el.hidden = !S.slash;
-    el.innerHTML = S.slash ? items.map((x, i) => `<button type="button" role="option" aria-selected="${i === S.slash.hi}" class="${i === S.slash.hi ? 'hi' : ''}" data-slash="${esc(x.name)}"><b>/${esc(x.name)}</b>${x.hint ? ` <span class="muted">${esc(x.hint)}</span>` : ''}${x.description ? `<small>${esc(x.description)}</small>` : ''}</button>`).join('') : '';
+    });
+    S.slash = items.length ? { items, hi: Math.min(S.slash?.hi || 0, items.length - 1) } : null;
+    el.hidden = !S.slash && !S.cmdsLoading.has(key);
+    el.innerHTML = S.slash ? items.map((x, i) => `<button type="button" id="slash-option-${i}" role="option" aria-selected="${i === S.slash.hi}" class="${i === S.slash.hi ? 'hi' : ''}" data-slash="${esc(x.name)}"><b>/${esc(x.name)}</b>${x.hint ? ` <span class="muted">${esc(x.hint)}</span>` : ''}${x.description ? `<small>${esc(x.description)}</small>` : ''}</button>`).join('') : S.cmdsLoading.has(key) ? '<div role="status">Loading commands…</div>' : '';
+    if (S.slash) input.setAttribute('aria-activedescendant', 'slash-option-' + S.slash.hi);
+    else input.removeAttribute('aria-activedescendant');
   }
   function pickSlash(name) {
-    const input = $('#input');
-    input.value = '/' + name + ' '; drafts.set(S.view, input.value); autosize(input);
-    renderSlash(); input.focus(); update();
+    const input = $('#homePrompt') || $('#input');
+    input.value = '/' + name + ' ';
+    if (input.id === 'homePrompt') S.home.prompt = input.value;
+    else drafts.set(S.view, input.value);
+    autosize(input); renderSlash(); input.focus(); update();
   }
 
   // ---------- actions ----------
@@ -1786,10 +1799,11 @@
       ${l ? `
       <div>
         <div class="picked" style="margin-bottom:8px"><span>Working in</span><b>${esc(base(l.path))}</b>${l.isGit ? '<span class="tag">git</span>' : ''}</div>
-        <div class="composer">
+        <div class="composer home-composer">
+          <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <textarea id="homePrompt" rows="3" placeholder="What should OMP do in ${esc(base(l.path))}? (optional)">${esc(h.prompt)}</textarea>
+          <textarea id="homePrompt" rows="3" aria-label="Initial prompt" aria-autocomplete="list" aria-controls="slash" placeholder="What should OMP do in ${esc(base(l.path))}? Type / for commands and skills (optional).">${esc(h.prompt)}</textarea>
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
@@ -1801,6 +1815,7 @@
       ${recentSessions.length ? `<div><div class="section-label">Pick up where you left off</div><div class="session-list" style="margin:0">${recentSessions.map(it => `
         <button class="item ${it.status === 'history' ? 'history' : ''}" data-key="${esc(it.key)}"><span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span><span></span><span class="m">${esc(it.folder)}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span></button>`).join('')}</div></div>` : ''}`;
     renderAttachments();
+    renderSlash();
     if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
   }
   function renderAttachments() {
@@ -2102,7 +2117,7 @@
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
     else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
-    else if (t.id === 'homePrompt') S.home.prompt = t.value;
+    else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
     else if (t.id === 'folderFilter') {
@@ -2164,12 +2179,12 @@
       if (e.key === 'Enter') { e.preventDefault(); pickModel(S.picker.hi); return; }
       return;
     }
-    if (t.id === 'input' && S.slash) {
+    if ((t.id === 'input' || t.id === 'homePrompt') && S.slash) {
       const n = S.slash.items.length, hi = S.slash.items[S.slash.hi];
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.slash.hi = (S.slash.hi + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; renderSlash(); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.slash.hi = (S.slash.hi + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; renderSlash(); $('#slash .hi')?.scrollIntoView({ block: 'nearest' }); return; }
       // Enter completes a partial name; on a full name it falls through and sends.
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && t.value !== '/' + hi.name)) { e.preventDefault(); pickSlash(hi.name); return; }
-      if (e.key === 'Escape') { e.preventDefault(); S.slash = null; $('#slash').hidden = true; return; }
+      if (e.key === 'Escape') { e.preventDefault(); S.slash = null; $('#slash').hidden = true; t.removeAttribute('aria-activedescendant'); return; }
     }
     if (t.id === 'input' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -2185,6 +2200,13 @@
     if (e.key === '/' && !/INPUT|TEXTAREA/.test(t.tagName)) { e.preventDefault(); $('#search').focus(); }
   });
   $('#newBtn').addEventListener('click', () => newSession());
+  $('#groupBy').addEventListener('click', e => {
+    S.groupBy = S.groupBy === 'project' ? 'time' : 'project';
+    localStorage.setItem('omp-group-by', S.groupBy);
+    e.currentTarget.classList.toggle('on', S.groupBy === 'project');
+    renderList();
+  });
+  $('#groupBy').classList.toggle('on', S.groupBy === 'project');
   $('#scrim').addEventListener('click', () => document.getElementById('app').classList.remove('nav-open'));
   $('#disconnect').addEventListener('click', () => setToken(''));
   window.addEventListener('hashchange', () => {
