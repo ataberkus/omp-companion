@@ -6,7 +6,7 @@
   <img alt="No build step" src="https://img.shields.io/badge/build-none-3fd0e6?style=flat-square&labelColor=09090b"/>
 </p>
 
-**One browser tab for all your [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.** Run, watch and review OMP agents across many projects without juggling terminals. OMP itself stays unchanged.
+**One browser tab for all your [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.** Run, watch and review OMP agents across many projects without juggling terminals.
 
 <!-- Animated preview (plays inline, no sound). For a real player with sound, upload the MP4 through GitHub's web editor and put the resulting https://github.com/user-attachments/assets/... URL on its own line here. -->
 <p align="center"><img src="docs/showreel.webp" alt="30-second showreel of OMP Control Room: sessions sidebar, chat, diffs, live plan, composer and more" width="100%"/></p>
@@ -31,6 +31,7 @@
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents, background jobs and advisor transcripts.
 - **Native plan mode:** enable read-only planning before your first prompt, review the proposed Markdown plan, request refinement, or approve implementation with the current, fresh or compacted context. Requires an OMP build with plan-mode RPC support.
+- **Native goal mode:** `/goal` opens an objective prompt or the current goal's controls; start autonomous work, replace an objective, pause/resume, set a token budget, or confirm dropping it. Requires an OMP build with goal-mode RPC support.
 - **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` as you type (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), and run `!command` in the session's shell.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
 - **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
@@ -74,6 +75,14 @@ start.bat
 
 `OMP_BIN` can also point to a compiled OMP executable containing the same RPC changes. Restart companion sessions after changing the runtime.
 
+### Native goal mode
+
+Type `/goal` to open the objective prompt or manage the current goal. `/goal <objective>` starts work directly; `/goal set <objective>` replaces an active objective. `/goal show`, `/goal pause`, `/goal resume`, `/goal budget <N|off>` and `/goal drop` use OMP's native goal runtime. Dropping a goal requires confirmation in the browser.
+
+Use an OMP build that advertises `/goal` over RPC and exposes `get_state.goalMode`, such as the patched sibling checkout configured above. Older builds reject `/goal` rather than send it to the model; `goal.enabled` must also be enabled. Command discovery starts an idle session's runner, but restored goals remain paused until you explicitly resume them.
+
+In `rpc-ui`, automatic continuation follows `goal.continuationModes`'s `interactive` profile. It stops on completion, pause/drop, exhausted budget, blocked work, errors, or no progress.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -102,6 +111,6 @@ Your browser may block HTTPS-to-localhost requests. If it does, use the local da
 node --test "tests/*.test.mjs"
 ```
 
-`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan mode requires the RPC commands described above.
+`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan and goal modes require the RPC support described above.
 
 **Not supported:** attaching to already-running terminal sessions, automatic Git merges, and custom extension TUIs beyond select, confirm, text and editor prompts.

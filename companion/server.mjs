@@ -55,6 +55,7 @@ const exists=p=>fs.access(p).then(()=>true,()=>false);
 // Keep only what the dashboard shows from OMP's subagent registry entries.
 const subagentView=e=>{const p=e?.progress||{};const pick=o=>Object.fromEntries(Object.entries(o||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).map(([k,v])=>[k,typeof v==='string'?v.slice(0,300):v]));
  return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(p.status||e?.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
+const goalView=g=>g?{objective:String(g.objective||'').slice(0,500),status:String(g.status||''),tokensUsed:g.tokensUsed,tokenBudget:g.tokenBudget}:undefined;
 // Background jobs (async bash, task subagents) as recorded in a session transcript. Scans append-only files incrementally.
 const jobScans=new Map();
 async function scanJobs(file){
@@ -240,7 +241,7 @@ export async function createCompanion(options={}){
   if(f.type==='ttsr_triggered'&&Array.isArray(f.rules)&&f.rules.length)append(s,'system',`Rule applied: ${f.rules.map(r=>r?.name||r?.id||'rule').join(', ')}`);
   if(f.type==='irc_message'){const v=contentText(f.message?.content);if(v)append(s,'system',v);}
   if(f.type==='todo_auto_clear')s.todos=[];
-  if(f.type==='goal_updated')s.goal=f.goal?{objective:String(f.goal.objective||'').slice(0,500),status:String(f.goal.status||''),tokensUsed:f.goal.tokensUsed,tokenBudget:f.goal.tokenBudget}:undefined;
+  if(f.type==='goal_updated')s.goal=goalView(f.goal);
   if(f.type==='plan_mode_changed'){s.planMode=f.planMode;s._planSupported=true;}
   if(f.type==='plan_review')s._planReview=f.proposal;
   if(f.type==='plan_review_clear'&&s._planReview?.id===f.proposalId)delete s._planReview;
@@ -261,7 +262,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[])];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
    try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'progress'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
     // Per-session toggles live in the OMP process, so a restarted runner gets them back.
@@ -276,6 +277,7 @@ export async function createCompanion(options={}){
   if(state?.isSettled===true&&s.status==='running'&&!s._compacting&&Date.now()-(s._lastEvent||0)>3000)settle(s);
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
+  if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);}
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
@@ -386,6 +388,12 @@ export async function createCompanion(options={}){
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
   if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';activity(s,`Completed ${s.title}`,'done');await persist();return s;}
   if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);}
+  const goalCommand=prompting&&/^\/goal(?:\s|$)/.test(body.message);
+  if(goalCommand){
+   await start(s);
+   if(!s._goalSupported)throw error('This OMP build has no RPC goal mode. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts; /goal was not sent to the model.',409);
+   if(!s._goalAvailable)throw error('Goal mode is disabled in OMP. Enable goal.enabled in OMP settings; /goal was not sent to the model.',409);
+  }
   if(body.type==='follow_up'&&['running','queued'].includes(s.status)){
    const item={id:randomUUID(),text:body.message,hasImage:!!images.length,imagePreview:images.length?body.preview:undefined,at:now()};
    if(images.length){await fs.mkdir(path.dirname(queuedImageFile(item.id)),{recursive:true,mode:0o700});await fs.writeFile(queuedImageFile(item.id),JSON.stringify(images),{mode:0o600});}
@@ -410,13 +418,15 @@ export async function createCompanion(options={}){
    if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await rpc.send({type:'prompt',message:`/advisor ${body.action}`});}
    await advisorStatus(s,rpc);await persist();return s;}
   if(body.type==='abort'&&!runners.has(s.id)){s.status='paused';await persist();return s;}
-  if(body.type==='prompt'&&s.status==='running')throw error('This session is running. Use Steer or Queue follow-up.');
+  if(body.type==='prompt'&&s.status==='running'&&!goalCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
    const rpc=await start(s);
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
-   if(prompting){if(body.type==='prompt')delete s._streamId;s.status='running';s.error=undefined;const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer')msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
-   const result=await rpc.send({type:body.type,...(prompting?{message:body.message,...(images.length?{images}:{})}:{})});
-   if(body.type==='prompt'&&result?.agentInvoked===false)s.status='review';
+   const rpcType=goalCommand?'prompt':body.type;
+   if(prompting){if(!goalCommand){if(body.type==='prompt')delete s._streamId;s.status='running';}s.error=undefined;const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!goalCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   const result=await rpc.send({type:rpcType,...(prompting?{message:body.message,...(images.length?{images}:{})}:{})},goalCommand?0:30000);
+   if(rpcType==='prompt'&&result?.agentInvoked===false&&!goalCommand)s.status='review';
+   if(goalCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
    if(body.type==='abort'){s.status='paused';delete s.uiRequests;delete s._planReview;}
    await persist();return s;
   }catch(e){s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
@@ -640,7 +650,10 @@ async function pluginAction(body){
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
-   if(req.method==='GET'&&url.pathname==='/api/commands'){json({commands:commands.get(String(url.searchParams.get('session')))||[]});return;}
+   if(req.method==='GET'&&url.pathname==='/api/commands'){
+    const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
+    await lock(s.id,async()=>{await start(s);await persist();});json({commands:commands.get(s.id)||[]});return;
+   }
    if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const live=store.sessions.some(s=>s.sessionFile&&samePath(s.sessionFile,file)&&runners.has(s.id));const bg=await background(file,live);
     const own=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));json({...bg,live,agents:own?.subagentList||[]});return;}
    if(req.method==='GET'&&url.pathname==='/api/transcript'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}const st=await fs.stat(file);json({...head,file,result,updatedAt:st.mtime.toISOString(),messages:await importMessages(file,600)});return;}
@@ -696,7 +709,7 @@ async function pluginAction(body){
     const set=new Set(store.archived);if(body.archived===false)set.delete(key);else set.add(key);store.archived=[...set];await persist();json({archived:store.archived});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
-   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await lock(s.id,()=>command(s,body)));return;}
+   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(body.type==='answer'?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
