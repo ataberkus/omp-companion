@@ -978,6 +978,7 @@
       <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelName(j.model)) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
       ${desc ? `<div class="job-desc">${esc(desc.slice(0, 220))}</div>` : ''}
       ${liveLine ? `<div class="job-live">${esc(liveLine)}</div>` : ''}
+      ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}" open><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
       ${j.command ? `<pre class="job-cmd">${esc(j.command.slice(0, 600))}</pre>` : ''}
       ${output && !running ? `<details class="job-out"><summary>Output</summary><pre>${esc(output.slice(0, 6000))}</pre></details>` : ''}
       ${j.transcript ? `<button class="btn sm ghost job-open" data-sub="${esc(j.transcript)}">${running ? 'Watch' : 'Open'} subagent →</button>` : ''}
@@ -1020,7 +1021,7 @@
   async function loadSub(file, force) {
     const e = S.subs.get(file) || {};
     if (e.loading || (!force && e.at && Date.now() - e.at < 4000)) return;
-    if (e.data && !force && Date.now() - new Date(e.data.updatedAt).getTime() > 120000 && e.at) return;
+    if (e.data && e.data.active !== true && !force && Date.now() - new Date(e.data.updatedAt).getTime() > 120000 && e.at) return;
     e.loading = true; S.subs.set(file, e);
     try { e.data = await api('/transcript?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
@@ -1032,7 +1033,7 @@
     const name = base(file).replace(/\.jsonl$/, '');
     const advisor = name === '__advisor' || name.startsWith('__advisor.');
     const d = e?.data;
-    const active = !advisor && d && Date.now() - new Date(d.updatedAt).getTime() < 120000;
+    const active = !advisor && d && (d.active ?? Date.now() - new Date(d.updatedAt).getTime() < 120000);
     setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav">☰</button>
       <div class="title-block"><div class="crumb">${parent ? `<a href="${esc(parent.hash)}">← ${esc(parent.title)}</a>` : '<a href="#/new">← Home</a>'} <span>/ ${advisor ? 'advisor' : 'subagent'}</span></div>
         <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(ago(d.updatedAt))} ago</span>` : ''}`)}</div>

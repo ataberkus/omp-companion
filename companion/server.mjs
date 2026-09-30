@@ -54,7 +54,7 @@ async function resolveDir(value){let dir=text(value,'Directory path',4000);if(di
 const exists=p=>fs.access(p).then(()=>true,()=>false);
 // Keep only what the dashboard shows from OMP's subagent registry entries.
 const subagentView=e=>{const p=e?.progress||{};const pick=o=>Object.fromEntries(Object.entries(o||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).map(([k,v])=>[k,typeof v==='string'?v.slice(0,300):v]));
- return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(p.status||e?.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
+ return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(e?.status||p.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
 const goalView=g=>g?{objective:String(g.objective||'').slice(0,500),status:String(g.status||''),tokensUsed:g.tokensUsed,tokenBudget:g.tokenBudget}:undefined;
 // Background jobs (async bash, task subagents) as recorded in a session transcript. Scans append-only files incrementally.
 const jobScans=new Map();
@@ -130,7 +130,7 @@ async function importMessages(file,limit=400){
  for(const line of (await readTail(file,12*1024*1024)).split('\n')){let f;try{f=JSON.parse(line);}catch{continue;}if(f.type!=='message'&&f.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
   if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');if(v||hasImage)out.push({id:f.id||randomUUID(),role:m.synthetic&&m.attribution==='agent'?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at});}
   else if(m.role==='assistant'){
-   const th=thinkingText(m.content).trim();if(th)out.push({id:(f.id||randomUUID())+'-think',role:'thinking',text:th.slice(-40000),at});
+   const th=thinkingText(m.content).trim();if(th)out.push({id:(f.id||randomUUID())+'-think',role:'thinking',text:th.slice(-40000),at,sourceTimestamp:m.timestamp});
    const v=contentText(m.content).trim();if(v)out.push({id:f.id||randomUUID(),role:'assistant',text:v.slice(-100000),at,model:m.provider&&m.model?`${m.provider}/${m.model}`:undefined});
    for(const c of Array.isArray(m.content)?m.content:[])if(c?.type==='toolCall'){const tool=toolRecord(c.name,c.arguments,c.intent);tool.status='done';const msg={id:'tool-'+c.id,role:'tool',tool,text:toolSummary(tool),at};tools.set(c.id,msg);out.push(msg);}
   }
@@ -159,6 +159,8 @@ export async function createCompanion(options={}){
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let saveChain=Promise.resolve();
+ // Only the current thought is live; completed messages remain in OMP's transcript.
+ const subagentThoughts=new Map();
  const persist=()=>{const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);saveChain=saveChain.catch(()=>{}).then(async()=>{await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600});await fs.rename(stateFile+'.tmp',stateFile);});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
@@ -212,7 +214,16 @@ export async function createCompanion(options={}){
   }
   if(f.type==='session_settled'){dropSteers(s);if(s.status==='running')settle(s);}
   if(f.type==='subagent_progress'||f.type==='subagent_lifecycle'){const p=f.payload||f;const id=p.progress?.id||p.id||p.subagentId;
-   if(id){s.subagentList??=[];const prev=s.subagentList.find(x=>x.id===id);const next=subagentView({...prev,...p,id,progress:p.progress||prev?.progress,status:p.progress?.status||p.status||p.phase||prev?.status});if(prev)Object.assign(prev,next);else s.subagentList.push(next);s.subagentList=s.subagentList.slice(-50);}}
+   if(id){s.subagentList??=[];const prev=s.subagentList.find(x=>x.id===id);const next=subagentView({...prev,...p,id,progress:p.progress||prev?.progress,status:p.status||p.progress?.status||p.phase||prev?.status});if(prev)Object.assign(prev,next);else s.subagentList.push(next);s.subagentList=s.subagentList.slice(-50);
+    const key=s.id+':'+id;let thought=subagentThoughts.get(key);
+    if(!thought||p.status==='started'||(thought.file&&next.sessionFile&&!samePath(thought.file,next.sessionFile))){thought={parentId:s.id,text:'',at:now(),streaming:false};subagentThoughts.set(key,thought);if(subagentThoughts.size>256)subagentThoughts.delete(subagentThoughts.keys().next().value);}
+    thought.file=next.sessionFile||thought.file;thought.active=/run|pend|start|queue/i.test(next.status);if(!thought.active)thought.streaming=false;
+   }}
+  if(f.type==='subagent_event'){const p=f.payload||{},e=p.event;const thought=subagentThoughts.get(s.id+':'+p.id);
+   if(thought&&e?.message?.role==='assistant'&&['message_start','message_update','message_end'].includes(e.type)){
+    if(e.type==='message_start'||!thought.id)thought.id='sub-think-'+randomUUID();
+    thought.text=thinkingText(e.message.content).slice(-40000);thought.at=now();thought.sourceTimestamp=e.message.timestamp;thought.streaming=e.type!=='message_end';
+   }}
   if(f.type==='extension_ui_request'&&f.id){
    if(f.method==='cancel')s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==f.targetId);
    else if(['select','confirm','input','editor'].includes(f.method)){
@@ -258,13 +269,14 @@ export async function createCompanion(options={}){
   if(runners.get(s.id)?.alive)return runners.get(s.id);
   if(launches.has(s.id))return launches.get(s.id);
   const promise=(async()=>{
+   for(const [key,thought] of subagentThoughts)if(thought.parentId===s.id)subagentThoughts.delete(key);
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[])];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
    const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
-   try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'progress'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
+   try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
     // Per-session toggles live in the OMP process, so a restarted runner gets them back.
     for(const [key,value] of Object.entries(s.prefs||{}))await rpc.send(PREFS[key](value)).catch(e=>notice(s,'warning',e.message));
     await refresh(s,rpc);return rpc;}catch(e){runners.delete(s.id);rpc.kill();throw e;}
@@ -655,8 +667,15 @@ async function pluginAction(body){
     await lock(s.id,async()=>{await start(s);await persist();});json({commands:commands.get(s.id)||[]});return;
    }
    if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const live=store.sessions.some(s=>s.sessionFile&&samePath(s.sessionFile,file)&&runners.has(s.id));const bg=await background(file,live);
-    const own=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));json({...bg,live,agents:own?.subagentList||[]});return;}
-   if(req.method==='GET'&&url.pathname==='/api/transcript'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}const st=await fs.stat(file);json({...head,file,result,updatedAt:st.mtime.toISOString(),messages:await importMessages(file,600)});return;}
+    const own=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));json({...bg,live,agents:(own?.subagentList||[]).map(a=>({...a,thinking:subagentThoughts.get(own.id+':'+a.id)?.text||''}))});return;}
+   if(req.method==='GET'&&url.pathname==='/api/transcript'){
+    const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}
+    const st=await fs.stat(file),messages=await importMessages(file,600);
+    const thought=[...subagentThoughts.values()].find(t=>t.file&&samePath(t.file,file));
+    const active=thought?runners.has(thought.parentId)&&thought.active:undefined;
+    if(active&&thought.streaming&&thought.text&&!messages.some(m=>m.role==='thinking'&&m.sourceTimestamp!==undefined&&m.sourceTimestamp===thought.sourceTimestamp))messages.push({id:thought.id,role:'thinking',text:thought.text,at:thought.at,sourceTimestamp:thought.sourceTimestamp});
+    json({...head,file,result,active,updatedAt:new Date(Math.max(st.mtimeMs,active?new Date(thought.at).getTime():0)).toISOString(),messages});return;
+   }
    if(req.method==='GET'&&url.pathname==='/api/log'){const file=insideSessions(url.searchParams.get('file'),['.log']);const fh=await fs.open(file,'r').catch(()=>{throw error('Log not found.',404);});try{const {size}=await fh.stat();const n=Math.min(size,128*1024);const buf=Buffer.alloc(n);await fh.read(buf,0,n,size-n);json({file,size,text:buf.toString('utf8')});}finally{await fh.close();}return;}
    if(req.method==='GET'&&url.pathname==='/api/browse'){json(await browse(url.searchParams.get('path')||''));return;}
    if(req.method!=='POST')throw error('Route not found.',404);

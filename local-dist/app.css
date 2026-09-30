@@ -366,6 +366,7 @@ details.side-sec[open]>summary::after{transform:rotate(90deg)}
 .job-cmd{margin:0;padding:6px 8px;border-radius:6px;background:var(--bg);font:11.5px/1.5 var(--mono);color:oklch(.86 .005 280);white-space:pre-wrap;word-break:break-word;max-height:90px;overflow:auto}
 .job-out>summary{cursor:pointer;font-size:12px;color:var(--muted)}
 .job-out pre{margin:6px 0 0;padding:6px 8px;border-radius:6px;background:var(--bg);font:11.5px/1.5 var(--mono);color:oklch(.86 .005 280);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+.job-thought pre{font:14px/1.55 var(--sans);color:var(--muted)}
 .job-open{align-self:flex-start;padding-left:0}
 .badge.live{color:var(--accent);font-weight:650}
 .btn.on{color:var(--fg);background:var(--hover)}
