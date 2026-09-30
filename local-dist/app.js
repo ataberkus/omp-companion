@@ -12,9 +12,19 @@
     if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
     if (s < 86400) return Math.round(s / 3600) + 'h';
     if (s < 86400 * 7) return Math.round(s / 86400) + 'd';
-    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return new Date(iso).toLocaleDateString('en', { month: 'short', day: 'numeric' });
   };
-  const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); };
+  const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }; // numeric only, so the system's 12/24h choice stays
+  // Bounded memo: a hit moves the key to the newest end, the oldest entry falls out past `cap`.
+  function memo(cache, key, fn, cap = 400) {
+    if (cache.has(key)) { const v = cache.get(key); cache.delete(key); cache.set(key, v); return v; }
+    const v = fn();
+    cache.set(key, v);
+    if (cache.size > cap) cache.delete(cache.keys().next().value);
+    return v;
+  }
+  const trim = (map, cap) => { while (map.size > cap) map.delete(map.keys().next().value); };
+  const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
   const fmtTokens = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n || 0);
   const STATUS = { queued: 'Starting', running: 'Working', review: 'Ready for review', paused: 'Idle', error: 'Error', done: 'Done', history: 'OMP history' };
 
@@ -41,6 +51,7 @@
   }
 
   function inline(src, breaks) {
+    src = String(src).replace(/\u0000/g, ''); // NUL delimits the placeholder slots below
     const slots = [];
     const hold = html => `\u0000${slots.push(html) - 1}\u0000`;
     let s = src.replace(/(`+)([\s\S]*?[^`])\1(?!`)/g, (_, __, code) => hold(`<code>${esc(code.replace(/^ (.*) $/, '$1'))}</code>`));
@@ -58,11 +69,14 @@
 
   const LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
   const FENCE = /^\s{0,3}(```+|~~~+)\s*([^\s`]*)/;
-  const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const TABLE_SEP = /^(?=.*\|)\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
   const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
   const cells = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
 
-  function md(src, breaks = false) {
+  // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread.
+  const mdCache = new Map();
+  const md = (src, breaks = false) => memo(mdCache, (breaks ? '1' : '0') + String(src ?? ''), () => mdRaw(src, breaks), 800);
+  function mdRaw(src, breaks = false) {
     const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
     let out = '', i = 0;
     const isBlockStart = l => FENCE.test(l) || /^\s{0,3}#{1,6}\s/.test(l) || /^\s*>/.test(l) || LIST.test(l) || /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l);
@@ -74,7 +88,8 @@
         const fence = m[1], lang = m[2] || '';
         const body = [];
         i++;
-        while (i < lines.length && !lines[i].trim().startsWith(fence[0].repeat(fence.length))) body.push(lines[i++]);
+        const close = new RegExp(`^\\s{0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}\\s*$`);
+        while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
         i++;
         const code = body.join('\n');
         out += `<div class="codeblock"><div class="bar"><span>${esc(lang || 'text')}</span><button class="copy" data-copy>Copy</button></div><pre><code>${highlight(code, lang)}</code></pre></div>`;
@@ -94,7 +109,7 @@
       }
       if (/^\s*>/.test(line)) {
         const body = [];
-        while (i < lines.length && lines[i].trim() && (/^\s*>/.test(lines[i]) || !isBlockStart(lines[i]))) body.push(lines[i++].replace(/^\s*>\s?/, ''));
+        while (i < lines.length && (lines[i].trim() ? /^\s*>/.test(lines[i]) || !isBlockStart(lines[i]) : /^\s*>/.test(lines[i + 1] || ''))) body.push(lines[i++].replace(/^\s*>\s?/, ''));
         out += `<blockquote>${md(body.join('\n'), breaks)}</blockquote>`;
         continue;
       }
@@ -136,7 +151,7 @@
     const lis = items.map(it => {
       let text = it.lines.join('\n'), cls = '', box = '';
       const t = text.match(/^\[( |x|X)\]\s+/);
-      if (t) { cls = ' class="task-item"'; box = t[1] === ' ' ? '☐ ' : '☑ '; text = text.slice(t[0].length); }
+      if (t) { cls = ' class="task-item"'; box = `<input type="checkbox" disabled${t[1] === ' ' ? '' : ' checked'} aria-label="${t[1] === ' ' ? 'Not done' : 'Done'}"> `; text = text.slice(t[0].length); }
       let html = md(text, breaks);
       html = html.replace(/^<p>([\s\S]*?)<\/p>/, '$1');
       return `<li${cls}>${box}${html}</li>`;
@@ -149,7 +164,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: localStorage.getItem('omp-group-by') || 'time',
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
-    pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, tasksOpen: false, view: '', lastSig: '', nativeAt: 0,
+    pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
     noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
@@ -165,16 +180,20 @@
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
-  async function api(p, body) {
+  async function api(p, body, { timeout = 30000 } = {}) {
     if (!S.token) throw Object.assign(new Error('Not connected.'), { auth: true });
-    const res = await fetch('/api' + p, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    let res;
+    try {
+      res = await fetch('/api' + p, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(timeout),
+      });
+    } catch (e) { throw new Error(e.name === 'TimeoutError' ? 'The companion did not answer in time.' : 'The companion is not reachable.'); }
     const data = await res.json().catch(() => ({}));
     if (res.status === 401) { setToken(''); throw Object.assign(new Error('The connection token is no longer valid. Open the link printed by the companion.'), { auth: true }); }
-    if (!res.ok) throw new Error(data.error || 'The companion rejected the request.');
+    if (!res.ok) throw new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`);
     return data;
   }
   function setToken(t) {
@@ -186,6 +205,7 @@
   function toast(msg, kind = '', action) {
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
+    if (kind === 'err') el.setAttribute('role', 'alert');
     el.textContent = msg;
     if (action) { const b = document.createElement('button'); b.className = 'toast-act'; b.textContent = action.label; b.onclick = () => { el.remove(); action.run(); }; el.appendChild(b); }
     $('#toasts').appendChild(el);
@@ -218,7 +238,8 @@
     return out.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   }
   function current() {
-    const h = decodeURIComponent(location.hash.slice(1));
+    let h = location.hash.slice(1);
+    try { h = decodeURIComponent(h); } catch { /* malformed %-escape: route on the raw hash */ }
     if (h.startsWith('/s/')) return { kind: 'session', id: h.slice(3) };
     if (h.startsWith('/f/')) return { kind: 'native', file: h.slice(3) };
     if (h.startsWith('/sub/')) return { kind: 'sub', file: h.slice(5) };
@@ -262,11 +283,14 @@
       add('Older', rest.filter(it => new Date(it.updatedAt) < startToday - 7 * day));
     }
     const sel = selKey();
-    list.innerHTML = groups.map(([label, arr, cwd]) => `<div class="group-label"${cwd ? ` title="${esc(cwd)}"` : ''}>${esc(label)}${cwd ? `<span class="gcount">${arr.length}</span>` : ''}</div>` + arr.map(it => `
-      <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}">
-        <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>${it.status === 'running' || it.status === 'queued' ? '' : `<span class="arch" role="button" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</span>`}
+    const html = groups.map(([label, arr, cwd]) => `<div class="group-label"${cwd ? ` title="${esc(cwd)}"` : ''}>${esc(label)}${cwd ? `<span class="gcount">${arr.length}</span>` : ''}</div>` + arr.map(it => `<div class="item-row">
+      <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
+        <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
-      </button>`).join('')).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
+      </button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</div>`).join('')).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
+    setIfChanged(list, html); // rebuilding every poll would reset hover, focus and scroll
+    document.querySelectorAll('#filters [data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === S.filter)));
+    $('#groupBy')?.setAttribute('aria-pressed', String(S.groupBy === 'project'));
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
     $('#conn').title = S.online ? 'Connected to the local companion' : 'Companion not reachable';
   }
@@ -291,8 +315,12 @@
     if (!S.token) return renderConnect();
     const c = current();
     const view = c.kind + ':' + (c.id || c.file || c.parent || '');
-    if (view !== S.view) { S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null; build(c); }
-    if (!S.models && !S.modelsLoading) { S.modelsLoading = true; ensureModels().then(() => { S.lastSig = ''; renderList(); update(); if (current().kind === 'home') renderHome(); }).catch(() => { S.modelsLoading = false; }); }
+    if (view !== S.view) {
+      S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null; build(c);
+      // Per-file caches only matter for recently viewed sessions; keep them bounded.
+      trim(S.previews, 20); trim(S.subs, 30); trim(S.bg, 30); trim(S.advTx, 60); trim(groupOpen, 2000); trim(rowOpen, 2000);
+    }
+    if (!S.models && !S.modelsLoading) { S.modelsLoading = true; ensureModels().then(() => { S.lastSig = ''; renderList(); update(); if (current().kind === 'home') renderHome(); }).catch(() => {}).finally(() => { S.modelsLoading = false; }); }
     update();
     renderList();
   }
@@ -310,7 +338,7 @@
         <div class="status-line" id="statusLine"></div>
         <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
         <div class="composer">
-          <textarea id="input" rows="1" aria-autocomplete="list" aria-controls="slash"></textarea>
+          <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
           <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span class="hint" id="hint"></span><span id="buttons" style="display:flex;gap:6px"></span></div>
@@ -372,6 +400,13 @@
     }
   }
 
+  // Typing only changes the composer (send button, hints); leave the thread and panels alone.
+  function updateComposer() {
+    const c = current();
+    if (c.kind === 'session') { const s = S.store?.sessions.find(x => x.id === c.id); if (s) renderComposer(s); }
+    else if (c.kind === 'native') renderComposer(null, S.native.find(x => x.file === c.file) || S.previews.get(c.file));
+  }
+
   function contextMeta(tokens, win, pct) {
     if (typeof pct !== 'number' && tokens && win) pct = tokens / win * 100;
     if (typeof pct !== 'number' && !tokens) return '';
@@ -380,7 +415,7 @@
     return `<span class="ctx ${p >= 85 ? 'hot' : p >= 65 ? 'warm' : ''}" title="${tip}">${p != null ? `<i><b style="width:${p.toFixed(1)}%"></b></i>${Math.round(p)}%` : 'context'} ${tokens ? fmtTokens(tokens) : ''}${win ? ' / ' + fmtTokens(win) : ''}</span>`;
   }
   function metaHtml(cwd, extra) {
-    return `<div class="meta"><span class="path" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}">📁 ${esc(cwd)}</span>${extra}</div>`;
+    return `<div class="meta"><span class="path" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}">${esc(cwd)}</span>${extra}</div>`;
   }
   function renderTopbarSession(s) {
     const p = projectOf(s);
@@ -395,11 +430,11 @@
       s.goal?.objective ? `<span class="goal" title="${esc(`Goal (${s.goal.status}): ${s.goal.objective}`)}">🎯 ${esc(s.goal.objective.slice(0, 60))}</span>` : '',
     ].join('');
     const btn = [changesButton(s.messages, 's:' + s.id), sideButton()];
-    if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort">■ <span class="lbl">Stop</span></button>`);
-    if (['review', 'paused', 'error'].includes(s.status) && s.messages.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete">✓ <span class="lbl">Mark done</span></button>`);
+    if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort" aria-label="Stop">■ <span class="lbl">Stop</span></button>`);
+    if (['review', 'paused', 'error'].includes(s.status) && s.messages.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
     const idle = s.status !== 'running' && s.status !== 'queued';
     const pref = (key, on, label, yes = true, no = false) => `<button data-pref="${key}" data-value="${esc(JSON.stringify(on ? no : yes))}" role="menuitemcheckbox" aria-checked="${!!on}"><span class="check">${on ? '✓' : ''}</span>${esc(label)}</button>`;
-    const html = `<button class="btn sm ghost menu-btn" data-act="nav">☰</button>
+    const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
       <div class="title-block"><h1 title="${esc(s.title)}">${esc(s.title)}</h1>${metaHtml(p?.path || s.cwd, extra)}</div>
       <div class="actions">${btn.join('')}
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
@@ -429,10 +464,10 @@
   function renderTopbarNative(n, pv, file) {
     const title = n?.title || pv?.title || 'OMP session';
     const cwd = n?.cwd || pv?.cwd || '';
-    const html = `<button class="btn sm ghost menu-btn" data-act="nav">☰</button>
+    const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
       <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(ago(n.updatedAt))} ago</span>` : ''}`)}</div>
       <div class="actions">${changesButton(pv?.messages || [], 'f:' + file)}${sideButton()}
-        <button class="btn sm" data-act="newHere">＋ <span class="lbl">New here</span></button>
+        <button class="btn sm" data-act="newHere" aria-label="New session here">＋ <span class="lbl">New here</span></button>
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
           <button data-act="resumeOnly">Add to panel without a message</button>
           <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button>
@@ -520,7 +555,8 @@
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
   const fmtMs = ms => !ms && ms !== 0 ? '' : ms < 1000 ? ms + 'ms' : ms < 60000 ? (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's' : Math.floor(ms / 60000) + 'm ' + Math.round(ms % 60000 / 1000) + 's';
-  const parseArgs = s => { if (s && typeof s === 'object') return s; try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch { return null; } };
+  const argsCache = new Map();
+  const parseArgs = s => { if (s && typeof s === 'object') return s; return memo(argsCache, String(s), () => { try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch { return null; } }); };
   const shortPath = p => { const parts = String(p).split(/[\\/]/).filter(Boolean); return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : String(p); };
   function keyArg(name, a) {
     if (!a) return '';
@@ -566,7 +602,7 @@
     return out.join('') || '<div class="muted" style="padding:4px 0">No details.</div>';
   }
   // Group state survives re-renders; values only exist when the user overrides the default.
-  const groupOpen = new Map(), rowOpen = new Map();
+  const groupOpen = new Map(), rowOpen = new Map(), bodyCache = new Map();
   const thinkTitle = text => {
     const line = String(text).split('\n').map(l => l.replace(/[*_#`>]/g, '').trim()).find(Boolean) || 'Thinking';
     return line.length > 110 ? line.slice(0, 110) + '…' : line;
@@ -582,17 +618,17 @@
     }
     const t = m.tool;
     const a = parseArgs(t.args);
-    const running = t.status === 'running' && (live || t.user);
+    const running = t.status === 'running' && live;
     const bad = t.status === 'error';
     const edits = realFiles(t).length ? diffStat(realFiles(t)) : null;
-    const def = !!edits && !S.collapseDiffs;
+    const def = !!edits;
     const open = rowOpen.has(rid) ? rowOpen.get(rid) : def;
     const bg = a?.async === true;
     const tip = [t.intent, t.ms ? fmtMs(t.ms) : ''].filter(Boolean).join(' · ');
     return `<details class="row tool ${bad ? 'bad' : ''} ${edits ? 'edit' : ''}" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
       <summary title="${esc(tip)}"><span class="ln">${esc(L.v)}${L.b ? ` <b>${esc(L.b)}</b>` : ''}${L.d ? ` <span class="ds">${esc(L.d)}</span>` : ''}${L.c ? ` <code>${esc(L.c.slice(0, 120))}</code>` : ''}</span>
       ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕</span>' : ''}</summary>
-      <div class="row-body">${toolBody(t, a)}</div></details>`;
+      <div class="row-body">${memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), diffMode()].join('|'), () => toolBody(t, a), 300)}</div></details>`;
   }
   function legacyTools(group) {
     // Pair legacy "call"/"result" text records into tool objects.
@@ -703,14 +739,7 @@
   // OMP also routes some tool calls through `write` to virtual URIs (xd://…); those are not file changes.
   const realFiles = t => (t?.files || []).filter(f => !/^[a-z][\w+.-]+:\/\//i.test(f.path || ''));
   const diffCache = new Map();
-  function parseDiff(diff) {
-    const hit = diffCache.get(diff);
-    if (hit) return hit;
-    if (diffCache.size > 800) diffCache.clear();
-    const res = parseDiffRaw(diff);
-    diffCache.set(diff, res);
-    return res;
-  }
+  const parseDiff = diff => memo(diffCache, diff, () => parseDiffRaw(diff), 200);
   function parseDiffRaw(diff) {
     const hunks = [];
     let cur = null, delta = 0, adds = 0, dels = 0;
@@ -779,7 +808,7 @@
         }
       }
     });
-    return `<div class="diff-scroll"><table class="diff ${mode}">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
+    return `<div class="diff-scroll"><table class="diff ${mode}" aria-label="${mode === 'split' ? 'Side-by-side' : 'Unified'} diff: old line, new line, code">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
   }
   const diffMode = () => S.diffMode || (innerWidth > 1000 ? 'split' : 'unified');
   function fileDiff(f, opts = {}) {
@@ -794,7 +823,7 @@
         <span class="fd-path" title="${esc(f.path)}">${esc(name)}</span>
         <span class="fd-stat"><span class="plus">+${parsed.adds}</span> <span class="minus">−${parsed.dels}</span></span>
         ${opts.meta || ''}
-        ${created ? '' : `<span class="seg"><button class="${mode === 'unified' ? 'on' : ''}" data-diffmode="unified" title="Inline">Unified</button><button class="${mode === 'split' ? 'on' : ''}" data-diffmode="split" title="Side by side">Split</button></span>`}
+        ${created ? '' : `<span class="seg" role="group" aria-label="Diff layout"><button class="${mode === 'unified' ? 'on' : ''}" aria-pressed="${mode === 'unified'}" data-diffmode="unified" title="Inline">Unified</button><button class="${mode === 'split' ? 'on' : ''}" aria-pressed="${mode === 'split'}" data-diffmode="split" title="Side by side">Split</button></span>`}
         ${f.path ? `<button class="btn sm ghost" data-copy-text="${esc(f.path)}" title="Copy path">⧉</button>` : ''}
       </div>
       ${parsed.hunks.length ? diffTable(parsed, lang, mode) : `<pre class="fd-raw">${esc(f.diff)}</pre>`}
@@ -823,10 +852,10 @@
     const byFile = collectChanges(messages);
     const all = [...byFile.values()].flat();
     const tot = diffStat(all);
-    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav">☰</button>
+    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
       <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ changes</span></div>
         <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'} · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}</div></div>
-      <div class="actions"><span class="seg"><button class="${diffMode() === 'unified' ? 'on' : ''}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" data-diffmode="split">Split</button></span></div>`);
+      <div class="actions"><span class="seg" role="group" aria-label="Diff layout"><button class="${diffMode() === 'unified' ? 'on' : ''}" aria-pressed="${diffMode() === 'unified'}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" aria-pressed="${diffMode() === 'split'}" data-diffmode="split">Split</button></span></div>`);
     const sig = ['changes', c.parent, messages.length, messages[messages.length - 1]?.id, diffMode()].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
@@ -986,8 +1015,8 @@
       ${desc ? `<div class="job-desc">${esc(desc.slice(0, 220))}</div>` : ''}
       ${liveLine ? `<div class="job-live">${esc(liveLine)}</div>` : ''}
       ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}" open><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
-      ${j.command ? `<pre class="job-cmd">${esc(j.command.slice(0, 600))}</pre>` : ''}
-      ${output && !running ? `<details class="job-out"><summary>Output</summary><pre>${esc(output.slice(0, 6000))}</pre></details>` : ''}
+      ${j.command ? `<pre class="job-cmd">${esc(j.command.slice(0, 600))}${j.command.length > 600 ? `\n… ${j.command.length - 600} more characters` : ''}</pre>` : ''}
+      ${output && !running ? `<details class="job-out"><summary>Output</summary><pre>${esc(output.slice(0, 6000))}${output.length > 6000 ? `\n… showing the first 6000 of ${output.length} characters${j.transcript ? '. Open the subagent for the full transcript.' : ''}` : ''}</pre></details>` : ''}
       ${j.transcript ? `<button class="btn sm ghost job-open" data-sub="${esc(j.transcript)}">${running ? 'Watch' : 'Open'} subagent →</button>` : ''}
     </div>`;
   }
@@ -1008,20 +1037,20 @@
     setIfChanged(el, `<div class="side-head"><div class="side-tabs" role="group" aria-label="Session panel"><button type="button" class="${tab === 'plan' ? 'on' : ''}" aria-pressed="${tab === 'plan'}" data-act="sideTab" data-tab="plan" ${total ? '' : 'disabled'}>Plan${total ? ` <small>${done}/${total}</small>` : ''}</button><button type="button" class="${tab === 'activity' ? 'on' : ''}" aria-pressed="${tab === 'activity'}" data-act="sideTab" data-tab="activity">Activity${running.length ? ` <small>${running.length}</small>` : ''}</button></div><button class="btn sm ghost" data-act="closeSide" aria-label="Close panel">✕</button></div>
       ${tab === 'plan' ? `<div class="side-plan"><div class="side-plan-progress"><span>${done} of ${total} complete</span><progress value="${done}" max="${total}"></progress></div>${planPhases(s)}</div>` :
         `${jobs.length ? `<div class="side-sec"><div class="side-label">Running <span>${running.length}</span></div>${running.map(jobCard).join('') || '<div class="side-empty">Nothing running right now.</div>'}</div>
-      ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : '<div class="side-sec"><div class="side-empty">No background work yet.</div></div>'}
+      ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
       ${advisors.length ? `<div class="side-sec"><div class="side-label">Advisors <span>${advisors.length}</span></div>${advisors.map(x => `<div class="job"><div class="job-top"><b>${esc(x.name === '__advisor' ? 'Default' : x.name.slice('__advisor.'.length))}</b><span class="dur">${esc(ago(x.updatedAt))}</span></div>${x.model ? `<div class="job-sub">${esc(modelName(x.model))}</div>` : ''}<button class="btn sm ghost job-open" data-sub="${esc(x.file)}">Open transcript →</button></div>`).join('')}</div>` : ''}`}`);
   }
   function changesButton(messages, key) {
     const files = new Set();
     for (const m of messages) for (const f of realFiles(m.tool)) files.add(f.path);
     if (!files.size) return '';
-    return `<a class="btn sm ghost" href="#/changes/${encodeURIComponent(key)}" title="Review every file this session changed">± <span class="lbl">${files.size} ${files.size === 1 ? 'file' : 'files'} changed</span></a>`;
+    return `<a class="btn sm ghost" href="#/changes/${encodeURIComponent(key)}" title="Review every file this session changed" aria-label="${files.size} ${files.size === 1 ? 'file' : 'files'} changed">± <span class="lbl">${files.size} ${files.size === 1 ? 'file' : 'files'} changed</span></a>`;
   }
   function sideButton() {
     const c = S.sideCounts || {};
     if (!c.jobs && !c.advisors) return '';
     const bits = [c.running ? `<span class="badge live">${c.running} running</span>` : c.jobs ? `${c.jobs} background` : '', c.advisors ? `${c.advisors} advisor${c.advisors === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
-    return `<button class="btn sm ghost ${S.sideOpen && (S.sideTab === 'activity' || !c.total) ? 'on' : ''}" data-act="side" title="Background tasks and advisors">⧉ <span class="lbl">${bits}</span></button>`;
+    return `<button class="btn sm ghost ${S.sideOpen && (S.sideTab === 'activity' || !c.total) ? 'on' : ''}" data-act="side" title="Background tasks and advisors" aria-label="Background tasks and advisors${bits ? ': ' + bits.replace(/<[^>]+>/g, '') : ''}">⧉ <span class="lbl">${bits}</span></button>`;
   }
 
   // ---------- subagent transcript ----------
@@ -1041,7 +1070,7 @@
     const advisor = name === '__advisor' || name.startsWith('__advisor.');
     const d = e?.data;
     const active = !advisor && d && (d.active ?? Date.now() - new Date(d.updatedAt).getTime() < 120000);
-    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav">☰</button>
+    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
       <div class="title-block"><div class="crumb">${parent ? `<a href="${esc(parent.hash)}">← ${esc(parent.title)}</a>` : '<a href="#/new">← Home</a>'} <span>/ ${advisor ? 'advisor' : 'subagent'}</span></div>
         <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(ago(d.updatedAt))} ago</span>` : ''}`)}</div>
       <div class="actions"><div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
@@ -1119,10 +1148,10 @@
     return all.sort((a, b) => (pref.has(b) - pref.has(a)) || (a === 'openrouter') - (b === 'openrouter') || a.localeCompare(b));
   }
   async function openPicker(ctx) {
-    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [] };
+    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [], opener: S.picker?.opener || document.activeElement };
     let el = $('#picker');
     if (!el) { el = document.createElement('div'); el.id = 'picker'; el.className = 'picker-wrap'; document.body.appendChild(el); }
-    el.innerHTML = `<div class="picker" role="dialog" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
+    el.innerHTML = `<div class="picker" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
       <div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList"><div class="working"><span class="spinner"></span> Loading models…</div></div>
       <div class="picker-foot"><span>↑↓ to move · Enter to choose · hover to see reasoning levels</span></div></div>`;
     el.hidden = false;
@@ -1133,7 +1162,12 @@
     S.picker.hi = -1;
     renderPicker();
   }
-  function closePicker() { S.picker = null; const el = $('#picker'); if (el) { el.hidden = true; el.innerHTML = ''; } }
+  function closePicker() {
+    const opener = S.picker?.opener;
+    S.picker = null; const el = $('#picker'); if (el) { el.hidden = true; el.innerHTML = ''; }
+    // Return focus unless a pick already moved it somewhere on purpose.
+    if (opener?.isConnected && (!document.activeElement || document.activeElement === document.body)) opener.focus();
+  }
   function renderPicker() {
     const P = S.picker;
     if (!P || !S.models) return;
@@ -1149,8 +1183,8 @@
     $('#pickerList').innerHTML = sections.map(s => `<div class="picker-sec">${esc(s.label)}</div>` + s.rows.map(r => {
       const i = n++;
       const cur = r.sel === P.ctx.model && (r.isDefault || !r.thinking || r.thinking === P.ctx.thinking);
-      return `<button class="picker-row ${i === P.hi ? 'hi' : ''} ${cur ? 'cur' : ''}" data-pi="${i}"><span class="pn">${esc(r.name)}</span>${r.badge ? `<span class="tag">${esc(r.badge)}${r.thinking ? ' · ' + esc(r.thinking) : ''}</span>` : ''}
-        <span class="pp">${esc(r.isDefault ? r.provider : r.sel)}</span><span class="pm">${r.m?.reasoning ? '✱' : ''}${r.m?.contextWindow ? ' ' + fmtTokens(r.m.contextWindow) : ''}</span>${r.isDefault ? '<span></span>' : `<span class="fav ${fv.has(r.sel) ? 'on' : ''}" data-fav="${esc(r.sel)}" role="button" title="${fv.has(r.sel) ? 'Remove from favorites' : 'Add to favorites'}">${fv.has(r.sel) ? '★' : '☆'}</span>`}</button>`;
+      return `<div class="picker-line"><button class="picker-row ${i === P.hi ? 'hi' : ''} ${cur ? 'cur' : ''}" data-pi="${i}"><span class="pn">${esc(r.name)}</span>${r.badge ? `<span class="tag">${esc(r.badge)}${r.thinking ? ' · ' + esc(r.thinking) : ''}</span>` : ''}
+        <span class="pp">${esc(r.isDefault ? r.provider : r.sel)}</span><span class="pm">${r.m?.reasoning ? '✱' : ''}${r.m?.contextWindow ? ' ' + fmtTokens(r.m.contextWindow) : ''}</span></button>${r.isDefault ? '' : `<button type="button" class="fav ${fv.has(r.sel) ? 'on' : ''}" data-fav="${esc(r.sel)}" aria-pressed="${fv.has(r.sel)}" aria-label="Favorite ${esc(r.name)}" title="${fv.has(r.sel) ? 'Remove from favorites' : 'Add to favorites'}">${fv.has(r.sel) ? '★' : '☆'}</button>`}</div>`;
     }).join('')).join('') || '<div class="side-empty">No models match.</div>';
     renderThink();
     $('#pickerList .hi')?.scrollIntoView({ block: 'nearest' });
@@ -1216,16 +1250,22 @@
       <button type="button" class="btn sm ghost question-cancel" data-uicancel="${esc(q.id)}">Cancel question</button>
     </section>`).join(''));
     el.dataset.first = questions[0].id;
-    if (first !== questions[0].id) el.querySelector('input,textarea,[data-uichoice],[data-confirmed="false"],[data-uicancel]')?.focus();
+    // Take focus for a new question, but never from a field the user is typing in.
+    const a = document.activeElement, typing = a && /INPUT|TEXTAREA/.test(a.tagName) && a.value && !el.contains(a);
+    if (first !== questions[0].id && !typing) el.querySelector('input,textarea,[data-uichoice]')?.focus();
   }
 
   async function answerQuestion(id, answer, control) {
     const c = current();
     if (c.kind !== 'session') return;
     const section = control.closest('.question');
-    section.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = true; });
-    try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, ...answer }); await refresh(); }
-    catch (e) { toast(e.message, 'err'); await refresh(); section.querySelectorAll('button,input,textarea').forEach(el => { el.disabled = false; }); }
+    const controls = () => section.querySelectorAll('button,input,textarea');
+    controls().forEach(el => { el.disabled = true; });
+    try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, ...answer }); }
+    catch (e) { toast(e.message, 'err'); }
+    await refresh();
+    // A re-render replaces the section once the question clears; if it didn't, make it usable again.
+    controls().forEach(el => { el.disabled = false; });
   }
 
   function renderQueue(s) {
@@ -1304,8 +1344,8 @@
       placeholder = 'Type feedback to keep planning without approving…';
     }
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
-    // Extensions can pre-fill the composer (set_editor_text); apply each request once.
-    if (s?._editorText && S.editorApplied !== s._editorText.id) { S.editorApplied = s._editorText.id; input.value = s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
+    // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
+    if (s?._editorText && S.editorApplied !== s._editorText.id) { S.editorApplied = s._editorText.id; input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
@@ -1318,7 +1358,8 @@
   function renderExtras(s) {
     const el = $('#extras'), parts = [];
     const link = s?._openUrl && S.urlDismissed !== s._openUrl.id ? s._openUrl : null;
-    if (link) parts.push(`<div class="extra-link"><span class="grow">${esc(link.instructions || 'OMP needs you to open this link to continue.')}</span><a class="btn sm primary" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">Open link</a><button class="btn sm ghost" data-copy-text="${esc(link.url)}">Copy</button><button class="btn sm ghost" data-act="dismissUrl" data-id="${esc(link.id)}" aria-label="Dismiss link">✕</button></div>`);
+    const safeUrl = link && /^(https?:|mailto:)/i.test(link.url);
+    if (link) parts.push(`<div class="extra-link"><span class="grow">${esc(link.instructions || 'OMP needs you to open this link to continue.')}</span>${safeUrl ? `<a class="btn sm primary" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">Open link</a>` : `<code>${esc(link.url)}</code>`}<button class="btn sm ghost" data-copy-text="${esc(link.url)}">Copy</button><button class="btn sm ghost" data-act="dismissUrl" data-id="${esc(link.id)}" aria-label="Dismiss link">✕</button></div>`);
     for (const [key, lines] of Object.entries(s?._widgets || {})) parts.push(`<pre class="extra-widget" title="${esc(key)}">${esc(plain(lines.join('\n')))}</pre>`);
     const status = Object.entries(s?._status || {});
     if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
@@ -1336,14 +1377,16 @@
 
   // ---------- dialogs ----------
   function modal(title, body) {
-    closeModal();
+    const returnFocus = document.activeElement;
+    if (!closeModal()) return toast('Wait for the current dialog to finish.', 'err');
     const el = document.createElement('div');
     el.id = 'modal'; el.className = 'modal'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', title);
+    el._returnFocus = returnFocus;
     el.innerHTML = `<div class="modal-card"><div class="modal-head"><strong>${esc(title)}</strong><button class="btn sm ghost" data-modal-close aria-label="Close">✕</button></div><div class="modal-body">${body}</div></div>`;
     document.body.appendChild(el);
     (el.querySelector('.modal-body textarea, .modal-body button:not([disabled])') || el.querySelector('[data-modal-close]')).focus();
   }
-  const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected) focus.focus(); };
+  const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected) focus.focus(); return true; };
   const sessionApi = body => api(`/sessions/${current().id}/command`, body);
   async function togglePlan(id) {
     const s = S.store?.sessions.find(x => x.id === id);
@@ -1370,6 +1413,7 @@
       if (S.planSubmitted.has(key)) throw new Error('This proposal has already been submitted. Wait for the next plan.');
       const returnFocus = document.activeElement;
       modal(proposal.title || 'Review native plan', `<div class="plan-review-intro"><p>Read the plan before choosing how to continue. Closing this review does not approve or implement it.</p><p class="muted plan-review-path">${esc(proposal.planFilePath || '')}</p></div><article class="md plan-review-content" tabindex="0" aria-label="Proposed plan">${md(proposal.content || '')}</article><form data-plan-approval><fieldset><legend>Execution context</legend><label class="plan-context"><input type="radio" name="action" value="preserve" required><span><strong>Keep context</strong><small>Implement with the current conversation intact.</small></span></label><label class="plan-context"><input type="radio" name="action" value="fresh"><span><strong>Fresh context</strong><small>Start implementation in a fresh context with the plan.</small></span></label><label class="plan-context"><input type="radio" name="action" value="compact"><span><strong>Compact context</strong><small>Summarize the conversation before implementation.</small></span></label><label class="plan-context"><input type="radio" name="action" value="refine"><span><strong>Request refinement</strong><small>Stay in read-only planning and revise the plan using your feedback.</small></span></label></fieldset><label class="plan-feedback">Feedback <span class="muted">(required for refinement)</span><textarea name="feedback" rows="3" maxlength="20000" placeholder="What should change or guide implementation?"></textarea></label><div class="plan-model"><span>Execution model</span><button class="model-chip" type="button" data-plan-model>OMP default ▾</button></div><p class="plan-review-error" role="alert" hidden></p><div class="question-actions"><button class="btn" type="button" data-modal-close>Review later</button><button class="btn primary" type="submit">Confirm selected action</button></div></form>`);
+      if ($('#modal')?._planOwner) return; // modal() refused: another plan review is still submitting
       const dialog = $('#modal'), form = dialog.querySelector('[data-plan-approval]');
       dialog.classList.add('plan-review-modal');
       dialog._planOwner = id; dialog._returnFocus = returnFocus;
@@ -1409,18 +1453,22 @@
     try {
       const r = await sessionApi({ type: 'branch_messages' });
       if (!r.messages.length) return toast('There are no earlier messages to branch from.');
-      modal('Branch from an earlier message', `<p class="muted">OMP starts a new session with everything before the message you pick. That message goes back into the composer so you can change it.</p><div class="modal-list">${r.messages.map(m => `<button data-branch="${esc(m.entryId)}">${esc(m.text || 'Image attached')}</button>`).join('')}</div>`);
+      const label = m => { const t = m.text || 'Image attached'; return t.length > 160 ? t.slice(0, 160) + '…' : t; };
+      modal('Branch from an earlier message', `<p class="muted">OMP starts a new session with everything before the message you pick. That message goes back into the composer so you can change it.</p><div class="modal-list">${r.messages.map(m => `<button data-branch="${esc(m.entryId)}" title="${esc(m.text || '')}">${esc(label(m))}</button>`).join('')}</div>`);
     } catch (e) { toast(e.message, 'err'); }
   }
   async function doBranch(entryId) {
-    closeModal();
+    const buttons = document.querySelectorAll('#modal [data-branch]');
+    if ([...buttons].some(b => b.disabled)) return;
+    buttons.forEach(b => { b.disabled = true; });
     try {
       const r = await sessionApi({ type: 'branch', entryId });
+      closeModal();
       await refresh(); S.lastSig = '';
       const input = $('#input');
       if (input && r.text) { input.value = r.text; drafts.set(S.view, r.text); autosize(input); input.focus(); }
       update(); toast('Branched into a new session');
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) { toast(e.message, 'err'); buttons.forEach(b => { b.disabled = false; }); }
   }
   const openHandoff = () => modal('Hand off to a fresh session', `<form data-handoff><p class="muted">OMP writes a summary of this session, then continues in a fresh context that starts from that summary.</p><textarea name="instructions" rows="3" maxlength="5000" placeholder="Optional: what the handoff should focus on"></textarea><div class="question-actions"><button class="btn sm primary" type="submit">Hand off</button></div></form>`);
   async function exportHtml() {
@@ -1466,7 +1514,7 @@
   // ---------- slash command completion ----------
   async function loadCommands(key) {
     try { const r = await api('/commands?' + key); S.cmds.set(key, { at: Date.now(), list: r.commands }); }
-    catch (e) { S.cmds.set(key, { at: Date.now(), list: [] }); toast('Could not load slash commands: ' + e.message, 'err'); }
+    catch (e) { const failedBefore = S.cmds.get(key)?.error; S.cmds.set(key, { at: Date.now(), list: [], error: e.message }); if (!failedBefore) toast('Could not load slash commands: ' + e.message, 'err'); }
     finally { S.cmdsLoading.delete(key); }
     renderSlash();
   }
@@ -1476,7 +1524,7 @@
     const m = (input?.value || '').match(/^\/(\S*)$/);
     const key = c.kind === 'session' ? 'session=' + encodeURIComponent(c.id)
       : c.kind === 'home' && S.home.listing ? 'path=' + encodeURIComponent(S.home.listing.path) : '';
-    if (!key || !m) { S.slash = null; el.hidden = true; input?.removeAttribute('aria-activedescendant'); return; }
+    if (!key || !m) { S.slash = null; el.hidden = true; input?.removeAttribute('aria-activedescendant'); input?.setAttribute('aria-expanded', 'false'); return; }
     const cached = S.cmds.get(key);
     if ((!cached || Date.now() - cached.at > 30000) && !S.cmdsLoading.has(key)) {
       S.cmdsLoading.add(key); loadCommands(key);
@@ -1491,6 +1539,7 @@
     el.innerHTML = S.slash ? items.map((x, i) => `<button type="button" id="slash-option-${i}" role="option" aria-selected="${i === S.slash.hi}" class="${i === S.slash.hi ? 'hi' : ''}" data-slash="${esc(x.name)}"><b>/${esc(x.name)}</b>${x.hint ? ` <span class="muted">${esc(x.hint)}</span>` : ''}${x.description ? `<small>${esc(x.description)}</small>` : ''}</button>`).join('') : S.cmdsLoading.has(key) ? '<div role="status">Loading commands…</div>' : '';
     if (S.slash) input.setAttribute('aria-activedescendant', 'slash-option-' + S.slash.hi);
     else input.removeAttribute('aria-activedescendant');
+    input.setAttribute('aria-expanded', String(!el.hidden));
   }
   function pickSlash(name) {
     const input = $('#homePrompt') || $('#input');
@@ -1502,7 +1551,8 @@
 
   // ---------- actions ----------
   // Message previews: one data URL (older saved messages) or a list.
-  const images = list => [].concat(list || []).map(src => `<img class="msg-image" src="${esc(src)}" alt="Attached image">`).join('');
+  const safeImg = src => /^(data:image\/|blob:|https?:|\/)/i.test(String(src || ''));
+  const images = list => [].concat(list || []).filter(safeImg).map(src => `<button type="button" class="msg-image-btn" aria-label="View attached image full size"><img class="msg-image" src="${esc(src)}" alt="Attached image"></button>`).join('');
   const attached = () => S.attachments.filter(a => a.view === S.view);
   const imagePayload = list => list.length ? { images: list.map(a => a.image), preview: list.map(a => a.preview) } : {};
   async function attachImage(file) {
@@ -1575,7 +1625,8 @@
         S.pending = { view: 'session:' + s.id, text, imagePreview: S.pending.imagePreview, at: S.pending.at };
         location.hash = '#/s/' + s.id;
       } else {
-        const s = S.store.sessions.find(x => x.id === c.id);
+        const s = S.store?.sessions.find(x => x.id === c.id);
+        if (!s) throw new Error('This session no longer exists.');
         const type = kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
         const response = await api(`/sessions/${c.id}/command`, { type, message: text, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
@@ -1612,9 +1663,9 @@
   S.set = { data: null, q: '', group: '', changed: false, error: '', plugins: null, pluginError: '' };
 
   function buildSettings() {
-    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav">☰</button>
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
       <div class="title-block"><h1>OMP settings</h1><div class="meta" id="setMeta"></div></div>
-      <div class="actions"><button class="btn sm" data-act="ompUpdate">Update OMP</button><button class="btn sm ghost" data-act="setReload" title="Read the settings again">↻ <span class="lbl">Reload</span></button></div></div>
+      <div class="actions"><button class="btn sm" data-act="ompUpdate">Update OMP</button><button class="btn sm ghost" data-act="setReload" title="Read the settings again" aria-label="Reload settings">↻ <span class="lbl">Reload</span></button></div></div>
       <div class="settings"><nav class="set-nav" id="setNav"></nav>
         <div class="set-main" id="setMain"><div class="update-status" id="updateStatus" role="status" aria-live="polite" hidden></div><div class="set-tools"><input id="setSearch" placeholder="Search settings and plugins… (e.g. approval, compaction, theme)" value="${esc(S.set.q)}" spellcheck="false" autocomplete="off">
           <label class="check"><input type="checkbox" id="setChanged" ${S.set.changed ? 'checked' : ''}> Changed only</label></div>
@@ -1662,8 +1713,8 @@
     const d = S.set.data, plug = S.set.plugins?.plugins || [];
     const shown = d ? settingsView() : [];
     const changed = d ? d.settings.filter(x => x.modified).length : 0;
-    $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<span class="path" data-copy-text="${esc(d.file)}" title="Copy path">📁 ${esc(d.file)}</span>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
-    $('#setNav').innerHTML = `<a href="#sg-plugins" data-setgroup="plugins">🧩 Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
+    $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<span class="path" data-copy-text="${esc(d.file)}" title="Copy path">${esc(d.file)}</span>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
+    $('#setNav').innerHTML = `<a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
       const n = shown.filter(x => x.group === g).length, m = d.settings.filter(x => x.group === g && x.modified).length;
       return `<a href="#" data-setgroup="${esc(g)}" class="${n ? '' : 'dim'}">${esc(groupLabel(g))}<span>${m ? `<i title="${m} changed">●</i>` : ''}${n}</span></a>`;
     }).join('') : '');
@@ -1768,7 +1819,7 @@
 
   // ---------- home / new session ----------
   function buildHome() {
-    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav">☰</button><div class="title-block"><h1>New session</h1></div></div><div class="home"><div class="home-inner" id="home"></div></div>`;
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button><div class="title-block"><h1>New session</h1></div></div><div class="home"><div class="home-inner" id="home"></div></div>`;
     renderHome();
     if (!S.home.roots) api('/browse').then(r => { S.home.roots = r.roots; S.home.recent = r.recent; renderHome(); }).catch(e => toast(e.message, 'err'));
   }
@@ -1783,7 +1834,7 @@
       <p class="sub">Pick a folder, say what to do, press Enter. Earlier sessions are in the sidebar.</p>
       <div>
         <div class="section-label">Recent folders</div>
-        <div class="chips">${(h.recent || []).map(r => `<button class="chip ${l && norm(l.path) === norm(r.path) ? 'sel' : ''}" data-go="${esc(r.path)}" title="${esc(r.path)}">📁 ${esc(r.name)} <small>${esc(ago(r.lastUsed))}</small></button>`).join('') || (h.roots ? '<span class="sub" style="margin:0">None yet</span>' : '<span class="spinner"></span>')}</div>
+        <div class="chips">${(h.recent || []).map(r => `<button class="chip ${l && norm(l.path) === norm(r.path) ? 'sel' : ''}" data-go="${esc(r.path)}" title="${esc(r.path)}">${esc(r.name)} <small>${esc(ago(r.lastUsed))}</small></button>`).join('') || (h.roots ? '<span class="sub" style="margin:0">None yet</span>' : '<span class="spinner"></span>')}</div>
       </div>
       <div class="folder-box">
         <form class="folder-head" id="pathForm">
@@ -1793,7 +1844,7 @@
         </form>
         ${l ? `
           <input class="folder-filter" id="folderFilter" placeholder="Filter ${l.dirs.length} subfolders…" value="${esc(h.filter)}">
-          <div class="folder-list">${l.dirs.filter(d => d.name.toLowerCase().includes(f)).map(d => `<button data-go="${esc(d.path)}">📁 ${esc(d.name)}</button>`).join('') || '<div class="sub" style="padding:6px 8px;margin:0">No subfolders</div>'}</div>`
+          <div class="folder-list">${l.dirs.filter(d => d.name.toLowerCase().includes(f)).map(d => `<button data-go="${esc(d.path)}">${esc(d.name)}</button>`).join('') || '<div class="sub" style="padding:6px 8px;margin:0">No subfolders</div>'}</div>`
         : `<div style="padding:10px 12px" class="chips">${(h.roots || []).map(r => `<button class="chip" data-go="${esc(r.path)}">${esc(r.name)}</button>`).join('')}</div>`}
       </div>
       ${l ? `
@@ -1803,7 +1854,7 @@
           <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <textarea id="homePrompt" rows="3" aria-label="Initial prompt" aria-autocomplete="list" aria-controls="slash" placeholder="What should OMP do in ${esc(base(l.path))}? Type / for commands and skills (optional).">${esc(h.prompt)}</textarea>
+          <textarea id="homePrompt" rows="3" aria-label="Initial prompt" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash" placeholder="What should OMP do in ${esc(base(l.path))}? Type / for commands and skills (optional).">${esc(h.prompt)}</textarea>
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
@@ -1873,8 +1924,8 @@
   async function refresh() {
     try {
       S.store = await api('/state');
-      S.online = true;
-    } catch (e) { S.online = false; if (e.auth) return; }
+      S.online = true; S.fails = 0;
+    } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
     if (Date.now() - S.nativeAt > 20000) {
       S.nativeAt = Date.now();
       try { S.native = (await api('/omp-sessions')).sessions; } catch {}
@@ -1886,7 +1937,8 @@
   async function loop() {
     if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); }
     const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued');
-    setTimeout(loop, document.hidden ? 8000 : busy ? 1200 : 3500);
+    // Back off while the companion is unreachable instead of hammering it every second.
+    setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
   }
 
   // ---------- events ----------
@@ -1940,7 +1992,9 @@
       return;
     }
     if (t.closest('#modal')) {
-      if (t.id === 'modal' || t.closest('[data-modal-close]')) closeModal();
+      // The backdrop only dismisses a dialog with nothing typed into it.
+      const dirty = [...t.closest('#modal').querySelectorAll('textarea,input:not([type=checkbox]):not([type=radio])')].some(f => f.value.trim());
+      if ((t.id === 'modal' && !dirty) || t.closest('[data-modal-close]')) closeModal();
       const br = t.closest('[data-branch]'), lg = t.closest('[data-login]');
       if (br) doBranch(br.dataset.branch);
       if (lg) { closeModal(); sessionAction({ type: 'login', provider: lg.dataset.login }); }
@@ -1979,7 +2033,7 @@
     if (ts) { const ctx = $('#thinkMenu')._ctx; closeThinkMenu(); ctx.apply(ctx.model, ts.dataset.thinkset); return; }
     if (!t.closest('#thinkMenu, [data-act="thinkMenu"], [data-act="advMenu"]')) closeThinkMenu();
     const sg = t.closest('[data-setgroup]');
-    if (sg) { e.preventDefault(); document.getElementById('sg-' + sg.dataset.setgroup)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    if (sg) { e.preventDefault(); document.getElementById('sg-' + sg.dataset.setgroup)?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); return; }
     const sr = t.closest('[data-setreset]');
     if (sr) { saveSetting(sr.dataset.setreset, null, true); return; }
     const pa = t.closest('[data-pluginaction]');
@@ -1991,7 +2045,7 @@
     const dm = t.closest('[data-diffmode]');
     if (dm) { S.diffMode = dm.dataset.diffmode; try { localStorage.setItem('omp-diff-mode', S.diffMode); } catch {} S.lastSig = ''; $('#topbar')._html = ''; update(); return; }
     const jump = t.closest('[data-jump]');
-    if (jump) { e.preventDefault(); document.getElementById(jump.dataset.jump)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    if (jump) { e.preventDefault(); document.getElementById(jump.dataset.jump)?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); return; }
     const sub = t.closest('[data-sub]');
     if (sub) { openSub(sub.dataset.sub); return; }
     const subName = t.closest('[data-subname]');
@@ -2086,17 +2140,21 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
   // Click any chat, queued or not-yet-sent image to see it full size.
   function openLightbox(src, alt) {
+    if (!safeImg(src)) return;
+    const returnFocus = document.activeElement;
     closeLightbox();
     const el = document.createElement('div');
-    el.id = 'lightbox'; el.className = 'lightbox'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Image preview');
+    el.id = 'lightbox'; el.className = 'lightbox'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', 'Image preview');
+    el._returnFocus = returnFocus;
     el.innerHTML = `<img src="${esc(src)}" alt="${esc(alt || 'Image')}"><div class="lb-bar"><a class="btn sm" href="${esc(src)}" download="image">Download</a><button class="btn sm" data-lb-close>Close <kbd>Esc</kbd></button></div>`;
     document.body.appendChild(el);
+    el.querySelector('[data-lb-close]').focus();
   }
-  const closeLightbox = () => $('#lightbox')?.remove();
+  const closeLightbox = () => { const el = $('#lightbox'); if (!el) return; el.remove(); if (el._returnFocus?.isConnected) el._returnFocus.focus(); };
   document.addEventListener('click', e => {
     const lb = e.target.closest?.('#lightbox');
     if (lb) { if (e.target.tagName !== 'IMG' && !e.target.closest('a')) closeLightbox(); return; }
-    const img = e.target.closest?.('img.msg-image, .attach-preview img, .queued-image img');
+    const img = e.target.closest?.('.msg-image-btn')?.querySelector('img') || e.target.closest?.('img.msg-image, .attach-preview img, .queued-image img');
     if (img) { e.preventDefault(); e.stopPropagation(); openLightbox(img.src, img.alt); }
   }, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#lightbox')) { e.stopPropagation(); closeLightbox(); } }, true);
@@ -2112,7 +2170,7 @@
   document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); }, true);
   document.addEventListener('input', e => {
     const t = e.target;
-    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); update(); }
+    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); }
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
@@ -2161,22 +2219,26 @@
     row.classList.add('hi'); S.picker.hi = +row.dataset.pi; renderThink();
   });
   document.addEventListener('keydown', e => {
+    if (e.isComposing || e.keyCode === 229) return; // IME composition: Enter confirms a character, not the message
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'p') { e.preventDefault(); if (!S.picker && !$('#modal') && current().kind === 'session') togglePlan(current().id); return; }
-    const planDialog = $('#modal.plan-review-modal');
-    if (planDialog && !S.picker && e.key === 'Tab') {
-      const nodes = [...planDialog.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex="0"]')];
+    // Keep keyboard focus inside whichever dialog is on top.
+    const dialog = $('#lightbox') || (S.picker ? $('#picker .picker') : $('#modal'));
+    if (dialog && e.key === 'Tab') {
+      const nodes = [...dialog.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),a[href],[tabindex="0"]')].filter(n => n.offsetParent !== null);
       const first = nodes[0], last = nodes[nodes.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      if (!dialog.contains(document.activeElement)) { e.preventDefault(); first?.focus(); }
+      else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
+    // Ctrl+P cycles model roles from the composer (and closes the picker); elsewhere it stays the browser's Print.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p' && (S.picker || e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Escape' && $('#modal') && !S.picker) { e.stopPropagation(); closeModal(); return; }
     if (e.key === 'Escape' && $('#thinkMenu')) { closeThinkMenu(); return; }
     const t = e.target;
     if (S.picker) {
       if (e.key === 'Escape') { e.preventDefault(); closePicker(); return; }
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.picker.hi = Math.max(0, Math.min(S.picker.flat.length - 1, S.picker.hi + (e.key === 'ArrowDown' ? 1 : -1))); $('#pickerList .hi')?.classList.remove('hi'); const r = $(`#pickerList [data-pi="${S.picker.hi}"]`); r?.classList.add('hi'); r?.scrollIntoView({ block: 'nearest' }); renderThink(); return; }
-      if (e.key === 'Enter') { e.preventDefault(); pickModel(S.picker.hi); return; }
+      if (e.key === 'Enter' && !t.closest('[data-fav]')) { e.preventDefault(); pickModel(S.picker.hi); return; }
       return;
     }
     if ((t.id === 'input' || t.id === 'homePrompt') && S.slash) {
@@ -2196,7 +2258,12 @@
     if (t.id === 'folderFilter' && e.key === 'Enter') { e.preventDefault(); const first = $('.folder-list [data-go]'); if (first) goFolder(first.dataset.go); return; }
     if (t.id === 'search' && e.key === 'Enter') { const first = $('#list [data-key]'); if (first) openItem(first.dataset.key); return; }
     if (e.altKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newSession(); return; }
-    if (e.key === 'Escape') { document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); document.getElementById('app').classList.remove('nav-open'); if (t.id === 'search') { t.value = ''; S.search = ''; renderList(); t.blur(); } return; }
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); document.getElementById('app').classList.remove('nav-open');
+      if (t.id === 'search') { t.value = ''; S.search = ''; renderList(); t.blur(); }
+      else if (innerWidth <= 1100 && S.sideOpen && $('#tasks') && !$('#tasks').hidden) { S.sideOpen = false; $('#topbar')._html = ''; update(); }
+      return;
+    }
     if (e.key === '/' && !/INPUT|TEXTAREA/.test(t.tagName)) { e.preventDefault(); $('#search').focus(); }
   });
   $('#newBtn').addEventListener('click', () => newSession());

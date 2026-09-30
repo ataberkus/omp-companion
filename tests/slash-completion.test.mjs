@@ -24,7 +24,7 @@ for (const kind of ['session', 'home']) test(`${kind} slash completion finds ski
   };
   runInNewContext(await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8'), {
     document, window: { innerHeight: 900, addEventListener() {} }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
-    location: { hash: kind === 'home' ? '#/new' : '#/s/session', pathname: '/' }, URLSearchParams,
+    location: { hash: kind === 'home' ? '#/new' : '#/s/session', pathname: '/' }, URLSearchParams, AbortSignal,
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout() {}, requestAnimationFrame: fn => fn(),
     fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(

@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>OMP Control Room</title>
 <link rel="icon" href="/favicon.svg?v=2"/>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"/>
 <link rel="stylesheet" href="/app.css"/>
 </head>
 <body>
@@ -18,17 +15,17 @@
       <div class="brand-text"><b>OMP</b><span>Control Room</span></div>
       <span class="conn" id="conn" title="Connection"></span>
     </div>
-    <button class="btn primary new-btn" id="newBtn"><span>＋</span> New session <kbd>Alt N</kbd></button>
+    <button class="btn new-btn" id="newBtn"><span>＋</span> New session <kbd>Alt N</kbd></button>
     <div class="search-wrap">
-      <input id="search" class="search" placeholder="Search sessions…" autocomplete="off"/>
+      <input id="search" class="search" placeholder="Search sessions…" aria-label="Search sessions" autocomplete="off"/>
       <kbd>/</kbd>
     </div>
-    <div class="filters" id="filters">
-      <button data-filter="all" class="on">All</button>
-      <button data-filter="active">Active</button>
-      <button data-filter="panel">In panel</button>
-      <button data-filter="archived">Archived</button>
-      <button id="groupBy" class="gb" title="Group by project" aria-label="Group by project">▤</button>
+    <div class="filters" id="filters" role="group" aria-label="Filter sessions">
+      <button data-filter="all" class="on" aria-pressed="true">All</button>
+      <button data-filter="active" aria-pressed="false">Active</button>
+      <button data-filter="panel" aria-pressed="false">In panel</button>
+      <button data-filter="archived" aria-pressed="false">Archived</button>
+      <button id="groupBy" class="gb" title="Group by project" aria-label="Group by project" aria-pressed="false">▤</button>
     </div>
     <div class="session-list" id="list"></div>
     <div class="sidebar-foot">
@@ -36,10 +33,10 @@
       <button class="link" id="disconnect">Disconnect</button>
     </div>
   </aside>
-  <div class="scrim" id="scrim"></div>
+  <div class="scrim" id="scrim" aria-hidden="true"></div>
   <main class="main" id="main"></main>
 </div>
-<div class="toasts" id="toasts"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>

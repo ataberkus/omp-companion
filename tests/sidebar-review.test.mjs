@@ -8,7 +8,7 @@ test('pending questions take review priority until the last question clears', as
   const session = { id: 'session', title: 'Chat', cwd: '/project', status: 'running', updatedAt: new Date().toISOString() };
   const store = { projects: [], sessions: [session], archived: [] };
   const listeners = new Map(), timers = new Map();
-  const node = () => ({ innerHTML: '', value: '', style: {}, scrollHeight: 20, classList: { remove() {}, toggle() {} }, addEventListener() {}, focus() {} });
+  const node = () => ({ innerHTML: '', value: '', style: {}, scrollHeight: 20, classList: { remove() {}, toggle() {} }, addEventListener() {}, setAttribute() {}, querySelector: () => null, focus() {} });
   const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect'].map(id => [id, node()]));
   const document = {
     hidden: false,
@@ -19,7 +19,7 @@ test('pending questions take review priority until the last question clears', as
   };
   runInNewContext(await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8'), {
     document, window: { addEventListener() {} }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
-    location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams,
+    location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams, AbortSignal,
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout: fn => timers.set(fn.name, fn),
     fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? store : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
