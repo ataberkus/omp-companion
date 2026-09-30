@@ -967,7 +967,7 @@
       if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; }
       else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: new Date(a.lastUpdate).toISOString(), transcript: a.sessionFile, live: a });
     }
-    for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
+    for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
     return jobs;
   }
   const since = iso => { const ms = Date.now() - new Date(iso).getTime(); return isFinite(ms) ? fmtMs(Math.max(0, Math.round(ms / 1000) * 1000)) : ''; };
@@ -982,7 +982,7 @@
     const output = j.output || j.summary || '';
     return `<div class="job ${esc(j.status)}" data-key="job:${esc(j.id)}">
       <div class="job-top"><span class="dot ${running ? 'running' : j.status === 'error' ? 'error' : j.status === 'stale' ? 'paused' : 'done'}"></span><b title="${esc(j.id)}">${esc(j.type === 'bash' ? (j.title || j.id) : j.id)}</b><span class="dur">${esc(time)}</span></div>
-      <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelName(j.model)) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
+      <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelName(j.model)) : ''}${j.cost ? ' · $' + j.cost.toFixed(j.cost < 0.01 ? 4 : 2) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
       ${desc ? `<div class="job-desc">${esc(desc.slice(0, 220))}</div>` : ''}
       ${liveLine ? `<div class="job-live">${esc(liveLine)}</div>` : ''}
       ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}" open><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
@@ -1751,7 +1751,7 @@
         + (installed.map(pluginRow).join('') || '<div class="history-note">No installed plugins match.</div>')
         + (avail.length ? '<div class="section-label" style="margin-top:10px">Available</div>' + avail.map(a => `<div class="set-row" data-plugin="${esc(a.id)}"><div class="set-info"><div class="set-name">${esc(pluginBase(a.id))}</div><code class="set-key" title="Plugin id">${esc(a.id)}</code>${a.description ? `<div class="set-desc">${esc(a.description)}</div>` : ''}</div><div class="set-ctl"><button class="btn sm" data-pluginaction="install" data-plugin="${esc(a.id)}">Install</button></div></div>`).join('') : '');
     }
-    return `<section class="set-group" id="sg-plugins"><h2>Plugins</h2>${inner}</section>`;
+    return `<section class="set-group" id="sg-plugins"><h2>Plugins</h2><p class="set-desc">Plugin switches only control that plugin's installation, not separate skill copies in folders such as <code>~/.agents/skills</code>. To disable a skill from every source, add its name to <code>skills.ignoredSkills</code>. After changing plugins, use <code>/reload-plugins</code> or restart existing sessions to pick up changes.</p>${inner}</section>`;
   }
   function pluginRow(x) {
     return `<div class="set-row${x.enabled ? '' : ' mod'}" data-plugin="${esc(x.id)}"><div class="set-info"><div class="set-name">${esc(pluginBase(x.id))}${x.enabled ? '' : '<span class="tag mod">disabled</span>'}</div><code class="set-key" data-copy-text="${esc(x.id)}" title="Copy plugin id">${esc(x.id)}${x.version ? ` · ${esc(x.version)}` : ''}</code>${x.description ? `<div class="set-desc">${esc(x.description)}</div>` : ''}</div><div class="set-ctl"><label class="switch" title="${x.enabled ? 'Disable' : 'Enable'}"><input type="checkbox" data-plugin-toggle="${esc(x.id)}" ${x.enabled ? 'checked' : ''}><span></span></label><button class="btn sm ghost" data-pluginaction="uninstall" data-plugin="${esc(x.id)}" title="Uninstall this plugin">Remove</button></div></div>`;

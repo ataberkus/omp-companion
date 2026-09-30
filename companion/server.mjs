@@ -608,18 +608,20 @@ async function pluginAction(body){
  const ompSessionsDir=path.resolve(options.ompSessionsDir||process.env.OMP_SESSIONS_DIR||path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'sessions'));
  const headCache=new Map();
  const insideSessions=(value,exts)=>{const file=path.resolve(text(value,'File',4000));const rel=path.relative(ompSessionsDir,file);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!exts.some(x=>file.endsWith(x)))throw error('Not an OMP session file.');return file;};
+const costCache=new Map();
+async function transcriptCost(f,st){const key=f+'|'+st.mtimeMs+'|'+st.size;let c=costCache.get(key);if(c===undefined){c=0;try{for(const l of (await fs.readFile(f,'utf8')).split('\n')){if(!l.includes('"cost"'))continue;try{c+=JSON.parse(l).message?.usage?.cost?.total||0;}catch{}}}catch{}costCache.set(key,c);}return c;}
  async function background(file,live=false){
   const dir=file.replace(/\.jsonl$/,'');const scanned=await scanJobs(file);let entries=[];try{entries=await fs.readdir(dir,{withFileTypes:true});}catch{}
   const subagents=[],jobs=[];
   await Promise.all(entries.filter(e=>e.isFile()).map(async e=>{const f=path.join(dir,e.name);let st;try{st=await fs.stat(f);}catch{return;}
    if(e.name.endsWith('.jsonl')){const name=e.name.slice(0,-6);let head={};try{head=await readSessionHead(f);}catch{}let result='';try{result=(await fs.readFile(path.join(dir,name+'.md'),'utf8')).slice(0,4000);}catch{}
-    subagents.push({name,file:f,size:st.size,updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.thinking||'',preview:head.preview||'',result,advisor:name==='__advisor'||name.startsWith('__advisor.')});}
+    subagents.push({name,file:f,size:st.size,updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.thinking||'',preview:head.preview||'',result,cost:await transcriptCost(f,st),advisor:name==='__advisor'||name.startsWith('__advisor.')});}
    else if(e.name.endsWith('.async.log')){jobs.push({name:e.name,file:f,size:st.size,updatedAt:st.mtime.toISOString()});}
   }));
   subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   const byName=new Map(subagents.map(x=>[x.name,x]));
   let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=!live&&Date.now()-mtime>30*60e3;
-  const tasks=scanned.map(j=>{const sub=byName.get(j.id);const status=j.status==='running'?(sub?.result?'done':quiet?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',summary:sub?.result||'',updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
+  const tasks=scanned.map(j=>{const sub=byName.get(j.id);const status=j.status==='running'?(sub?.result?'done':quiet?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
   const linked=new Set(tasks.map(t=>t.id));
   return {dir,tasks,subagents:subagents.filter(x=>!linked.has(x.name)),logs:jobs};
  }

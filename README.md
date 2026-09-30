@@ -32,7 +32,7 @@
 - **Live plan and activity panel** for todos, subagents with expandable live reasoning, background jobs and advisor transcripts.
 - **Native plan mode:** enable read-only planning before your first prompt, review the proposed Markdown plan, request refinement, or approve implementation with the current, fresh or compacted context. Requires an OMP build with plan-mode RPC support.
 - **Native goal mode:** `/goal` opens an objective prompt or the current goal's controls; start autonomous work, replace an objective, pause/resume, set a token budget, or confirm dropping it. Requires an OMP build with goal-mode RPC support.
-- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` as you type (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), and run `!command` in the session's shell.
+- **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), complete `/commands` in both new and live sessions (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), and run `!command` in the session's shell.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
 - **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
@@ -51,10 +51,13 @@ On Windows you can double-click `start.bat` instead.
 
 The dashboard opens in your browser, already connected. Press **Alt+N** (or click **New session**), pick a folder, type a prompt and press Enter. Keep the companion terminal open while you work.
 
+Type `/` in the composer to browse commands and skills. Use ↑/↓ to select, Tab or Enter to complete a partial name, and Esc to dismiss; clicking an option also completes it. On **New session**, the catalog follows the selected folder, including its local skills and commands, without creating a saved session.
+
 ## Good to know
 
 - **Don't continue a session in the panel while it's still open in a terminal.** Both would write to the same file.
 - **Subagent reasoning:** the Activity card shows the current thought in an expandable, scrollable **Reasoning** section. **Watch subagent** updates the unfinished thought as it streams. Sessions running in a separate terminal only expose saved reasoning. After updating the companion, wait for running work to finish, restart it and refresh the browser.
+- **Plugins vs standalone skills:** disabling a plugin does not disable separately installed copies under folders such as `~/.agents/skills`. To disable a skill from every source, add its name (for example, `impeccable`) to `skills.ignoredSkills` in Settings. After plugin changes, use `/reload-plugins` or restart existing sessions. A skill already read remains in that conversation's history; start a new session to remove that context.
 - **Worktrees:** tick **Isolated git worktree** when starting a session in a Git repo. You get an `omp-web/<id>` branch off HEAD. Uncommitted changes and dependencies are not copied. Worktrees are never merged or deleted automatically.
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
 - **Security:** the companion listens only on `127.0.0.1`. It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions.
