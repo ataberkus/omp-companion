@@ -336,6 +336,8 @@ input,textarea{font:inherit;color:inherit}
 .steer-state.dropped{color:var(--red)}
 .msg.steer-pending .bubble{opacity:.75;border-style:dashed}
 .msg.steer-dropped .bubble{opacity:.6}
+.steer-btn{font-size:11.5px;padding:0 7px;border-radius:999px;border:0;background:var(--hover);color:var(--muted);cursor:pointer}
+.steer-btn:hover{color:var(--text)}
 .mdl{color:var(--faint)}
 .muted{color:var(--muted)}
 

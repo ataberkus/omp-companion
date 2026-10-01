@@ -221,21 +221,29 @@
   const modelName = sel => { if (!sel) return ''; const m = modelInfo(sel); return m ? m.name : sel.slice(sel.indexOf('/') + 1); };
   const modelLabel = (sel, thinking) => sel ? modelName(sel) + (thinking && thinking !== 'off' ? ' · ' + thinking : '') : '';
   const archivedKeys = () => new Set(S.store?.archived || []);
+  // Sort position moves only when a session settles (done / needs review), never on tool-call activity (updatedAt).
+  const rank = new Map();
+  const settleAt = s => {
+    const st = s.uiRequests?.length ? 'review' : s.status, busy = st === 'running' || st === 'queued', k = s.id, prev = rank.get(k);
+    if (!prev) rank.set(k, { st, at: busy ? s.createdAt : s.updatedAt });
+    else if (prev.st !== st) { if (!busy) prev.at = new Date().toISOString(); prev.st = st; }
+    return rank.get(k).at;
+  };
   function items() {
     const panel = panelSessions();
     const out = panel.map(s => {
       const p = projectOf(s);
       const model = sessionModel(s);
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, panel: true, model, thinking: s.thinking, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
     });
     const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
       if (n.managedId && ids.has(n.managedId)) continue;
-      out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: base(n.cwd), cwd: n.cwd, status: 'history', updatedAt: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
+      out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: base(n.cwd), cwd: n.cwd, status: 'history', updatedAt: n.updatedAt, at: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
     }
     const arch = archivedKeys();
     for (const it of out) it.archived = arch.has(it.key);
-    return out.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    return out.sort((a, b) => new Date(b.at) - new Date(a.at));
   }
   function current() {
     let h = location.hash.slice(1);
@@ -272,7 +280,8 @@
       const by = new Map();
       for (const it of all) (by.get(it.cwd) || by.set(it.cwd, []).get(it.cwd)).push(it);
       for (const arr of by.values()) groups.push([arr[0].folder, arr, arr[0].cwd]);
-      groups.sort((a, b) => Math.max(...b[1].map(i => +new Date(i.updatedAt))) - Math.max(...a[1].map(i => +new Date(i.updatedAt))));
+      const top = g => Math.max(...g[1].map(i => +new Date(i.at)));
+      groups.sort((a, b) => top(b) - top(a));
     } else {
       add('Working now', working);
       add('Needs your review', review);
@@ -712,7 +721,7 @@
       }
       const user = m.role === 'user';
       const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
-      const steer = user && m.steer === 'pending' ? '<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>'
+      const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`
         : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
       parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
         <div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div></div>`);
@@ -2013,6 +2022,16 @@
     if (yesNo) { answerQuestion(yesNo.dataset.uiconfirm, { confirmed: yesNo.dataset.confirmed === 'true' }, yesNo); return; }
     const cancelQuestion = t.closest('[data-uicancel]');
     if (cancelQuestion) { answerQuestion(cancelQuestion.dataset.uicancel, { cancelled: true }, cancelQuestion); return; }
+    const steerAct = t.closest('[data-steeract]');
+    if (steerAct) {
+      const type = steerAct.dataset.steeract, id = steerAct.dataset.id, c = current();
+      const old = S.store.sessions.find(s => s.id === c.id)?.messages.find(m => m.id === id)?.text;
+      const message = type === 'edit_steer' ? prompt('Edit steer', old) : null;
+      if (type === 'edit_steer' && !message?.trim()) return;
+      steerAct.disabled = true;
+      api(`/sessions/${c.id}/command`, { type, id, ...(message ? { message } : {}) }).then(refresh, e => { toast(e.message, 'err'); refresh(); });
+      return;
+    }
     const qedit = t.closest('[data-qedit]');
     if (qedit) { S.editQueue = { view: S.view, id: qedit.dataset.qedit }; renderQueue(S.store.sessions.find(s => s.id === current().id)); $('#queued textarea')?.focus(); return; }
     if (t.closest('[data-qtoggle]')) { S.queueOpen = S.queueOpen === S.view ? null : S.view; renderQueue(S.store.sessions.find(s => s.id === current().id)); return; }

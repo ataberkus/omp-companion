@@ -152,7 +152,7 @@ out({ type: 'ready' });
 for await (const line of createInterface({ input: process.stdin })) {
   const c = JSON.parse(line);
   if (['prompt', 'steer'].includes(c.type)) appendFileSync(log, JSON.stringify({ type: c.type, message: c.message }) + '\\n');
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
+  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : c.type === 'remove_queued_message' ? { removed: c.queue === 'steering' } : {};
   out({ type: 'response', id: c.id, command: c.type, success: true, data });
   if (c.type === 'prompt') { out({ type: 'agent_start' }); out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: c.message }] } }); }
   if (c.type === 'steer' && c.message === 'Read me') {
@@ -183,19 +183,27 @@ for await (const line of createInterface({ input: process.stdin })) {
   await post({ type: 'steer', message: 'Never read' });
   assert.equal(session().messages.find(m => m.text === 'Never read').steer, 'pending');
 
+  await post({ type: 'steer', message: 'Cancel me' });
+  await post({ type: 'cancel_steer', id: session().messages.find(m => m.text === 'Cancel me').id });
+  assert.ok(!session().messages.some(m => m.text === 'Cancel me'));
+  await post({ type: 'edit_steer', id: session().messages.find(m => m.text === 'Never read').id, message: 'Fixed' });
+  assert.ok(!session().messages.some(m => m.text === 'Never read'));
+  assert.equal(session().messages.find(m => m.text === 'Fixed').steer, 'pending');
+  assert.equal((await post({ type: 'cancel_steer', id: session().messages.find(m => m.text === 'Read me').id }))[0], 400);
+
   const [, queued] = await post({ type: 'follow_up', message: 'Later one' });
   const [, sent] = await post({ type: 'send_follow_up', id: queued.queuedMessages[0].id });
   assert.equal(sent.queuedMessages.length, 0);
   assert.equal(session().messages.find(m => m.text === 'Later one').steer, 'pending');
 
   const [, idle] = await post({ type: 'abort' });
-  await wait(() => session().messages.find(m => m.text === 'Never read').steer === 'dropped');
+  await wait(() => session().messages.find(m => m.text === 'Fixed').steer === 'dropped');
   assert.equal(idle.status, 'paused');
 
   const [, again] = await post({ type: 'follow_up', message: 'While idle' });
   assert.equal(again.queuedMessages?.length || 0, 0, 'idle sessions send follow-ups immediately');
   const sentLog = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(sentLog.map(x => [x.type, x.message]), [['prompt', 'Work'], ['steer', 'Read me'], ['steer', 'Never read'], ['steer', 'Later one'], ['prompt', 'While idle']]);
+  assert.deepEqual(sentLog.map(x => [x.type, x.message]), [['prompt', 'Work'], ['steer', 'Read me'], ['steer', 'Never read'], ['steer', 'Cancel me'], ['steer', 'Fixed'], ['steer', 'Later one'], ['prompt', 'While idle']]);
   assert.equal((await post({ type: 'send_follow_up', id: 'missing' }))[0], 400);
 });
 

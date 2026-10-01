@@ -312,7 +312,7 @@ export async function createCompanion(options={}){
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   const prompting=['prompt','steer','follow_up'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
   if(prompting&&s._task)throw error('Wait for the handoff to finish first.');
@@ -342,6 +342,16 @@ export async function createCompanion(options={}){
    if(body.type==='edit_follow_up'){const value=body.message;queue[i].text=queue[i].hasImage&&typeof value==='string'&&!value.trim()?'':text(value,'Message',200000);}
    else{const [item]=queue.splice(i,1);await persist();if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});return s;}
    await persist();return s;
+  }
+  if(body.type==='cancel_steer'||body.type==='edit_steer'){
+   const i=s.messages.findIndex(m=>m.id===body.id&&m.steer==='pending'),m=s.messages[i];
+   if(!m)throw error('OMP already read this steer.');
+   if(body.type==='edit_steer'&&m.hasImage)throw error('Steers with images can only be cancelled.');
+   const rpc=runners.get(s.id);
+   const r=rpc?.alive?await rpc.send({type:'remove_queued_message',message:m.hasImage&&m.text==='Image attached'?'':m.text,queue:'steering'}):null;
+   if(!r?.removed)throw error('OMP already read this steer.');
+   s.messages.splice(i,1);await persist();
+   return body.type==='edit_steer'?command(s,{type:'steer',message:body.message}):s;
   }
   if(body.type==='set_model'){
    const {selector,thinking}=modelChoice(body);if(selector)s.modelSelector=selector;if(thinking)s.thinkingChoice=thinking;
@@ -418,8 +428,8 @@ export async function createCompanion(options={}){
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
   if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';activity(s,`Completed ${s.title}`,'done');await persist();return s;}
   if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);}
-  const goalCommand=prompting&&/^\/goal(?:\s|$)/.test(body.message);
-  if(goalCommand){
+  const goalCommand=prompting&&/^\/(?:goal|fast)(?:\s|$)/.test(body.message);
+  if(goalCommand&&body.message.startsWith('/goal')){
    await start(s);
    if(!s._goalSupported)throw error('This OMP build has no RPC goal mode. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts; /goal was not sent to the model.',409);
    if(!s._goalAvailable)throw error('Goal mode is disabled in OMP. Enable goal.enabled in OMP settings; /goal was not sent to the model.',409);
