@@ -45,7 +45,7 @@ export class RpcProcess {
  }
  fail(error){clearTimeout(this.readyTimer);this.rejectReady(error);for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(error);}this.pending.clear();}
  // timeout 0 waits as long as OMP needs (bash, login, handoff).
- async send(command,timeout=30000){await this.ready;if(!this.alive||this.child.stdin.destroyed)throw new Error('OMP process is not running.');const id=randomUUID();return new Promise((resolve,reject)=>{const timer=timeout?setTimeout(()=>{this.pending.delete(id);reject(new Error(`OMP timed out while processing ${command.type}.`));},timeout):undefined;this.pending.set(id,{resolve,reject,timer});this.child.stdin.write(JSON.stringify({...command,id})+'\n',e=>{if(e){clearTimeout(timer);this.pending.delete(id);reject(e);}});});}
+ async send(command,timeout=30000){await this.ready;if(!this.alive||this.child.stdin.destroyed)throw new Error('OMP process is not running.');const id=command.id||randomUUID();return new Promise((resolve,reject)=>{const timer=timeout?setTimeout(()=>{this.pending.delete(id);reject(new Error(`OMP timed out while processing ${command.type}.`));},timeout):undefined;this.pending.set(id,{resolve,reject,timer});this.child.stdin.write(JSON.stringify({...command,id})+'\n',e=>{if(e){clearTimeout(timer);this.pending.delete(id);reject(e);}});});}
  async reply(frame){await this.ready;if(!this.alive||this.child.stdin.destroyed)throw new Error('OMP process is not running.');return new Promise((resolve,reject)=>this.child.stdin.write(JSON.stringify(frame)+'\n',e=>e?reject(e):resolve()));}
  kill(){this.stopping=true;this.child.stdin.end();this.child.kill('SIGTERM');const t=setTimeout(()=>{if(this.alive)this.child.kill('SIGKILL');},3000);t.unref();}
 }

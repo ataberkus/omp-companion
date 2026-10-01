@@ -224,7 +224,8 @@ export async function createCompanion(options={}){
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
   if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={enabled:adv.enabled??s.advisor?.enabled??adv.state==='running',...adv,at:now()};if(!(adv&&s._silentAdvisorUntil>Date.now()))append(s,adv?'system':'assistant',text);}
-  if(f.type==='prompt_result'){
+  // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
+  if(f.type==='prompt_result'&&!(f.id&&f.id!==s._promptId)){
    if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
    dropSteers(s);
@@ -453,7 +454,10 @@ export async function createCompanion(options={}){
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
    const rpcType=goalCommand?'prompt':body.type;
    if(prompting){if(!goalCommand){if(body.type==='prompt')delete s._streamId;s.status='running';}s.error=undefined;const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!goalCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
-   const result=await rpc.send({type:rpcType,...(prompting?{message:body.message,...(images.length?{images}:{})}:{})},goalCommand?0:30000);
+   const id=randomUUID();
+   const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(images.length?{images}:{})}:{})},goalCommand?0:30000);
+   // Only on acceptance: a rejected prompt (e.g. OMP busy) must not overwrite the live id, or the running turn's result would be ignored as stale.
+   if(rpcType==='prompt')s._promptId=id;
    if(rpcType==='prompt'&&result?.agentInvoked===false&&!goalCommand)s.status='review';
    if(goalCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
    if(body.type==='abort'){s.status='paused';delete s.uiRequests;delete s._planReview;}

@@ -198,3 +198,33 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.deepEqual(sentLog.map(x => [x.type, x.message]), [['prompt', 'Work'], ['steer', 'Read me'], ['steer', 'Never read'], ['steer', 'Later one'], ['prompt', 'While idle']]);
   assert.equal((await post({ type: 'send_follow_up', id: 'missing' }))[0], 400);
 });
+
+test('a stopped run\'s late prompt_result does not pause the next prompt', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-chat-abort-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const fake = join(dir, 'omp.mjs');
+  // Like OMP: prompt_result is keyed by the prompt's id and can land after the abort reply and the next prompt.
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
+out({ type: 'ready' });
+let first;
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
+  out({ type: 'response', id: c.id, command: c.type, success: true, data });
+  if (c.type === 'prompt') { out({ type: 'agent_start' }); if (first) out({ type: 'prompt_result', id: first, status: 'aborted' }); else first = c.id; }
+}`);
+  const at = new Date().toISOString();
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const post = body => fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+
+  await post({ type: 'prompt', message: 'Work' });
+  assert.equal((await post({ type: 'abort' })).status, 'paused');
+  await post({ type: 'prompt', message: 'Continue' });
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(app.store.sessions[0].status, 'running');
+});
