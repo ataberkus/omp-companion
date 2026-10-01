@@ -217,7 +217,7 @@ export async function createCompanion(options={}){
    if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();s.messages.push(m);}
   }
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}else if(m.stopReason==='aborted'){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}else if(m.stopReason==='aborted'){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
@@ -262,7 +262,7 @@ export async function createCompanion(options={}){
   if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'&&out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;}
   if(f.type==='extension_error')notice(s,'error',`Extension ${path.basename(String(f.extensionPath||'extension'))} failed${f.event?` in ${f.event}`:''}: ${f.error}`);
   if(f.type==='notice')notice(s,f.level,f.source?`${f.source}: ${f.message}`:f.message);
-  if(f.type==='auto_retry_start')s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};
+  if(f.type==='auto_retry_start'&&s.status!=='paused'&&s.status!=='done'){s.status='running';s.error=undefined;s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};}
   if(f.type==='auto_retry_end'){delete s._retry;if(!f.success)append(s,'system',`Retries stopped after attempt ${f.attempt}${f.finalError?`: ${f.finalError}`:'.'}`);}
   if(f.type==='retry_fallback_applied')append(s,'system',`Switched from ${f.from} to fallback model ${f.to}${f.reason?` (${f.reason})`:''}.`);
   if(f.type==='model_changed'){const rpc=runners.get(s.id);if(rpc)void refresh(s,rpc);}
@@ -391,7 +391,14 @@ export async function createCompanion(options={}){
    const rpc=await start(s);try{await rpc.send(PREFS[body.key](body.value));}catch(e){throw error(e.message);}
    (s.prefs??={})[body.key]=body.value;await refresh(s,rpc);await persist();return s;
   }
-  if(body.type==='abort_retry'||body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
+  if(body.type==='abort'||body.type==='abort_retry'){
+   // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
+   const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
+   s.status='paused';s.error=undefined;dropSteers(s);
+   delete s._promptId;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
+   await persist();return s;
+  }
+  if(body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
   // Runs outside the session lock (timeout 0) so Stop, answers and other commands still get through while it works.
   if(body.type==='bash'){
    const cmd=text(body.command,'Command',20000);if(s._bash)throw error('A shell command is already running.');
@@ -457,7 +464,6 @@ export async function createCompanion(options={}){
    // The composer's advisor chip shows the result, so the on/off reply stays out of the chat.
    if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await rpc.send({type:'prompt',message:`/advisor ${body.action}`});}
    await advisorStatus(s,rpc);await persist();return s;}
-  if(body.type==='abort'&&!runners.has(s.id)){s.status='paused';await persist();return s;}
   if(body.type==='prompt'&&s.status==='running'&&!goalCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
    const rpc=await start(s);
@@ -470,7 +476,6 @@ export async function createCompanion(options={}){
    if(rpcType==='prompt')s._promptId=id;
    if(rpcType==='prompt'&&result?.agentInvoked===false&&!goalCommand)s.status='review';
    if(goalCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
-   if(body.type==='abort'){s.status='paused';delete s.uiRequests;delete s._planReview;}
    await persist();return s;
   }catch(e){s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
  }

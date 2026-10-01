@@ -56,6 +56,8 @@ Type `/` in the composer to browse commands and skills. Use ↑/↓ to select, T
 ## Good to know
 
 - **Don't continue a session in the panel while it's still open in a terminal.** Both would write to the same file.
+- **Stopping retries:** **Stop** and **Stop retrying** cancel the active turn, including retry backoff and in-flight provider requests. The session returns to Idle, and queued follow-ups stay queued. Restart the companion after updating it, then refresh the browser.
+- **OpenCode Go multi-account limits:** the patched sibling OMP runtime tries another stored account for `429 Output token rate limit exceeded`, including advisor requests. Select it with `OMP_BIN` as shown below; updating the companion alone does not change an installed OMP executable. Generic backend `503` errors remain ordinary retry errors.
 - **Subagent reasoning:** the Activity card shows the current thought in an expandable, scrollable **Reasoning** section. **Watch subagent** updates the unfinished thought as it streams. Sessions running in a separate terminal only expose saved reasoning. After updating the companion, wait for running work to finish, restart it and refresh the browser.
 - **Subagent cost:** the dollar amount on each Activity job covers that subagent's own transcript only, not subagents it started in turn.
 - **Plugins vs standalone skills:** disabling a plugin does not disable separately installed copies under folders such as `~/.agents/skills`. To disable a skill from every source, add its name (for example, `impeccable`) to `skills.ignoredSkills` in Settings. After plugin changes, use `/reload-plugins` or restart existing sessions. A skill already read remains in that conversation's history; start a new session to remove that context.
