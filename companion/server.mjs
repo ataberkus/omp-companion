@@ -594,11 +594,13 @@ async function pluginAction(body){
   }
   const {schema}=await configList();await changeSetting({key:'modelRoles',value:{...(schema.modelRoles?.value||{}),advisor:sel}},false);return 'advisor role';
  }
+// Mirrors OMP's serviceTierFamily(); `omp models --json` omits the api field, so custom OpenAI relays read as unsupported.
+function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|openai)\//.test(m.id);return ['anthropic','openai','openai-codex','google','google-vertex'].includes(m.provider);}
  let modelCache;
  async function listModels(){
   if(modelCache&&Date.now()-modelCache.at<10*60000)return modelCache.data;
   const {stdout}=await execOmp(['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true});
-  const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow}));
+  const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow,fast:fastCapable(m)}));
   const roles={};let defaultThinking='';
   try{const cfg=await fs.readFile(path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'config.yml'),'utf8');let inRoles=false;
    for(const line of cfg.split(/\r?\n/)){if(/^modelRoles:\s*$/.test(line)){inRoles=true;continue;}if(inRoles){const m=line.match(/^\s+([\w-]+):\s*(\S+)/);if(m){roles[m[1]]=m[2].replace(/^["']|["']$/g,'');continue;}if(/^\S/.test(line))inRoles=false;}
@@ -747,6 +749,7 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
     const {selector,thinking}=modelChoice(body);
     const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking});
     if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
+    if(body.fast===true)await lock(s.id,()=>command(s,{type:'pref',key:'fast',value:true})).catch(e=>notice(s,'warning',e.message));
     json(images.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,preview:body.preview},images)):s,201);return;
    }
    if(url.pathname==='/api/omp-sessions/resume'){

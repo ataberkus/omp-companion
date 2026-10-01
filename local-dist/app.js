@@ -1237,6 +1237,9 @@
   }
   // Reasoning levels of a selector, or of the default role's model when no model is picked.
   const thinkLevels = sel => { const eff = sel || splitSel(S.models?.roles?.default || '').sel; if (!S.models) return []; const m = modelInfo(eff); return m ? (m.reasoning ? m.thinking || [] : []) : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']; };
+  // Fast (priority service) toggle; only for models with a service-tier family, or the default role's model.
+  const fastOk = sel => !!modelInfo(sel || splitSel(S.models?.roles?.default || '').sel)?.fast;
+  const fastChip = (sel, on) => fastOk(sel) ? `<button class="model-chip fast-chip ${on ? 'on' : ''}" data-act="fastToggle" aria-pressed="${!!on}" title="Fast mode: priority service tier">⚡ <span>Fast ${on ? 'on' : 'off'}</span></button>` : '';
   function openThinkMenu(btn) {
     closeThinkMenu();
     const ctx = pickerCtx();
@@ -1349,7 +1352,7 @@
     let placeholder, hintText, btns, status = '';
     const has = !!input.value.trim() || !!attachment;
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
-    setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + advisorChip(s)
+    setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s)
       : choice ? modelChip(choice.model, choice.thinking, 'Saved model')
       : modelChip(native?.model, native?.thinking, 'Saved model'));
     if (!s) {
@@ -1889,7 +1892,7 @@
           <div class="attach-preview" id="imagePreview" hidden></div>
           <textarea id="homePrompt" rows="3" aria-label="Initial prompt" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash" placeholder="What should OMP do in ${esc(base(l.path))}? Type / for commands and skills (optional).">${esc(h.prompt)}</textarea>
           <div class="composer-bar">
-            ${modelChip(h.model, h.thinking, defaultLabel())}
+            ${modelChip(h.model, h.thinking, defaultLabel())}${fastChip(h.model, h.fast)}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
@@ -1925,7 +1928,7 @@
     const attachment = attached();
     S.attachments = S.attachments.filter(a => a.view !== S.view);
     try {
-      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...imagePayload(attachment) });
+      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...imagePayload(attachment) });
       S.home.prompt = '';
       await refresh();
       location.hash = '#/s/' + s.id;
@@ -2151,6 +2154,10 @@
     else if (act === 'setReload') { S.set.data = null; S.set.plugins = null; loadSettings(); }
     else if (act === 'advMenu') { $('#thinkMenu') ? closeThinkMenu() : openAdvMenu(t.closest('[data-act]')); }
     else if (act === 'thinkMenu') { $('#thinkMenu') ? closeThinkMenu() : openThinkMenu(t.closest('[data-act]')); }
+    else if (act === 'fastToggle') {
+      if (c.kind === 'home') { S.home.fast = !S.home.fast; renderHome(); }
+      else if (c.kind === 'session') { const s = S.store.sessions.find(x => x.id === c.id); if (s) sessionAction({ type: 'pref', key: 'fast', value: !s.fast?.enabled }); }
+    }
     else if (act === 'model') { const ctx = pickerCtx(); if (ctx) openPicker(ctx); }
     else if (act === 'retry') {
       const s = S.store.sessions.find(x => x.id === c.id);

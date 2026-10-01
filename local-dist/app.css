@@ -533,6 +533,8 @@ details.raw>*:not(summary){margin-top:6px}
 /* advisor */
 .adv-chip.on{color:var(--fg);border-color:color-mix(in oklch,var(--violet) 40%,transparent)}
 .adv-chip.on::first-letter{color:var(--violet)}
+.fast-chip{flex-shrink:0}
+.fast-chip.on{color:var(--fg);border-color:color-mix(in oklch,var(--amber,#f5a524) 45%,transparent)}
 .adv-menu{min-width:260px;max-width:320px}
 .adv-toggle{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 9px;font-size:13px;cursor:pointer}
 .adv-info{padding:2px 9px 8px;color:var(--muted);font-size:12px;display:flex;flex-direction:column;gap:2px;border-bottom:1px solid var(--border);margin-bottom:4px}
