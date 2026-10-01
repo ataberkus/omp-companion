@@ -234,7 +234,7 @@
     const out = panel.map(s => {
       const p = projectOf(s);
       const model = sessionModel(s);
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
     });
     const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
@@ -261,6 +261,14 @@
   // Plain window.open (no noopener) so the new tab inherits sessionStorage, which holds the token.
   const openItemTab = key => window.open(location.pathname + location.search + itemHash(key), '_blank');
   const closeCtx = () => $('#ctxMenu')?.remove();
+
+  function workTime(s) {
+    const start = new Date(s.workStartedAt).getTime(), end = s.workFinishedAt ? new Date(s.workFinishedAt).getTime() : Date.now();
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return '';
+    const ms = Math.max(0, Math.floor((end - start) / 1000) * 1000);
+    const title = `Started ${new Date(start).toLocaleString()}${s.workFinishedAt ? `; finished ${new Date(end).toLocaleString()}` : ''}`;
+    return `<span class="work-time" title="${esc(title)}">${s.workFinishedAt ? 'Last run' : 'Running'} ${ms ? fmtMs(ms) : '0s'}</span>`;
+  }
 
   // ---------- sidebar ----------
   function renderList() {
@@ -297,6 +305,7 @@
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
+        ${workTime(it)}
       </button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</div>`).join(''); }).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
     setIfChanged(list, html); // rebuilding every poll would reset hover, focus and scroll
     document.querySelectorAll('#filters [data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === S.filter)));

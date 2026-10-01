@@ -9,6 +9,9 @@ import { promisify } from 'node:util';
 import { RpcProcess } from './rpc.mjs';
 const exec=promisify(execFile);
 const now=()=>new Date().toISOString();
+// One work interval spans steering, questions, retries and queued continuations.
+const startWork=s=>{if(!s.workStartedAt||s.workFinishedAt){s.workStartedAt=now();delete s.workFinishedAt;}};
+const finishWork=(s,at=now())=>{if(s.workStartedAt&&!s.workFinishedAt)s.workFinishedAt=at;};
 const colors=['#e8a16a','#93a9ee','#80bca4','#b59bd6'];
 const error=(message,status=400)=>Object.assign(new Error(message),{status});
 function text(value,name,max=10000){if(typeof value!=='string'||!value.trim()||value.length>max)throw error(`${name} is required (maximum ${max} characters).`);return value.trim();}
@@ -191,7 +194,7 @@ export async function createCompanion(options={}){
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
- for(const s of store.sessions){delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
+ for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
@@ -226,17 +229,19 @@ export async function createCompanion(options={}){
  const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
  function settle(s){
   void lock(s.id,async()=>{
-   if(s.status!=='running')return;
-   if(s._planReview||s.planMode?.reviewPending){s.status='review';return;}
+   if(s.status!=='running'||s.uiRequests?.length)return;
+   if(s._planReview||s.planMode?.reviewPending){s.status='review';finishWork(s);scheduleSave();return;}
    if(s.queuedMessages?.length)await sendQueued(s);
    else{s.status='review';activity(s,`${s.title} is ready for review`,'review');}
-  }).catch(e=>{s.status='error';s.error=`Could not send queued message: ${e.message}`;void persist();});
+   if(s.status!=='running')finishWork(s);
+   scheduleSave();
+  }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();});
  }
  function event(s,f){
   s.updatedAt=now();if(f.type!=='response')s._lastEvent=Date.now();
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
-  if(f.type==='agent_start'){s.status='running';s.error=undefined;}
+  if(f.type==='agent_start'){startWork(s);s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
   if(f.type==='auto_compaction_end'){
    s._compacting=!!f.willRetry;
@@ -265,9 +270,10 @@ export async function createCompanion(options={}){
   if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)){
    if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
+   if(f.status==='error'||f.status==='aborted')finishWork(s);
    dropSteers(s);
   }
-  if(f.type==='session_settled'){dropSteers(s);if(s.status==='running')settle(s);}
+  if(f.type==='session_settled'){dropSteers(s);if(s.status==='running')settle(s);else if(!s.uiRequests?.length)finishWork(s);}
   if(f.type==='prompt_result'&&f.agentInvoked===false&&f.status==='error')notice(s,'error',f.error?.message||'OMP command failed.');
   if(f.type==='subagent_progress'||f.type==='subagent_lifecycle'){const p=f.payload||f;const id=p.progress?.id||p.id||p.subagentId;
    if(id){s.subagentList??=[];const prev=s.subagentList.find(x=>x.id===id);const next=subagentView({...prev,...p,id,progress:p.progress||prev?.progress,status:p.status||p.progress?.status||p.phase||prev?.status});if(prev)Object.assign(prev,next);else s.subagentList.push(next);s.subagentList=s.subagentList.slice(-50);
@@ -330,7 +336,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[])];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
    try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
     // Per-session toggles live in the OMP process, so a restarted runner gets them back.
@@ -441,7 +447,7 @@ export async function createCompanion(options={}){
   if(body.type==='abort'||body.type==='abort_retry'){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
    const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
-   s.status='paused';s.error=undefined;dropSteers(s);
+   finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);
    delete s._promptId;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
    await persist();return s;
   }
@@ -840,7 +846,7 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(eventSaveTimer);const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(eventSaveTimer);const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

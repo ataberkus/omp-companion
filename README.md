@@ -27,6 +27,7 @@
 ## Features
 
 - **Every session in one sidebar**, including ones you started in a terminal, grouped by *Working now*, *Needs your review*, *Today* and older.
+- **Continuous work timers:** the sidebar shows **Running** elapsed time, then the frozen **Last run** duration. Steering, queued continuations, question prompts, retries and background waits stay in the same interval; hover for exact start/end times.
 - **Readable conversations:** Markdown, tables and code blocks with copy. Tool calls and thinking fold into one activity summary.
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents with expandable live reasoning, background jobs and advisor transcripts.
@@ -61,6 +62,7 @@ Send `/usage` (or `/usage show`) to put a quota snapshot in the conversation. Th
 ## Good to know
 
 - **Don't continue a session in the panel while it's still open in a terminal.** Both would write to the same file.
+- **Work timing:** counted from the agent's actual start until the session settles with no queued continuation. Stop, terminal failure or companion shutdown also freeze the timer; independent work starts a new interval. Durations persist across reloads and restarts, but past or terminal-only sessions have no invented timing. After updating, finish running work, restart the companion and refresh the browser.
 - **Stopping retries:** **Stop** and **Stop retrying** cancel the active turn, including retry backoff and in-flight provider requests. The session returns to Idle, and queued follow-ups stay queued. Restart the companion after updating it, then refresh the browser.
 - **OpenCode Go multi-account limits:** the patched sibling OMP runtime tries another stored account for `429 Output token rate limit exceeded`, including advisor requests. Select it with `OMP_BIN` as shown below; updating the companion alone does not change an installed OMP executable. Generic backend `503` errors remain ordinary retry errors.
 - **Subagent reasoning:** the Activity card shows the current thought in an expandable, scrollable **Reasoning** section. **Watch subagent** updates the unfinished thought as it streams. Sessions running in a separate terminal only expose saved reasoning. After updating the companion, wait for running work to finish, restart it and refresh the browser.

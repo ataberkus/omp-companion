@@ -25,7 +25,7 @@ test('pending questions take review priority until the last question clears', as
     fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? store : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
   });
   await new Promise(setImmediate);
-  const groups = () => new Map([...elements.get('list').innerHTML.matchAll(/<div class="group-label">([^<]+)<\/div>([\s\S]*?)(?=<div class="group-label">|$)/g)]
+  const groups = () => new Map([...elements.get('list').innerHTML.matchAll(/data-group="([^"]+)"[\s\S]*?<\/button>([\s\S]*?)(?=<button\b[^>]*\bdata-group=|$)/g)]
     .map(([, label, html]) => [label, [...html.matchAll(/data-key="([^"]+)"/g)].map(([, key]) => key)]));
   const refresh = async () => { await timers.get('loop')(); };
   const filter = value => listeners.get('click')({ target: { closest: selector => selector === '[data-filter]' ? { dataset: { filter: value } } : null } });
