@@ -141,6 +141,43 @@ async function importMessages(file,limit=400){
  return out.slice(-limit);
 }
 
+function modelUsageText(data,provider,model){
+ if(!Array.isArray(data.reports))throw new Error('OMP returned an invalid usage report.');
+ const clean=v=>String(v??'').replace(/[\r\n\t`]/g,' ');
+ const number=v=>Number.isFinite(v)?v:undefined;
+ const amount=v=>v.toLocaleString('en-US',{maximumFractionDigits:2});
+ const identity=(meta,fallback)=>[meta?.email||meta?.accountId||meta?.projectId||fallback,meta?.orgName||meta?.orgId,meta?.planType].filter(Boolean).map(clean).join(' · ');
+ const lines=[`Usage: ${clean(provider)}/${clean(model)}`,'All reported provider accounts; limits may be shared across models.'];
+ const reports=data.reports.filter(r=>r.provider===provider);
+ for(const [i,r] of reports.entries()){
+  lines.push('',identity(r.metadata,`Account ${i+1}`));
+  if(Number.isFinite(new Date(r.fetchedAt).getTime()))lines.push(`Fetched: ${new Date(r.fetchedAt).toISOString()}`);
+  for(const note of r.notes||[])lines.push(clean(note));
+  if(!Array.isArray(r.limits))throw new Error('OMP returned invalid usage limits.');
+  if(!r.limits.length)lines.push('  Remaining quota unavailable: no limits reported.');
+  for(const limit of r.limits){
+   const a=limit.amount||{},used=number(a.used),cap=number(a.limit),left=number(a.remaining),leftFraction=number(a.remainingFraction);
+   let fraction=number(a.usedFraction);
+   if(fraction===undefined&&used!==undefined)fraction=cap>0?used/cap:a.unit==='percent'?used/100:undefined;
+   if(fraction===undefined&&leftFraction!==undefined)fraction=1-leftFraction;
+   if(fraction===undefined&&a.unit==='percent'&&left!==undefined)fraction=1-left/100;
+   const remaining=left??(used!==undefined&&cap!==undefined?Math.max(0,cap-used):undefined);
+   const values=[];
+   if(remaining!==undefined&&a.unit!=='percent')values.push(`${amount(remaining)} ${clean(a.unit==='unknown'?'':a.unit)} remaining`.replace(/ +/g,' '));
+   if(fraction!==undefined)values.push(`${(Math.max(0,1-fraction)*100).toFixed(1)}% remaining · ${(fraction*100).toFixed(1)}% used`);
+   if(!values.length)values.push('Remaining quota unavailable');
+   if(used!==undefined&&a.unit!=='percent')values.push(`${amount(used)}${cap!==undefined?' / '+amount(cap):''} ${clean(a.unit==='unknown'?'':a.unit)} used`);
+   const scope=limit.scope||{},window=limit.window;
+   lines.push(`  ${clean(limit.label||limit.id)}${window?.label?' · '+clean(window.label):''}${scope.modelId?' · model: '+clean(scope.modelId):''}${scope.tier?' · tier: '+clean(scope.tier):''}`,`    ${values.join(' · ')}`);
+   if(Number.isFinite(window?.resetsAt)&&Number.isFinite(new Date(window.resetsAt).getTime()))lines.push(`    ${clean(window.resetLabel||'Resets')}: ${new Date(window.resetsAt).toISOString()}`);
+   for(const note of limit.notes||[])lines.push('    '+clean(note));
+  }
+ }
+ for(const a of Array.isArray(data.accountsWithoutUsage)?data.accountsWithoutUsage:[])if(a.provider===provider)lines.push('',identity(a,'Account'), '  Remaining quota unavailable: no usage data.');
+ if(!reports.length)lines.push('',`Remaining quota unavailable: ${clean(provider)} did not report usage limits.`);
+ return ['```text',...lines,'```'].join('\n');
+}
+
 export async function createCompanion(options={}){
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
  // OMP_BIN may point at the native executable or a source checkout's cli.ts.
@@ -166,7 +203,7 @@ export async function createCompanion(options={}){
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
  const commands=new Map();
- const slashList=list=>list.slice(0,500).filter(c=>typeof c?.name==='string').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}));
+ const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}))];
  const commandProbes=new Set();
  async function discoverCommands(dir){
   let list;
@@ -225,12 +262,13 @@ export async function createCompanion(options={}){
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
   if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={enabled:adv.enabled??s.advisor?.enabled??adv.state==='running',...adv,at:now()};if(!(adv&&s._silentAdvisorUntil>Date.now()))append(s,adv?'system':'assistant',text);}
   // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
-  if(f.type==='prompt_result'&&!(f.id&&f.id!==s._promptId)){
+  if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)){
    if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
    dropSteers(s);
   }
   if(f.type==='session_settled'){dropSteers(s);if(s.status==='running')settle(s);}
+  if(f.type==='prompt_result'&&f.agentInvoked===false&&f.status==='error')notice(s,'error',f.error?.message||'OMP command failed.');
   if(f.type==='subagent_progress'||f.type==='subagent_lifecycle'){const p=f.payload||f;const id=p.progress?.id||p.id||p.subagentId;
    if(id){s.subagentList??=[];const prev=s.subagentList.find(x=>x.id===id);const next=subagentView({...prev,...p,id,progress:p.progress||prev?.progress,status:p.status||p.progress?.status||p.phase||prev?.status});if(prev)Object.assign(prev,next);else s.subagentList.push(next);s.subagentList=s.subagentList.slice(-50);
     const key=s.id+':'+id;let thought=subagentThoughts.get(key);
@@ -275,7 +313,7 @@ export async function createCompanion(options={}){
   if(f.type==='plan_review')s._planReview=f.proposal;
   if(f.type==='plan_review_clear'&&s._planReview?.id===f.proposalId)delete s._planReview;
   if(f.type==='available_commands_update'&&Array.isArray(f.commands))commands.set(s.id,slashList(f.commands));
-  if(f.type==='response'&&!f.success){s.error=f.error;if(['prompt','steer','follow_up'].includes(f.command))s.status='error';}
+  if(f.type==='response'&&!f.success&&f.id===s._promptId){s.error=f.error;if(['prompt','steer','follow_up'].includes(f.command))s.status='error';}
   scheduleSave();
  }
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
@@ -444,8 +482,18 @@ export async function createCompanion(options={}){
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
   if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';activity(s,`Completed ${s.title}`,'done');await persist();return s;}
   if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);}
-  const goalCommand=prompting&&/^\/(?:goal|fast)(?:\s|$)/.test(body.message);
-  if(goalCommand&&body.message.startsWith('/goal')){
+  if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
+   if(images.length)throw error('Remove image attachments before checking /usage.');
+   const rpc=await start(s);await refresh(s,rpc);
+   const provider=s.provider,model=s.model;if(!provider||!model)throw error('Select a model before checking /usage.');
+   let report;
+   try{const {stdout}=await execOmp(['usage','--provider',provider,'--json'],{cwd:s.cwd,timeout:20000,maxBuffer:4*1024*1024,windowsHide:true});report=modelUsageText(JSON.parse(stdout),provider,model);}
+   catch(e){throw error(`Could not read ${provider} usage: ${String(e.stderr||e.message).trim()}`,502);}
+   append(s,'user',body.message,queuedId||randomUUID());append(s,'assistant',report);s.updatedAt=now();
+   await persist();return s;
+  }
+  const slashCommand=prompting&&/^\/\S/.test(body.message);
+  if(prompting&&/^\/goal(?:\s|$)/.test(body.message)){
    await start(s);
    if(!s._goalSupported)throw error('This OMP build has no RPC goal mode. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts; /goal was not sent to the model.',409);
    if(!s._goalAvailable)throw error('Goal mode is disabled in OMP. Enable goal.enabled in OMP settings; /goal was not sent to the model.',409);
@@ -473,20 +521,21 @@ export async function createCompanion(options={}){
    // The composer's advisor chip shows the result, so the on/off reply stays out of the chat.
    if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await rpc.send({type:'prompt',message:`/advisor ${body.action}`});}
    await advisorStatus(s,rpc);await persist();return s;}
-  if(body.type==='prompt'&&s.status==='running'&&!goalCommand)throw error('This session is running. Use Steer or Queue follow-up.');
+  if(body.type==='prompt'&&s.status==='running'&&!slashCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
    const rpc=await start(s);
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
-   const rpcType=goalCommand?'prompt':body.type;
-   if(prompting){if(!goalCommand){if(body.type==='prompt')delete s._streamId;s.status='running';}s.error=undefined;const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!goalCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   // Only prompt dispatch executes slash commands; steer would queue their literal text.
+   const rpcType=slashCommand?'prompt':body.type,wasRunning=['running','queued'].includes(s.status);
+   if(prompting){if(!slashCommand){if(body.type==='prompt')delete s._streamId;s.status='running';s.error=undefined;}const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
-   const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(images.length?{images}:{})}:{})},goalCommand?0:30000);
-   // Only on acceptance: a rejected prompt (e.g. OMP busy) must not overwrite the live id, or the running turn's result would be ignored as stale.
-   if(rpcType==='prompt')s._promptId=id;
-   if(rpcType==='prompt'&&result?.agentInvoked===false&&!goalCommand)s.status='review';
-   if(goalCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
+   const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(slashCommand&&wasRunning?{streamingBehavior:'steer'}:{}),...(images.length?{images}:{})}:{})},slashCommand?0:30000);
+   // Local commands must not replace the active turn's result correlation.
+   if(rpcType==='prompt'&&(!slashCommand||result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
+   if(rpcType==='prompt'&&result?.agentInvoked===false&&!slashCommand)s.status='review';
+   if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
    await persist();return s;
-  }catch(e){s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
+  }catch(e){if(slashCommand){await persist();throw error(e.message);}s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
  }
  async function sendQueued(s){
   while(s.queuedMessages?.length&&s.status==='running'){

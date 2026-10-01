@@ -33,6 +33,7 @@
 - **Native plan mode:** enable read-only planning before your first prompt, review the proposed Markdown plan, request refinement, or approve implementation with the current, fresh or compacted context. Requires an OMP build with plan-mode RPC support.
 - **Native goal mode:** `/goal` opens an objective prompt or the current goal's controls; start autonomous work, replace an objective, pause/resume, set a token budget, or confirm dropping it. Requires an OMP build with goal-mode RPC support.
 - **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), toggle fast mode (⚡ chip, shown only for models with a priority service tier: Anthropic, OpenAI/Codex, Google, and their OpenRouter variants) in new and live sessions, complete `/commands` in both new and live sessions (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), and run `!command` in the session's shell.
+- **Provider usage in chat:** `/usage` shows the selected model's provider quotas, remaining percentages and amounts, and reset times for every reported account. It works during a running turn without steering it or queueing another prompt.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
 - **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
@@ -52,6 +53,10 @@ On Windows you can double-click `start.bat` instead.
 The dashboard opens in your browser, already connected. Press **Alt+N** (or click **New session**), pick a folder, type a prompt and press Enter. Keep the companion terminal open while you work.
 
 Type `/` in the composer to browse commands and skills. Use ↑/↓ to select, Tab or Enter to complete a partial name, and Esc to dismiss; clicking an option also completes it. On **New session**, the catalog follows the selected folder, including its local skills and commands, without creating a saved session.
+
+During a running turn, Enter or **Run** dispatches slash commands instead of steering their literal text. Local controls leave the current turn and unread ordinary steers intact. **Queue** / **Alt+Enter** still defers commands until the turn finishes; `/usage` is always immediate. Restart the companion and refresh the browser after updating.
+
+Send `/usage` (or `/usage show`) to put a quota snapshot in the conversation. The selected model determines the provider; account, model and tier limits are labeled as reported, because a quota can be shared by several models. Snapshots include their fetch time and UTC reset timestamps. Providers without usage data show **Remaining quota unavailable**, not estimated remaining messages or a session-token total. This uses the configured OMP runtime's `usage --provider <id> --json` command.
 
 ## Good to know
 

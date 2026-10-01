@@ -723,8 +723,8 @@
       const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
       const editing = user && m.steer === 'pending' && S.editSteer?.id === m.id;
       const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
-        : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
         : user && m.steer === 'received' ? '<span class="steer-state" title="OMP has taken this steer; it can no longer be edited or cancelled">Steering · delivery started</span>'
+        : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
       const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
         : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
       parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
@@ -1352,6 +1352,7 @@
     renderAttachments();
     let placeholder, hintText, btns, status = '';
     const has = !!input.value.trim() || !!attachment;
+    const command = /^\/\S/.test(input.value.trim());
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s)
       : choice ? modelChip(choice.model, choice.thinking, 'Saved model')
@@ -1363,9 +1364,9 @@
       status = `<span class="grow">From OMP history${native?.cwd ? ' · ' + esc(native.cwd) : ''}. Don't continue it here while it's still open in a terminal.</span>`;
     } else if (s.status === 'running' || s.status === 'queued') {
       placeholder = 'Steer OMP while it works…';
-      hintText = 'Enter steers now · Alt+Enter queues for later';
+      hintText = command ? 'Enter runs command · Alt+Enter queues for later' : 'Enter steers now · Alt+Enter queues for later';
       btns = `<button class="btn" data-act="follow_up" ${has && !S.busy ? '' : 'disabled'} title="Send after OMP finishes (Alt+Enter)">Queue</button>
-        <button class="btn primary" data-act="steer" ${has && !S.busy ? '' : 'disabled'} title="Redirect the current work at the next tool or turn boundary (Enter)">Steer ↵</button>
+        <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !S.busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
         <button class="btn danger" data-act="abort" title="Stop the current turn">■</button>`;
     } else {
       const fresh = !s.messages.some(m => m.role === 'user');
@@ -1664,7 +1665,7 @@
       } else {
         const s = S.store?.sessions.find(x => x.id === c.id);
         if (!s) throw new Error('This session no longer exists.');
-        const type = kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
+        const type = kind === 'follow_up' ? kind : /^\/\S/.test(text) ? 'prompt' : kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
         const response = await api(`/sessions/${c.id}/command`, { type, message: text, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
         if (type === 'follow_up') toast((response.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now');
