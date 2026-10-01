@@ -344,13 +344,22 @@ export async function createCompanion(options={}){
    await persist();return s;
   }
   if(body.type==='cancel_steer'||body.type==='edit_steer'){
-   const i=s.messages.findIndex(m=>m.id===body.id&&m.steer==='pending'),m=s.messages[i];
-   if(!m)throw error('OMP already read this steer.');
+   const m=s.messages.find(m=>m.id===body.id);
+   if(!m){if(body.type==='cancel_steer')return s;throw error('This steer is no longer available.');}
+   if(m.steer==='dropped')throw error('This steer was not delivered.');
    if(body.type==='edit_steer'&&m.hasImage)throw error('Steers with images can only be cancelled.');
    const rpc=runners.get(s.id);
-   const r=rpc?.alive?await rpc.send({type:'remove_queued_message',message:m.hasImage&&m.text==='Image attached'?'':m.text,queue:'steering'}):null;
-   if(!r?.removed)throw error('OMP already read this steer.');
-   s.messages.splice(i,1);await persist();
+   const r=m.steer==='pending'&&rpc?.alive?await rpc.send({type:'remove_queued_message',message:m.hasImage&&m.text==='Image attached'?'':m.text,queue:'steering'}):null;
+   if(!r?.removed){
+    if(m.steer==='pending'&&!rpc?.alive)throw error('OMP is no longer running.');
+    // Delivery can win the cancel request before its transcript echo arrives.
+    if(m.steer==='pending')m.steer='received';
+    if(body.type==='cancel_steer')notice(s,'info','OMP has already started delivering this steer; it can no longer be cancelled.');
+    await persist();if(body.type==='edit_steer')throw error('OMP already read this steer.');
+    return s;
+   }
+   // RPC events can reorder the transcript while removal is awaiting its reply.
+   const i=s.messages.indexOf(m);if(i>=0)s.messages.splice(i,1);await persist();
    return body.type==='edit_steer'?command(s,{type:'steer',message:body.message}):s;
   }
   if(body.type==='set_model'){

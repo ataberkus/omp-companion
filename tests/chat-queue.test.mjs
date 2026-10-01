@@ -148,16 +148,28 @@ test('steers stay pending until OMP reads them, and queued messages can be sent 
 import { appendFileSync } from 'node:fs';
 const log = ${JSON.stringify(log)};
 const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
+const queue = [];
+let delivering;
+const read = text => { const i = queue.indexOf(text); if (i >= 0) queue.splice(i, 1); out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } }); };
 out({ type: 'ready' });
 for await (const line of createInterface({ input: process.stdin })) {
   const c = JSON.parse(line);
   if (['prompt', 'steer'].includes(c.type)) appendFileSync(log, JSON.stringify({ type: c.type, message: c.message }) + '\\n');
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : c.type === 'remove_queued_message' ? { removed: c.queue === 'steering' } : {};
+  if (c.type === 'steer') queue.push(c.message);
+  if (c.type === 'get_state' && delivering) { read(delivering); delivering = undefined; }
+  if (c.type === 'remove_queued_message') {
+    if (c.message === 'Read during cancel') read(c.message);
+    if (c.message === 'Taken by OMP') { queue.splice(queue.indexOf(c.message), 1); delivering = c.message; }
+    if (c.message === 'Cancel after reordering') read('Earlier pending');
+  }
+  const index = c.type === 'remove_queued_message' && c.queue === 'steering' ? queue.indexOf(c.message) : -1;
+  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : c.type === 'remove_queued_message' ? { removed: index >= 0 } : {};
+  if (index >= 0) queue.splice(index, 1);
   out({ type: 'response', id: c.id, command: c.type, success: true, data });
   if (c.type === 'prompt') { out({ type: 'agent_start' }); out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: c.message }] } }); }
   if (c.type === 'steer' && c.message === 'Read me') {
     out({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } });
-    out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: 'Read me' }] } });
+    read('Read me');
   }
   if (c.type === 'abort') out({ type: 'prompt_result', status: 'aborted' });
 }`);
@@ -189,7 +201,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   await post({ type: 'edit_steer', id: session().messages.find(m => m.text === 'Never read').id, message: 'Fixed' });
   assert.ok(!session().messages.some(m => m.text === 'Never read'));
   assert.equal(session().messages.find(m => m.text === 'Fixed').steer, 'pending');
-  assert.equal((await post({ type: 'cancel_steer', id: session().messages.find(m => m.text === 'Read me').id }))[0], 400);
+  assert.equal((await post({ type: 'cancel_steer', id: session().messages.find(m => m.text === 'Read me').id }))[0], 200);
+  assert.ok(session().messages.some(m => m.text === 'Read me' && !m.steer), 'late cancellation preserves delivered history');
 
   const [, queued] = await post({ type: 'follow_up', message: 'Later one' });
   const [, sent] = await post({ type: 'send_follow_up', id: queued.queuedMessages[0].id });
@@ -205,6 +218,32 @@ for await (const line of createInterface({ input: process.stdin })) {
   const sentLog = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(sentLog.map(x => [x.type, x.message]), [['prompt', 'Work'], ['steer', 'Read me'], ['steer', 'Never read'], ['steer', 'Cancel me'], ['steer', 'Fixed'], ['steer', 'Later one'], ['prompt', 'While idle']]);
   assert.equal((await post({ type: 'send_follow_up', id: 'missing' }))[0], 400);
+
+  await post({ type: 'steer', message: 'Read during cancel' });
+  const readId = session().messages.find(m => m.text === 'Read during cancel').id;
+  assert.equal((await post({ type: 'cancel_steer', id: readId }))[0], 200);
+  assert.ok(session().messages.some(m => m.id === readId && !m.steer));
+  assert.equal(session().status, 'running');
+  assert.equal((await post({ type: 'edit_steer', id: readId, message: 'Do not resend' }))[0], 400);
+  assert.ok(!session().messages.some(m => m.text === 'Do not resend'));
+
+  await post({ type: 'steer', message: 'Taken by OMP' });
+  const takenId = session().messages.find(m => m.text === 'Taken by OMP').id;
+  const [takenStatus, taken] = await post({ type: 'cancel_steer', id: takenId });
+  assert.equal(takenStatus, 200);
+  assert.equal(taken.messages.find(m => m.id === takenId).steer, 'received');
+  assert.equal(taken._notices.at(-1).level, 'info');
+  await post({ type: 'set_model', model: 'test/model' });
+  assert.equal(session().messages.at(-1).id, takenId, 'the later echo still places the steer at its delivery boundary');
+  assert.equal(session().messages.at(-1).steer, undefined);
+
+  await post({ type: 'steer', message: 'Earlier pending' });
+  await post({ type: 'steer', message: 'Cancel after reordering' });
+  const cancelId = session().messages.find(m => m.text === 'Cancel after reordering').id;
+  assert.equal((await post({ type: 'cancel_steer', id: cancelId }))[0], 200);
+  assert.ok(!session().messages.some(m => m.id === cancelId));
+  assert.ok(session().messages.some(m => m.text === 'Earlier pending' && !m.steer), 'cancellation must not delete a different delivered message');
+  assert.equal((await post({ type: 'cancel_steer', id: cancelId }))[0], 200);
 });
 
 test('a stopped run\'s late prompt_result does not pause the next prompt', async t => {
