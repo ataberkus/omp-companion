@@ -678,7 +678,7 @@
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
     // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
     const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, opts.extra || ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, opts.extra || ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     const scroller = $('#scroller');
@@ -721,10 +721,13 @@
       }
       const user = m.role === 'user';
       const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
-      const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`
+      const editing = user && m.steer === 'pending' && S.editSteer?.id === m.id;
+      const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
         : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
+      const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
+        : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
       parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
-        <div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div></div>`);
+        ${body}</div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
       parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
@@ -740,7 +743,12 @@
     }
     if (opts.tail) parts.push(opts.tail);
     if (!messages.length && !pending && status !== 'history' && !opts.head) parts.push(`<div class="history-note">This session is ready. Send the first message below.</div>`);
+    // Keep the in-progress steer edit across re-renders triggered by live events.
+    const draft = $('#thread [data-steerinput]'), focused = draft && document.activeElement === draft;
+    if (draft && S.editSteer) S.editSteer.text = draft.value;
     swapHtml($('#thread'), parts.join(''));
+    const fresh = $('#thread [data-steerinput]');
+    if (fresh && S.editSteer) { fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
@@ -1310,6 +1318,19 @@
   }
   function queuedActions(q, waiting) {
     return `<div class="queued-actions"><button class="btn sm ghost" data-qsend="${esc(q.id)}" aria-label="${waiting ? 'Send now' : 'Steer now'}" title="${waiting ? 'Send now' : 'Steer now: redirect the current work with this message'}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></button><button class="btn sm ghost" data-qedit="${esc(q.id)}" aria-label="Edit queued message" title="Edit queued message"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button><button class="btn sm ghost" data-qremove="${esc(q.id)}" aria-label="Remove queued message" title="Remove queued message">✕</button></div>`;
+  }
+  async function steerCommand(type, id, message) {
+    const c = current();
+    if (c.kind !== 'session') return;
+    try { await api(`/sessions/${c.id}/command`, { type, id, ...(message ? { message } : {}) }); }
+    catch (e) { toast(e.message, 'err'); }
+    S.editSteer = null; S.lastSig = ''; await refresh();
+  }
+  function saveSteer(btn) {
+    const message = $('#thread [data-steerinput]')?.value || '';
+    if (!message.trim()) return;
+    btn.disabled = true;
+    steerCommand('edit_steer', S.editSteer.id, message);
   }
   async function queuedAction(type, id, message) {
     const c = current();
@@ -2024,14 +2045,16 @@
     if (cancelQuestion) { answerQuestion(cancelQuestion.dataset.uicancel, { cancelled: true }, cancelQuestion); return; }
     const steerAct = t.closest('[data-steeract]');
     if (steerAct) {
-      const type = steerAct.dataset.steeract, id = steerAct.dataset.id, c = current();
-      const old = S.store.sessions.find(s => s.id === c.id)?.messages.find(m => m.id === id)?.text;
-      const message = type === 'edit_steer' ? prompt('Edit steer', old) : null;
-      if (type === 'edit_steer' && !message?.trim()) return;
-      steerAct.disabled = true;
-      api(`/sessions/${c.id}/command`, { type, id, ...(message ? { message } : {}) }).then(refresh, e => { toast(e.message, 'err'); refresh(); });
+      const id = steerAct.dataset.id;
+      if (steerAct.dataset.steeract === 'edit_steer') {
+        const old = S.store.sessions.find(s => s.id === current().id)?.messages.find(m => m.id === id)?.text || '';
+        S.editSteer = { id, text: old, focus: true }; S.lastSig = ''; update();
+      } else { steerAct.disabled = true; steerCommand('cancel_steer', id); }
       return;
     }
+    const steerSave = t.closest('[data-steersave]');
+    if (steerSave) { saveSteer(steerSave); return; }
+    if (t.closest('[data-steerclose]')) { S.editSteer = null; S.lastSig = ''; update(); return; }
     const qedit = t.closest('[data-qedit]');
     if (qedit) { S.editQueue = { view: S.view, id: qedit.dataset.qedit }; renderQueue(S.store.sessions.find(s => s.id === current().id)); $('#queued textarea')?.focus(); return; }
     if (t.closest('[data-qtoggle]')) { S.queueOpen = S.queueOpen === S.view ? null : S.view; renderQueue(S.store.sessions.find(s => s.id === current().id)); return; }
@@ -2271,6 +2294,10 @@
       // Enter completes a partial name; on a full name it falls through and sends.
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && t.value !== '/' + hi.name)) { e.preventDefault(); pickSlash(hi.name); return; }
       if (e.key === 'Escape') { e.preventDefault(); S.slash = null; $('#slash').hidden = true; t.removeAttribute('aria-activedescendant'); return; }
+    }
+    if (t.matches('[data-steerinput]')) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const b = $('#thread [data-steersave]'); if (b && !b.disabled) saveSteer(b); return; }
+      if (e.key === 'Escape') { e.preventDefault(); S.editSteer = null; S.lastSig = ''; update(); return; }
     }
     if (t.id === 'input' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
