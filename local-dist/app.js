@@ -243,7 +243,8 @@
     }
     const arch = archivedKeys();
     for (const it of out) it.archived = arch.has(it.key);
-    return out.sort((a, b) => new Date(b.at) - new Date(a.at));
+    const live = it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
+    return out.sort((a, b) => live(a) - live(b) || new Date(b.at) - new Date(a.at));
   }
   function current() {
     let h = location.hash.slice(1);
@@ -253,6 +254,7 @@
     if (h.startsWith('/sub/')) return { kind: 'sub', file: h.slice(5) };
     if (h.startsWith('/changes/')) return { kind: 'changes', parent: h.slice(9) };
     if (h === '/settings') return { kind: 'settings' };
+    if (h === '/tools') return { kind: 'tools' };
     return { kind: 'home' };
   }
   const selKey = () => { const c = current(); return c.kind === 'session' ? 's:' + c.id : c.kind === 'native' ? 'f:' + c.file : ''; };
@@ -301,7 +303,7 @@
     }
     const sel = selKey();
     const collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]'));
-    const html = groups.map(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return `<button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>${esc(label)}<span class="gcount">${arr.length}</span></button>` + (shut ? [] : arr).map(it => `<div class="item-row">
+    const html = groups.map(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return `<div class="group-head"><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>` + (shut ? [] : arr).map(it => `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
@@ -346,6 +348,7 @@
   function build(c) {
     if (c.kind === 'home') return buildHome();
     if (c.kind === 'settings') return buildSettings();
+    if (c.kind === 'tools') return buildTools();
     main().innerHTML = `
       <div class="topbar" id="topbar"></div>
       <div class="chat-plan" id="chatPlan" hidden></div>
@@ -383,7 +386,7 @@
 
   function update() {
     const c = current();
-    if (!S.token || c.kind === 'home' || c.kind === 'settings') return;
+    if (!S.token || c.kind === 'home' || c.kind === 'settings' || c.kind === 'tools') return;
     if (c.kind === 'sub') { loadSub(c.file); renderSub(c.file); return; }
     if (c.kind === 'changes') { if (S.store) renderChanges(c); return; }
     if (!S.store) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Loading…</div>'; return; }
@@ -462,16 +465,24 @@
           ${s.sessionFile ? `<button data-copy-text="${esc(s.sessionFile)}">Copy OMP session file path</button>` : ''}
           ${s.sessionFile ? `<button data-copy-text="omp --resume &quot;${esc(s.sessionFile)}&quot;">Copy terminal resume command</button>` : ''}
           <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button>
-          ${idle ? '<button data-act="compact">Compact context</button>' : ''}
+          ${idle ? '<button data-act="compact">Compact context…</button>' : ''}
+          <button data-act="tree">Session tree…</button>
+          <button data-act="lastReply">Copy last reply</button>
+          <button data-act="cycleModel">Next model (OMP cycle)</button>
+          <button data-act="cycleThinking">Next thinking level</button>
+          ${idle ? `<button data-act="launch">Launch options…${launchCount(s.launch) ? ` <small>${launchCount(s.launch)} set</small>` : ''}</button>` : ''}
           <button data-act="rename">Rename session…</button>
-          ${idle ? '<button data-act="branch">Branch from an earlier message…</button><button data-act="handoff">Hand off to a fresh session…</button>' : ''}
+          ${idle ? '<button data-act="branch">Branch from an earlier message…</button><button data-act="handoff">Hand off to a fresh session…</button><button data-act="newSession">Start a fresh OMP session (/new)…</button><button data-act="switchSession">Switch to another saved session…</button>' : ''}
           <button data-act="export">Export as HTML</button>
           <button data-act="stats">Session stats</button>
+          ${s.sessionFile ? '<button data-act="share">Share session…</button>' : ''}
+          <button data-act="commit">Commit changes in this folder…</button>
           <div class="menu-sep"></div>
           ${pref('fast', s.fast?.enabled, 'Fast mode')}
           ${pref('autoCompaction', s.autoCompaction !== false, 'Auto-compact when context is full')}
           ${pref('autoRetry', s.prefs?.autoRetry !== false, 'Retry failed requests automatically')}
           ${pref('steeringMode', s.modes?.steering === 'all', 'Deliver all steers at once', 'all', 'one-at-a-time')}
+          ${pref('followUpMode', (s.modes?.followUp || s.prefs?.followUpMode) === 'all', 'Send all queued follow-ups together', 'all', 'one-at-a-time')}
           ${pref('interruptMode', s.modes?.interrupt === 'wait', 'Hold steers until the turn ends', 'wait', 'immediate')}
           <div class="menu-sep"></div>
           <button data-act="login">Log in to a provider…</button>
@@ -573,7 +584,13 @@
     })[k]).join(', ');
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
-  const fmtMs = ms => !ms && ms !== 0 ? '' : ms < 1000 ? ms + 'ms' : ms < 60000 ? (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's' : Math.floor(ms / 60000) + 'm ' + Math.round(ms % 60000 / 1000) + 's';
+  const fmtMs = ms => {
+    if (!ms && ms !== 0) return '';
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+    const seconds = Math.round(ms / 1000), hours = Math.floor(seconds / 3600);
+    return (hours ? hours + 'h ' : '') + Math.floor(seconds % 3600 / 60) + 'm ' + seconds % 60 + 's';
+  };
   const argsCache = new Map();
   const parseArgs = s => { if (s && typeof s === 'object') return s; return memo(argsCache, String(s), () => { try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch { return null; } }); };
   const shortPath = p => { const parts = String(p).split(/[\\/]/).filter(Boolean); return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : String(p); };
@@ -747,7 +764,7 @@
       if (opts.retry) label = `Retrying after an error (attempt ${+opts.retry.attempt} of ${+opts.retry.maxAttempts})${opts.retry.error ? ': ' + esc(opts.retry.error.slice(0, 200)) : ''} <button class="btn sm ghost" data-act="abortRetry">Stop retrying</button>`;
       if (!opts.compacting && !opts.retry && !opts.task && !pending && status === 'running' && idle >= 20) {
         const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : last?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
-        label = `${waitingOn} · no activity for ${idle < 60 ? Math.floor(idle) + 's' : Math.floor(idle / 60) + 'm ' + Math.floor(idle % 60) + 's'}`;
+        label = `${waitingOn} · no activity for ${fmtMs(Math.floor(idle) * 1000)}`;
       }
       parts.push(`<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
     }
@@ -900,9 +917,10 @@
     for (const ph of s?.todos || []) for (const t of ph.tasks || []) { total++; if (t.status === 'completed') done++; }
     return { total, done };
   }
-  function planPhases(s) {
-    const icon = st => st === 'completed' ? '✓' : st === 'in_progress' ? '◉' : '○';
-    return (s?.todos || []).map(ph => `<div class="phase"><b>${esc(ph.name || 'Tasks')}</b>${(ph.tasks || []).map(t => `<div class="task ${esc(t.status)}"><i>${icon(t.status)}</i><span>${esc(t.content)}</span></div>`).join('')}</div>`).join('');
+  function planPhases(s, editable) {
+    const icon = st => st === 'completed' ? '✓' : st === 'in_progress' ? '◉' : st === 'blocked' ? '⊘' : st === 'abandoned' ? '✕' : '○';
+    const label = st => ({ pending: 'Pending', in_progress: 'In progress', completed: 'Done', blocked: 'Blocked', abandoned: 'Dropped' })[st] || st;
+    return (s?.todos || []).map((ph, p) => `<div class="phase"><b>${esc(ph.name || 'Tasks')}</b>${(ph.tasks || []).map((t, i) => `<div class="task ${esc(t.status)}">${editable ? `<button type="button" class="todo-mark" data-todo="${p}:${i}" title="${esc(label(t.status))}. Click to change" aria-label="${esc(label(t.status))}: ${esc(t.content)}. Change status">${icon(t.status)}</button>` : `<i>${icon(t.status)}</i>`}<span${t.blocker ? ` title="${esc('Blocked: ' + t.blocker)}"` : ''}>${esc(t.content)}</span></div>`).join('')}</div>`).join('');
   }
   function renderChatPlan(s) {
     const el = $('#chatPlan');
@@ -1065,7 +1083,7 @@
     const tab = total && S.sideTab === 'plan' ? 'plan' : 'activity';
     const shown = finished.slice(0, 60);
     setIfChanged(el, `<div class="side-head"><div class="side-tabs" role="group" aria-label="Session panel"><button type="button" class="${tab === 'plan' ? 'on' : ''}" aria-pressed="${tab === 'plan'}" data-act="sideTab" data-tab="plan" ${total ? '' : 'disabled'}>Plan${total ? ` <small>${done}/${total}</small>` : ''}</button><button type="button" class="${tab === 'activity' ? 'on' : ''}" aria-pressed="${tab === 'activity'}" data-act="sideTab" data-tab="activity">Activity${running.length ? ` <small>${running.length}</small>` : ''}</button></div><button class="btn sm ghost" data-act="closeSide" aria-label="Close panel">✕</button></div>
-      ${tab === 'plan' ? `<div class="side-plan"><div class="side-plan-progress"><span>${done} of ${total} complete</span><progress value="${done}" max="${total}"></progress></div>${planPhases(s)}</div>` :
+      ${tab === 'plan' ? `<div class="side-plan"><div class="side-plan-progress"><span>${done} of ${total} complete</span><progress value="${done}" max="${total}"></progress></div>${planPhases(s, current().kind === 'session')}${current().kind === 'session' ? '<button class="btn sm ghost todo-clear" data-act="clearTodos">Clear task plan</button>' : ''}</div>` :
         `${jobs.length ? `<div class="side-sec"><div class="side-label">Running <span>${running.length}</span></div>${running.map(jobCard).join('') || '<div class="side-empty">Nothing running right now.</div>'}</div>
       ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
       ${advisors.length ? `<div class="side-sec"><div class="side-label">Advisors <span>${advisors.length}</span></div>${advisors.map(x => `<div class="job"><div class="job-top"><b>${esc(x.name === '__advisor' ? 'Default' : x.name.slice('__advisor.'.length))}</b><span class="dur">${esc(ago(x.updatedAt))}</span></div>${x.model ? `<div class="job-sub">${esc(modelName(x.model))}</div>` : ''}<button class="btn sm ghost job-open" data-sub="${esc(x.file)}">Open transcript →</button></div>`).join('')}</div>` : ''}`}`);
@@ -1373,9 +1391,10 @@
       status = `<span class="grow">From OMP history${native?.cwd ? ' · ' + esc(native.cwd) : ''}. Don't continue it here while it's still open in a terminal.</span>`;
     } else if (s.status === 'running' || s.status === 'queued') {
       placeholder = 'Steer OMP while it works…';
-      hintText = command ? 'Enter runs command · Alt+Enter queues for later' : 'Enter steers now · Alt+Enter queues for later';
+      hintText = command ? 'Enter runs command · Alt+Enter queues for later' : 'Enter steers now · Ctrl+Enter stops & sends · Alt+Enter queues';
       btns = `<button class="btn" data-act="follow_up" ${has && !S.busy ? '' : 'disabled'} title="Send after OMP finishes (Alt+Enter)">Queue</button>
         <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !S.busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
+        ${has && !command && !S.busy ? '<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead (Ctrl+Enter)">■ Stop &amp; send</button>' : ''}
         <button class="btn danger" data-act="abort" title="Stop the current turn">■</button>`;
     } else {
       const fresh = !s.messages.some(m => m.role === 'user');
@@ -1699,8 +1718,176 @@
     catch (e) { toast(e.message, 'err'); }
   }
 
+  // ---------- session tools: compact, tree, new/switch session, cycling, launch options ----------
+  const openCompact = () => modal('Compact context', `<form data-compact><p class="muted">OMP summarises the conversation so far and continues from the summary, freeing context space.</p><textarea name="instructions" rows="3" maxlength="5000" placeholder="Optional: what the summary should keep or focus on"></textarea><div class="question-actions"><button class="btn sm primary" type="submit">Compact now</button></div></form>`);
+  const TREE_ICON = { user: '›', assistant: '◆', compaction: '⇣', branch: '⑂' };
+  async function openTree() {
+    try {
+      const r = await sessionApi({ type: 'tree' });
+      if (!r.nodes.length) return toast('This session has no messages yet.');
+      const forks = r.nodes.filter(n => n.forks).length;
+      modal('Session tree', `<p class="muted">Every message OMP recorded, including earlier branches. The highlighted path is the conversation the session continues from${forks ? ` · ${forks} ${forks === 1 ? 'fork' : 'forks'}` : ''}. Branch from one of your messages to start a new session from that point.</p><div class="tree-list">${r.nodes.map(n => `<div class="tree-node ${n.onPath ? 'on' : ''} ${esc(n.kind)}" style="--d:${Math.min(n.depth, 12)}"><i aria-hidden="true">${TREE_ICON[n.kind] || '·'}</i><span class="tree-text" title="${esc(n.text)}">${n.label ? `<b class="tag">${esc(n.label)}</b> ` : ''}${esc(n.text || '(empty)')}</span>${n.forks ? `<small class="muted">${n.forks} branches</small>` : ''}${n.kind === 'user' ? `<button class="btn sm ghost" data-branch="${esc(n.id)}" title="Start a new session from this message">Branch</button>` : ''}</div>`).join('')}${r.truncated ? '<div class="history-note">Showing the first 3,000 entries.</div>' : ''}</div>`);
+      $('#modal')?.classList.add('wide-modal');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  async function openSwitch() {
+    const s = S.store?.sessions.find(x => x.id === current().id);
+    if (!s) return;
+    if (!S.native.length) { S.nativeAt = 0; await refresh(); }
+    const list = S.native.filter(n => norm(n.cwd) === norm(s.cwd) && (!s.sessionFile || norm(n.file) !== norm(s.sessionFile))).slice(0, 60);
+    modal('Switch to another saved session', list.length
+      ? `<p class="muted">OMP loads the chosen session into this panel entry. The current conversation stays in its own session file.</p><div class="modal-list">${list.map(n => `<button data-switch="${esc(n.file)}" title="${esc(n.preview || n.title)}">${esc(n.title)} <span class="muted">· ${esc(ago(n.updatedAt))}</span></button>`).join('')}</div>`
+      : '<p class="muted">There are no other saved OMP sessions for this folder.</p>');
+  }
+  async function cycle(type) {
+    try {
+      const s = await sessionApi({ type });
+      await refresh();
+      toast(type === 'cycle_model' ? `Model: ${modelLabel(sessionModel(s), s.thinking) || 'OMP default'}` : `Thinking: ${s.thinking || 'off'}`);
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  async function copyLastReply() {
+    try { const { text } = await sessionApi({ type: 'last_reply' }); text ? copy(text, 'Last reply copied') : toast('OMP has not replied yet.'); }
+    catch (e) { toast(e.message, 'err'); }
+  }
+  // Todo edits go straight to OMP (set_todos); clicking a task's marker advances its status.
+  const NEXT_STATUS = { pending: 'in_progress', in_progress: 'completed', completed: 'pending', blocked: 'pending', abandoned: 'pending' };
+  async function editTodos(fn) {
+    const s = S.store?.sessions.find(x => x.id === current().id);
+    if (!s) return;
+    const phases = JSON.parse(JSON.stringify(s.todos || []));
+    fn(phases);
+    s.todos = phases; update();
+    try { await sessionApi({ type: 'todos', phases }); await refresh(); }
+    catch (e) { toast(e.message, 'err'); await refresh(); }
+  }
+  const launchCount = o => Object.keys(o || {}).length;
+  const LAUNCH_FLAGS = [['prewalk', 'Prewalk: switch to a cheaper model once the plan has a todo list'], ['planYolo', 'Plan YOLO: plan read-only, auto-approve, then implement (first launch only)'], ['noLsp', 'Disable LSP tools, formatting and diagnostics'], ['noPty', 'Disable interactive (PTY) bash'], ['noSkills', 'Disable skills'], ['noRules', 'Disable rules'], ['noExtensions', 'Disable extension discovery'], ['noTools', 'Disable all built-in tools'], ['noTitle', 'Do not auto-generate a title']];
+  // ctx: 'home' edits the next session's options; otherwise the open session's (OMP restarts to apply them).
+  function openLaunch(ctx) {
+    const s = ctx === 'home' ? null : S.store?.sessions.find(x => x.id === current().id);
+    const o = (ctx === 'home' ? S.home.launch : s?.launch) || {};
+    const models = (S.models?.models || []).map(m => `<option value="${esc(m.selector)}">${esc(m.name)}</option>`).join('');
+    const model = (k, label) => `<label>${esc(label)}<input name="${k}" list="launchModels" value="${esc(o[k] || '')}" placeholder="provider/model" spellcheck="false" autocomplete="off"></label>`;
+    modal('Launch options', `<form data-launch="${ctx === 'home' ? 'home' : 'session'}" class="launch-form">
+      <p class="muted">${ctx === 'home' ? 'Command-line options for the next session you start here.' : 'Command-line options for this session. OMP restarts (while idle) to apply them.'}</p>
+      <datalist id="launchModels">${models}</datalist>
+      <label>Tool approvals<select name="approvalMode"><option value="">OMP setting (tools.approvalMode)</option>${['always-ask', 'write', 'yolo'].map(v => `<option ${o.approvalMode === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label>Max run time<input name="maxTime" value="${esc(o.maxTime || '')}" placeholder="e.g. 600, 10m or 1h" spellcheck="false"></label>
+      <label>Only these tools<input name="tools" value="${esc((o.tools || []).join(','))}" placeholder="Comma-separated, e.g. read,grep,edit" spellcheck="false"></label>
+      <label>Skill filter<input name="skills" value="${esc((o.skills || []).join(','))}" placeholder="Glob patterns, e.g. git-*,docker" spellcheck="false"></label>
+      <label class="span2">Extra workspace folders<textarea name="addDirs" rows="2" placeholder="One absolute path per line" spellcheck="false">${esc((o.addDirs || []).join('\n'))}</textarea></label>
+      ${model('smol', 'Smol model (fast tasks)')}${model('slow', 'Slow model (deep reasoning)')}${model('plan', 'Plan model')}${model('prewalkInto', 'Prewalk target model')}${model('planYoloInto', 'Plan YOLO execution model')}
+      <fieldset class="span2"><legend>Switches</legend>${LAUNCH_FLAGS.map(([k, label]) => `<label class="check"><input type="checkbox" name="${k}" ${o[k] ? 'checked' : ''}> ${esc(label)}</label>`).join('')}</fieldset>
+      <label class="span2">Append to system prompt<textarea name="appendSystemPrompt" rows="2" maxlength="8000" placeholder="Extra instructions added to OMP's system prompt">${esc(o.appendSystemPrompt || '')}</textarea></label>
+      <label class="span2">Replace system prompt<textarea name="systemPrompt" rows="2" maxlength="8000" placeholder="Leave empty to keep OMP's coding-assistant prompt">${esc(o.systemPrompt || '')}</textarea></label>
+      <div class="question-actions span2">${launchCount(o) ? '<button class="btn sm ghost" type="button" data-launch-clear>Clear all</button>' : ''}<button class="btn sm primary" type="submit">${ctx === 'home' ? 'Use for next session' : 'Save and restart OMP'}</button></div></form>`);
+    $('#modal')?.classList.add('wide-modal');
+  }
+  function launchValues(form) {
+    const f = form.elements, o = {}, v = k => f[k].value.trim();
+    for (const k of ['approvalMode', 'maxTime', 'smol', 'slow', 'plan', 'prewalkInto', 'planYoloInto', 'appendSystemPrompt', 'systemPrompt']) if (v(k)) o[k] = v(k);
+    for (const k of ['tools', 'skills']) { const list = v(k).split(',').map(x => x.trim()).filter(Boolean); if (list.length) o[k] = list; }
+    const dirs = v('addDirs').split('\n').map(x => x.trim()).filter(Boolean); if (dirs.length) o.addDirs = dirs;
+    for (const [k] of LAUNCH_FLAGS) if (f[k].checked) o[k] = true;
+    return o;
+  }
+  async function saveLaunch(form, clear) {
+    const o = clear ? {} : launchValues(form);
+    if (form.dataset.launch === 'home') { S.home.launch = launchCount(o) ? o : undefined; closeModal(); renderHome(); toast(launchCount(o) ? `${launchCount(o)} launch ${launchCount(o) === 1 ? 'option' : 'options'} set` : 'Launch options cleared'); return; }
+    form.querySelectorAll('button,input,select,textarea').forEach(x => { x.disabled = true; });
+    try { await sessionApi({ type: 'launch', launch: o }); closeModal(); await refresh(); toast('Launch options saved'); }
+    catch (e) { toast(e.message, 'err'); form.querySelectorAll('button,input,select,textarea').forEach(x => { x.disabled = false; }); }
+  }
+
+  // ---------- OMP command-line tools ----------
+  S.tools = { catalog: null, jobs: [], tool: 'commit', action: '', values: {}, cwd: '', error: '' };
+  function buildTools() {
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+      <div class="title-block"><h1>OMP tools</h1><div class="meta"><span>Run OMP's command-line tools from here. Output appears below each form.</span></div></div></div>
+      <div class="settings"><nav class="set-nav" id="toolNav"></nav><div class="set-main"><div id="toolForm"><div class="working"><span class="spinner"></span> Loading tools…</div></div><div id="toolJobs"></div></div></div>`;
+    loadTools();
+  }
+  async function loadTools() {
+    try { const r = await api('/cli'); S.tools.catalog = r.tools; S.tools.jobs = r.jobs; S.tools.error = ''; }
+    catch (e) { S.tools.error = e.message; }
+    if (current().kind === 'tools') renderTools();
+  }
+  async function refreshJobs() {
+    try { S.tools.jobs = (await api('/cli')).jobs; } catch { return; }
+    if (current().kind === 'tools') renderToolJobs();
+  }
+  // Jump to a tool with fields already filled (from a session's menu).
+  function openTool(tool, action, values = {}, cwd = '') {
+    Object.assign(S.tools, { tool, action, values, cwd });
+    if (location.hash === '#/tools') { S.view = ''; route(); } else location.hash = '#/tools';
+  }
+  function toolFolders() {
+    const seen = new Set(), out = [];
+    for (const p of [S.tools.cwd, ...(S.store?.projects || []).map(p => p.path), ...S.native.map(n => n.cwd)]) if (p && !seen.has(norm(p))) { seen.add(norm(p)); out.push(p); }
+    return out.slice(0, 40);
+  }
+  function toolField(f, v) {
+    const id = 'tf-' + f.name, req = f.required ? ' required' : '', lbl = `${esc(f.label)}${f.flag ? ` <code class="muted">${esc(f.flag)}</code>` : ''}`;
+    if (f.type === 'bool') return `<label class="check span2"><input type="checkbox" name="${esc(f.name)}" ${v ?? f.default ? 'checked' : ''}> ${lbl}</label>`;
+    if (f.type === 'select') return `<label for="${id}">${lbl}<select id="${id}" name="${esc(f.name)}"${req}>${f.options.map(o => `<option value="${esc(o)}" ${(v ?? '') === o ? 'selected' : ''}>${esc(o.replace(/^--/, '') || '(default)')}</option>`).join('')}</select></label>`;
+    if (f.type === 'session') return `<label for="${id}" class="span2">${lbl}<select id="${id}" name="${esc(f.name)}"${req}><option value="">Choose a saved session…</option>${S.native.slice(0, 200).map(n => `<option value="${esc(n.file)}" ${v === n.file ? 'selected' : ''}>${esc(n.title)} · ${esc(base(n.cwd))} · ${esc(ago(n.updatedAt))}</option>`).join('')}</select></label>`;
+    if (f.type === 'textarea') return `<label for="${id}" class="span2">${lbl}<textarea id="${id}" name="${esc(f.name)}" rows="3" maxlength="${f.max || 500}"${req}>${esc(v || '')}</textarea></label>`;
+    const type = f.type === 'int' ? `type="number" step="1"${f.min !== undefined ? ` min="${f.min}"` : ''}${f.max !== undefined ? ` max="${f.max}"` : ''}` : 'type="text"';
+    return `<label for="${id}">${lbl}<input id="${id}" ${type} name="${esc(f.name)}" value="${esc(v ?? '')}" placeholder="${esc(f.placeholder || (f.type === 'model' ? 'provider/model' : f.type === 'dir' ? 'Absolute folder path' : ''))}"${f.type === 'model' ? ' list="toolModels"' : ''} spellcheck="false" autocomplete="off"${req}></label>`;
+  }
+  function renderTools() {
+    const T = S.tools, cat = T.catalog;
+    if (!cat) { $('#toolForm').innerHTML = T.error ? `<div class="msg system err"><div class="bubble">${esc(T.error)}</div></div>` : ''; return; }
+    if (!cat[T.tool]) T.tool = Object.keys(cat)[0];
+    const tool = cat[T.tool];
+    if (!tool.actions[T.action]) T.action = Object.keys(tool.actions)[0];
+    const a = tool.actions[T.action];
+    const running = id => T.jobs.filter(j => j.tool === id && j.status === 'running').length;
+    $('#toolNav').innerHTML = Object.entries(cat).map(([id, t]) => `<a href="#" data-tool="${esc(id)}" class="${id === T.tool ? 'on' : ''}" ${id === T.tool ? 'aria-current="page"' : ''}>${esc(t.title)}<span>${running(id) ? '<i title="Running">●</i>' : ''}</span></a>`).join('');
+    const folders = toolFolders();
+    $('#toolForm').innerHTML = `<section class="set-group tool-pane"><h2>${esc(tool.title)}</h2><p class="set-desc">${esc(tool.description)}</p>
+      ${Object.keys(tool.actions).length > 1 ? `<div class="tool-tabs" role="group" aria-label="Action">${Object.entries(tool.actions).map(([id, x]) => `<button type="button" class="${id === T.action ? 'on' : ''}" aria-pressed="${id === T.action}" data-toolaction="${esc(id)}">${esc(x.label)}</button>`).join('')}</div>` : ''}
+      <form class="tool-form" data-toolform><datalist id="toolModels">${(S.models?.models || []).map(m => `<option value="${esc(m.selector)}">${esc(m.name)}</option>`).join('')}</datalist>
+        ${a.cwd ? `<label class="span2" for="tf-cwd">Folder${a.cwd === 'required' ? '' : ' <span class="muted">(optional)</span>'}<input id="tf-cwd" name="__cwd" list="toolFolders" value="${esc(T.cwd)}" placeholder="Absolute folder path" spellcheck="false" autocomplete="off"${a.cwd === 'required' ? ' required' : ''}><datalist id="toolFolders">${folders.map(p => `<option value="${esc(p)}">`).join('')}</datalist></label>` : ''}
+        ${a.fields.map(f => toolField(f, T.values[f.name])).join('')}
+        <div class="tool-run span2"><code class="muted" title="Command">${esc(a.command)}</code><button class="btn primary" type="submit">Run</button></div>
+      </form></section>`;
+    renderToolJobs();
+  }
+  function renderToolJobs() {
+    const el = $('#toolJobs');
+    if (!el) return;
+    const jobs = S.tools.jobs.filter(j => j.tool === S.tools.tool);
+    setIfChanged(el, jobs.length ? `<section class="set-group"><h2>Recent runs</h2>${jobs.map(j => `<div class="tool-job ${esc(j.status)}"><div class="tool-job-head"><span class="dot ${j.status === 'running' ? 'running' : j.status === 'error' ? 'error' : 'done'}"></span><code title="${esc(j.cwd)}">${esc(j.command)}</code><span class="muted">${j.status === 'running' ? 'running…' : j.status === 'error' ? `failed${j.exitCode != null ? ' · exit ' + j.exitCode : ''}` : 'done'} · ${esc(ago(j.finishedAt || j.startedAt))}</span>${j.status === 'running' ? `<button class="btn sm danger" data-jobstop="${esc(j.id)}">Stop</button>` : `<button class="btn sm ghost" data-copy-text="${esc(plain(j.output || ''))}">Copy</button>`}</div><pre class="tool-out">${esc(plain(j.output || (j.status === 'running' ? 'Waiting for output…' : '')))}</pre></div>`).join('')}</section>` : '');
+    el.querySelectorAll('.tool-job.running .tool-out').forEach(p => { p.scrollTop = p.scrollHeight; });
+  }
+  function toolValues(form) {
+    const a = S.tools.catalog[S.tools.tool].actions[S.tools.action], values = {};
+    for (const f of a.fields) {
+      const el = form.elements[f.name];
+      if (!el) continue;
+      if (f.type === 'bool') values[f.name] = el.checked;
+      else if (f.type === 'int') { if (el.value.trim() !== '') values[f.name] = Number(el.value); }
+      else if (el.value.trim() !== '') values[f.name] = el.value.trim();
+    }
+    return values;
+  }
+  async function runTool(form) {
+    const T = S.tools, a = T.catalog[T.tool].actions[T.action];
+    T.values = toolValues(form); T.cwd = form.elements.__cwd?.value.trim() || '';
+    if (a.confirm && (!a.confirmIf || T.values[a.confirmIf]) && !confirm(a.confirm)) return;
+    const btn = form.querySelector('[type=submit]'); btn.disabled = true;
+    try {
+      const job = await api('/cli', { tool: T.tool, action: T.action, values: T.values, ...(a.cwd && T.cwd ? { cwd: T.cwd } : {}) });
+      T.jobs = [job, ...T.jobs.filter(j => j.id !== job.id)];
+      renderTools();
+    } catch (e) { toast(e.message, 'err'); }
+    finally { btn.disabled = false; }
+  }
+
   // ---------- OMP settings ----------
-  const GROUPS = [['model', 'Models'], ['interaction', 'Interaction & approvals'], ['context', 'Context & compaction'], ['tools', 'Tools'], ['tasks', 'Tasks & subagents'], ['appearance', 'Appearance'], ['shell', 'Shell'], ['files', 'Files'], ['memory', 'Memory'], ['providers', 'Providers'], ['other', 'Other'], ['internal', 'Advanced']];
+  const GROUPS =[['model', 'Models'], ['interaction', 'Interaction & approvals'], ['context', 'Context & compaction'], ['tools', 'Tools'], ['tasks', 'Tasks & subagents'], ['appearance', 'Appearance'], ['shell', 'Shell'], ['files', 'Files'], ['memory', 'Memory'], ['providers', 'Providers'], ['other', 'Other'], ['internal', 'Advanced']];
   const groupLabel = g => (GROUPS.find(x => x[0] === g) || [g, g[0].toUpperCase() + g.slice(1)])[1];
   // Records that map a name to a model selector get the model picker instead of raw JSON.
   const MODEL_MAPS = new Set(['modelRoles', 'task.agentModelOverrides']);
@@ -1905,6 +2092,7 @@
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}${fastChip(h.model, h.fast)}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
+            <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…">⚙ Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
           </div>
@@ -1939,7 +2127,7 @@
     const attachment = attached();
     S.attachments = S.attachments.filter(a => a.view !== S.view);
     try {
-      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...imagePayload(attachment) });
+      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}), ...imagePayload(attachment) });
       S.home.prompt = '';
       await refresh();
       location.hash = '#/s/' + s.id;
@@ -1982,7 +2170,7 @@
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
   async function loop() {
-    if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); }
+    if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
     const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued');
     // Back off while the companion is unreachable instead of hammering it every second.
     setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
@@ -2045,6 +2233,9 @@
       const br = t.closest('[data-branch]'), lg = t.closest('[data-login]');
       if (br) doBranch(br.dataset.branch);
       if (lg) { closeModal(); sessionAction({ type: 'login', provider: lg.dataset.login }); }
+      const sw = t.closest('[data-switch]');
+      if (sw && !sw.disabled) { $('#modal').querySelectorAll('[data-switch]').forEach(b => { b.disabled = true; }); sessionAction({ type: 'switch_session', file: sw.dataset.switch }).then(ok => { if (ok) { closeModal(); S.lastSig = ''; refreshNative(); toast('Switched session'); } else $('#modal')?.querySelectorAll('[data-switch]').forEach(b => { b.disabled = false; }); }); }
+      if (t.closest('[data-launch-clear]')) saveLaunch(t.closest('form'), true);
       return;
     }
     const sl = t.closest('[data-slash]');
@@ -2119,6 +2310,8 @@
     if (copyBtn) { copy(copyBtn.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
     const ct = t.closest('[data-copy-text]');
     if (ct) { copy(ct.dataset.copyText); ct.closest('.menu')?.classList.remove('open'); return; }
+    const ns = t.closest('[data-new-session]');
+    if (ns) { newSession(ns.dataset.newSession); return; }
     const gl = t.closest('[data-group]');
     if (gl) { const c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); localStorage.setItem('omp-collapsed', JSON.stringify([...c])); renderList(); return; }
     const ar = t.closest('[data-archive]');
@@ -2133,6 +2326,14 @@
     if (go) { goFolder(go.dataset.go); return; }
     const f = t.closest('[data-filter]');
     if (f) { S.filter = f.dataset.filter; document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('on', b === f)); renderList(); return; }
+    const tl = t.closest('[data-tool]');
+    if (tl) { e.preventDefault(); Object.assign(S.tools, { tool: tl.dataset.tool, action: '', values: {} }); renderTools(); return; }
+    const ta = t.closest('[data-toolaction]');
+    if (ta) { S.tools.action = ta.dataset.toolaction; S.tools.values = {}; renderTools(); return; }
+    const js = t.closest('[data-jobstop]');
+    if (js) { js.disabled = true; api('/cli/stop', { id: js.dataset.jobstop }).then(refreshJobs, err => toast(err.message, 'err')); return; }
+    const td = t.closest('[data-todo]');
+    if (td) { const [p, i] = td.dataset.todo.split(':').map(Number); editTodos(phases => { const task = phases[p]?.tasks?.[i]; if (!task) return; task.status = NEXT_STATUS[task.status] || 'pending'; delete task.blocker; }); return; }
     const a = t.closest('[data-act]');
     if (!a) return;
     const act = a.dataset.act, c = current();
@@ -2143,7 +2344,23 @@
     else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.name !== a.dataset.name); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
-    else if (act === 'abort' || act === 'complete' || act === 'compact') sessionCommand(act);
+    else if (act === 'abort' || act === 'complete') sessionCommand(act);
+    else if (act === 'interrupt') send('interrupt');
+    else if (act === 'homeLaunch') openLaunch('home');
+    else if (act === 'clearTodos') { if (confirm('Clear the task plan for this session?')) editTodos(phases => { phases.length = 0; }); }
+    else if (['compact', 'tree', 'lastReply', 'cycleModel', 'cycleThinking', 'launch', 'newSession', 'switchSession', 'share', 'commit'].includes(act)) {
+      a.closest('.menu')?.classList.remove('open');
+      const s = S.store?.sessions.find(x => x.id === c.id);
+      if (act === 'compact') openCompact();
+      else if (act === 'tree') openTree();
+      else if (act === 'lastReply') copyLastReply();
+      else if (act === 'cycleModel' || act === 'cycleThinking') cycle(act === 'cycleModel' ? 'cycle_model' : 'cycle_thinking');
+      else if (act === 'launch') { if (!S.models) ensureModels().then(() => openLaunch('session'), () => openLaunch('session')); else openLaunch('session'); }
+      else if (act === 'newSession') { if (confirm('Start a fresh OMP session in this panel entry? The current conversation is kept in its own session file and stays in OMP history.')) sessionAction({ type: 'new_session' }).then(ok => { if (ok) { S.lastSig = ''; refreshNative(); toast('Started a fresh session'); } }); }
+      else if (act === 'switchSession') openSwitch();
+      else if (act === 'share' && s?.sessionFile) openTool('share', 'share', { session: s.sessionFile });
+      else if (act === 'commit' && s) openTool('commit', 'run', { dryRun: true }, s.cwd);
+    }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
@@ -2265,6 +2482,9 @@
   });
   document.addEventListener('submit', e => {
     e.preventDefault();
+    if (e.target.hasAttribute('data-compact')) { const instructions = e.target.elements.instructions.value.trim(); closeModal(); sessionAction({ type: 'compact', ...(instructions ? { instructions } : {}) }).then(ok => ok && toast('Compacting context…')); return; }
+    if (e.target.dataset.launch) { saveLaunch(e.target); return; }
+    if (e.target.hasAttribute('data-toolform')) { runTool(e.target); return; }
     if (e.target.hasAttribute('data-handoff')) { const instructions = e.target.elements.instructions.value.trim(); closeModal(); sessionAction({ type: 'handoff', instructions }); return; }
     if (e.target.hasAttribute('data-uiform')) { answerQuestion(e.target.dataset.uiform, { value: e.target.elements.answer.value }, e.target); return; }
     if (e.target.dataset.mmadd) { const name = e.target.querySelector('input').value.trim(); if (!/^[\w.-]{1,60}$/.test(name)) return toast('Use letters, numbers, dots, dashes or underscores', 'err'); pickMapModel(e.target.dataset.mmadd, name); return; }
@@ -2320,7 +2540,7 @@
     if (t.id === 'input' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       const s = current().kind === 'session' && S.store?.sessions.find(x => x.id === current().id);
-      send(s && (s.status === 'running' || s.status === 'queued') ? (e.altKey ? 'follow_up' : 'steer') : undefined);
+      send(s && (s.status === 'running' || s.status === 'queued') ? (e.altKey ? 'follow_up' : (e.ctrlKey || e.metaKey) && !/^\/\S/.test(t.value.trim()) ? 'interrupt' : 'steer') : undefined);
       return;
     }
     if (t.id === 'homePrompt' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); startSession(); return; }

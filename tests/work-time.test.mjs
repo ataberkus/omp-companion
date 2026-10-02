@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { createCompanion } from '../companion/server.mjs';
 
 test('work time spans steers, questions, yields and queued turns, then freezes until new work starts', async t => {
@@ -109,4 +110,40 @@ for await (const line of createInterface({ input: process.stdin })) {
   const saved = JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions[0];
   assert.equal(saved.workStartedAt, resumed);
   assert.equal(saved.workFinishedAt, closed, 'shutdown must not keep counting offline time');
+});
+
+test('sidebar work timers carry minutes into hours and keep completed durations frozen', async t => {
+  const now = Date.UTC(2026, 0, 1);
+  t.mock.timers.enable({ apis: ['Date'], now });
+  const session = { id: 'session', title: 'Work', cwd: '/project', status: 'running', createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), workStartedAt: new Date(now).toISOString() };
+  const timers = new Map();
+  const node = () => ({ innerHTML: '', value: '', style: {}, scrollHeight: 20, classList: { remove() {}, toggle() {} }, addEventListener() {}, setAttribute() {}, querySelector: () => null, focus() {} });
+  const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect'].map(id => [id, node()]));
+  runInNewContext(await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8'), {
+    Date, document: {
+      hidden: false, getElementById: id => elements.get(id), querySelector: selector => elements.get(selector.slice(1)) || null,
+      querySelectorAll: () => [], addEventListener() {},
+    },
+    window: { addEventListener() {} }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
+    location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams, AbortSignal,
+    localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
+    setTimeout: fn => timers.set(fn.name, fn),
+    fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? { projects: [], sessions: [session], archived: [] } : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
+  });
+  await new Promise(setImmediate);
+  const label = () => elements.get('list').innerHTML.match(/class="work-time"[^>]*>([^<]*)<\/span>/)?.[1];
+  let previous = 0;
+  for (const [seconds, expected] of [[0, '0s'], [59, '59s'], [60, '1m 0s'], [3599, '59m 59s'], [3600, '1h 0m 0s'], [3919, '1h 5m 19s'], [7199, '1h 59m 59s'], [7200, '2h 0m 0s'], [90061, '25h 1m 1s']]) {
+    t.mock.timers.tick((seconds - previous) * 1000);
+    previous = seconds;
+    await timers.get('loop')();
+    assert.equal(label(), 'Running ' + expected);
+  }
+  session.status = 'review';
+  session.workFinishedAt = new Date(now + 3919000).toISOString();
+  await timers.get('loop')();
+  assert.equal(label(), 'Last run 1h 5m 19s');
+  t.mock.timers.tick(60000);
+  await timers.get('loop')();
+  assert.equal(label(), 'Last run 1h 5m 19s');
 });

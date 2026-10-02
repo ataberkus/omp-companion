@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { RpcProcess } from './rpc.mjs';
 const exec=promisify(execFile);
@@ -181,6 +181,156 @@ function modelUsageText(data,provider,model){
  return ['```text',...lines,'```'].join('\n');
 }
 
+const MODEL_RE=/^[\w.~@+-]+\/[\w.~@:+\/-]+$/;
+// Per-session OMP launch flags. Values are passed as `--flag=value`, so a value can never be read as another flag.
+const APPROVAL_MODES=['always-ask','write','yolo'];
+const LAUNCH_BOOLS={prewalk:'--prewalk',planYolo:'--plan-yolo',noTools:'--no-tools',noLsp:'--no-lsp',noPty:'--no-pty',noSkills:'--no-skills',noRules:'--no-rules',noExtensions:'--no-extensions',noTitle:'--no-title'};
+const LAUNCH_MODELS={smol:'--smol',slow:'--slow',plan:'--plan',prewalkInto:'--prewalk-into',planYoloInto:'--plan-yolo-into'};
+async function launchOptions(v){
+ if(v===undefined||v===null)return undefined;
+ if(typeof v!=='object'||Array.isArray(v))throw error('Invalid launch options.');
+ const o={};const list=(value,name,re,max)=>{const items=(Array.isArray(value)?value:String(value??'').split(',')).map(x=>String(x).trim()).filter(Boolean);if(items.length>max||items.some(x=>x.length>200||!re.test(x)))throw error(`Invalid ${name}.`);return items;};
+ if(v.approvalMode){if(!APPROVAL_MODES.includes(v.approvalMode))throw error('Approval mode must be always-ask, write or yolo.');o.approvalMode=v.approvalMode;}
+ for(const k of Object.keys(LAUNCH_BOOLS))if(v[k]===true)o[k]=true;else if(v[k]!==undefined&&v[k]!==false)throw error(`${k} must be true or false.`);
+ for(const k of Object.keys(LAUNCH_MODELS))if(v[k]){if(typeof v[k]!=='string'||!MODEL_RE.test(v[k].trim()))throw error(`Invalid ${k} model.`);o[k]=v[k].trim();}
+ if(v.tools){const t=list(v.tools,'tool list',/^[\w-]+$/,80);if(t.length)o.tools=t;}
+ if(v.skills){const t=list(v.skills,'skill patterns',/^[\w*?.:@\/-]+$/,40);if(t.length)o.skills=t;}
+ if(v.maxTime){const t=String(v.maxTime).trim();if(!/^\d{1,6}[smh]?$/.test(t))throw error('Max time looks like 600, 10m or 1h.');o.maxTime=t;}
+ if(v.addDirs){const dirs=Array.isArray(v.addDirs)?v.addDirs:String(v.addDirs).split('\n');const out=[];for(const d of dirs.map(x=>String(x).trim()).filter(Boolean).slice(0,10))out.push(await resolveDir(d));if(out.length)o.addDirs=out;}
+ for(const k of ['systemPrompt','appendSystemPrompt'])if(typeof v[k]==='string'&&v[k].trim()){if(v[k].length>8000)throw error('System prompts are limited to 8,000 characters here.');o[k]=v[k].trim();}
+ else if(v[k]!==undefined&&typeof v[k]!=='string')throw error(`${k} must be text.`);
+ return Object.keys(o).length?o:undefined;
+}
+// `--plan-yolo` forces plan mode at start, so it only applies to a session's first launch.
+function launchArgs(o,first){
+ if(!o)return [];const a=[];
+ if(o.approvalMode)a.push('--approval-mode='+o.approvalMode);
+ for(const [k,f] of Object.entries(LAUNCH_BOOLS))if(o[k]&&(k!=='planYolo'||first))a.push(f);
+ for(const [k,f] of Object.entries(LAUNCH_MODELS))if(o[k]&&(k!=='planYoloInto'||first&&o.planYolo)&&(k!=='prewalkInto'||o.prewalk))a.push(`${f}=${o[k]}`);
+ if(o.tools)a.push('--tools='+o.tools.join(','));if(o.skills)a.push('--skills='+o.skills.join(','));if(o.maxTime)a.push('--max-time='+o.maxTime);
+ for(const d of o.addDirs||[])a.push('--add-dir='+d);
+ if(o.systemPrompt)a.push('--system-prompt='+o.systemPrompt);if(o.appendSystemPrompt)a.push('--append-system-prompt='+o.appendSystemPrompt);
+ return a;
+}
+// OMP's session tree, flattened for display. Indentation grows only where the conversation forks.
+function treeView(r){
+ const leaf=r?.leafId||null,parents=new Map(),nodes=[];const stack=(Array.isArray(r?.tree)?r.tree:[]).map(n=>[n,0]).reverse();
+ while(stack.length&&nodes.length<3000){const [n,depth]=stack.pop();const e=n?.entry||{};parents.set(e.id,e.parentId);const kids=Array.isArray(n?.children)?n.children:[];
+  const m=e.type==='message'?e.message||{}:null;let kind='',textv='';
+  if(m?.role==='user'){kind='user';textv=contentText(m.content)||(Array.isArray(m.content)&&m.content.some(c=>c?.type==='image')?'Image attached':'');}
+  else if(m?.role==='assistant'){kind='assistant';textv=contentText(m.content).trim()||(Array.isArray(m.content)?'Tools: '+m.content.filter(c=>c?.type==='toolCall').map(c=>c.name).join(', '):'');}
+  else if(e.type==='compaction'){kind='compaction';textv='Context compacted';}
+  else if(e.type==='branch_summary'){kind='branch';textv=String(e.summary||'Branch summary');}
+  if(kind)nodes.push({id:String(e.id),kind,text:textv.slice(0,300),at:e.timestamp,label:n.label?String(n.label).slice(0,80):undefined,depth,forks:kids.length>1?kids.length:undefined});
+  const next=kids.length>1?depth+1:depth;for(let i=kids.length-1;i>=0;i--)stack.push([kids[i],next]);
+ }
+ const path=new Set();for(let id=leaf;id&&!path.has(id);id=parents.get(id))path.add(id);
+ for(const n of nodes)n.onPath=path.has(n.id);
+ return {leafId:leaf,nodes,truncated:nodes.length>=3000};
+}
+const TODO_STATUS=['pending','in_progress','completed','abandoned','blocked'];
+function todoPhases(v){
+ if(!Array.isArray(v)||v.length>30)throw error('Todos must be a list of up to 30 phases.');
+ const str=(x,n,name,req)=>{if(x===undefined&&!req)return undefined;if(typeof x!=='string'||(req&&!x.trim())||x.length>n)throw error(`Invalid todo ${name}.`);return x;};
+ return v.map(p=>{if(!p||typeof p!=='object'||!Array.isArray(p.tasks)||p.tasks.length>200)throw error('Invalid todo phase.');
+  return {name:str(p.name,200,'phase name',true),tasks:p.tasks.map(t=>{if(!t||!TODO_STATUS.includes(t.status))throw error('Invalid todo status.');const o={content:str(t.content,2000,'task',true),status:t.status};
+   for(const k of ['blocker','details'])if(t[k]!==undefined)o[k]=str(t[k],4000,k);if(t.notes!==undefined){if(!Array.isArray(t.notes)||t.notes.length>50)throw error('Invalid todo notes.');o.notes=t.notes.map(x=>str(x,2000,'note',false));}return o;})};});
+}
+
+// OMP CLI commands the Tools page can run. Each action is a fixed argv prefix plus validated fields; nothing runs through a shell.
+// Field types: bool (flag), text, int, select, model, dir, session, list (comma-separated, repeated flag).
+const CLI_TOOLS={
+ commit:{title:'Commit',description:'Generate a commit message with the commit model and update changelogs.',actions:{
+  run:{label:'Commit staged and unstaged changes',args:['commit'],cwd:'required',long:true,confirm:'Commit the changes in this folder?',fields:[
+   {name:'dryRun',type:'bool',flag:'--dry-run',label:'Dry run (preview the message, commit nothing)',default:true},
+   {name:'push',type:'bool',flag:'--push',label:'Push after committing'},
+   {name:'noChangelog',type:'bool',flag:'--no-changelog',label:'Skip changelog updates'},
+   {name:'legacy',type:'bool',flag:'--legacy',label:'Legacy deterministic pipeline'},
+   {name:'context',type:'textarea',flag:'--context',label:'Extra context for the model',max:4000},
+   {name:'model',type:'model',flag:'--model',label:'Model override'}]}}},
+ worktree:{title:'Worktrees',description:'Agent-managed git worktrees (clone-first when enabled).',actions:{
+  list:{label:'List',args:['worktree','list'],cwd:'optional'},
+  add:{label:'Add',args:['worktree','add'],cwd:'required',fields:[
+   {name:'path',type:'text',positional:true,required:true,label:'Worktree path',placeholder:'../feature'},
+   {name:'commit',type:'text',positional:true,label:'Commit-ish',placeholder:'origin/main'},
+   {name:'branch',type:'text',flag:'--branch',label:'New branch',pattern:'^[\\w./-]+$'},
+   {name:'forceBranch',type:'text',flag:'--force-branch',label:'Create or reset branch',pattern:'^[\\w./-]+$'},
+   {name:'detach',type:'bool',flag:'--detach',label:'Detach HEAD'}]},
+  clear:{label:'Clear',args:['worktree','clear'],cwd:'optional',confirm:'Remove agent-managed worktrees?',fields:[
+   {name:'dryRun',type:'bool',flag:'--dry-run',label:'Dry run',default:true},
+   {name:'all',type:'bool',flag:'--all',label:'Include live PR-checkout worktrees'}]}}},
+ stats:{title:'Usage stats',description:'Token, cost and model usage across all OMP sessions.',actions:{
+  summary:{label:'Summary',args:['stats','--summary'],long:true}}},
+ share:{title:'Share session',description:'Upload a saved session as an encrypted link (or a secret GitHub gist).',actions:{
+  share:{label:'Create share link',args:['share'],long:true,confirm:'Upload this session transcript? Anyone with the link can read it.',fields:[
+   {name:'session',type:'session',positional:true,required:true,label:'Session'},
+   {name:'gist',type:'bool',flag:'--gist',label:'Use a secret GitHub gist'}]}}},
+ skill:{title:'Skills registry',description:'Search, install and manage skills from skills.omp.sh.',actions:{
+  search:{label:'Search',args:['skill','search'],fields:[{name:'query',type:'text',positional:true,required:true,label:'Search for'},{name:'sort',type:'select',flag:'--sort',label:'Order',options:['','relevance','downloads','recent']}]},
+  info:{label:'Info',args:['skill','info'],fields:[{name:'name',type:'text',positional:true,required:true,label:'Skill',placeholder:'@alice/pdf-tools'}]},
+  list:{label:'Installed',args:['skill','list'],cwd:'optional'},
+  install:{label:'Install',args:['skill','install'],cwd:'optional',long:true,fields:[{name:'spec',type:'text',positional:true,required:true,label:'Skill spec',placeholder:'@alice/pdf-tools@^1.2'},{name:'global',type:'bool',flag:'--global',label:'Install for every project (user-global)',default:true},{name:'yes',type:'bool',flag:'--yes',label:'Allow skills that ship scripts'}]},
+  update:{label:'Update',args:['skill','update'],cwd:'optional',long:true,fields:[{name:'spec',type:'text',positional:true,label:'Skill (empty = all)'},{name:'global',type:'bool',flag:'--global',label:'User-global skills',default:true},{name:'yes',type:'bool',flag:'--yes',label:'Allow skills that ship scripts'}]},
+  uninstall:{label:'Uninstall',args:['skill','uninstall'],cwd:'optional',confirm:'Uninstall this skill?',fields:[{name:'spec',type:'text',positional:true,required:true,label:'Skill'},{name:'global',type:'bool',flag:'--global',label:'User-global skills',default:true}]}}},
+ plugin:{title:'Plugins (advanced)',description:'Plugin maintenance beyond the Settings page: link local plugins, doctor, features, upgrades and marketplaces.',actions:{
+  doctor:{label:'Doctor',args:['plugin','doctor'],fields:[{name:'fix',type:'bool',flag:'--fix',label:'Attempt to fix issues'}]},
+  upgrade:{label:'Upgrade',args:['plugin','upgrade'],long:true,fields:[{name:'name',type:'text',positional:true,label:'Plugin (empty = all)'},{name:'dryRun',type:'bool',flag:'--dry-run',label:'Dry run'}]},
+  link:{label:'Link local',args:['plugin','link'],fields:[{name:'path',type:'dir',positional:true,required:true,label:'Plugin folder'}]},
+  features:{label:'Features',args:['plugin','features'],fields:[{name:'name',type:'text',positional:true,required:true,label:'Plugin'},{name:'enable',type:'text',flag:'--enable',label:'Enable feature'},{name:'disable',type:'text',flag:'--disable',label:'Disable feature'}]},
+  config:{label:'Config',args:['plugin','config'],fields:[{name:'name',type:'text',positional:true,required:true,label:'Plugin'},{name:'set',type:'text',flag:'--set',label:'Set key=value'}]},
+  marketplace:{label:'Marketplaces',args:['plugin','marketplace'],fields:[{name:'action',type:'select',positional:true,label:'Action',options:['list','add','remove','update']},{name:'target',type:'text',positional:true,label:'Marketplace (owner/repo, URL or name)'}]}}},
+ agents:{title:'Task agents',description:'Export the bundled task agents so you can customise them.',actions:{
+  unpack:{label:'Unpack',args:['agents','unpack'],cwd:'optional',fields:[{name:'where',type:'select',label:'Destination',options:['--user','--project'],arg:true},{name:'force',type:'bool',flag:'--force',label:'Overwrite existing agent files'}]}}},
+ ps:{title:'Background processes',description:'Daemon-supervised processes started by OMP (dev servers, watchers, relays).',actions:{
+  list:{label:'List',args:['ps','list','--plain'],cwd:'optional',fields:[{name:'all',type:'bool',flag:'--all',label:'Include other projects and exited global services'}]},
+  info:{label:'Info',args:['ps','info'],cwd:'optional',fields:[{name:'name',type:'text',positional:true,required:true,label:'Process'}]},
+  logs:{label:'Logs',args:['ps','logs'],cwd:'optional',fields:[{name:'name',type:'text',positional:true,required:true,label:'Process'},{name:'lines',type:'int',flag:'--lines',label:'Lines',min:1,max:1000},{name:'grep',type:'text',flag:'--grep',label:'Filter (regex)'},{name:'head',type:'bool',flag:'--head',label:'From the beginning'}]},
+  stop:{label:'Stop',args:['ps','stop'],cwd:'optional',confirm:'Stop this process?',fields:[{name:'name',type:'text',positional:true,required:true,label:'Process'},{name:'timeout',type:'int',flag:'--timeout',label:'Grace period (s)',min:0,max:600}]},
+  kill:{label:'Kill',args:['ps','kill'],cwd:'optional',confirm:'Kill this process?',fields:[{name:'name',type:'text',positional:true,required:true,label:'Process'}]},
+  restart:{label:'Restart',args:['ps','restart'],cwd:'optional',fields:[{name:'name',type:'text',positional:true,required:true,label:'Process'}]}}},
+ gc:{title:'Storage cleanup',description:'Garbage-collect OMP storage. Runs as a dry run unless Apply is ticked.',actions:{
+  run:{label:'Run',args:['gc'],long:true,fields:[
+   {name:'apply',type:'bool',flag:'--apply',label:'Apply changes (otherwise dry run)'},
+   {name:'blobs',type:'bool',flag:'--blobs',label:'Sweep unreferenced blobs'},
+   {name:'archive',type:'bool',flag:'--archive',label:'Archive cold sessions'},
+   {name:'wal',type:'bool',flag:'--wal',label:'Checkpoint database WAL files'},
+   {name:'days',type:'int',flag:'--cold-archive-after-days',label:'Archive sessions older than (days)',min:0,max:3650},
+   {name:'keepGlobal',type:'int',flag:'--retain-newest-global',label:'Always keep newest (global)',min:0,max:100000},
+   {name:'keepCwd',type:'int',flag:'--retain-newest-per-cwd',label:'Always keep newest per folder',min:0,max:100000}],confirmIf:'apply',confirm:'Apply storage cleanup? Archived sessions leave the session list.'}}},
+ ssh:{title:'SSH hosts',description:'Hosts the ssh tool can reach.',actions:{
+  list:{label:'List',args:['ssh','list'],cwd:'optional'},
+  add:{label:'Add',args:['ssh','add'],cwd:'optional',fields:[
+   {name:'name',type:'text',positional:true,required:true,label:'Name',pattern:'^[\\w.-]+$'},
+   {name:'host',type:'text',flag:'--host',required:true,label:'Host address'},
+   {name:'user',type:'text',flag:'--user',label:'User'},
+   {name:'port',type:'int',flag:'--port',label:'Port',min:1,max:65535},
+   {name:'key',type:'text',flag:'--key',label:'Identity key path'},
+   {name:'desc',type:'text',flag:'--desc',label:'Description'},
+   {name:'compat',type:'bool',flag:'--compat',label:'Compatibility mode'},
+   {name:'scope',type:'select',flag:'--scope',label:'Scope',options:['','user','project']}]},
+  remove:{label:'Remove',args:['ssh','remove'],cwd:'optional',confirm:'Remove this SSH host?',fields:[{name:'name',type:'text',positional:true,required:true,label:'Name',pattern:'^[\\w.-]+$'},{name:'scope',type:'select',flag:'--scope',label:'Scope',options:['','user','project']}]}}},
+ setup:{title:'Optional features',description:'Install or check dependencies for Python and speech features.',actions:{
+  check:{label:'Check',args:['setup','--check'],fields:[{name:'component',type:'select',positional:true,required:true,label:'Component',options:['python','speech']}]},
+  install:{label:'Install',args:['setup'],long:true,confirm:'Install this optional component?',fields:[{name:'component',type:'select',positional:true,required:true,label:'Component',options:['python','speech']}]}}},
+ tinyModels:{title:'Tiny local models',description:'Small local models for session titles, memory and word completion.',actions:{
+  list:{label:'List',args:['tiny-models','list']},
+  download:{label:'Download',args:['tiny-models','download'],long:true,fields:[{name:'model',type:'text',positional:true,required:true,label:'Model key (or all)',placeholder:'lfm2.5-230m',pattern:'^[\\w.:-]+$'}]}}},
+ find:{title:'Semantic find',description:'Describe a behaviour; get the files and line ranges that implement it.',actions:{
+  find:{label:'Find',args:['find','--quiet'],cwd:'required',long:true,fields:[
+   {name:'query',type:'text',positional:true,required:true,label:'What to find',max:2000},
+   {name:'path',type:'text',positional:true,label:'Sub-folder (optional)'},
+   {name:'keyword',type:'list',flag:'--keyword',label:'Extra keywords (comma-separated)'},
+   {name:'hidden',type:'bool',flag:'--hidden',label:'Include dot-files'}]}}},
+ grievances:{title:'Tool grievances',description:'Issues the auto-QA reported about tool behaviour.',actions:{
+  list:{label:'List',args:['grievances','list'],fields:[{name:'limit',type:'int',flag:'--limit',label:'How many',min:1,max:1000},{name:'tool',type:'text',flag:'--tool',label:'Tool',pattern:'^[\\w-]+$'}]},
+  clean:{label:'Clean',args:['grievances','clean'],confirm:'Delete these grievances?',fields:[{name:'id',type:'int',flag:'--id',label:'Grievance id',min:1,max:1e9},{name:'tool',type:'text',flag:'--tool',label:'Tool',pattern:'^[\\w-]+$'},{name:'all',type:'bool',flag:'--all',label:'Delete every grievance'}]},
+  push:{label:'Push',args:['grievances','push'],long:true,confirm:'Send the recorded grievances to the OMP maintainers?'}}},
+};
+// The catalog the dashboard renders: no argv, only what the forms need.
+const cliCatalog=()=>Object.fromEntries(Object.entries(CLI_TOOLS).map(([id,t])=>[id,{title:t.title,description:t.description,actions:Object.fromEntries(Object.entries(t.actions).map(([a,x])=>[a,{label:x.label,cwd:x.cwd,confirm:x.confirm,confirmIf:x.confirmIf,command:'omp '+x.args.join(' '),fields:(x.fields||[]).map(({flag,arg,...f})=>({...f,flag}))}]))}]));
+
+// Pure helpers, exported for tests.
+export const internals={launchOptions,launchArgs,treeView,todoPhases};
 export async function createCompanion(options={}){
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
  // OMP_BIN may point at the native executable or a source checkout's cli.ts.
@@ -225,11 +375,13 @@ export async function createCompanion(options={}){
   }
  }
  // Session toggles the dashboard can change; values are validated in command().
- const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
- const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
- function settle(s){
+ const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),followUpMode:v=>({type:'set_follow_up_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
+ const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],followUpMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
+ function settle(s,promptId=s._promptId,run=s._run){
   void lock(s.id,async()=>{
-   if(s.status!=='running'||s.uiRequests?.length)return;
+   if(s.status!=='running'||s._promptId!==promptId||s._run!==run||s._settled||s._interrupt||s.uiRequests?.length)return;
+   // Completion and idle polling can report the same run before a queued prompt starts.
+   s._settled=true;dropSteers(s);
    if(s._planReview||s.planMode?.reviewPending){s.status='review';finishWork(s);scheduleSave();return;}
    if(s.queuedMessages?.length)await sendQueued(s);
    else{s.status='review';activity(s,`${s.title} is ready for review`,'review');}
@@ -238,10 +390,10 @@ export async function createCompanion(options={}){
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();});
  }
  function event(s,f){
-  s.updatedAt=now();if(f.type!=='response')s._lastEvent=Date.now();
+  s.updatedAt=now();
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
-  if(f.type==='agent_start'){startWork(s);s.status='running';s.error=undefined;}
+  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;startWork(s);s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
   if(f.type==='auto_compaction_end'){
    s._compacting=!!f.willRetry;
@@ -259,7 +411,7 @@ export async function createCompanion(options={}){
    if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();s.messages.push(m);}
   }
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}else if(m.stopReason==='aborted'){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
@@ -267,14 +419,16 @@ export async function createCompanion(options={}){
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
   if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);const adv=parseAdvisorStatus(text);if(adv)s.advisor={enabled:adv.enabled??s.advisor?.enabled??adv.state==='running',...adv,at:now()};if(!(adv&&s._silentAdvisorUntil>Date.now()))append(s,adv?'system':'assistant',text);}
   // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
-  if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)){
+  if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)&&!(s._interrupt&&f.id!==s._interrupt)){
+   if(f.id&&f.id===s._interrupt)delete s._interrupt;
    if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
+   else if(f.status==='completed'&&f.sessionSettled===true)settle(s);
    if(f.status==='error'||f.status==='aborted')finishWork(s);
    dropSteers(s);
   }
-  if(f.type==='session_settled'){dropSteers(s);if(s.status==='running')settle(s);else if(!s.uiRequests?.length)finishWork(s);}
   if(f.type==='prompt_result'&&f.agentInvoked===false&&f.status==='error')notice(s,'error',f.error?.message||'OMP command failed.');
+  if(f.type==='session_settled'){dropSteers(s);if(s.status==='running')settle(s);else if(!s.uiRequests?.length)finishWork(s);}
   if(f.type==='subagent_progress'||f.type==='subagent_lifecycle'){const p=f.payload||f;const id=p.progress?.id||p.id||p.subagentId;
    if(id){s.subagentList??=[];const prev=s.subagentList.find(x=>x.id===id);const next=subagentView({...prev,...p,id,progress:p.progress||prev?.progress,status:p.status||p.progress?.status||p.phase||prev?.status});if(prev)Object.assign(prev,next);else s.subagentList.push(next);s.subagentList=s.subagentList.slice(-50);
     const key=s.id+':'+id;let thought=subagentThoughts.get(key);
@@ -319,7 +473,8 @@ export async function createCompanion(options={}){
   if(f.type==='plan_review')s._planReview=f.proposal;
   if(f.type==='plan_review_clear'&&s._planReview?.id===f.proposalId)delete s._planReview;
   if(f.type==='available_commands_update'&&Array.isArray(f.commands))commands.set(s.id,slashList(f.commands));
-  if(f.type==='response'&&!f.success&&f.id===s._promptId){s.error=f.error;if(['prompt','steer','follow_up'].includes(f.command))s.status='error';}
+  if(f.type==='response'&&f.success&&f.command==='prompt'&&f.data?.agentInvoked===true)s._promptId=f.id;
+  if(f.type==='response'&&!f.success&&f.id===s._promptId){s.error=f.error;if(['prompt','steer','follow_up','abort_and_prompt'].includes(f.command)){s.status='error';delete s._interrupt;}}
   scheduleSave();
  }
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
@@ -334,9 +489,9 @@ export async function createCompanion(options={}){
    for(const [key,thought] of subagentThoughts)if(thought.parentId===s.id)subagentThoughts.delete(key);
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
-   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[])];
+   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?'paused':'error';s.error=stopping?undefined:e.message;void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
    try{await rpc.ready;await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
     // Per-session toggles live in the OMP process, so a restarted runner gets them back.
@@ -346,20 +501,20 @@ export async function createCompanion(options={}){
  }
  // The status reply can arrive after send() resolves, so stay silent until it shows up (or a few seconds pass).
  async function advisorStatus(s,rpc){s._silentAdvisorUntil=Date.now()+5000;try{await rpc.send({type:'prompt',message:'/advisor status'});}catch{s._silentAdvisorUntil=0;}}
- async function refresh(s,rpc){try{const state=await rpc.send({type:'get_state'});
-  // OMP only emits session_settled right after a terminal agent_end; if async work finished later, nothing re-announces it.
-  if(state?.isSettled===true&&s.status==='running'&&!s._compacting&&Date.now()-(s._lastEvent||0)>3000)settle(s);
-  if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,interrupt:state.interruptMode};}
+ async function refresh(s,rpc){const promptId=s._promptId,run=s._run;try{const state=await rpc.send({type:'get_state'});
+  if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,...(state.followUpMode?{followUp:state.followUpMode}:{}),interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
   if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);}
+  // Native quiescence is authoritative; unrelated events must not keep an idle run working.
+  if(state?.isSettled===true&&state.isCompacting!==true&&s.status==='running')settle(s,promptId,run);
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
-  const prompting=['prompt','steer','follow_up'].includes(body.type);
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const prompting=['prompt','steer','follow_up','interrupt'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
-  if(prompting&&s._task)throw error('Wait for the handoff to finish first.');
+  if(prompting&&s._task)throw error(`Wait for OMP to finish first (${s._task.replace(/…$/,'').toLowerCase()}).`);
   if(body.type==='answer'){
    const rpc=runners.get(s.id),id=text(body.id,'Question ID',200),q=s.uiRequests?.find(q=>q.id===id);
    if(!rpc?.alive||!q)throw error('This question is no longer pending.');
@@ -448,10 +603,48 @@ export async function createCompanion(options={}){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
    const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
    finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);
-   delete s._promptId;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
+   delete s._promptId;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
    await persist();return s;
   }
   if(body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
+  if(body.type==='tree'){const rpc=await start(s);return treeView(await rpc.send({type:'get_tree'}));}
+  if(body.type==='last_reply'){const rpc=await start(s);const r=await rpc.send({type:'get_last_assistant_text'});return {text:typeof r?.text==='string'?r.text:''};}
+  if(body.type==='cycle_model'||body.type==='cycle_thinking'){
+   const rpc=await start(s);const r=await rpc.send({type:body.type==='cycle_model'?'cycle_model':'cycle_thinking_level'});
+   if(!r)throw error(body.type==='cycle_model'?'OMP has only one model to cycle through. Configure model roles or scoped models.':'This model has no thinking levels to cycle through.');
+   // Remember the choice so a restarted runner keeps it.
+   if(r.model?.provider&&r.model?.id){s.modelSelector=`${r.model.provider}/${r.model.id}`;if(r.thinkingLevel)s.thinkingChoice=r.thinkingLevel;}
+   if(typeof r.level==='string')s.thinkingChoice=r.level;
+   await refresh(s,rpc);await persist();return s;
+  }
+  if(body.type==='todos'){const phases=todoPhases(body.phases);const rpc=await start(s);const r=await rpc.send({type:'set_todos',phases});s.todos=Array.isArray(r?.todoPhases)?r.todoPhases:phases;await persist();return s;}
+  if(body.type==='launch'){
+   busy();const launch=await launchOptions(body.launch);
+   if(JSON.stringify(launch??null)!==JSON.stringify(s.launch??null)){
+    if(launch)s.launch=launch;else delete s.launch;
+    // Launch flags are read at startup, so a live runner restarts (idle only) to apply them.
+    if(runners.get(s.id)?.alive){const prev=s.status;runners.get(s.id).kill();for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));await start(s);s.status=prev;s.error=undefined;}
+    append(s,'system',launch?'Launch options updated. OMP restarted with them.':'Launch options cleared. OMP restarted with its defaults.');
+   }
+   await persist();return s;
+  }
+  if(body.type==='compact'){
+   busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Compacting context…';s._compacting=true;
+   rpc.send({type:'compact',...(instructions?{customInstructions:instructions}:{})},0).then(async r=>{await refresh(s,rpc);append(s,'system',`Context compacted${typeof r?.tokensBefore==='number'?` (was ${r.tokensBefore.toLocaleString('en-US')} tokens)`:''}.`);},e=>append(s,'system',`Compaction failed: ${e.message}`))
+    .finally(()=>{delete s._task;s._compacting=false;void persist();});
+   await persist();return s;
+  }
+  if(body.type==='new_session'||body.type==='switch_session'){
+   busy();let file;
+   if(body.type==='switch_session'){file=sessionFileParam(body.file);const other=store.sessions.find(x=>x.id!==s.id&&!x.hidden&&x.sessionFile&&samePath(x.sessionFile,file));if(other)throw error(`That session is already open in the panel as “${other.title}”.`,409);}
+   const rpc=await start(s);
+   const r=await rpc.send(body.type==='new_session'?{type:'new_session'}:{type:'switch_session',sessionPath:file},60000);
+   if(r?.cancelled)throw error('An extension cancelled the session change.');
+   s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,rpc);
+   if(body.type==='switch_session'){const head=await readSessionHead(file).catch(()=>null);if(head?.title)s.title=head.title.slice(0,120);}
+   append(s,'system',body.type==='new_session'?'Started a fresh OMP session. The previous conversation stays in its own session file.':'Switched to another saved OMP session.');
+   s.status='paused';await persist();return s;
+  }
   // Runs outside the session lock (timeout 0) so Stop, answers and other commands still get through while it works.
   if(body.type==='bash'){
    const cmd=text(body.command,'Command',20000);if(s._bash)throw error('A shell command is already running.');
@@ -499,6 +692,8 @@ export async function createCompanion(options={}){
    await persist();return s;
   }
   const slashCommand=prompting&&/^\/\S/.test(body.message);
+  if(body.type==='interrupt'){if(slashCommand)throw error('Run slash commands with Enter; Stop & send is for messages.');if(!['running','queued'].includes(s.status))body.type='prompt';}
+  if(prompting&&images.length&&/^\/skill:/.test(body.message))throw error('OMP drops image attachments on /skill: commands. Send the image in a normal message, then invoke the skill.');
   if(prompting&&/^\/goal(?:\s|$)/.test(body.message)){
    await start(s);
    if(!s._goalSupported)throw error('This OMP build has no RPC goal mode. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts; /goal was not sent to the model.',409);
@@ -532,28 +727,37 @@ export async function createCompanion(options={}){
    const rpc=await start(s);
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
    // Only prompt dispatch executes slash commands; steer would queue their literal text.
-   const rpcType=slashCommand?'prompt':body.type,wasRunning=['running','queued'].includes(s.status);
-   if(prompting){if(!slashCommand){if(body.type==='prompt')delete s._streamId;s.status='running';s.error=undefined;}const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   // Stop & send: OMP aborts the turn and starts this prompt in one step (abort_and_prompt).
+   const interrupt=body.type==='interrupt';
+   const rpcType=slashCommand?'prompt':interrupt?'abort_and_prompt':body.type,wasRunning=['running','queued'].includes(s.status);
+   if(prompting){if(!slashCommand){if(body.type==='prompt'||interrupt)delete s._streamId;s.status='running';s.error=undefined;}const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
+   if((rpcType==='prompt'||interrupt)&&!slashCommand)s._promptId=id;
+   if(interrupt){s._interrupt=id;delete s._retry;delete s._thinkId;}
    const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(slashCommand&&wasRunning?{streamingBehavior:'steer'}:{}),...(images.length?{images}:{})}:{})},slashCommand?0:30000);
    // Local commands must not replace the active turn's result correlation.
-   if(rpcType==='prompt'&&(!slashCommand||result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
+   if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
    if(rpcType==='prompt'&&result?.agentInvoked===false&&!slashCommand)s.status='review';
    if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
    await persist();return s;
-  }catch(e){if(slashCommand){await persist();throw error(e.message);}s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
+  }catch(e){if(slashCommand){await persist();throw error(e.message);}delete s._interrupt;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
  }
  async function sendQueued(s){
   while(s.queuedMessages?.length&&s.status==='running'){
-   const item=s.queuedMessages[0];
-   const images=item.hasImage?chatImages({images:JSON.parse(await fs.readFile(queuedImageFile(item.id),'utf8'))}):[];
+   // Follow-up mode "all" delivers every queued message as one prompt, like OMP's own queue.
+   let batch=s.prefs?.followUpMode==='all'?s.queuedMessages.slice():[s.queuedMessages[0]];
+   const load=async list=>{const out=[];for(const q of list)if(q.hasImage)out.push(...JSON.parse(await fs.readFile(queuedImageFile(q.id),'utf8')));return out;};
+   let raw=await load(batch);if(raw.length>MAX_IMAGES){batch=[batch[0]];raw=await load(batch);}
+   const item=batch[0],images=raw.length?chatImages({images:raw}):[];
+   const message=batch.length>1?batch.map(q=>q.text).filter(Boolean).join('\n\n'):item.text;
+   const preview=batch.length>1?batch.flatMap(q=>[].concat(q.imagePreview??[])):item.imagePreview;
    s.status='review';
-   await command(s,{type:'prompt',message:item.text,preview:item.imagePreview},images,item.id);
+   await command(s,{type:'prompt',message,preview:Array.isArray(preview)&&!preview.length?undefined:preview},images,item.id);
    if(s.status==='error'){s.messages=s.messages.filter(m=>m.id!==item.id);await persist();return;}
    if(closing)return;
-   s.queuedMessages.shift();
+   const sent=new Set(batch.map(q=>q.id));s.queuedMessages=s.queuedMessages.filter(q=>!sent.has(q.id));
    await persist();
-   if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});
+   for(const q of batch)if(q.hasImage)await fs.rm(queuedImageFile(q.id),{force:true}).catch(()=>{});
    if(s.status==='review'&&s.queuedMessages.length)s.status='running';
    else break;
   }
@@ -681,11 +885,11 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   let branch='workspace';try{branch=await git(dir,['branch','--show-current'])||'detached';}catch{}
   p={id:randomUUID(),name:String(name||'').trim().slice(0,80)||path.basename(dir)||dir,path:dir,description:'',branch,color:colors[store.projects.length%colors.length]};store.projects.push(p);activity(null,`Added project ${p.name}`);return p;
  }
- async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking}){
+ async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch}){
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
   if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);await fs.mkdir(path.dirname(wt),{recursive:true});
    try{await git(p.path,['worktree','add','-b',b,wt,'HEAD']);cwd=wt;branch=b;}catch(e){isolated=false;notes.push(`Worktree isolation skipped (needs a Git repository with at least one commit). Working directly in ${p.path}.`);}}
-  const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[]};
+  const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(launch?{launch}:{})};
   if(selector){const i=selector.indexOf('/');s.modelSelector=selector;s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking){s.thinkingChoice=thinking;s.thinking=thinking;}
   for(const n of notes)append(s,'system',n);store.sessions.unshift(s);activity(s,sessionFile?`Resumed ${title}`:`Started ${title}`,'running');
   if(prompt)await command(s,{type:'prompt',message:prompt});else await persist();return s;
@@ -712,6 +916,47 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
   return {dir,tasks,subagents:subagents.filter(x=>!linked.has(x.name)),logs:jobs};
  }
  const sessionFileParam=value=>{const file=path.resolve(text(value,'Session file',4000));if(!file.endsWith('.jsonl')||!samePath(path.dirname(path.dirname(file)),ompSessionsDir))throw error('Not an OMP session file.');return file;};
+ // Tools page: each run is a background job the dashboard polls; stdin is closed so a prompt fails instead of hanging.
+ const cliJobs=[];const cliProcs=new Map();
+ async function cliArgs(body){
+  const tool=CLI_TOOLS[body.tool],spec=tool&&Object.hasOwn(tool.actions,body.action)?tool.actions[body.action]:null;
+  if(!spec||!Object.hasOwn(CLI_TOOLS,body.tool))throw error('Unknown OMP command.');
+  const values=body.values&&typeof body.values==='object'&&!Array.isArray(body.values)?body.values:{};
+  const args=[...spec.args];
+  for(const f of spec.fields||[]){
+   let v=values[f.name];if(typeof v==='string')v=v.trim();
+   if(v===undefined||v===null||v===''||v===false){if(f.required)throw error(`${f.label} is required.`);continue;}
+   if(f.type==='bool'){if(v!==true)throw error(`${f.label} must be on or off.`);args.push(f.flag);continue;}
+   let out;
+   if(f.type==='int'){if(!Number.isInteger(v)||v<(f.min??0)||v>(f.max??1e9))throw error(`${f.label} must be a whole number${f.max!==undefined?` from ${f.min??0} to ${f.max}`:''}.`);out=String(v);}
+   else if(f.type==='select'){if(!f.options.includes(v))throw error(`Choose a valid ${f.label.toLowerCase()}.`);out=v;}
+   else if(f.type==='model'){if(typeof v!=='string'||!MODEL_RE.test(v))throw error('Invalid model.');out=v;}
+   else if(f.type==='dir')out=await resolveDir(v);
+   else if(f.type==='session')out=sessionFileParam(v);
+   else{if(typeof v!=='string'||v.length>(f.max||500)||v.includes('\0')||(f.type!=='textarea'&&/[\r\n]/.test(v)))throw error(`${f.label} is too long or has invalid characters.`);
+    if(f.pattern&&!new RegExp(f.pattern).test(v))throw error(`${f.label} has invalid characters.`);out=v;}
+   if(f.arg){args.push(out);continue;}
+   if(f.positional){if(out.startsWith('-'))throw error(`${f.label} cannot start with "-".`);args.push(out);}
+   else if(f.type==='list')for(const x of out.split(',').map(x=>x.trim()).filter(Boolean))args.push(`${f.flag}=${x}`);
+   else args.push(`${f.flag}=${out}`);
+  }
+  const cwd=body.cwd?await resolveDir(body.cwd):spec.cwd==='required'?(()=>{throw error('Pick a folder to run this in.');})():dataDir;
+  return {spec,args,cwd};
+ }
+ async function runCli(body){
+  const {spec,args,cwd}=await cliArgs(body);
+  if(cliJobs.filter(j=>j.status==='running').length>=4)throw error('Four OMP commands are already running. Wait for one to finish.',409);
+  const job={id:randomUUID(),tool:body.tool,action:body.action,command:'omp '+args.join(' '),cwd,status:'running',output:'',startedAt:now()};
+  cliJobs.unshift(job);cliJobs.splice(30);
+  const child=spawn(ompExecutable,[...ompPrefix,...args],{cwd,stdio:['ignore','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});
+  cliProcs.set(job.id,child);
+  const add=b=>{job.output=(job.output+b.toString()).slice(-200000);};
+  child.stdout.on('data',add);child.stderr.on('data',add);
+  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},spec.long?30*60000:3*60000);
+  const finish=(code,err)=>{if(job.status!=='running')return;clearTimeout(timer);cliProcs.delete(job.id);job.output=[job.output,err?.message,job.timedOut?'Timed out.':job.stopped?'Stopped.':''].filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-200000)||'(no output)';job.exitCode=code;job.status=code===0&&!err?'done':'error';job.finishedAt=now();};
+  child.on('error',e=>finish(null,e));child.on('close',code=>finish(code));
+  return job;
+ }
  async function listNativeSessions(limit=200){
   const files=[];let dirs=[];try{dirs=await fs.readdir(ompSessionsDir,{withFileTypes:true});}catch{return [];}
   await Promise.all(dirs.filter(d=>d.isDirectory()).map(async d=>{const dir=path.join(ompSessionsDir,d.name);let entries=[];try{entries=await fs.readdir(dir);}catch{return;}
@@ -773,6 +1018,7 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
    if(req.method==='GET'&&url.pathname==='/api/plugins'){try{json(await listPlugins());}catch(e){throw error(`Could not read OMP plugins: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
+   if(req.method==='GET'&&url.pathname==='/api/cli'){json({tools:cliCatalog(),jobs:cliJobs});return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
     if(url.searchParams.has('path')){json({commands:await discoverCommands(await resolveDir(url.searchParams.get('path')))});return;}
@@ -808,6 +1054,8 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
    if(url.pathname==='/api/settings'){json(await changeSetting(body,false));return;}
    if(url.pathname==='/api/settings/reset'){json(await changeSetting(body,true));return;}
    if(url.pathname==='/api/plugins'){json(await pluginAction(body));return;}
+   if(url.pathname==='/api/cli'){json(await runCli(body),202);return;}
+   if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
    if(url.pathname==='/api/omp-update'){
     if(updateState.status==='running')throw error('OMP update is already running.',409);
     updateState={status:'running',startedAt:now()};void runUpdate(updateState.startedAt);json(updateState,202);return;
@@ -815,8 +1063,8 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
    if(url.pathname==='/api/quick-start'){
     const dir=await resolveDir(body.path);const images=chatImages(body);const raw=typeof body.prompt==='string'?body.prompt.trim().slice(0,200000):'';const p=await ensureProject(dir);
     const title=(typeof body.title==='string'&&body.title.trim().slice(0,120))||raw.split('\n')[0].slice(0,70)||`New session · ${p.name}`;
-    const {selector,thinking}=modelChoice(body);
-    const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking});
+    const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);
+    const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking,launch});
     if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
     if(body.fast===true)await lock(s.id,()=>command(s,{type:'pref',key:'fast',value:true})).catch(e=>notice(s,'warning',e.message));
     json(images.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,preview:body.preview},images)):s,201);return;
@@ -831,14 +1079,16 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||head.preview.split('\n')[0]||'Resumed session').slice(0,120);
     const messages=await importMessages(file).catch(()=>[]);const contextTokens=await lastContext(file).catch(()=>undefined);messages.push({id:randomUUID(),role:'system',text:'Resumed from OMP session history. Avoid prompting it here while the same session is open in a terminal.',at:now()});
-    const {selector,thinking}=modelChoice(body);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking});s.contextTokens=contextTokens;
+    const {selector,thinking}=modelChoice(body);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch:await launchOptions(body.launch)});s.contextTokens=contextTokens;
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
     if(!selector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}if(!thinking&&head.thinking)s.thinking=head.thinking;
     json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,preview:body.preview},images)):s,201);return;
    }
    if(url.pathname==='/api/archive'){
     const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
-    if(key.startsWith('s:')){const s=store.sessions.find(s=>s.id===key.slice(2));if(!s)throw error('Session not found.',404);if(body.archived!==false&&['running','queued'].includes(s.status))throw error('Stop the session before archiving it.');}
+    if(key.startsWith('s:')){const s=store.sessions.find(s=>s.id===key.slice(2));if(!s)throw error('Session not found.',404);if(body.archived!==false&&['running','queued'].includes(s.status))throw error('Stop the session before archiving it.');
+     // Archiving a session that is ready for review completes it and stops its OMP process.
+     if(body.archived!==false&&s.status==='review'){await lock(s.id,()=>command(s,{type:'complete'}));runners.get(s.id)?.kill();}}
     const set=new Set(store.archived);if(body.archived===false)set.delete(key);else set.add(key);store.archived=[...set];await persist();json({archived:store.archived});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
@@ -846,7 +1096,7 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(eventSaveTimer);const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

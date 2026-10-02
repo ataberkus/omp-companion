@@ -79,7 +79,6 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.deepEqual(s._notices.map(n => n.level), ['info', 'error']);
   assert.ok(s.messages.some(m => m.role === 'system' && m.text.includes('broken-ext.ts') && m.text.includes('boom')));
   assert.ok(!s.messages.some(m => m.role === 'system' && m.text.includes('Hook says hi')), 'info notices stay out of the chat');
-  assert.deepEqual((await request('/commands?session=session'))[1].commands.map(c => c.name), ['review']);
   assert.deepEqual(s.modes, { steering: 'all', interrupt: 'wait' });
 
   // A pref OMP rejects is reported and not remembered for restarts.

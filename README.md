@@ -27,7 +27,7 @@
 ## Features
 
 - **Every session in one sidebar**, including ones you started in a terminal, grouped by *Working now*, *Needs your review*, *Today* and older.
-- **Continuous work timers:** the sidebar shows **Running** elapsed time, then the frozen **Last run** duration. Steering, queued continuations, question prompts, retries and background waits stay in the same interval; hover for exact start/end times.
+- **Continuous work timers:** the sidebar shows **Running** elapsed time, then the frozen **Last run** duration, using hours, minutes and seconds for long runs (e.g. `1h 5m 19s`). Steering, queued continuations, question prompts, retries and background waits stay in the same interval; hover for exact start/end times.
 - **Readable conversations:** Markdown, tables and code blocks with copy. Tool calls and thinking fold into one activity summary.
 - **GitHub-style diffs** with word-level highlights, in unified or split view.
 - **Live plan and activity panel** for todos, subagents with expandable live reasoning, background jobs and advisor transcripts.
@@ -36,9 +36,13 @@
 - **Smart composer:** send, steer a running turn, queue follow-ups, attach images, switch model or reasoning level (Ctrl+P cycles configured default/smol/slow roles), toggle fast mode (⚡ chip, shown only for models with a priority service tier: Anthropic, OpenAI/Codex, Google, and their OpenRouter variants) in new and live sessions, complete `/commands` in both new and live sessions (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), and run `!command` in the session's shell.
 - **Provider usage in chat:** `/usage` shows the selected model's provider quotas, remaining percentages and amounts, and reset times for every reported account. It works during a running turn without steering it or queueing another prompt.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
-- **Session tools:** rename, branch from an earlier message, hand off to a fresh context, export as HTML, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry and steering behaviour.
+- **Session tools:** rename, branch from an earlier message or from the full **session tree**, hand off to a fresh context, compact with optional instructions, start a fresh OMP session (`/new`) or switch the entry to another saved session, copy the last reply, cycle OMP's model and thinking level, export as HTML, share a link, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry, steering and follow-up batching (*Send all queued follow-ups together*).
+- **Stop & send:** while OMP is working, **■ Stop & send** (or Ctrl+Enter) cancels the current turn and sends your message in its place. Plain Enter still steers and Alt+Enter still queues.
+- **Editable task plan:** click a task's status icon in the Plan panel to cycle pending → in progress → done (or *Clear task plan*). Changes go to OMP's own todo list.
+- **Launch options:** **⚙ Options** in the new-session composer and *Launch options…* in a session menu set OMP's startup flags: approval mode, tool and skill allowlists, extra folders (`--add-dir`), max run time, model roles (smol/slow/plan), plan-yolo, prewalk, system-prompt overrides, and switches such as no LSP, no rules or no extensions. Changing them restarts an idle session's OMP process.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
 - **Settings UI** for every `omp config` value and for plugins, plus one-click `omp update`.
+- **Tools page** (🧰 in the sidebar) for OMP's command-line tools: AI `commit` (dry run by default), `worktree`, usage `stats`, `share`, the skills registry, advanced `plugin` maintenance, `agents unpack`, background processes (`ps`), storage cleanup (`gc`, dry run unless *Apply*), `ssh` hosts, optional-feature `setup`, `tiny-models`, semantic `find` and tool `grievances`. Commands run in the background with live output and a Stop button; arguments are validated and never pass through a shell.
 - **Isolated git worktrees** so parallel sessions don't overwrite each other's files.
 
 ## Quick start
@@ -53,6 +57,8 @@ On Windows you can double-click `start.bat` instead.
 
 The dashboard opens in your browser, already connected. Press **Alt+N** (or click **New session**), pick a folder, type a prompt and press Enter. Keep the companion terminal open while you work.
 
+With **Group by project** enabled, click **+** beside a workspace's session count to open **New session** with that folder already selected.
+
 Type `/` in the composer to browse commands and skills. Use ↑/↓ to select, Tab or Enter to complete a partial name, and Esc to dismiss; clicking an option also completes it. On **New session**, the catalog follows the selected folder, including its local skills and commands, without creating a saved session.
 
 During a running turn, Enter or **Run** dispatches slash commands instead of steering their literal text. Local controls leave the current turn and unread ordinary steers intact. **Queue** / **Alt+Enter** still defers commands until the turn finishes; `/usage` is always immediate. Restart the companion and refresh the browser after updating.
@@ -62,14 +68,16 @@ Send `/usage` (or `/usage show`) to put a quota snapshot in the conversation. Th
 ## Good to know
 
 - **Don't continue a session in the panel while it's still open in a terminal.** Both would write to the same file.
+- **Finished turns:** OMP's completed-and-settled result or idle state moves the session to **Ready for review**, even if the separate settled notification is missing. Unrelated command output no longer keeps a finished turn **Working**. Queued continuations stay in the same work interval, and stale or duplicate completion signals cannot finish the next run. Click **Mark done** after reviewing the result. Restart the companion and refresh the browser after updating.
 - **Work timing:** counted from the agent's actual start until the session settles with no queued continuation. Stop, terminal failure or companion shutdown also freeze the timer; independent work starts a new interval. Durations persist across reloads and restarts, but past or terminal-only sessions have no invented timing. After updating, finish running work, restart the companion and refresh the browser.
 - **Stopping retries:** **Stop** and **Stop retrying** cancel the active turn, including retry backoff and in-flight provider requests. The session returns to Idle, and queued follow-ups stay queued. Restart the companion after updating it, then refresh the browser.
+- **Cancelling steers:** **Cancel** removes a steer only while OMP still has it queued. If delivery wins the click, the panel clears the stale controls and shows an informational notice instead of an error; the delivered message stays in the transcript. Restart the companion and refresh the browser after updating.
 - **OpenCode Go multi-account limits:** the patched sibling OMP runtime tries another stored account for `429 Output token rate limit exceeded`, including advisor requests. Select it with `OMP_BIN` as shown below; updating the companion alone does not change an installed OMP executable. Generic backend `503` errors remain ordinary retry errors.
 - **Subagent reasoning:** the Activity card shows the current thought in an expandable, scrollable **Reasoning** section. **Watch subagent** updates the unfinished thought as it streams. Sessions running in a separate terminal only expose saved reasoning. After updating the companion, wait for running work to finish, restart it and refresh the browser.
 - **Subagent cost:** the dollar amount on each Activity job covers that subagent's own transcript only, not subagents it started in turn.
 - **Plugins vs standalone skills:** disabling a plugin does not disable separately installed copies under folders such as `~/.agents/skills`. To disable a skill from every source, add its name (for example, `impeccable`) to `skills.ignoredSkills` in Settings. After plugin changes, use `/reload-plugins` or restart existing sessions. A skill already read remains in that conversation's history; start a new session to remove that context.
 - **Worktrees:** tick **Isolated git worktree** when starting a session in a Git repo. You get an `omp-web/<id>` branch off HEAD. Uncommitted changes and dependencies are not copied. Worktrees are never merged or deleted automatically.
-- **Cancelling steers:** **Cancel** removes a steer only while OMP still has it queued. If delivery wins the click, the panel clears the stale controls and shows an informational notice instead of an error; the delivered message stays in the transcript. Restart the companion and refresh the browser after updating.
+- **Not in the panel:** importing from Claude Code or Codex (`--from-claude`, `--from-codex`) needs OMP's terminal picker, and `--profile` sessions live in a separate store the panel does not list. Use the terminal for those, and for the interactive `omp stats` dashboard server and skill publishing.
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
 - **Security:** the companion listens only on `127.0.0.1`. It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. The token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. Sessions opened in a new tab share the token through the tab's session storage.
 
