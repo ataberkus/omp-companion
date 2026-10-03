@@ -346,6 +346,8 @@ export async function createCompanion(options={}){
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
+ // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.
+ const exposeToken=options.exposeToken??process.env.OMP_WEB_NO_TOKEN==='1';
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let saveChain=Promise.resolve();
@@ -989,9 +991,12 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
  const server=createServer(async(req,res)=>{
   const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'});res.end(JSON.stringify(value));};
   try{
-   const port=server.address()?.port;const hosts=new Set([`127.0.0.1:${port}`,`localhost:${port}`]);
+   // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's LAN addresses, still rejecting DNS-rebinding names.
+   const a=server.address(),port=a?.port,names=new Set(['127.0.0.1','localhost']);
+   if(a&&['0.0.0.0','::'].includes(a.address)){for(const list of Object.values(os.networkInterfaces()))for(const n of list||[])names.add(n.family==='IPv6'?`[${n.address}]`:n.address);}else if(a?.address)names.add(a.family==='IPv6'?`[${a.address}]`:a.address);
+   const hosts=new Set([...names].map(n=>`${n}:${port}`));
    if(!hosts.has(req.headers.host))throw error('Invalid Host header.',403);
-   const origin=req.headers.origin;const own=new Set([`http://127.0.0.1:${port}`,`http://localhost:${port}`]);
+   const origin=req.headers.origin;const own=new Set([...hosts].map(h=>'http://'+h));
    if(origin&&!own.has(origin)&&!allowedOrigins.has(origin))throw error('Origin not allowed. Open the local dashboard or set OMP_ALLOWED_ORIGINS to the exact hosted origin.',403);
    if(origin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');res.setHeader('Access-Control-Allow-Private-Network','true');}
    if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
@@ -1003,7 +1008,7 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
     if(url.pathname==='/')file=path.join(root,'app.html');
     let data,hash;try{({data,hash}=await staticFile(file));}catch{throw error('Dashboard files not found. Build with npm run build:local or use the prebuilt companion download.',404);}
     const ext=path.extname(file);
-    if(ext==='.html'){const v={};for(const n of ['app.css','app.js'])v[n]=(await staticFile(path.join(root,n)).catch(()=>null))?.hash;data=Buffer.from(data.toString('utf8').replace(/(href|src)="\/(app\.(?:css|js))"/g,(m,a,n)=>v[n]?`${a}="/${n}?v=${v[n]}"`:m));hash=digest(data);}
+    if(ext==='.html'){const v={};for(const n of ['app.css','app.js'])v[n]=(await staticFile(path.join(root,n)).catch(()=>null))?.hash;let html=data.toString('utf8').replace(/(href|src)="\/(app\.(?:css|js))"/g,(m,a,n)=>v[n]?`${a}="/${n}?v=${v[n]}"`:m);if(exposeToken)html=html.replace('</head>',`<meta name="omp-token" content="${token}"/>\n</head>`);data=Buffer.from(html);hash=digest(data);}
     const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.zip':'application/zip'};
     const headers={'Content-Type':mime[ext]||'application/octet-stream','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':csp,'Cache-Control':ext!=='.html'&&url.searchParams.get('v')===hash?'public, max-age=31536000, immutable':'no-cache',ETag:`"${hash}"`};
     if(req.headers['if-none-match']===headers.ETag){res.writeHead(304,headers);res.end();return;}
@@ -1100,11 +1105,13 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- const app=await createCompanion();const port=Number(process.env.OMP_WEB_PORT||4545);
- app.server.listen(port,'127.0.0.1',()=>{
+ const app=await createCompanion();const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';
+ app.server.listen(port,host,()=>{
   // The token travels in the URL fragment, which browsers never send to the server or in Referer headers.
-  const link=`http://127.0.0.1:${port}/#token=${app.token}`;
-  console.log(`\nOMP Control Room\n\nOpen: ${link}\nConnection token: ${app.token}\n\nYour provider credentials remain in OMP. Keep this process running.\n`);
+  const frag=process.env.OMP_WEB_NO_TOKEN==='1'?'':`#token=${app.token}`;
+  const link=`http://${wild?'127.0.0.1':host}:${port}/${frag}`;
+  const lan=wild?Object.values(os.networkInterfaces()).flat().filter(n=>n.family==='IPv4'&&!n.internal).map(n=>`http://${n.address}:${port}/${frag}`):[];
+  console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${frag?`Connection token: ${app.token}\n`:'No token required: anyone who can reach this port has full control.\n'}\nYour provider credentials remain in OMP. Keep this process running.\n`);
   if(!process.env.OMP_WEB_NO_OPEN){const [cmd,args]=process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',link]]:process.platform==='darwin'?['open',[link]]:['xdg-open',[link]];execFile(cmd,args,{windowsHide:true},()=>{});}
  });
  app.server.on('error',e=>{console.error(e.code==='EADDRINUSE'?`\nPort ${port} is already in use: the companion is probably already running at http://127.0.0.1:${port}/\nClose it, or set OMP_WEB_PORT to use another port.\n`:`\nThe companion could not start: ${e.message}\n`);process.exit(1);});

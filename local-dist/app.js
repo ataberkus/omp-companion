@@ -176,7 +176,9 @@
   try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; } catch {}
   S.advReviews = true; S.advImportant = false;
   try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; } catch {}
-  try { S.token = sessionStorage.getItem(KEY) || ''; } catch {}
+  // OMP_WEB_NO_TOKEN: the companion embeds the token in the page, so nothing asks for it.
+  S.token = document.querySelector('meta[name="omp-token"]')?.content || '';
+  if (!S.token) try { S.token = sessionStorage.getItem(KEY) || ''; } catch {}
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
@@ -211,7 +213,16 @@
     $('#toasts').appendChild(el);
     setTimeout(() => el.remove(), kind === 'err' ? 6000 : 3500);
   }
-  const copy = (text, label = 'Copied') => navigator.clipboard.writeText(text).then(() => toast(label), () => toast('Could not copy', 'err'));
+  function copy(text, label = 'Copied') {
+    const done = ok => ok ? toast(label) : toast('Could not copy', 'err');
+    if (navigator.clipboard) { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); return; }
+    // Plain-HTTP LAN pages are not a secure context, so navigator.clipboard is missing there.
+    const t = document.createElement('textarea');
+    t.value = text; t.readOnly = true; t.style.cssText = 'position:fixed;top:0;opacity:0;font-size:16px';
+    document.body.append(t); t.select(); t.setSelectionRange(0, text.length); // iOS ignores select() on readOnly fields
+    let ok = false; try { ok = document.execCommand('copy'); } catch {}
+    t.remove(); done(ok);
+  }
 
   // ---------- data model ----------
   const panelSessions = () => (S.store?.sessions || []).filter(s => !s.hidden);

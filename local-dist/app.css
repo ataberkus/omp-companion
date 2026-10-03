@@ -295,9 +295,14 @@ input,textarea{font:inherit;color:inherit}
   .composer-bar .hint:has(.check){flex-basis:100%;order:1}
   #buttons{margin-left:auto}
   .home-inner{padding:28px 16px}
-  .meta .path{max-width:180px}
+  .meta{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .meta .path{display:none}
+  .menu-pop{max-height:calc(100dvh - 90px);overflow-y:auto}
   .actions .btn .lbl{display:none}
 }
+/* touch: iOS zooms into inputs under 16px; keyboard hints are noise without a keyboard */
+@media (pointer:coarse){input,textarea,select{font-size:16px!important}}
+@media (hover:none){kbd{display:none}}
 
 /* activity: tool calls and thinking */
 .activity>summary{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;list-style:none;font-size:13.5px;color:var(--muted);user-select:none;min-width:0;width:fit-content;max-width:100%}
@@ -384,7 +389,8 @@ details.side-sec[open]>summary::after{transform:rotate(90deg)}
 .job-open{align-self:flex-start;padding-left:0}
 .badge.live{color:var(--accent);font-weight:650}
 .btn.on{color:var(--fg);background:var(--hover)}
-.crumb{font-size:12px;color:var(--faint);display:flex;gap:6px}
+.crumb{font-size:12px;color:var(--faint);display:flex;gap:6px;min-width:0}
+.crumb a{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.crumb span{flex:none}
 .crumb a,.history-note a{color:var(--accent);text-decoration:none}
 .crumb a:hover,.history-note a:hover{text-decoration:underline}
 .sub-result{border:1px solid var(--border);border-radius:10px;background:var(--card);padding:12px 16px}
@@ -554,7 +560,7 @@ img.msg-image,.attach-preview img,.queued-image img{cursor:zoom-in}
 .msg-image-btn{display:block;max-width:100%;margin-top:6px;padding:0;border:0;background:none;cursor:zoom-in}
 .msg-image-btn:first-child{margin-top:0}
 .lightbox{position:fixed;inset:0;z-index:var(--z-lightbox);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;background:#000d;cursor:zoom-out}
-.lightbox img{max-width:100%;max-height:calc(100vh - 100px);object-fit:contain;border-radius:8px;box-shadow:0 20px 60px #000;cursor:default;background:#fff1}
+.lightbox img{max-width:100%;max-height:calc(100vh - 100px);max-height:calc(100dvh - 100px);object-fit:contain;border-radius:8px;box-shadow:0 20px 60px #000;cursor:default;background:#fff1}
 .lb-bar{display:flex;gap:8px}
 .msg-image{border:1px solid var(--border);transition:filter .12s,border-color .12s}.msg-image:hover,.attach-preview img:hover,.queued-image img:hover{filter:brightness(1.12);border-color:var(--accent)}
 
@@ -640,7 +646,7 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 
 /* dialogs */
 .modal{position:fixed;inset:0;z-index:var(--z-modal);display:flex;align-items:center;justify-content:center;padding:24px;background:#000b}
-.modal-card{width:min(560px,100%);max-height:calc(100vh - 48px);display:flex;flex-direction:column;border:1px solid var(--border);border-radius:14px;background:var(--raised);box-shadow:0 20px 60px #000}
+.modal-card{width:min(560px,100%);max-height:calc(100vh - 48px);max-height:calc(100dvh - 48px);display:flex;flex-direction:column;border:1px solid var(--border);border-radius:14px;background:var(--raised);box-shadow:0 20px 60px #000}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px 12px 18px;border-bottom:1px solid var(--border)}
 .modal-body{padding:14px 18px 18px;overflow-y:auto;font-size:13.5px}
 .modal-body p{margin:0 0 12px}

@@ -38,6 +38,7 @@
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
 - **Session tools:** rename, branch from an earlier message or from the full **session tree**, hand off to a fresh context, compact with optional instructions, start a fresh OMP session (`/new`) or switch the entry to another saved session, copy the last reply, cycle OMP's model and thinking level, export as HTML, share a link, session stats, provider login, and per-session toggles for fast mode, auto-compaction, auto-retry, steering and follow-up batching (*Send all queued follow-ups together*).
 - **Stop & send:** while OMP is working, **■ Stop & send** (or Ctrl+Enter) cancels the current turn and sends your message in its place. Plain Enter still steers and Alt+Enter still queues.
+- **Prompt rail:** the thin strip right of the chat has one tick per prompt you sent, placed where it sits in the conversation. Hover a tick to preview the prompt, click to jump to it; **Alt+↑ / Alt+↓** step to the previous / next prompt. The highlighted tick is the prompt you're reading.
 - **Editable task plan:** click a task's status icon in the Plan panel to cycle pending → in progress → done (or *Clear task plan*). Changes go to OMP's own todo list.
 - **Launch options:** **⚙ Options** in the new-session composer and *Launch options…* in a session menu set OMP's startup flags: approval mode, tool and skill allowlists, extra folders (`--add-dir`), max run time, model roles (smol/slow/plan), plan-yolo, prewalk, system-prompt overrides, and switches such as no LSP, no rules or no extensions. Changing them restarts an idle session's OMP process.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
@@ -79,7 +80,7 @@ Send `/usage` (or `/usage show`) to put a quota snapshot in the conversation. Th
 - **Worktrees:** tick **Isolated git worktree** when starting a session in a Git repo. You get an `omp-web/<id>` branch off HEAD. Uncommitted changes and dependencies are not copied. Worktrees are never merged or deleted automatically.
 - **Not in the panel:** importing from Claude Code or Codex (`--from-claude`, `--from-codex`) needs OMP's terminal picker, and `--profile` sessions live in a separate store the panel does not list. Use the terminal for those, and for the interactive `omp stats` dashboard server and skill publishing.
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
-- **Security:** the companion listens only on `127.0.0.1`. It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. The token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. Sessions opened in a new tab share the token through the tab's session storage.
+- **Security:** `node companion/server.mjs` listens only on `127.0.0.1`; `start.bat` opens it to your network with no token (see [Phone or tablet on your network](#phone-or-tablet-on-your-network)). It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. Unless `OMP_WEB_NO_TOKEN=1`, the token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. Sessions opened in a new tab share the token through the tab's session storage.
 
 ### Native plan mode
 
@@ -112,6 +113,8 @@ In `rpc-ui`, automatic continuation follows `goal.continuationModes`'s `interact
 | --- | --- | --- |
 | `OMP_BIN` | `omp` | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
 | `OMP_WEB_PORT` | `4545` | Companion port |
+| `OMP_WEB_HOST` | `127.0.0.1` (`0.0.0.0` via `start.bat`) | Bind address; `0.0.0.0` opens it to your local network (see below) |
+| `OMP_WEB_NO_TOKEN` | unset (`1` via `start.bat`) | `1` serves the token inside the page, so no device is asked for it |
 | `OMP_WEB_DATA_DIR` | `~/.omp-web` | Panel state, sessions and worktrees |
 | `OMP_SESSIONS_DIR` | `<agent dir>/sessions` | OMP's native session store |
 | `PI_CODING_AGENT_DIR` | `~/.omp/agent` | OMP agent directory (`config.yml`, `WATCHDOG.yml`) |
@@ -127,6 +130,18 @@ OMP_ALLOWED_ORIGINS=https://omp-control-room.ataberk-oztrk3.chatgpt.site node co
 ```
 
 Your browser may block HTTPS-to-localhost requests. If it does, use the local dashboard.
+
+### Phone or tablet on your network
+
+`start.bat` listens on every network adapter and doesn't ask for a token. The console prints a `LAN:` address per adapter (usually the `192.168.x.x` one); open it on a phone on the same Wi-Fi. Allow Node.js through Windows Firewall for private networks when prompted.
+
+**Anyone on that network can open the address and run commands on this PC.** Use it only on networks you trust. To lock it back down to this PC with a token:
+
+```bat
+set OMP_WEB_HOST=127.0.0.1
+set OMP_WEB_NO_TOKEN=0
+start.bat
+```
 
 ## Development
 
