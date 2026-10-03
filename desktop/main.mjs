@@ -1,16 +1,18 @@
 // OMP Control Room desktop shell: runs the companion in-process and shows the dashboard in an app window.
-import { app, BrowserWindow, dialog, Menu, screen, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, Menu, nativeImage, screen, shell, Tray } from 'electron';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createCompanion, portBusy } from '../companion/server.mjs';
+import { phoneLinks } from './links.mjs';
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
 const origin = `http://127.0.0.1:${port}`;
 const icon = fileURLToPath(new URL('icon.png', import.meta.url));
 const alreadyRunning = `The companion is already running on port ${port}, probably start.bat. Close it and try again.`;
-let companion, win;
-let isQuitting = false;
+let companion, win, tray;
+let isQuitting = false, lan = false, toldAboutTray = false;
 
 function fail(message) {
   dialog.showErrorBox('OMP Control Room', message);
@@ -18,7 +20,8 @@ function fail(message) {
 }
 
 function showWindow() {
-  if (!win) return;
+  // A renderer-side window.close() destroys the window without a preventable 'close'; rebuild it instead of leaving a windowless app.
+  if (!win || win.isDestroyed()) return companion && createWindow();
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
@@ -39,10 +42,57 @@ function createWindow() {
   const { maximized, ...bounds } = savedBounds();
   win = new BrowserWindow({ width: 1400, height: 900, ...bounds, icon, show: false, title: 'OMP Control Room' });
   win.once('ready-to-show', () => { if (maximized) win.maximize(); win.show(); });
-  win.on('close', () => {
+  win.on('close', e => {
     try { fs.writeFileSync(boundsFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })); } catch {}
+    if (isQuitting) return;
+    // Closing hides to the tray so running agents keep working; Quit lives in the tray menu.
+    e.preventDefault();
+    win.hide();
+    if (!toldAboutTray) { toldAboutTray = true; tray.displayBalloon({ icon: nativeImage.createFromPath(icon), title: 'OMP Control Room', content: 'Still running in the tray.' }); }
   });
   win.loadURL(`${origin}/#token=${companion.token}`);
+}
+
+function rebuildTrayMenu() {
+  const links = phoneLinks(os.networkInterfaces(), port, companion.token);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open', click: showWindow },
+    { label: 'Allow phones on my network', type: 'checkbox', checked: lan, click: item => setLan(item.checked) },
+    { label: 'Copy phone link', enabled: lan, submenu: links.length ? links.map(l => ({ label: l.label, click: () => clipboard.writeText(l.url) })) : [{ label: 'No network address found', enabled: false }] },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+  ]));
+}
+
+function createTray() {
+  tray = new Tray(icon);
+  tray.setToolTip('OMP Control Room');
+  tray.on('double-click', showWindow);
+  rebuildTrayMenu();
+}
+
+// Rebind the same server instead of restarting the companion: close() would kill every running agent.
+// The Host/Origin allowlist is recomputed from server.address() per request, so it follows the new bind.
+function bind(host) {
+  const server = companion.server;
+  return new Promise((resolve, reject) => {
+    server.closeAllConnections();
+    server.close(() => {
+      server.once('error', reject);
+      server.listen(port, host, () => { server.off('error', reject); resolve(); });
+    });
+  });
+}
+
+async function setLan(on) {
+  try { await bind(on ? '0.0.0.0' : '127.0.0.1'); lan = on; }
+  catch (e) {
+    await bind('127.0.0.1').catch(() => {});
+    lan = false;
+    // Async on purpose: a sync dialog would block the main process, and with it the in-process companion server.
+    dialog.showMessageBox({ type: 'error', title: 'OMP Control Room', message: 'Could not change network access', detail: e.message });
+  }
+  rebuildTrayMenu();
 }
 
 // Every window, including dashboard popups: own-origin pages stay in the app (they inherit the token
@@ -73,9 +123,13 @@ async function bootstrap() {
   server.once('error', onStartError);
   server.listen(port, '127.0.0.1', () => {
     server.off('error', onStartError);
+    createTray();
     createWindow();
   });
 }
+
+// Hidden or extra windows closing must never end the app; only the tray's Quit does.
+app.on('window-all-closed', () => {});
 
 if (!app.requestSingleInstanceLock()) app.exit(0);
 else {
