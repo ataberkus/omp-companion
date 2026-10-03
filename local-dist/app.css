@@ -201,6 +201,7 @@ input,textarea{font:inherit;color:inherit}
 .question-options{display:grid;gap:6px;margin-top:10px}
 .question-options button{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:8px;background:var(--card);text-align:left;cursor:pointer}
 .question-options button:hover{border-color:var(--accent);background:var(--accent-soft)}
+.question-options button.checked{border-color:var(--accent);background:var(--accent-soft)}
 .question-options small{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .question form{margin-top:10px}
 .question input,.question textarea{display:block;width:100%;padding:8px 10px;border:1px solid var(--input);border-radius:8px;background:var(--bg);outline:none;resize:vertical}

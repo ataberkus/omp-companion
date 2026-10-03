@@ -24,7 +24,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     else emit({ type: 'command_output', text: 'Invalid reply reached OMP' });
     continue;
   }
-  if (c.type === 'prompt') emit({ type: 'extension_ui_request', id: 'choice', method: 'select', title: 'Choose', options: ['First', 'Second'], optionDetails: [{ description: 'A' }, { description: 'B' }] });
+  if (c.type === 'prompt') emit({ type: 'extension_ui_request', id: 'choice', method: 'select', title: 'Choose', options: ['First', 'Second'], optionDetails: [{ description: 'A' }, { description: 'B' }], checkedIndices: [1, 5] });
   if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
   else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
   else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
@@ -52,7 +52,9 @@ for await (const line of createInterface({ input: process.stdin })) {
   const command = body => request('/sessions/session/command', body);
   const [start] = await command({ type: 'prompt', message: 'Ask me' });
   assert.equal(start, 200);
-  assert.deepEqual((await pending('choice')).optionDetails, [{ description: 'A' }, { description: 'B' }]);
+  const choice = await pending('choice');
+  assert.deepEqual(choice.optionDetails, [{ description: 'A' }, { description: 'B' }]);
+  assert.deepEqual(choice.checked, [1]);
   const [invalid] = await command({ type: 'answer', id: 'choice', value: 'Not an option' });
   assert.equal(invalid, 400);
   assert.equal((await pending('choice')).title, 'Choose');

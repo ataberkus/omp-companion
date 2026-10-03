@@ -446,7 +446,7 @@ export async function createCompanion(options={}){
    if(f.method==='cancel')s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==f.targetId);
    else if(['select','confirm','input','editor'].includes(f.method)){
     const q={id:f.id,method:f.method,title:String(f.title||'Question').slice(0,500)};
-    if(f.method==='select'){q.options=Array.isArray(f.options)?f.options.filter(x=>typeof x==='string').slice(0,100):[];q.optionDetails=Array.isArray(f.optionDetails)?f.optionDetails.slice(0,q.options.length).map(x=>({description:String(x?.description||'').slice(0,500)})):[];}
+    if(f.method==='select'){q.options=Array.isArray(f.options)?f.options.filter(x=>typeof x==='string').slice(0,100):[];q.optionDetails=Array.isArray(f.optionDetails)?f.optionDetails.slice(0,q.options.length).map(x=>({description:String(x?.description||'').slice(0,500)})):[];q.checked=Array.isArray(f.checkedIndices)?f.checkedIndices.filter(i=>Number.isInteger(i)&&i>=0&&i<q.options.length):[];}
     if(f.method==='confirm')q.message=String(f.message||'').slice(0,2000);
     if(f.method==='input')q.placeholder=String(f.placeholder||'').slice(0,500);
     if(f.method==='editor')q.prefill=String(f.prefill||'').slice(0,20000);
