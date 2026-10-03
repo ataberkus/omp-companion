@@ -66,6 +66,23 @@ During a running turn, Enter or **Run** dispatches slash commands instead of ste
 
 Send `/usage` (or `/usage show`) to put a quota snapshot in the conversation. The selected model determines the provider; account, model and tier limits are labeled as reported, because a quota can be shared by several models. Snapshots include their fetch time and UTC reset timestamps. Providers without usage data show **Remaining quota unavailable**, not estimated remaining messages or a session-token total. This uses the configured OMP runtime's `usage --provider <id> --json` command.
 
+## Desktop app (Windows)
+
+The same dashboard in its own window, with the companion running inside the app: no console window, no browser tab.
+
+```sh
+npm install
+npm run dist
+```
+
+Run `dist/OMP Control Room Setup <version>.exe`. It installs for your user only (no admin rights) and adds **OMP Control Room** to the Start menu. The installer is unsigned, so Windows SmartScreen may show *Unknown publisher* on first run: choose **More info → Run anyway**. For development, `npm run desktop` starts the app from this checkout.
+
+- **Closing the window** hides it to the tray; sessions keep working. Open it again from the tray icon (double-click or **Open**) or by launching the app again.
+- **Quit** (tray menu) stops the companion and every OMP process it started. If sessions are still working it asks first; they are saved as paused. Signing out or shutting Windows down quits without asking.
+- **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. Allow the Windows Firewall prompt for **private networks only**.
+- **One companion at a time.** The desktop app and `start.bat` share `~/.omp-web`, so each refuses to start while the other is running on the same port.
+- `OMP_BIN`, `OMP_WEB_PORT`, `OMP_WEB_DATA_DIR` and the other variables below still apply. `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN` are ignored: the app always starts on `127.0.0.1` with a token.
+
 ## Good to know
 
 - **Don't continue a session in the panel while it's still open in a terminal.** Both would write to the same file.
@@ -149,6 +166,6 @@ start.bat
 node --test "tests/*.test.mjs"
 ```
 
-`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan and goal modes require the RPC support described above.
+`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. `desktop/` is the Electron shell that runs the companion in-process for the Windows app. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan and goal modes require the RPC support described above.
 
 **Not supported:** attaching to already-running terminal sessions, automatic Git merges, and custom extension TUIs beyond select, confirm, text and editor prompts.
