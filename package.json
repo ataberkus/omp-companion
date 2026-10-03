@@ -7,7 +7,7 @@
   "main": "desktop/main.mjs",
   "scripts": {
     "desktop": "electron .",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder --win nsis --publish never"
   },
   "devDependencies": {
     "electron": "^44.5.1",
