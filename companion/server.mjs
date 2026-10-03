@@ -506,7 +506,7 @@ export async function createCompanion(options={}){
  async function refresh(s,rpc){const promptId=s._promptId,run=s._run;try{const state=await rpc.send({type:'get_state'});
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,...(state.followUpMode?{followUp:state.followUpMode}:{}),interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
-  if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);}
+  if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);s._skillImages=state.skillImages===true;}
   // Native quiescence is authoritative; unrelated events must not keep an idle run working.
   if(state?.isSettled===true&&state.isCompacting!==true&&s.status==='running')settle(s,promptId,run);
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
@@ -695,7 +695,7 @@ export async function createCompanion(options={}){
   }
   const slashCommand=prompting&&/^\/\S/.test(body.message);
   if(body.type==='interrupt'){if(slashCommand)throw error('Run slash commands with Enter; Stop & send is for messages.');if(!['running','queued'].includes(s.status))body.type='prompt';}
-  if(prompting&&images.length&&/^\/skill:/.test(body.message))throw error('OMP drops image attachments on /skill: commands. Send the image in a normal message, then invoke the skill.');
+  if(prompting&&images.length&&/^\/skill:/.test(body.message)){await start(s);if(!s._skillImages)throw error('This OMP build drops image attachments on /skill: commands. Set OMP_BIN to an updated build, or send the image in a normal message, then invoke the skill.');}
   if(prompting&&/^\/goal(?:\s|$)/.test(body.message)){
    await start(s);
    if(!s._goalSupported)throw error('This OMP build has no RPC goal mode. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts; /goal was not sent to the model.',409);
