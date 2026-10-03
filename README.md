@@ -91,14 +91,9 @@ The project stays read-only until you explicitly approve implementation or turn 
 
 The installed OMP must expose `set_plan_mode`, `review_plan` and `approve_plan`. Older builds show **Requires updated OMP RPC support**; the companion does not simulate planning or silently approve it.
 
-To run the patched sibling checkout on Windows, with Bun on PATH and the checkout's dependencies, generated tool views and native bindings prepared:
+`start.bat` runs the patched sibling checkout (`..\oh-my-pi\packages\coding-agent\src\cli.ts`) automatically when it exists and Bun is on PATH; the checkout needs its dependencies, generated tool views and native bindings prepared. The console prints `Using OMP: …` when it does. Otherwise it falls back to `omp` on PATH.
 
-```bat
-set "OMP_BIN=%CD%\..\oh-my-pi\packages\coding-agent\src\cli.ts"
-start.bat
-```
-
-`OMP_BIN` can also point to a compiled OMP executable containing the same RPC changes. Restart companion sessions after changing the runtime.
+Set `OMP_BIN` before `start.bat` to override, for example with a compiled OMP executable containing the same RPC changes. Restart companion sessions after changing the runtime.
 
 ### Native goal mode
 
@@ -112,7 +107,7 @@ In `rpc-ui`, automatic continuation follows `goal.continuationModes`'s `interact
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OMP_BIN` | `omp` | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
+| `OMP_BIN` | `omp` (sibling `oh-my-pi` checkout via `start.bat`, if present with Bun) | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
 | `OMP_WEB_PORT` | `4545` | Companion port |
 | `OMP_WEB_HOST` | `127.0.0.1` (`0.0.0.0` via `start.bat`) | Bind address; `0.0.0.0` opens it to your local network (see below) |
 | `OMP_WEB_NO_TOKEN` | unset (`1` via `start.bat`) | `1` serves the token inside the page, so no device is asked for it |
