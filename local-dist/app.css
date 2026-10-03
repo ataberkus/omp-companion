@@ -670,6 +670,11 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 .stats{display:grid;grid-template-columns:max-content 1fr;gap:8px 16px;margin:0}
 .stats dt{color:var(--muted)}
 .stats dd{margin:0;overflow-wrap:anywhere}
+.spend-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;max-width:1000px;margin-top:16px}
+.spend-cards div{display:flex;flex-direction:column;gap:4px;padding:14px 16px;border:1px solid var(--border);border-radius:10px;background:var(--card)}
+.spend-cards span{color:var(--muted);font-size:12.5px}
+.spend-cards b{font-size:22px;font-variant-numeric:tabular-nums}
+.md .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 
 /* Native plan approval is distinct from the task progress panel. */
 .native-plan{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;max-width:812px;margin:auto;font-size:13px}

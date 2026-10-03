@@ -266,6 +266,7 @@
     if (h.startsWith('/changes/')) return { kind: 'changes', parent: h.slice(9) };
     if (h === '/settings') return { kind: 'settings' };
     if (h === '/tools') return { kind: 'tools' };
+    if (h === '/spend') return { kind: 'spend' };
     return { kind: 'home' };
   }
   const selKey = () => { const c = current(); return c.kind === 'session' ? 's:' + c.id : c.kind === 'native' ? 'f:' + c.file : ''; };
@@ -360,6 +361,7 @@
     if (c.kind === 'home') return buildHome();
     if (c.kind === 'settings') return buildSettings();
     if (c.kind === 'tools') return buildTools();
+    if (c.kind === 'spend') return buildSpend();
     main().innerHTML = `
       <div class="topbar" id="topbar"></div>
       <div class="chat-plan" id="chatPlan" hidden></div>
@@ -398,7 +400,7 @@
 
   function update() {
     const c = current();
-    if (!S.token || c.kind === 'home' || c.kind === 'settings' || c.kind === 'tools') return;
+    if (!S.token || c.kind === 'home' || c.kind === 'settings' || c.kind === 'tools' || c.kind === 'spend') return;
     if (c.kind === 'sub') { loadSub(c.file); renderSub(c.file); return; }
     if (c.kind === 'changes') { if (S.store) renderChanges(c); return; }
     if (!S.store) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Loading…</div>'; return; }
@@ -1949,6 +1951,47 @@
     finally { btn.disabled = false; }
   }
 
+  // ---------- spend ----------
+  S.spend = { rows: null, error: '' };
+  function buildSpend() {
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+      <div class="title-block"><h1>Spend</h1><div class="meta"><span>Dollar cost per model, from OMP's usage stats across every session.</span></div></div>
+      <div class="actions"><button class="btn sm ghost" data-act="spendReload" title="Sync OMP usage stats again" aria-label="Reload spend">↻ <span class="lbl">Reload</span></button></div></div>
+      <div class="settings"><div class="set-main" id="spend"></div></div>`;
+    loadSpend();
+  }
+  async function loadSpend() {
+    S.spend = { rows: null, error: '' }; renderSpend();
+    try { S.spend.rows = (await api('/spend', undefined, { timeout: 130000 })).rows; } catch (e) { S.spend.error = e.message; }
+    if (current().kind === 'spend') renderSpend();
+  }
+  const usd = n => '$' + n.toFixed(n > 0 && n < 1 ? 4 : 2);
+  function renderSpend() {
+    const el = $('#spend');
+    if (!el) return;
+    const { rows, error } = S.spend;
+    if (!rows) { el.innerHTML = error ? `<div class="msg system err" style="margin-top:16px"><div class="bubble">${esc(error)}</div></div>` : '<div class="working" style="margin-top:16px"><span class="spinner"></span> Syncing OMP usage stats…</div>'; return; }
+    // ponytail: OMP rolls up per UTC hour, so a half-hour timezone shifts 30 min of spend across midnight.
+    const day = t => new Date(t).toLocaleDateString('sv'); // local YYYY-MM-DD
+    const today = day(Date.now()), month = today.slice(0, 7);
+    const zero = () => ({ today: 0, month: 0, all: 0 }), total = zero(), models = new Map(), days = new Map();
+    for (const r of rows) {
+      const d = day(r.at), m = models.get(r.model) || models.set(r.model, zero()).get(r.model);
+      for (const t of [m, total]) { t.all += r.cost; if (d.startsWith(month)) t.month += r.cost; if (d === today) t.today += r.cost; }
+      if (d.startsWith(month)) { const x = days.get(d) || days.set(d, new Map()).get(d); x.set(r.model, (x.get(r.model) || 0) + r.cost); }
+    }
+    const byCost = (a, b) => b[1] - a[1];
+    const sorted = [...models].filter(([, v]) => v.all > 0).sort((a, b) => b[1].month - a[1].month || b[1].all - a[1].all);
+    const monthName = new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    el.innerHTML = `<div class="spend-cards">${[['Today', total.today], [monthName, total.month], ['All time', total.all]].map(([k, v]) => `<div><span>${esc(k)}</span><b>${usd(v)}</b></div>`).join('')}</div>
+      <section class="set-group"><h2>By model</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Today</th><th class="num">This month</th><th class="num">All time</th></tr></thead><tbody>
+        ${sorted.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
+      </tbody></table></div></div></section>
+      <section class="set-group"><h2>${esc(monthName)} by day</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Day</th><th class="num">Total</th><th>Models</th></tr></thead><tbody>
+        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
+      </tbody></table></div></div></section>`;
+  }
+
   // ---------- OMP settings ----------
   const GROUPS =[['model', 'Models'], ['interaction', 'Interaction & approvals'], ['context', 'Context & compaction'], ['tools', 'Tools'], ['tasks', 'Tasks & subagents'], ['appearance', 'Appearance'], ['shell', 'Shell'], ['files', 'Files'], ['memory', 'Memory'], ['providers', 'Providers'], ['other', 'Other'], ['internal', 'Advanced']];
   const groupLabel = g => (GROUPS.find(x => x[0] === g) || [g, g[0].toUpperCase() + g.slice(1)])[1];
@@ -2440,6 +2483,7 @@
       else if (act === 'share' && s?.sessionFile) openTool('share', 'share', { session: s.sessionFile });
       else if (act === 'commit' && s) openTool('commit', 'run', { dryRun: true }, s.cwd);
     }
+    else if (act === 'usage') { toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
@@ -2459,6 +2503,7 @@
     else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} a.closest('.menu')?.classList.remove('open'); S.lastSig = ''; $('#topbar')._html = ''; update(); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { S.set.data = null; S.set.plugins = null; loadSettings(); }
+    else if (act === 'spendReload') loadSpend();
     else if (act === 'advMenu') { $('#thinkMenu') ? closeThinkMenu() : openAdvMenu(t.closest('[data-act]')); }
     else if (act === 'thinkMenu') { $('#thinkMenu') ? closeThinkMenu() : openThinkMenu(t.closest('[data-act]')); }
     else if (act === 'fastToggle') {
@@ -2483,7 +2528,6 @@
     const item = e.button === 1 && e.target.closest('.item[data-key]');
     if (item && !e.target.closest('[data-archive]')) { e.preventDefault(); openItemTab(item.dataset.key); }
   });
-    else if (act === 'usage') { toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
   document.addEventListener('contextmenu', e => {
     closeCtx();
     const item = e.target.closest('.item[data-key]');

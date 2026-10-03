@@ -905,6 +905,12 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
 // Keyed by path so a growing transcript replaces its entry instead of adding one per poll.
 const costCache=new Map();
 async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mtimeMs&&hit.s===st.size)return hit.c;let c=0;try{for(const l of (await fs.readFile(f,'utf8')).split('\n')){if(!l.includes('"cost"'))continue;try{c+=JSON.parse(l).message?.usage?.cost?.total||0;}catch{}}}catch{}costCache.set(f,{m:st.mtimeMs,s:st.size,c});return c;}
+// Spend per model from OMP's own stats DB (hourly rollups); `omp stats` runs first because it is what ingests new transcripts.
+async function spend(){
+ await execOmp(['stats','--summary'],{timeout:120000,maxBuffer:16*1024*1024,windowsHide:true});
+ const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(path.join(os.homedir(),'.omp','stats.db'),{readOnly:true});
+ try{return {rows:db.prepare("SELECT bucket AS at,provider||'/'||model AS model,TOTAL(cost_total) AS cost FROM message_rollup GROUP BY bucket,provider,model ORDER BY bucket").all()};}finally{db.close();}
+}
  async function background(file,live=false){
   const dir=file.replace(/\.jsonl$/,'');const scanned=await scanJobs(file);let entries=[];try{entries=await fs.readdir(dir,{withFileTypes:true});}catch{}
   const subagents=[],jobs=[];
@@ -1027,6 +1033,7 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
    if(req.method==='GET'&&url.pathname==='/api/cli'){json({tools:cliCatalog(),jobs:cliJobs});return;}
+   if(req.method==='GET'&&url.pathname==='/api/spend'){try{json(await spend());}catch(e){throw error(`Could not read OMP usage stats: ${String(e.stderr||e.message).trim()}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
     if(url.searchParams.has('path')){json({commands:await discoverCommands(await resolveDir(url.searchParams.get('path')))});return;}

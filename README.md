@@ -45,6 +45,7 @@
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
 - **Settings UI** for every `omp config` value and for plugins, plus one-click `omp update`.
 - **Tools page** (🧰 in the sidebar) for OMP's command-line tools: AI `commit` (dry run by default), `worktree`, usage `stats`, `share`, the skills registry, advanced `plugin` maintenance, `agents unpack`, background processes (`ps`), storage cleanup (`gc`, dry run unless *Apply*), `ssh` hosts, optional-feature `setup`, `tiny-models`, semantic `find` and tool `grievances`. Commands run in the background with live output and a Stop button; arguments are validated and never pass through a shell.
+- **Spend page** ($ in the sidebar): dollar cost per model for today, this month and all time, plus this month day by day. Figures come from OMP's usage stats (`~/.omp/stats.db`, synced via `omp stats` on each load) and are API list prices, so subscription/OAuth usage shows what it would have cost, not what you were billed.
 - **Isolated git worktrees** so parallel sessions don't overwrite each other's files.
 
 ## Quick start
