@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -331,6 +332,8 @@ const cliCatalog=()=>Object.fromEntries(Object.entries(CLI_TOOLS).map(([id,t])=>
 
 // Pure helpers, exported for tests.
 export const internals={launchOptions,launchArgs,treeView,todoPhases};
+// Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
+export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 export async function createCompanion(options={}){
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
  // OMP_BIN may point at the native executable or a source checkout's cli.ts.
@@ -1105,7 +1108,11 @@ async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mt
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- const app=await createCompanion();const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';
+ const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';
+ const inUse=`\nPort ${port} is already in use: the companion is probably already running at http://127.0.0.1:${port}/\nClose it, or set OMP_WEB_PORT to use another port.\n`;
+ // Probe before createCompanion: it pauses running sessions and saves workspace.json, which would clobber the live companion's state.
+ if(await portBusy(port)){console.error(inUse);process.exit(1);}
+ const app=await createCompanion();
  app.server.listen(port,host,()=>{
   // The token travels in the URL fragment, which browsers never send to the server or in Referer headers.
   const frag=process.env.OMP_WEB_NO_TOKEN==='1'?'':`#token=${app.token}`;
@@ -1114,6 +1121,6 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${frag?`Connection token: ${app.token}\n`:'No token required: anyone who can reach this port has full control.\n'}\nYour provider credentials remain in OMP. Keep this process running.\n`);
   if(!process.env.OMP_WEB_NO_OPEN){const [cmd,args]=process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',link]]:process.platform==='darwin'?['open',[link]]:['xdg-open',[link]];execFile(cmd,args,{windowsHide:true},()=>{});}
  });
- app.server.on('error',e=>{console.error(e.code==='EADDRINUSE'?`\nPort ${port} is already in use: the companion is probably already running at http://127.0.0.1:${port}/\nClose it, or set OMP_WEB_PORT to use another port.\n`:`\nThe companion could not start: ${e.message}\n`);process.exit(1);});
+ app.server.on('error',e=>{console.error(e.code==='EADDRINUSE'?inUse:`\nThe companion could not start: ${e.message}\n`);process.exit(1);});
  for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{await app.close();process.exit(0);});
 }

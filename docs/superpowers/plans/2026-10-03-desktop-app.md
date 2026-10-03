@@ -14,7 +14,7 @@
 
 - Windows only. The installer is per-user NSIS (`oneClick: true`, `perMachine: false`) and unsigned.
 - Electron's bundled Node is >= 22.
-- `companion/server.mjs` and `local-dist/**` are NOT modified.
+- `local-dist/**` and `createCompanion()` are NOT modified. `companion/server.mjs` only gains the exported `portBusy` and a guard in its CLI block (user decision).
 - `build.files` is exactly `["package.json", "desktop/**", "companion/**", "local-dist/**"]`, and `directories.output` is `"dist"`.
 - Desktop mode always binds `127.0.0.1` with a token at launch (`exposeToken: false`) and ignores `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN`.
 - Port: `Number(process.env.OMP_WEB_PORT || 4545)`, with no fallback port.
@@ -35,23 +35,27 @@
 ### Task 1: Electron shell boots the companion into a window
 
 **Files:**
-- Create: `package.json`, `desktop/main.mjs`, `desktop/icon.png`
-- Modify: `.gitignore`
+- Create: `package.json`, `desktop/main.mjs`, `desktop/icon.png`, `tests/port-busy.test.mjs`
+- Modify: `.gitignore`, `companion/server.mjs` (new export, plus the CLI block at the end of the file)
 
 **Interfaces:**
+- Produces in `companion/server.mjs`: `export async function portBusy(port: number, host = '127.0.0.1', timeoutMs = 1000): Promise<boolean>`.
 - Produces in `desktop/main.mjs` (module scope, used by Tasks 3–4): `companion` (return value of `createCompanion`), `port: number`, `win: BrowserWindow`, `let isQuitting = false`, `showWindow(): void` (show, restore if minimized, focus).
 
-- [ ] **Step 1: Create `package.json`.** `name: "omp-control-room"`, `version: "1.0.0"`, `private: true`, `type: "module"`, `main: "desktop/main.mjs"`. Scripts: `"desktop": "electron ."`, `"dist": "electron-builder --win nsis"`. devDependencies: `electron@^44.5.1`, `electron-builder@^26.15.3`. Include the `build` block verbatim from the spec. Run `npm install`. Add `node_modules/` and `dist/` to `.gitignore`.
-  - `type: "module"` must not break the tests: they are already `.mjs` and `server.mjs` is ESM. Verify in Step 6.
-- [ ] **Step 2: Create `desktop/icon.png` (256×256, transparent corners) from `local-dist/favicon.svg`.** Use a throwaway Electron script that is **not committed**: an offscreen `BrowserWindow` 256×256 with `transparent: true` loads `data:text/html,<img src="file:///…/favicon.svg" width=256 height=256 style="display:block">` with `body{margin:0}`, then `capturePage()` → `toPNG()` → write the file. Expected: a 256×256 PNG with the gradient square and "π".
-- [ ] **Step 3: Implement startup in `desktop/main.mjs`.**
+- [ ] **Step 1: Write the failing test** `tests/port-busy.test.mjs`. Hold a `net` server on `0.0.0.0` at an ephemeral port (`listen(0, '0.0.0.0')`, read `address().port`). Assert `await portBusy(p) === true`. Close it, then assert `await portBusy(p) === false`.
+- [ ] **Step 2: Run** `node --test tests/port-busy.test.mjs`. Expected: FAIL (`portBusy` is not exported).
+- [ ] **Step 3: Implement `portBusy`** in `server.mjs`. `net.connect(port, host)`: `connect` → `true`; `error` → `false`; a `timeoutMs` timer → `true`. Destroy the socket and clear the timer in every case. In the CLI block, `if (await portBusy(port))`, print the existing `EADDRINUSE` message (factor that string into one const shared with the `server.on('error')` handler) and `process.exit(1)`. This must happen **before** `createCompanion()`, which means moving the `port` const above it.
+- [ ] **Step 4: Run** `node --test tests/port-busy.test.mjs`. Expected: PASS. Smoke: with `node companion/server.mjs` already running, a second `node companion/server.mjs` prints "Port 4545 is already in use" and exits 1.
+- [ ] **Step 5: Create `package.json`.** `name: "omp-control-room"`, `version: "1.0.0"`, `private: true`, `type: "module"`, `main: "desktop/main.mjs"`. Scripts: `"desktop": "electron ."`, `"dist": "electron-builder --win nsis"`. devDependencies: `electron@^44.5.1`, `electron-builder@^26.15.3`. Include the `build` block verbatim from the spec. Run `npm install`. Add `dist/` to `.gitignore`; `node_modules/` is already there.
+  - `type: "module"` must not break the tests: they are already `.mjs` and `server.mjs` is ESM. Verify in Step 10.
+- [ ] **Step 6: Create `desktop/icon.png` (256×256, transparent corners) from `local-dist/favicon.svg`.** Use a throwaway Electron script that is **not committed**. An offscreen `BrowserWindow` 256×256 with `transparent: true` loads an HTML string whose body is the SVG markup read from disk, inlined with `width=256 height=256`. (A `data:` page can't load `file://` subresources.) Then `capturePage()` → `.resize({ width: 256, height: 256 })` (display scaling returns device pixels) → `toPNG()` → write the file. Expected: a 256×256 PNG with the gradient square and "π".
+- [ ] **Step 7: Implement startup in `desktop/main.mjs`.**
   - `if (!app.requestSingleInstanceLock()) app.exit(0); else bootstrap();`, so the second instance never reaches `createCompanion`. On `second-instance`, call `showWindow()`.
-  - `portBusy(port: number): Promise<boolean>` resolves `true` when `net.connect(port, '127.0.0.1')` connects or hasn't resolved after 1000 ms, and `false` on `ECONNREFUSED` (other errors also count as `false`). Destroy the socket either way.
-  - `bootstrap()`: `await app.whenReady()`. If `await portBusy(port)`, show `dialog.showErrorBox` with the verbatim "already running" copy and call `app.exit(1)`. Only after that, call `createCompanion({ exposeToken: false })`, then `companion.server.listen(port, '127.0.0.1')`.
+  - `bootstrap()`: `await app.whenReady()`. If `await portBusy(port)` (imported from `server.mjs`), show `dialog.showErrorBox` with the verbatim "already running" copy and call `app.exit(1)`. Only after that, call `createCompanion({ exposeToken: false })`, then `companion.server.listen(port, '127.0.0.1')`.
   - Attach `server.once('error', onStartError)`; on `listening`, remove it with `server.off('error', onStartError)`.
   - `onStartError`: for `EADDRINUSE`, show the same "already running" copy; otherwise show the message. Then `app.exit(1)`. Wrap `createCompanion` in try/catch with the same dialog-and-exit.
   - `Menu.setApplicationMenu(null)`.
-- [ ] **Step 4: Implement the window.**
+- [ ] **Step 8: Implement the window.**
   - `new BrowserWindow({ icon, show: false, ...savedBounds })`. On `ready-to-show`, call `show()`, and `maximize()` if saved.
   - Load `http://127.0.0.1:${port}/#token=${companion.token}`.
   - Bounds file: `path.join(app.getPath('userData'), 'window.json')` with `{ x, y, width, height, maximized }`. Write it on the window's `close`, using `getNormalBounds()`. Ignore a missing or corrupt file.
@@ -60,15 +64,16 @@
     - Else if the protocol is `http:` or `https:`, call `shell.openExternal(url)` and return `{ action: 'deny' }`.
     - Otherwise return `{ action: 'deny' }`.
   - Apply the same handler to child windows through `app.on('web-contents-created')` so popups follow the rules too, along with a `will-navigate` guard that does `preventDefault()` plus `openExternal` for foreign origins.
-- [ ] **Step 5: Smoke test** with `npm run desktop`:
+- [ ] **Step 9: Smoke test** with `npm run desktop`:
   - **T1-1:** the window shows the dashboard, already connected (session list loads, no token prompt), and no console window appears.
   - **T1-2:** a second `npm run desktop` exits with no dialog and focuses the first window.
   - **T1-3:** start `start.bat` (it binds `0.0.0.0:4545`) and give one of its sessions a long-running prompt. While it works, run `npm run desktop`. Expect the "already running" dialog and an exit. Right afterwards, `~/.omp-web/workspace.json` still shows that session with `"status": "running"`. Then repeat with plain `node companion/server.mjs` (`127.0.0.1`): same dialog.
   - **T1-4:** "Open in new tab" on a session opens a connected app window.
   - **T1-5:** a Markdown link to `https://example.com` opens in the system browser.
+  - **T1-6:** with the app running, `start.bat` prints "Port 4545 is already in use" and stops.
   - Verify with `computer` screenshots.
-- [ ] **Step 6: Run the tests.** `node --test "tests/*.test.mjs"`. Expected: all pass.
-- [ ] **Step 7: Commit:** `git add package.json package-lock.json .gitignore desktop/ && git commit -m "Add Electron desktop shell"`
+- [ ] **Step 10: Run the tests.** `node --test "tests/*.test.mjs"`. Expected: all pass.
+- [ ] **Step 11: Commit:** `git add package.json package-lock.json .gitignore desktop/ companion/server.mjs tests/port-busy.test.mjs && git commit -m "Add Electron desktop shell"`
 
 ### Task 2: `phoneLinks` (pure, tested)
 

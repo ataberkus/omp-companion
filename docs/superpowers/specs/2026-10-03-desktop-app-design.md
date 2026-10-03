@@ -16,7 +16,7 @@ Success: installing the `.exe` gives a Start-menu app that opens the existing da
 ## Non-goals
 
 - macOS/Linux builds, code signing, auto-update.
-- Any change to the dashboard (`local-dist/`) or the server (`companion/server.mjs`).
+- Any change to the dashboard (`local-dist/`), or to `createCompanion()` in `companion/server.mjs`.
 - Remembering the LAN toggle between launches.
 - A native (non-web) UI.
 
@@ -31,7 +31,8 @@ Success: installing the `.exe` gives a Start-menu app that opens the existing da
 | `desktop/icon.png` | New. 256×256 PNG rasterized once from `local-dist/favicon.svg`; used for the window, tray and installer. |
 | `.gitignore` | Add `node_modules/` and `dist/`. |
 | `README.md` | New "Desktop app" section: build, install, tray menu, LAN toggle, SmartScreen note, the "one companion at a time" rule. |
-| `companion/server.mjs` | Unchanged. |
+| `companion/server.mjs` | Add `export async function portBusy(port, host = '127.0.0.1', timeoutMs = 1000): Promise<boolean>`, a connect probe: `true` if something answers or the connect hasn't resolved within the timeout, `false` on any error such as `ECONNREFUSED`. The CLI block calls it before `createCompanion()` and, if the port is busy, prints the existing "Port N is already in use" message and exits 1. `createCompanion()` is unchanged. (User decision: `start.bat` launched while the app sits in the tray would otherwise bind `0.0.0.0` next to it and pause and overwrite the app's sessions.) |
+| `tests/port-busy.test.mjs` | New. Checks that `portBusy` is `true` for a port held on `0.0.0.0` and `false` once it's released. |
 
 Placing `package.json` at the root keeps `desktop/`, `companion/` and `local-dist/` at the same relative paths in development and inside `app.asar`. `server.mjs` resolves its static root as `../local-dist` from `import.meta.url`, so it works unchanged. Its CLI block is guarded by `process.argv[1] === fileURLToPath(import.meta.url)` and therefore does not run when the module is imported.
 
@@ -54,9 +55,9 @@ Placing `package.json` at the root keeps `desktop/`, `companion/` and `local-dis
 
 ### Startup
 1. `app.requestSingleInstanceLock()`. If the lock is not acquired, `app.exit(0)` immediately: the bootstrap runs only in the lock-holder branch, so a second instance never reaches `createCompanion`. The running instance handles `second-instance` by showing and focusing its window.
-2. **Port probe before `createCompanion`.** `createCompanion()` marks `running`/`queued` sessions as `paused` and persists `workspace.json` (`server.mjs` lines 347 and 1105) before anything listens. Launching next to a live `start.bat` would therefore rewrite its sessions on disk. Also, Windows lets `127.0.0.1:N` and `0.0.0.0:N` bind side by side, so a bind can't detect `start.bat` (which binds `0.0.0.0`). So first try `net.connect(port, '127.0.0.1')`. If it connects, or hasn't resolved within 1 s, show the error dialog ("The companion is already running on port N, probably start.bat. Close it and try again.") and quit. `ECONNREFUSED` means the port is free. Do not fall back to another port. Known limit: a companion on a *different* `OMP_WEB_PORT` with the same data dir isn't detected; the README says to run one companion at a time.
+2. **Port probe before `createCompanion`.** `createCompanion()` marks `running`/`queued` sessions as `paused` and persists `workspace.json` (`server.mjs` lines 347 and 1105) before anything listens. Launching next to a live `start.bat` would therefore rewrite its sessions on disk. Also, Windows lets `127.0.0.1:N` and `0.0.0.0:N` bind side by side, so a bind can't detect `start.bat` (which binds `0.0.0.0`). So first call `portBusy(port)`, exported from `server.mjs`. If it returns `true`, show the error dialog ("The companion is already running on port N, probably start.bat. Close it and try again.") and quit. Do not fall back to another port. The CLI uses the same probe, so `start.bat` refuses to start while the app is running. Known limit: companions on *different* `OMP_WEB_PORT`s with the same data dir aren't detected; the README says to run one companion at a time.
 3. `const companion = await createCompanion({ exposeToken: false })`, imported from `../companion/server.mjs`. The desktop app ignores `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN`. Other variables (`OMP_BIN`, `OMP_WEB_DATA_DIR`, `OMP_SESSIONS_DIR`, `PI_CODING_AGENT_DIR`, `OMP_ALLOWED_ORIGINS`) are read by `createCompanion` as usual.
-4. Listen on `127.0.0.1` at port `Number(process.env.OMP_WEB_PORT || 4545)`. The port is fixed so phone links stay valid across launches. The startup `error` handler is attached with `once('error')` and removed on `listening`, so a later LAN rebind failure never reaches it. It covers the small race after the probe and any other listen error: show the message (the "already running" copy for `EADDRINUSE`) and quit.
+4. Listen on `127.0.0.1` at port `Number(process.env.OMP_WEB_PORT || 4545)`, with no fallback port, so the "already running" check always targets the same address. The token is still generated per launch, so phone links last only until the app restarts; that is deliberate, because a stored token would keep a leaked link valid indefinitely. The startup `error` handler is attached with `once('error')` and removed on `listening`, so a later LAN rebind failure never reaches it. It covers the small race after the probe and any other listen error: show the message (the "already running" copy for `EADDRINUSE`) and quit.
 5. If `createCompanion()` throws or `listen` fails for another reason, show an error dialog with the message and quit.
 
 ### Window
@@ -107,7 +108,7 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
 
 ## Testing
 
-- `node --test "tests/*.test.mjs"` stays green; `server.mjs` is untouched.
+- `node --test "tests/*.test.mjs"` stays green; `createCompanion()` is untouched.
 - One new permanent test, `tests/desktop-links.test.mjs`. It checks that `192.168.*` comes before `10.*` and both come before 172.x/VPN addresses, that internal and IPv6 addresses are skipped, that labels read `<adapter> — <address>` and URLs carry `#token=`, and that no adapters gives an empty list. The rest of `main.mjs` is Electron wiring, verified by the smoke test.
 - Smoke test with `npm run desktop`:
   1. The window opens the dashboard, already connected, with no console.
@@ -118,4 +119,5 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
   6. With a session running, tray Quit shows the confirm. Cancel keeps it running; Quit exits, and the session is persisted as paused and the OMP process is gone.
   7. With `start.bat` running (binds `0.0.0.0`) and one of its sessions working, launching the app shows the "already running" dialog. Afterwards `~/.omp-web/workspace.json` still has that session as `running`, not `paused`.
   8. Run a session that makes a bash tool call, then send a `!dir` command in the composer. No console window flashes up.
+  9. With the app running (hidden in the tray), `start.bat` prints "Port 4545 is already in use" and stops. The app's sessions in `workspace.json` are unchanged.
 - Packaging: `npm run dist` produces `dist/OMP Control Room Setup <version>.exe`. Install it, launch it from the Start menu and repeat checks 1, 2, 6 and 8. Check 8 is only conclusive here, because `npm run desktop` attaches Electron to the terminal's console. Confirm that the installer does not contain `docs/`.
