@@ -363,7 +363,7 @@
     main().innerHTML = `
       <div class="topbar" id="topbar"></div>
       <div class="chat-plan" id="chatPlan" hidden></div>
-      <div class="body"><div class="scroller" id="scroller"><div class="thread" id="thread"></div></div><aside class="tasks" id="tasks" hidden></aside></div>
+      <div class="body"><div class="scroller" id="scroller"><div class="thread" id="thread"></div></div><nav class="prompt-rail" id="promptRail" aria-label="Your prompts (Alt+↑/↓)"></nav><aside class="tasks" id="tasks" hidden></aside></div>
       <div class="composer-wrap">
         <div class="extras" id="extras" hidden></div>
         <div class="questions" id="questions" aria-live="polite" hidden></div>
@@ -380,6 +380,7 @@
     const input = $('#input');
     input.value = drafts.get(S.view) || '';
     autosize(input);
+    railObserver.disconnect(); railObserver.observe($('#scroller')); railObserver.observe($('#thread'));
     if (c.kind === 'native' && !S.previews.has(c.file)) loadPreview(c.file);
     if (c.kind === 'sub') { $('.composer').hidden = true; loadSub(c.file, true); return; }
     if (c.kind === 'changes') { $('.composer-wrap').hidden = true; $('#thread').classList.add('wide'); return; }
@@ -788,6 +789,48 @@
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+  }
+
+  // ---------- prompt rail: one tick per user prompt, placed like a scrollbar annotation ----------
+  // Heights change on re-render, image load, details toggle and resize; the observer covers all of them.
+  const railObserver = new ResizeObserver(() => renderPromptRail());
+  function renderPromptRail() {
+    const rail = $('#promptRail'), sc = $('#scroller');
+    if (!rail || !sc) return;
+    const base = sc.getBoundingClientRect().top - sc.scrollTop, h = sc.scrollHeight;
+    const users = h > sc.clientHeight ? [...$('#thread').querySelectorAll('.msg.user[data-key]')] : [];
+    const ticks = users.map(u => ({ key: u.dataset.key, y: Math.round(u.getBoundingClientRect().top - base), tip: (u.querySelector('.bubble')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140) || 'Prompt' }));
+    // Streaming resizes the thread every chunk; only move existing buttons so a click or hover in progress isn't lost to a rebuild.
+    const sig = ticks.map(t => t.key + '\n' + t.tip).join('\n\n');
+    if (rail._sig !== sig) {
+      rail._sig = sig;
+      rail.innerHTML = ticks.map((t, i) => `<button type="button" tabindex="-1" data-prompt="${esc(t.key)}" data-tip="${esc(t.tip)}" aria-label="Prompt ${i + 1}: ${esc(t.tip)}"></button>`).join('');
+    }
+    ticks.forEach((t, i) => { const b = rail.children[i]; b.dataset.y = t.y; b.style.top = (t.y / h * 100).toFixed(2) + '%'; });
+    markPromptRail();
+  }
+  function markPromptRail() {
+    const sc = $('#scroller'), ticks = $('#promptRail')?.children;
+    if (!sc || !ticks?.length) return;
+    const at = sc.scrollTop + sc.clientHeight * 0.3;
+    let cur = null;
+    for (const b of ticks) if (+b.dataset.y <= at) cur = b;
+    for (const b of ticks) b.classList.toggle('on', b === cur);
+  }
+  function jumpToPrompt(key) {
+    const el = $(`#thread [data-key="${CSS.escape(key)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' });
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+  }
+  function stepPrompt(dir) {
+    const sc = $('#scroller'), ticks = [...($('#promptRail')?.children || [])];
+    if (!sc || !ticks.length) return false;
+    // A prompt within the top 24px is the current one: a jump parks it 12px down (scroll-margin-top), or less when clamped at the bottom.
+    const top = sc.scrollTop;
+    const t = dir < 0 ? ticks.filter(b => +b.dataset.y < top - 2).pop() : ticks.find(b => +b.dataset.y > top + 24);
+    if (t) jumpToPrompt(t.dataset.prompt);
+    return true;
   }
 
   // ---------- diffs (GitHub / VS Code style) ----------
@@ -2305,6 +2348,8 @@
     if (md) { const x = S.set.data?.settings.find(s => s.key === md.dataset.mmdel); const v = { ...(x?.value || {}) }; delete v[md.dataset.mmname]; saveSetting(md.dataset.mmdel, v); return; }
     const dm = t.closest('[data-diffmode]');
     if (dm) { S.diffMode = dm.dataset.diffmode; try { localStorage.setItem('omp-diff-mode', S.diffMode); } catch {} S.lastSig = ''; $('#topbar')._html = ''; update(); return; }
+    const prompt = t.closest('[data-prompt]');
+    if (prompt) { jumpToPrompt(prompt.dataset.prompt); return; }
     const jump = t.closest('[data-jump]');
     if (jump) { e.preventDefault(); document.getElementById(jump.dataset.jump)?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); return; }
     const sub = t.closest('[data-sub]');
@@ -2460,7 +2505,7 @@
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
     else if (d.tagName === 'DETAILS') touched.add(d);
   }, true);
-  document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); }, true);
+  document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); if (e.target.id === 'scroller') markPromptRail(); }, true);
   document.addEventListener('input', e => {
     const t = e.target;
     if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); }
@@ -2548,6 +2593,7 @@
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const b = $('#thread [data-steersave]'); if (b && !b.disabled) saveSteer(b); return; }
       if (e.key === 'Escape') { e.preventDefault(); S.editSteer = null; S.lastSig = ''; update(); return; }
     }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !$('#modal') && stepPrompt(e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
     if (t.id === 'input' && e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       const s = current().kind === 'session' && S.store?.sessions.find(x => x.id === current().id);

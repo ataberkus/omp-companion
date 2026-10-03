@@ -108,6 +108,14 @@ input,textarea{font:inherit;color:inherit}
 
 .body{flex:1;display:flex;min-height:0}
 .scroller{flex:1;overflow-y:auto;min-width:0}
+.prompt-rail{position:relative;flex:0 0 14px;margin:8px 0;z-index:var(--z-float)}
+.prompt-rail button{position:absolute;left:2px;right:2px;height:4px;margin-top:-2px;padding:0;border:0;border-radius:2px;background:var(--faint);opacity:.55;cursor:pointer;transition:opacity .12s,background .12s}
+.prompt-rail button::before{content:'';position:absolute;inset:-4px -2px}
+.prompt-rail button:hover,.prompt-rail button.on{opacity:1;background:var(--accent)}
+.prompt-rail button:hover::after{content:attr(data-tip);position:absolute;right:calc(100% + 8px);top:50%;transform:translateY(-50%);width:max-content;max-width:min(340px,60vw);padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--raised);box-shadow:0 8px 24px #000a;color:var(--fg);font-size:12.5px;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+.msg.user{scroll-margin-top:12px}
+.msg.user.flash .bubble{animation:prompt-flash 1.2s ease-out}
+@keyframes prompt-flash{from{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}}
 .thread{max-width:860px;margin:0 auto;padding:24px 24px 32px;display:flex;flex-direction:column;gap:18px}
 .tasks{width:340px;flex-shrink:0;overflow-y:auto;border-left:1px solid var(--border);padding:0 0 16px;background:var(--panel)}
 .tasks h3{margin:0 0 10px;font-size:13px;display:flex;justify-content:space-between;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}

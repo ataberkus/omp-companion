@@ -21,7 +21,7 @@ test('pending questions take review priority until the last question clears', as
     document, window: { addEventListener() {} }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
     location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams, AbortSignal,
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
-    setTimeout: fn => timers.set(fn.name, fn),
+    setTimeout: fn => timers.set(fn.name, fn), ResizeObserver: class { observe() {} disconnect() {} },
     fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? store : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
   });
   await new Promise(setImmediate);
