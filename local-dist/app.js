@@ -1213,6 +1213,15 @@
   const thinkMem = () => { try { return JSON.parse(localStorage.getItem('omp-think-levels') || '{}'); } catch { return {}; } };
   const thinkGet = sel => sel ? thinkMem()[sel] : undefined;
   const thinkSet = (sel, th) => { if (!sel) return; try { const m = thinkMem(); m[sel] = th || ''; localStorage.setItem('omp-think-levels', JSON.stringify(m)); } catch {} };
+  // Composer hotkeys while OMP works, saved in this browser. Values are comma-separated combos like "Ctrl+Enter, Alt+Q".
+  const HOTKEYS = [['follow_up', 'Queue', 'Send after OMP finishes', 'Ctrl+Enter, Alt+Enter, Ctrl+Q'], ['interrupt', 'Stop & send', 'Stop the current turn and send this instead', '']];
+  const hotkeys = () => { let saved = {}; try { saved = JSON.parse(localStorage.getItem('omp-hotkeys') || '{}'); } catch {} return Object.fromEntries(HOTKEYS.map(([a, , , def]) => [a, typeof saved[a] === 'string' ? saved[a] : def])); };
+  const hotkeyList = a => hotkeys()[a].split(',').map(s => s.trim()).filter(Boolean);
+  // Unknown modifier names or combos without Ctrl/Alt/Meta are rejected, so a typo can't hijack Enter or plain typing.
+  const MODS = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', option: 'alt', shift: 'shift', meta: 'meta', cmd: 'meta', command: 'meta', win: 'meta' };
+  const normCombo = s => { const p = s.toLowerCase().split('+').map(x => x.trim()), key = p.pop(); if (!key || p.some(x => !MODS[x])) return null; const m = new Set(p.map(x => MODS[x])); return m.has('ctrl') || m.has('alt') || m.has('meta') ? [...['ctrl', 'alt', 'shift', 'meta'].filter(x => m.has(x)), key].join('+') : null; };
+  const hotkeyAction = e => { const c = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta', e.key.toLowerCase()].filter(Boolean).join('+'); return HOTKEYS.map(h => h[0]).find(a => hotkeyList(a).some(s => normCombo(s) === c)); };
+  const hotkeyHint = (a, verb) => { const k = hotkeyList(a); return k.length ? ` · ${k.join(', ')} ${verb}` : ''; };
   function pickerRows() {
     const P = S.picker, M = S.models;
     const q = P.q.trim().toLowerCase();
@@ -1445,10 +1454,10 @@
       status = `<span class="grow">From OMP history${native?.cwd ? ' · ' + esc(native.cwd) : ''}. Don't continue it here while it's still open in a terminal.</span>`;
     } else if (s.status === 'running' || s.status === 'queued') {
       placeholder = 'Steer OMP while it works…';
-      hintText = command ? 'Enter runs command · Alt+Enter queues for later' : 'Enter steers now · Ctrl+Enter stops & sends · Alt+Enter queues';
-      btns = `<button class="btn" data-act="follow_up" ${has && !S.busy ? '' : 'disabled'} title="Send after OMP finishes (Alt+Enter)">Queue</button>
+      hintText = (command ? 'Enter runs command' + hotkeyHint('follow_up', 'queues for later') : 'Enter steers now' + hotkeyHint('interrupt', 'stops & sends') + hotkeyHint('follow_up', 'queues'));
+      btns = `<button class="btn" data-act="follow_up" ${has && !S.busy ? '' : 'disabled'} title="Send after OMP finishes${esc(hotkeyList('follow_up').length ? ` (${hotkeyList('follow_up').join(', ')})` : '')}">Queue</button>
         <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !S.busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
-        ${has && !command && !S.busy ? '<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead (Ctrl+Enter)">■ Stop &amp; send</button>' : ''}
+        ${has && !command && !S.busy ? `<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}">■ Stop &amp; send</button>` : ''}
         <button class="btn danger" data-act="abort" title="Stop the current turn">■</button>`;
     } else {
       const fresh = !s.messages.some(m => m.role === 'user');
@@ -2002,17 +2011,29 @@
     const shown = d ? settingsView() : [];
     const changed = d ? d.settings.filter(x => x.modified).length : 0;
     $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<span class="path" data-copy-text="${esc(d.file)}" title="Copy path">${esc(d.file)}</span>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
-    $('#setNav').innerHTML = `<a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
+    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
       const n = shown.filter(x => x.group === g).length, m = d.settings.filter(x => x.group === g && x.modified).length;
       return `<a href="#" data-setgroup="${esc(g)}" class="${n ? '' : 'dim'}">${esc(groupLabel(g))}<span>${m ? `<i title="${m} changed">●</i>` : ''}${n}</span></a>`;
     }).join('') : '');
   }
   function renderSettings() {
     const d = S.set.data;
-    if (!d && !S.set.plugins) { $('#setList').innerHTML = S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''; return; }
+    if (!d && !S.set.plugins) { $('#setList').innerHTML = hotkeysSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); return; }
     renderSettingsChrome();
     const groups = d ? (() => { const by = new Map(settingGroups(d).map(g => [g, []])); for (const x of settingsView()) (by.get(x.group) || by.set(x.group, []).get(x.group)).push(x); return [...by].filter(([, list]) => list.length).map(([g, list]) => `<section class="set-group" id="sg-${esc(g)}"><h2>${esc(groupLabel(g))}${g === 'internal' ? ' <small>used by OMP itself; change with care</small>' : ''}</h2>${list.map(settingRow).join('')}</section>`).join(''); })() : (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : '');
-    $('#setList').innerHTML = pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : ''));
+    $('#setList').innerHTML = hotkeysSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : ''));
+  }
+  function hotkeysSection() {
+    const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean), h = hotkeys();
+    const rows = HOTKEYS.filter(([a, label, desc]) => !q.length || q.every(w => ('hotkeys keyboard shortcuts ' + label + ' ' + desc + ' ' + h[a]).toLowerCase().includes(w))).filter(([a, , , def]) => !S.set.changed || h[a] !== def);
+    if (!rows.length) return '';
+    return `<section class="set-group" id="sg-hotkeys"><h2>Hotkeys <small>composer, while OMP is working · saved in this browser</small></h2><p class="set-desc">Comma-separated, e.g. <code>Ctrl+Enter, Alt+Q</code>. Modifiers: Ctrl, Alt, Shift, Meta/Cmd. Leave empty to turn off. Plain Enter always steers. Some browsers keep Ctrl+Q or Cmd+Q for themselves.</p>`
+      + rows.map(([a, label, desc, def]) => `<div class="set-row ${h[a] !== def ? 'mod' : ''}"><div class="set-info"><div class="set-name">${esc(label)}${h[a] !== def ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${esc(desc)}</div>${h[a] !== def ? `<div class="set-def">Default: <code>${esc(def || 'none')}</code></div>` : ''}</div>
+        <div class="set-ctl"><input data-hotkey="${a}" value="${esc(h[a])}" placeholder="None" spellcheck="false" autocomplete="off">${h[a] !== def ? `<button class="btn sm ghost" data-hotkeyreset="${a}">Reset</button>` : ''}</div></div>`).join('') + '</section>';
+  }
+  function saveHotkey(action, value) {
+    try { localStorage.setItem('omp-hotkeys', JSON.stringify({ ...hotkeys(), [action]: value })); } catch {}
+    renderSettings(); toast('Saved hotkeys');
   }
   function settingRow(x) {
     return `<div class="set-row ${x.modified ? 'mod' : ''}" data-row="${esc(x.key)}">
@@ -2340,6 +2361,8 @@
     if (sg) { e.preventDefault(); document.getElementById('sg-' + sg.dataset.setgroup)?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); return; }
     const sr = t.closest('[data-setreset]');
     if (sr) { saveSetting(sr.dataset.setreset, null, true); return; }
+    const hr = t.closest('[data-hotkeyreset]');
+    if (hr) { saveHotkey(hr.dataset.hotkeyreset, HOTKEYS.find(h => h[0] === hr.dataset.hotkeyreset)[3]); return; }
     const pa = t.closest('[data-pluginaction]');
     if (pa) { if (pa.dataset.pluginaction === 'uninstall' && !confirm(`Uninstall ${pa.dataset.plugin}?`)) return; savePlugin(pa.dataset.pluginaction, pa.dataset.plugin); return; }
     const mm = t.closest('[data-mmkey]');
@@ -2530,6 +2553,7 @@
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
+    else if (e.target.dataset?.hotkey) { const v = e.target.value.split(',').map(s => s.trim()).filter(Boolean), bad = v.filter(s => !normCombo(s)); if (bad.length) toast(`Not a usable hotkey: ${bad.join(', ')}. Use Ctrl, Alt or Meta plus a key, e.g. Alt+Q`, 'err'); else saveHotkey(e.target.dataset.hotkey, v.join(', ')); }
   });
   document.addEventListener('paste', e => {
     if (e.target.id !== 'input' && e.target.id !== 'homePrompt') return;
@@ -2594,11 +2618,11 @@
       if (e.key === 'Escape') { e.preventDefault(); S.editSteer = null; S.lastSig = ''; update(); return; }
     }
     if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !$('#modal') && stepPrompt(e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
-    if (t.id === 'input' && e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
+    if (t.id === 'input') {
       const s = current().kind === 'session' && S.store?.sessions.find(x => x.id === current().id);
-      send(s && (s.status === 'running' || s.status === 'queued') ? (e.altKey ? 'follow_up' : (e.ctrlKey || e.metaKey) && !/^\/\S/.test(t.value.trim()) ? 'interrupt' : 'steer') : undefined);
-      return;
+      const live = s && (s.status === 'running' || s.status === 'queued'), act = live && hotkeyAction(e);
+      if (act) { e.preventDefault(); send(act); return; }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(live ? 'steer' : undefined); return; }
     }
     if (t.id === 'homePrompt' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); startSession(); return; }
     if (t.id === 'folderFilter' && e.key === 'Enter') { e.preventDefault(); const first = $('.folder-list [data-go]'); if (first) goFolder(first.dataset.go); return; }
