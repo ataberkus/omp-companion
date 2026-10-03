@@ -26,6 +26,8 @@ Success: installing the `.exe` gives a Start-menu app that opens the existing da
 | --- | --- |
 | `package.json` | New, at the repo root. `"main": "desktop/main.mjs"`, `"private": true`. Dev dependencies: `electron` (>= 35, bundled Node >= 22), `electron-builder`. Scripts: `"desktop": "electron ."`, `"dist": "electron-builder --win nsis"`. Inline `build` config (below). |
 | `desktop/main.mjs` | New. The whole shell: server boot, window, tray, LAN rebind, quit logic. |
+| `desktop/links.mjs` | New. Pure, Electron-free: `phoneLinks(interfaces, port, token) → [{ label, url }]`, which builds the ordered **Copy phone link** entries from `os.networkInterfaces()` output. |
+| `tests/desktop-links.test.mjs` | New. Covers `phoneLinks` ordering and filtering. |
 | `desktop/icon.png` | New. 256×256 PNG rasterized once from `local-dist/favicon.svg`; used for the window, tray and installer. |
 | `.gitignore` | Add `node_modules/` and `dist/`. |
 | `README.md` | New "Desktop app" section: build, install, tray menu, LAN toggle, SmartScreen note, the "one companion at a time" rule. |
@@ -54,7 +56,7 @@ Placing `package.json` at the root keeps `desktop/`, `companion/` and `local-dis
 1. `app.requestSingleInstanceLock()`. If the lock is not acquired, quit. The running instance handles `second-instance` by showing and focusing its window.
 2. `const companion = await createCompanion({ exposeToken: false })`, imported from `../companion/server.mjs`. The desktop app ignores `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN`. Other variables (`OMP_BIN`, `OMP_WEB_DATA_DIR`, `OMP_SESSIONS_DIR`, `PI_CODING_AGENT_DIR`, `OMP_ALLOWED_ORIGINS`) are read by `createCompanion` as usual.
 3. Listen on `127.0.0.1` at port `Number(process.env.OMP_WEB_PORT || 4545)`. The port is fixed so phone links stay valid across launches.
-4. On `EADDRINUSE`, do not fall back to another port. A second companion with the same data dir would overwrite `workspace.json`. Show an error dialog ("The companion is already running on port N, probably start.bat. Close it and try again.") and quit.
+4. The startup `error` handler is attached with `once('error')` and removed on `listening`, so a later LAN rebind failure never reaches it. On `EADDRINUSE`, do not fall back to another port. A second companion with the same data dir would overwrite `workspace.json`. Show an error dialog ("The companion is already running on port N, probably start.bat. Close it and try again.") and quit.
 5. If `createCompanion()` throws or `listen` fails for another reason, show an error dialog with the message and quit.
 
 ### Window
@@ -70,7 +72,7 @@ Placing `package.json` at the root keeps `desktop/`, `companion/` and `local-dis
 Icon, tooltip "OMP Control Room", menu:
 - **Open**: shows and focuses the main window. Double-clicking the tray icon does the same.
 - **Allow phones on my network**: a checkbox, off at every launch.
-- **Copy phone link**: enabled only in LAN mode. Copies `http://<first non-internal IPv4>:<port>/#token=<token>` to the clipboard. If no LAN IPv4 exists, shows a dialog instead.
+- **Copy phone link**: a submenu, enabled only in LAN mode, rebuilt each time LAN mode turns on. It has one item per non-internal IPv4 address, labeled `<adapter name> — <address>`. Private home/office ranges (`192.168.*`, then `10.*`) are listed first, and others (for example a WSL/Hyper-V `vEthernet` 172.x or a VPN address) after them. Clicking an item copies `http://<address>:<port>/#token=<token>`. With no IPv4 adapter, the submenu holds one disabled item: "No network address found".
 - **Quit**: see Quitting.
 
 ### LAN toggle (rebind, never restart)
@@ -85,7 +87,7 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
 - The Host/Origin allowlist is recomputed from `server.address()` on every request (`server.mjs` around line 995), so it follows the new bind.
 - The dashboard polls `/state`. Requests in flight during the rebind fail and the next poll recovers.
 - The token stays required in LAN mode. Phones open the copied link, which carries the token in the URL fragment.
-- If binding `0.0.0.0` fails, rebind `127.0.0.1`, uncheck the item and show the error.
+- The rebind attaches its own one-shot `error` handler. If binding `0.0.0.0` fails, rebind `127.0.0.1`, uncheck the item and show the error.
 - The first LAN bind triggers the Windows Firewall prompt for the app; the README tells the user to allow private networks only.
 
 ### Quitting
@@ -100,19 +102,20 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
 | Port in use | Error dialog explaining that another companion is running; quit. |
 | `createCompanion` / listen error | Error dialog with the message; quit. |
 | LAN bind fails | Revert to 127.0.0.1, uncheck the toggle, error dialog. |
-| No LAN IPv4 for Copy phone link | Info dialog. |
+| No LAN IPv4 for Copy phone link | Disabled "No network address found" submenu item. |
 | OMP missing or outdated | Unchanged: handled by the dashboard and server as today. |
 
 ## Testing
 
 - `node --test "tests/*.test.mjs"` stays green; `server.mjs` is untouched.
-- No new permanent tests: `main.mjs` is Electron wiring (window, tray, dialogs) with no logic worth unit-testing outside Electron.
+- One new permanent test, `tests/desktop-links.test.mjs`. It checks that `192.168.*` comes before `10.*` and both come before 172.x/VPN addresses, that internal and IPv6 addresses are skipped, that labels read `<adapter> — <address>` and URLs carry `#token=`, and that no adapters gives an empty list. The rest of `main.mjs` is Electron wiring, verified by the smoke test.
 - Smoke test with `npm run desktop`:
   1. The window opens the dashboard, already connected, with no console.
   2. Closing the window hides it to the tray, the balloon shows once, and tray Open restores it.
   3. A second launch focuses the existing window.
   4. LAN toggle on: `GET http://<LAN IP>:<port>/api/state` with `Authorization: Bearer <token>` returns 200, and without it returns 401. The window keeps working. Toggle off: connections to the LAN IP are refused.
-  5. Copy phone link puts the expected URL on the clipboard.
+  5. Copy phone link lists every adapter, private ranges first, and the clicked item puts its URL on the clipboard.
   6. With a session running, tray Quit shows the confirm. Cancel keeps it running; Quit exits, and the session is persisted as paused and the OMP process is gone.
   7. With `start.bat` running, launching the app shows the "already running" dialog.
+  8. Run a session that makes a bash tool call, then send a `!dir` command in the composer. No console window flashes up.
 - Packaging: `npm run dist` produces `dist/OMP Control Room Setup <version>.exe`. Install it, launch it from the Start menu and repeat checks 1, 2 and 6. Confirm that the installer does not contain `docs/`.
