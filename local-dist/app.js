@@ -463,7 +463,7 @@
       s.fast?.active ? '<span class="pill" title="Fast mode is active">⚡ Fast</span>' : '',
       s.goal?.objective ? `<span class="goal" title="${esc(`Goal (${s.goal.status}): ${s.goal.objective}`)}">🎯 ${esc(s.goal.objective.slice(0, 60))}</span>` : '',
     ].join('');
-    const btn = [changesButton(s.messages, 's:' + s.id), sideButton()];
+    const btn = [changesButton(s.messages, 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Show the selected model's provider quota (/usage)" aria-label="Usage">◔ <span class="lbl">Usage</span></button>`];
     if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort" aria-label="Stop">■ <span class="lbl">Stop</span></button>`);
     if (['review', 'paused', 'error'].includes(s.status) && s.messages.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
     const idle = s.status !== 'running' && s.status !== 'queued';
@@ -2483,6 +2483,7 @@
     const item = e.button === 1 && e.target.closest('.item[data-key]');
     if (item && !e.target.closest('[data-archive]')) { e.preventDefault(); openItemTab(item.dataset.key); }
   });
+    else if (act === 'usage') { toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
   document.addEventListener('contextmenu', e => {
     closeCtx();
     const item = e.target.closest('.item[data-key]');

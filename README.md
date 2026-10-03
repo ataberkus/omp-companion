@@ -65,7 +65,7 @@ Type `/` in the composer to browse commands and skills. Use ↑/↓ to select, T
 
 During a running turn, Enter or **Run** dispatches slash commands instead of steering their literal text. Local controls leave the current turn and unread ordinary steers intact. **Queue** / **Alt+Enter** still defers commands until the turn finishes; `/usage` is always immediate. Restart the companion and refresh the browser after updating.
 
-Send `/usage` (or `/usage show`) to put a quota snapshot in the conversation. The selected model determines the provider; account, model and tier limits are labeled as reported, because a quota can be shared by several models. Snapshots include their fetch time and UTC reset timestamps. Providers without usage data show **Remaining quota unavailable**, not estimated remaining messages or a session-token total. This uses the configured OMP runtime's `usage --provider <id> --json` command.
+Click **◔ Usage** in a session's top bar, or send `/usage` (or `/usage show`), to put a quota snapshot in the conversation. The selected model determines the provider; account, model and tier limits are labeled as reported, because a quota can be shared by several models. Snapshots include their fetch time and UTC reset timestamps. Providers without usage data show **Remaining quota unavailable**, not estimated remaining messages or a session-token total. This uses the configured OMP runtime's `usage --provider <id> --json` command.
 
 ## Desktop app (Windows)
 
