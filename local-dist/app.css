@@ -240,7 +240,9 @@ input,textarea{font:inherit;color:inherit}
 .attach-item{position:relative;max-width:100%}
 .attach-item img{display:block;max-width:100%;max-height:200px;border:1px solid var(--border);border-radius:6px}
 .attach-item button{position:absolute;top:4px;right:4px;background:#000b}
-.composer-bar .hint:has(.check){display:flex;flex-wrap:wrap;gap:2px 14px;white-space:normal}
+.composer-bar:has(.hint .check){flex-wrap:wrap}
+.composer-bar .hint:has(.check){display:flex;flex-wrap:wrap;gap:2px 14px;white-space:normal;flex-basis:100%;order:1;padding-top:4px}
+.composer-bar:has(.hint .check) [data-act=start]{margin-left:auto}
 .attach-btn{flex-shrink:0}
 .composer-bar{display:flex;align-items:center;gap:8px;padding:6px 8px 8px 14px}
 .composer-bar .hint{flex:1;font-size:12px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -301,7 +303,6 @@ input,textarea{font:inherit;color:inherit}
   .composer-wrap{padding:0 16px 14px}
   .composer-bar{flex-wrap:wrap}
   .composer-bar .hint:not(:has(.check)){display:none}
-  .composer-bar .hint:has(.check){flex-basis:100%;order:1}
   #buttons{margin-left:auto}
   .home-inner{padding:28px 16px}
   .meta{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
