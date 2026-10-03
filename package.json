@@ -1,0 +1,24 @@
+{
+  "name": "omp-control-room",
+  "version": "1.0.0",
+  "description": "OMP Control Room desktop app",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "desktop": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "dev.omp.control-room",
+    "productName": "OMP Control Room",
+    "directories": { "output": "dist" },
+    "files": ["package.json", "desktop/**", "companion/**", "local-dist/**"],
+    "win": { "target": "nsis", "icon": "desktop/icon.png" },
+    "nsis": { "oneClick": true, "perMachine": false }
+  }
+}
