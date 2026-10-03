@@ -24,11 +24,11 @@
 
 ## Review Focus
 
-1. **Startup listen error vs. LAN rebind error.** A failed `0.0.0.0` bind must revert to `127.0.0.1` and must not show the "already running" dialog or quit. Pinned by smoke check T3-4b (force the failure by holding `<LAN IP>:<port>` from another process).
+1. **Startup listen error vs. LAN rebind error.** A failed `0.0.0.0` bind must revert to `127.0.0.1` and must not show the "already running" dialog or quit. Pinned by smoke check T3-4b (force the failure by holding `0.0.0.0:<port>` from another process; a helper on a specific IP does not block a wildcard bind on Windows).
 2. **The window hides when the user closes it, and quits when the app is quitting.** If `isQuitting` isn't set before `companion.close()`, quitting hangs with a hidden window. If it is set too early, close-to-tray quits the app. Pinned by T3 and T4 smoke checks.
 3. **Busy count.** Only `running` and `queued` sessions count, not `review` or `paused`. A wrong filter either nags on every quit or kills agents silently. Pinned by T4-3 (one session in `review`: no prompt).
 4. **Same-origin popup windows.** "Open in new tab" in the dashboard must open a connected app window, not the system browser, which has no token. Pinned by T1-4.
-5. **Phone link on a machine with WSL/VPN adapters.** A `192.168.*` address must be listed first. Pinned by the `phoneLinks` unit test in T2.
+5. **Launching next to a live `start.bat`.** `createCompanion()` pauses and persists sessions before `listen`, and Windows allows `127.0.0.1:N` and `0.0.0.0:N` to bind side by side. So the app must stop at the connect probe, before `createCompanion`, or it rewrites `start.bat`'s working sessions as `paused` on disk. Pinned by T1-3. (Phone-link ordering, the previous item 5, is already covered by the T2 unit test.)
 
 ---
 
@@ -45,10 +45,11 @@
   - `type: "module"` must not break the tests: they are already `.mjs` and `server.mjs` is ESM. Verify in Step 6.
 - [ ] **Step 2: Create `desktop/icon.png` (256×256, transparent corners) from `local-dist/favicon.svg`.** Use a throwaway Electron script that is **not committed**: an offscreen `BrowserWindow` 256×256 with `transparent: true` loads `data:text/html,<img src="file:///…/favicon.svg" width=256 height=256 style="display:block">` with `body{margin:0}`, then `capturePage()` → `toPNG()` → write the file. Expected: a 256×256 PNG with the gradient square and "π".
 - [ ] **Step 3: Implement startup in `desktop/main.mjs`.**
-  - `if (!app.requestSingleInstanceLock()) app.quit()`; on `second-instance`, call `showWindow()`.
-  - In `app.whenReady()`: call `createCompanion({ exposeToken: false })`, then `companion.server.listen(port, '127.0.0.1')`.
+  - `if (!app.requestSingleInstanceLock()) app.exit(0); else bootstrap();`, so the second instance never reaches `createCompanion`. On `second-instance`, call `showWindow()`.
+  - `portBusy(port: number): Promise<boolean>` resolves `true` when `net.connect(port, '127.0.0.1')` connects or hasn't resolved after 1000 ms, and `false` on `ECONNREFUSED` (other errors also count as `false`). Destroy the socket either way.
+  - `bootstrap()`: `await app.whenReady()`. If `await portBusy(port)`, show `dialog.showErrorBox` with the verbatim "already running" copy and call `app.exit(1)`. Only after that, call `createCompanion({ exposeToken: false })`, then `companion.server.listen(port, '127.0.0.1')`.
   - Attach `server.once('error', onStartError)`; on `listening`, remove it with `server.off('error', onStartError)`.
-  - `onStartError`: for `EADDRINUSE`, `dialog.showErrorBox` with the verbatim copy (N = port); otherwise show the message. Then `app.exit(1)`. Wrap `createCompanion` in try/catch with the same dialog-and-exit.
+  - `onStartError`: for `EADDRINUSE`, show the same "already running" copy; otherwise show the message. Then `app.exit(1)`. Wrap `createCompanion` in try/catch with the same dialog-and-exit.
   - `Menu.setApplicationMenu(null)`.
 - [ ] **Step 4: Implement the window.**
   - `new BrowserWindow({ icon, show: false, ...savedBounds })`. On `ready-to-show`, call `show()`, and `maximize()` if saved.
@@ -61,8 +62,8 @@
   - Apply the same handler to child windows through `app.on('web-contents-created')` so popups follow the rules too, along with a `will-navigate` guard that does `preventDefault()` plus `openExternal` for foreign origins.
 - [ ] **Step 5: Smoke test** with `npm run desktop`:
   - **T1-1:** the window shows the dashboard, already connected (session list loads, no token prompt), and no console window appears.
-  - **T1-2:** a second `npm run desktop` exits and focuses the first window.
-  - **T1-3:** with `node companion/server.mjs` already running on 4545, `npm run desktop` shows the "already running" dialog and exits.
+  - **T1-2:** a second `npm run desktop` exits with no dialog and focuses the first window.
+  - **T1-3:** start `start.bat` (it binds `0.0.0.0:4545`) and give one of its sessions a long-running prompt. While it works, run `npm run desktop`. Expect the "already running" dialog and an exit. Right afterwards, `~/.omp-web/workspace.json` still shows that session with `"status": "running"`. Then repeat with plain `node companion/server.mjs` (`127.0.0.1`): same dialog.
   - **T1-4:** "Open in new tab" on a session opens a connected app window.
   - **T1-5:** a Markdown link to `https://example.com` opens in the system browser.
   - Verify with `computer` screenshots.
@@ -126,7 +127,7 @@
   - **T3-2:** toggle LAN on. Allow the Windows Firewall prompt for private networks.
   - **T3-3:** run `curl -s -o NUL -w "%{http_code}" -H "Authorization: Bearer <token>" http://<192.168 IP>:4545/api/state` and expect `200`. Without the header, expect `401`. Read the token from the copied link. The dashboard window keeps updating.
   - **T3-4:** the Copy phone link submenu lists `192.168.*` first, and clicking an entry puts that URL on the clipboard.
-  - **T3-4b:** with LAN off, run `node -e "require('net').createServer().listen(4545,'<192.168 IP>')"` to hold the port on the LAN address, so the app's `0.0.0.0:4545` bind gets `EADDRINUSE`. Toggle LAN on and expect the error dialog, the checkbox unchecked, the app still running and the window still connected. Stop the helper.
+  - **T3-4b:** with LAN off, run `node -e "require('net').createServer().listen(4545,'0.0.0.0')"`. This works next to the app's `127.0.0.1:4545` on Windows, and makes the app's `0.0.0.0:4545` rebind fail with `EADDRINUSE`. Toggle LAN on and expect the "Could not change network access" dialog (not "already running"), the checkbox unchecked, the app still running and the window still connected. Stop the helper.
   - **T3-5:** toggle LAN off. The curl command to the LAN IP fails to connect.
 - [ ] **Step 5: Commit:** `git commit -am "Desktop: tray, hide to tray, LAN rebind"`
 
@@ -159,7 +160,7 @@
 
 - [ ] **Step 1: Build.** `npm run dist`. Expected: `dist/OMP Control Room Setup 1.0.0.exe`.
 - [ ] **Step 2: Inspect the package.** `npx asar list "dist/win-unpacked/resources/app.asar"`. Expected: only `package.json`, `desktop/`, `companion/` and `local-dist/` paths, with no `docs/`, `tests/` or `start.bat`. The installer is under 150 MB.
-- [ ] **Step 3: Install and smoke test.** Run the installer and launch "OMP Control Room" from the Start menu. Repeat T1-1, T3-1 and T4-2.
+- [ ] **Step 3: Install and smoke test.** Run the installer and launch "OMP Control Room" from the Start menu. Repeat T1-1, T3-1, T4-2 and T4-4. T4-4 (no console flashes) is only conclusive here, because `npm run desktop` attaches Electron to the terminal's console.
 - [ ] **Step 4: README section** containing:
   - Build steps: `npm install`, `npm run dist`, run the installer; `npm run desktop` for development.
   - Tray menu items.

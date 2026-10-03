@@ -53,10 +53,10 @@ Placing `package.json` at the root keeps `desktop/`, `companion/` and `local-dis
 ## Runtime behavior (`desktop/main.mjs`)
 
 ### Startup
-1. `app.requestSingleInstanceLock()`. If the lock is not acquired, quit. The running instance handles `second-instance` by showing and focusing its window.
-2. `const companion = await createCompanion({ exposeToken: false })`, imported from `../companion/server.mjs`. The desktop app ignores `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN`. Other variables (`OMP_BIN`, `OMP_WEB_DATA_DIR`, `OMP_SESSIONS_DIR`, `PI_CODING_AGENT_DIR`, `OMP_ALLOWED_ORIGINS`) are read by `createCompanion` as usual.
-3. Listen on `127.0.0.1` at port `Number(process.env.OMP_WEB_PORT || 4545)`. The port is fixed so phone links stay valid across launches.
-4. The startup `error` handler is attached with `once('error')` and removed on `listening`, so a later LAN rebind failure never reaches it. On `EADDRINUSE`, do not fall back to another port. A second companion with the same data dir would overwrite `workspace.json`. Show an error dialog ("The companion is already running on port N, probably start.bat. Close it and try again.") and quit.
+1. `app.requestSingleInstanceLock()`. If the lock is not acquired, `app.exit(0)` immediately: the bootstrap runs only in the lock-holder branch, so a second instance never reaches `createCompanion`. The running instance handles `second-instance` by showing and focusing its window.
+2. **Port probe before `createCompanion`.** `createCompanion()` marks `running`/`queued` sessions as `paused` and persists `workspace.json` (`server.mjs` lines 347 and 1105) before anything listens. Launching next to a live `start.bat` would therefore rewrite its sessions on disk. Also, Windows lets `127.0.0.1:N` and `0.0.0.0:N` bind side by side, so a bind can't detect `start.bat` (which binds `0.0.0.0`). So first try `net.connect(port, '127.0.0.1')`. If it connects, or hasn't resolved within 1 s, show the error dialog ("The companion is already running on port N, probably start.bat. Close it and try again.") and quit. `ECONNREFUSED` means the port is free. Do not fall back to another port. Known limit: a companion on a *different* `OMP_WEB_PORT` with the same data dir isn't detected; the README says to run one companion at a time.
+3. `const companion = await createCompanion({ exposeToken: false })`, imported from `../companion/server.mjs`. The desktop app ignores `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN`. Other variables (`OMP_BIN`, `OMP_WEB_DATA_DIR`, `OMP_SESSIONS_DIR`, `PI_CODING_AGENT_DIR`, `OMP_ALLOWED_ORIGINS`) are read by `createCompanion` as usual.
+4. Listen on `127.0.0.1` at port `Number(process.env.OMP_WEB_PORT || 4545)`. The port is fixed so phone links stay valid across launches. The startup `error` handler is attached with `once('error')` and removed on `listening`, so a later LAN rebind failure never reaches it. It covers the small race after the probe and any other listen error: show the message (the "already running" copy for `EADDRINUSE`) and quit.
 5. If `createCompanion()` throws or `listen` fails for another reason, show an error dialog with the message and quit.
 
 ### Window
@@ -99,7 +99,7 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
 
 | Failure | Behavior |
 | --- | --- |
-| Port in use | Error dialog explaining that another companion is running; quit. |
+| Port in use (connect probe succeeds or times out) | Error dialog explaining that another companion is running; quit before `createCompanion` touches `workspace.json`. |
 | `createCompanion` / listen error | Error dialog with the message; quit. |
 | LAN bind fails | Revert to 127.0.0.1, uncheck the toggle, error dialog. |
 | No LAN IPv4 for Copy phone link | Disabled "No network address found" submenu item. |
@@ -112,10 +112,10 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
 - Smoke test with `npm run desktop`:
   1. The window opens the dashboard, already connected, with no console.
   2. Closing the window hides it to the tray, the balloon shows once, and tray Open restores it.
-  3. A second launch focuses the existing window.
+  3. A second launch focuses the existing window and shows no dialog.
   4. LAN toggle on: `GET http://<LAN IP>:<port>/api/state` with `Authorization: Bearer <token>` returns 200, and without it returns 401. The window keeps working. Toggle off: connections to the LAN IP are refused.
   5. Copy phone link lists every adapter, private ranges first, and the clicked item puts its URL on the clipboard.
   6. With a session running, tray Quit shows the confirm. Cancel keeps it running; Quit exits, and the session is persisted as paused and the OMP process is gone.
-  7. With `start.bat` running, launching the app shows the "already running" dialog.
+  7. With `start.bat` running (binds `0.0.0.0`) and one of its sessions working, launching the app shows the "already running" dialog. Afterwards `~/.omp-web/workspace.json` still has that session as `running`, not `paused`.
   8. Run a session that makes a bash tool call, then send a `!dir` command in the composer. No console window flashes up.
-- Packaging: `npm run dist` produces `dist/OMP Control Room Setup <version>.exe`. Install it, launch it from the Start menu and repeat checks 1, 2 and 6. Confirm that the installer does not contain `docs/`.
+- Packaging: `npm run dist` produces `dist/OMP Control Room Setup <version>.exe`. Install it, launch it from the Start menu and repeat checks 1, 2, 6 and 8. Check 8 is only conclusive here, because `npm run desktop` attaches Electron to the terminal's console. Confirm that the installer does not contain `docs/`.
