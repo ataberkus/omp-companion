@@ -79,7 +79,7 @@ Run `dist/OMP Control Room Setup <version>.exe`. It installs for your user only 
 
 - **Closing the window** hides it to the tray; sessions keep working. Open it again from the tray icon (double-click or **Open**) or by launching the app again.
 - **Quit** (tray menu) stops the companion and every OMP process it started. If sessions are still working it asks first; they are saved as paused. Signing out or shutting Windows down quits without asking.
-- **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. Allow the Windows Firewall prompt for **private networks only**.
+- **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. The token changes every time the app starts, so copy a fresh link after restarting it. Allow the Windows Firewall prompt for **private networks only**.
 - **One companion at a time.** The desktop app and `start.bat` share `~/.omp-web`, so each refuses to start while the other is running on the same port.
 - `OMP_BIN`, `OMP_WEB_PORT`, `OMP_WEB_DATA_DIR` and the other variables below still apply. `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN` are ignored: the app always starts on `127.0.0.1` with a token.
 

@@ -38,12 +38,17 @@ function savedBounds() {
   } catch { return {}; }
 }
 
+function saveBounds() {
+  if (!win || win.isDestroyed()) return;
+  try { fs.writeFileSync(boundsFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })); } catch {}
+}
+
 function createWindow() {
   const { maximized, ...bounds } = savedBounds();
   win = new BrowserWindow({ width: 1400, height: 900, ...bounds, icon, show: false, title: 'OMP Control Room' });
   win.once('ready-to-show', () => { if (maximized) win.maximize(); win.show(); });
   win.on('close', e => {
-    try { fs.writeFileSync(boundsFile(), JSON.stringify({ ...win.getNormalBounds(), maximized: win.isMaximized() })); } catch {}
+    saveBounds();
     if (isQuitting) return;
     // Closing hides to the tray so running agents keep working; Quit lives in the tray menu.
     e.preventDefault();
@@ -77,6 +82,8 @@ async function quit({ confirm }) {
     if (response !== 0) { quitting = false; return; }
   }
   isQuitting = true;
+  // app.exit() destroys windows without a 'close' event, so save the window position here.
+  saveBounds();
   tray.destroy();
   // close() pauses running sessions, saves workspace.json and stops every OMP process.
   try { await companion.close(); } finally { app.exit(0); }
