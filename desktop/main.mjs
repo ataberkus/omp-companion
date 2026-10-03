@@ -12,7 +12,7 @@ const origin = `http://127.0.0.1:${port}`;
 const icon = fileURLToPath(new URL('icon.png', import.meta.url));
 const alreadyRunning = `The companion is already running on port ${port}, probably start.bat. Close it and try again.`;
 let companion, win, tray;
-let isQuitting = false, lan = false, toldAboutTray = false;
+let isQuitting = false, quitting = false, lan = false, toldAboutTray = false;
 
 function fail(message) {
   dialog.showErrorBox('OMP Control Room', message);
@@ -50,6 +50,8 @@ function createWindow() {
     win.hide();
     if (!toldAboutTray) { toldAboutTray = true; tray.displayBalloon({ icon: nativeImage.createFromPath(icon), title: 'OMP Control Room', content: 'Still running in the tray.' }); }
   });
+  // Windows kills the process seconds after WM_ENDSESSION: no question, save and stop right away.
+  win.on('session-end', () => quit({ confirm: false }));
   win.loadURL(`${origin}/#token=${companion.token}`);
 }
 
@@ -60,8 +62,24 @@ function rebuildTrayMenu() {
     { label: 'Allow phones on my network', type: 'checkbox', checked: lan, click: item => setLan(item.checked) },
     { label: 'Copy phone link', enabled: lan, submenu: links.length ? links.map(l => ({ label: l.label, click: () => clipboard.writeText(l.url) })) : [{ label: 'No network address found', enabled: false }] },
     { type: 'separator' },
-    { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+    { label: 'Quit', click: () => quit({ confirm: true }) },
   ]));
+}
+
+async function quit({ confirm }) {
+  if (quitting) return;
+  quitting = true;
+  const busy = companion.store.sessions.filter(s => s.status === 'running' || s.status === 'queued').length;
+  if (confirm && busy) {
+    // No parent window: it may be hidden in the tray, and a dialog owned by a hidden window can stay invisible.
+    const message = busy === 1 ? '1 session is still working. Quit and stop it?' : `${busy} sessions are still working. Quit and stop them?`;
+    const { response } = await dialog.showMessageBox({ type: 'warning', title: 'OMP Control Room', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1, noLink: true, message });
+    if (response !== 0) { quitting = false; return; }
+  }
+  isQuitting = true;
+  tray.destroy();
+  // close() pauses running sessions, saves workspace.json and stops every OMP process.
+  try { await companion.close(); } finally { app.exit(0); }
 }
 
 function createTray() {
