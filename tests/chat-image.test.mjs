@@ -58,11 +58,12 @@ for await (const line of createInterface({ input: process.stdin })) {
   const [steerStatus, steered] = await post('/sessions/session/command', { type: 'steer', message: 'With text', images: [image], preview });
   assert.equal(steerStatus, 200);
   assert.notEqual(steered.status, 'error');
-  const [resumeStatus, resumed] = await post('/omp-sessions/resume', { file: nativeFile, message: '', images: [image], preview });
+  const [resumeStatus, resumed] = await post('/omp-sessions/resume', { file: nativeFile, message: '', advisor: true, images: [image], preview });
   assert.equal(resumeStatus, 201);
   assert.equal(resumed.status, 'review');
   assert.equal(resumed.messages.find(m => m.role === 'user' && m.imagePreview)?.imagePreview, preview);
   assert.ok(resumed.messages.some(m => m.hasImage && !m.imagePreview && m.text === 'Image attached'));
+  assert.match(await readFile(join(dir, 'advisor.log'), 'utf8'), /^\/advisor on$/m);
   // New session from home with an image-only prompt also shows the preview.
   const [quickStatus, quick] = await post('/quick-start', { path: dir, prompt: '', images: [image], preview });
   assert.equal(quickStatus, 201);

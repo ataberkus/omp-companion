@@ -1089,7 +1089,7 @@ async function spend(){
     const submitted=!!message||body.images!==undefined;
     const existing=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));
     store.archived=store.archived.filter(k=>k!=='f:'+file&&k!=='f:'+body.file);
-    if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(),existing));return;}
+    if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(),existing));return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||head.preview.split('\n')[0]||'Resumed session').slice(0,120);
@@ -1097,6 +1097,7 @@ async function spend(){
     const {selector,thinking}=modelChoice(body);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch:await launchOptions(body.launch)});s.contextTokens=contextTokens;
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
     if(!selector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}if(!thinking&&head.thinking)s.thinking=head.thinking;
+    if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
     json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,preview:body.preview},images)):s,201);return;
    }
    if(url.pathname==='/api/archive'){

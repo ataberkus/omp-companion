@@ -165,7 +165,7 @@
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: localStorage.getItem('omp-group-by') || 'time',
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, view: '', lastSig: '', nativeAt: 0,
-    models: null, picker: null, nativeChoice: new Map(), expandAll: false,
+    models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
     noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
     planBusy: new Set(), planSubmitted: new Set(),
@@ -174,8 +174,8 @@
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
   S.home.model = ''; S.home.thinking = '';
   try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; } catch {}
-  S.advReviews = true; S.advImportant = false;
-  try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; } catch {}
+  S.advReviews = true; S.advImportant = false; S.advHidden = false;
+  try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; S.advHidden = localStorage.getItem('omp-adv-hidden') === '1'; } catch {}
   // OMP_WEB_NO_TOKEN: the companion embeds the token in the page, so nothing asks for it.
   S.token = document.querySelector('meta[name="omp-token"]')?.content || '';
   if (!S.token) try { S.token = sessionStorage.getItem(KEY) || ''; } catch {}
@@ -711,6 +711,8 @@
   }
 
   function renderThread(messages, status, ownerId, opts = {}) {
+    // Drop hidden advisor messages up front so they don't split activity groups.
+    if (S.advHidden) messages = messages.filter(m => m.role !== 'advisor' && m.role !== 'advisor-update');
     const pending = S.pending && S.pending.view === S.view && !S.pending.queued ? S.pending : null;
     const last = messages[messages.length - 1];
     const runningTools = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? 1 : 0), 0);
@@ -718,7 +720,7 @@
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
     // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
     const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, opts.extra || ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     const scroller = $('#scroller');
@@ -1000,7 +1002,7 @@
   S.advTx = new Map();
   function advisorFiles(file) { return (S.bg.get(file)?.data?.subagents || []).filter(x => x.advisor); }
   async function loadAdvisorTx(file) {
-    if (!S.advReviews) return;
+    if (!S.advReviews || S.advHidden) return;
     for (const a of advisorFiles(file)) {
       const e = S.advTx.get(a.file) || {};
       if (e.loading || (e.updatedAt === a.updatedAt && e.data) || (e.at && Date.now() - e.at < 4000)) continue;
@@ -1012,7 +1014,7 @@
   }
   function withAdvisor(messages, file) {
     if (!file) return messages;
-    if (!S.advReviews) return messages;
+    if (!S.advReviews || S.advHidden) return messages;
     const extra = [];
     for (const a of advisorFiles(file)) {
       const name = a.name === '__advisor' || a.name === '__advisor.default' ? '' : a.name.slice('__advisor.'.length);
@@ -1024,7 +1026,7 @@
     return [...messages, ...extra.filter(m => t(m) >= since)].map((m, i) => [m, i]).sort((a, b) => t(a[0]) - t(b[0]) || a[1] - b[1]).map(x => x[0]);
   }
   function advisorReview(group) {
-    if (!S.advReviews) return '';
+    if (!S.advReviews || S.advHidden) return '';
     const thoughts = group.filter(m => m.role === 'thinking').length, tools = group.filter(m => m.role === 'tool').length, replies = group.filter(m => m.role === 'assistant');
     const who = [...new Set(group.map(m => m.adv))].join(', ');
     const open = rowOpen.get('adv:' + group[0].id);
@@ -1057,8 +1059,9 @@
     const el = document.createElement('div');
     el.id = 'thinkMenu'; el.className = 'think-menu adv-menu';
     el.innerHTML = `<div class="tm-head">Advisor</div>
-      <label class="adv-toggle"><span>Show advisor reviews in chat</span><span class="switch"><input type="checkbox" data-advreviews ${S.advReviews ? 'checked' : ''}><span></span></span></label>
-      <label class="adv-toggle"><span>Important notes only (concern + blocker)</span><span class="switch"><input type="checkbox" data-advimportant ${S.advImportant ? 'checked' : ''}><span></span></span></label>
+      <label class="adv-toggle"><span>Hide all advisor output in chat (advisor keeps running)</span><span class="switch"><input type="checkbox" data-advhidden ${S.advHidden ? 'checked' : ''}><span></span></span></label>
+      <label class="adv-toggle"><span>Show advisor reviews in chat</span><span class="switch"><input type="checkbox" data-advreviews ${S.advReviews ? 'checked' : ''} ${S.advHidden ? 'disabled' : ''}><span></span></span></label>
+      <label class="adv-toggle"><span>Important notes only (concern + blocker)</span><span class="switch"><input type="checkbox" data-advimportant ${S.advImportant ? 'checked' : ''} ${S.advHidden ? 'disabled' : ''}><span></span></span></label>
       <label class="adv-toggle"><span>${a.enabled && !a.noModel ? 'On for this session' : a.noModel ? 'On, but no model set' : s.advisor ? 'Off for this session' : 'Status unknown'}</span><span class="switch"><input type="checkbox" data-advset ${a.enabled ? 'checked' : ''}><span></span></span></label>
       <div class="adv-info">${a.model ? `<div>Model <b>${esc(a.model)}</b></div>` : role ? `<div>Model <b>${esc(role)}</b> <span class="muted">from ${esc(S.advCfg.source)}</span></div>` : '<div>No advisor model set yet.</div>'}
         ${pct != null ? `<div>Context ${fmtTokens(a.contextTokens)} / ${fmtTokens(a.contextWindow)} (${pct}%)</div>` : ''}${typeof a.cost === 'number' ? `<div>Spend $${a.cost.toFixed(4)}</div>` : ''}${a.state && a.enabled ? `<div>State: ${esc(a.state)}</div>` : ''}</div>
@@ -1446,9 +1449,11 @@
     const has = !!input.value.trim() || !!attachment;
     const command = /^\/\S/.test(input.value.trim());
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
+    const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
+    const nAdvChip = !s && native ? `<button class="model-chip adv-chip ${nAdv ? 'on' : ''}" data-act="nativeAdv" title="Advisor for this session once it starts">⚑ <span>Advisor ${nAdv === undefined ? 'default' : nAdv ? 'on' : 'off'}</span></button>` : '';
     setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s)
-      : choice ? modelChip(choice.model, choice.thinking, 'Saved model')
-      : modelChip(native?.model, native?.thinking, 'Saved model'));
+      : (choice ? modelChip(choice.model, choice.thinking, 'Saved model') : modelChip(native?.model, native?.thinking, 'Saved model')) + nAdvChip);
+    if (!s && native && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }); }
     if (!s) {
       placeholder = 'Continue this session…';
       hintText = 'Enter to continue · Shift+Enter for a new line';
@@ -1750,7 +1755,8 @@
     try {
       if (c.kind === 'native') {
         const ch = S.nativeChoice.get(c.file);
-        const s = await api('/omp-sessions/resume', { file: c.file, message: text, ...imagePayload(attachment), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}) });
+        const adv = S.nativeAdv.get(c.file);
+        const s = await api('/omp-sessions/resume', { file: c.file, message: text, ...imagePayload(attachment), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}), ...(adv === undefined ? {} : { advisor: adv }) });
         if (s.status === 'error') { retryView = 'session:' + s.id; await refresh(); location.hash = '#/s/' + s.id; throw new Error(s.error || 'OMP could not send this message.'); }
         await refresh();
         S.pending = { view: 'session:' + s.id, text, imagePreview: S.pending.imagePreview, at: S.pending.at };
@@ -2506,6 +2512,7 @@
     else if (act === 'spendReload') loadSpend();
     else if (act === 'advMenu') { $('#thinkMenu') ? closeThinkMenu() : openAdvMenu(t.closest('[data-act]')); }
     else if (act === 'thinkMenu') { $('#thinkMenu') ? closeThinkMenu() : openThinkMenu(t.closest('[data-act]')); }
+    else if (act === 'nativeAdv') { S.nativeAdv.set(c.file, !(S.nativeAdv.get(c.file) ?? S.advCfg?.enabled)); update(); }
     else if (act === 'fastToggle') {
       if (c.kind === 'home') { S.home.fast = !S.home.fast; renderHome(); }
       else if (c.kind === 'session') { const s = S.store.sessions.find(x => x.id === c.id); if (s) sessionAction({ type: 'pref', key: 'fast', value: !s.fast?.enabled }); }
@@ -2521,7 +2528,7 @@
       const s = c.kind === 'session' ? S.store.sessions.find(x => x.id === c.id) : null;
       newSession(s ? projectOf(s)?.path || s.cwd : (S.native.find(n => n.file === c.file)?.cwd || S.previews.get(c.file)?.cwd));
     }
-    else if (act === 'resumeOnly') api('/omp-sessions/resume', { file: c.file }).then(async s => { await refreshNative(); location.hash = '#/s/' + s.id; }).catch(err => toast(err.message, 'err'));
+    else if (act === 'resumeOnly') { const adv = S.nativeAdv.get(c.file); api('/omp-sessions/resume', { file: c.file, ...(adv === undefined ? {} : { advisor: adv }) }).then(async s => { await refreshNative(); location.hash = '#/s/' + s.id; }).catch(err => toast(err.message, 'err')); }
     else if (act === 'start') startSession();
   });
   document.addEventListener('auxclick', e => {
@@ -2593,6 +2600,7 @@
   });
   document.addEventListener('change', e => {
     if (e.target.matches?.('[data-advset]')) { advisorAction(e.target.checked ? 'on' : 'off'); return; }
+    if (e.target.matches?.('[data-advhidden]')) { S.advHidden = e.target.checked; try { localStorage.setItem('omp-adv-hidden', S.advHidden ? '1' : '0'); } catch {} e.target.closest('.adv-menu')?.querySelectorAll('[data-advreviews],[data-advimportant]').forEach(x => { x.disabled = S.advHidden; }); S.lastSig = ''; update(); return; }
     if (e.target.matches?.('[data-advreviews]')) { S.advReviews = e.target.checked; try { localStorage.setItem('omp-adv-reviews', S.advReviews ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
     if (e.target.matches?.('[data-advimportant]')) { S.advImportant = e.target.checked; try { localStorage.setItem('omp-adv-important', S.advImportant ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }

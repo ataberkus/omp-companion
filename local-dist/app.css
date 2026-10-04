@@ -524,6 +524,7 @@ details.raw>*:not(summary){margin-top:6px}
 .switch input:checked+span{background:var(--accent)}
 .switch input:checked+span::after{transform:translateX(16px);background:var(--accent-fg)}
 .switch input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+.switch input:disabled+span{opacity:.4;cursor:not-allowed}
 .model-map{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
 .mm-row{display:flex;align-items:center;gap:6px}
 .mm-name{font:12px var(--mono);color:var(--muted);width:90px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis}
