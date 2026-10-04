@@ -13,23 +13,20 @@ Success: from the browser, a user turns vibe on, sends a directive, sees worker 
 
 `/vibe` defines only `handleTui` (`slash-commands/builtin-modes.ts:314-331`). OMP's RPC layer only reads `getVibeModeState()`, and only to block plan and goal mode (`rpc-plan-mode.ts:228`, `rpc-goal-mode.ts:224,270`). This work therefore starts with an OMP patch. The companion side is useless without it, and capability detection keeps older builds working unchanged.
 
-## Phase 0 — commit the existing OMP WIP
+## Phase 0 — commit the existing OMP WIP (done)
 
-`../oh-my-pi` (on `main`, 3 commits ahead of origin) has uncommitted work in the same files this patch touches. `git status --porcelain` shows these changes, committed as two commits:
+The WIP in `../oh-my-pi` has been committed as two commits. `test/tools/zz-probe.test.ts` was left untracked.
 
-1. `feat(coding-agent): expose native goal mode over RPC`
-   - untracked: `src/goals/continuation.ts`, `src/modes/rpc/rpc-goal-mode.ts`, `test/rpc-goal-mode.test.ts`
-   - modified: goal hunks of `src/modes/rpc/rpc-mode.ts`, `src/modes/rpc/rpc-types.ts` (`RpcGoalModeState`, `goalMode`), `src/modes/interactive-mode.ts`, `README.md`, `packages/coding-agent/CHANGELOG.md` (goal line)
-2. `fix(coding-agent): show the Done row for multi-select ask questions in RPC`
-   - `src/tools/ask.ts`, `test/tools/ask.test.ts`, `test/rpc-extension-ui.test.ts`, `checkedIndices` hunk of `rpc-types.ts`, CHANGELOG fix line
+- `0a50a5a397 fix(coding-agent): show the Done row for multi-select ask questions in RPC`: `ask.ts`, `ask.test.ts`, `rpc-extension-ui.test.ts`, plus the `checkedIndices` hunks of `rpc-mode.ts`/`rpc-types.ts` and the CHANGELOG fix line. `dialogOptions.checkedIndices` already exists at HEAD, so this commit builds without the goal changes.
+- `50e0a20c9b feat(coding-agent): expose native goal mode over RPC`: `goals/continuation.ts`, `rpc-goal-mode.ts`, `rpc-goal-mode.test.ts` (previously untracked), the goal hunks of `rpc-mode.ts`/`rpc-types.ts`/`interactive-mode.ts`, `README.md`, and the CHANGELOG goal line.
 
-`test/tools/zz-probe.test.ts` stays untracked and untouched. If the goal and ask hunks can't be separated cleanly with `git add -p`, I fall back to a single WIP commit. Before committing, I show you the exact file list and messages and run the touched tests (`rpc-goal-mode`, `ask`, `rpc-extension-ui`). Each commit has to build on its own, so the untracked goal files are added explicitly, never through `commit -a`.
+Checked before committing: `bun test` for ask, rpc-extension-ui and rpc-goal-mode (81 pass) and `bun run check:types` (clean).
 
 ## Phase 1 — OMP: `RpcVibeMode`
 
-New file `packages/coding-agent/src/modes/rpc/rpc-vibe-mode.ts`, structured like `RpcPlanMode`/`RpcGoalMode`. It calls `AgentSession` APIs directly. `InteractiveMode` is not changed.
+New file `packages/coding-agent/src/modes/rpc/rpc-vibe-mode.ts`, structured like `RpcPlanMode`/`RpcGoalMode`, on top of a shared helper both front ends call.
 
-Note: `#enterVibeMode`/`#exitVibeMode` in `interactive-mode.ts` (5672-5762) are mostly session calls with TUI concerns mixed in (status line, warnings, `/vibe <prompt>` submission ordering). The RPC class repeats roughly 20 lines of that sequence. The alternative is extracting a shared helper, which means editing `interactive-mode.ts`. Repeating them keeps the patch away from TUI code. If the two copies drift, extracting the helper is the follow-up.
+Shared helper `packages/coding-agent/src/vibe/mode.ts`: `enterVibeMode`, `exitVibeMode`, `quiesceVibeForSwitch` and `reconcileVibeMode` take the session plus a `VibeParentSession` and hold the vibe mode state (`previousTools`, owner scope, in-flight entry, suspended-for-switch flag) in a small object each front end owns. The session-level sequences currently in `interactive-mode.ts` move into it: enter/exit at 5672-5762, quiesce at 4253-4258, and the vibe parts of `#clearTransientModeState`/`#reconcileModeFromSession` at 4490-4534 and 4567-4576. `InteractiveMode` keeps its TUI-only concerns (status line, warnings, `/vibe <prompt>` submission ordering) and calls the helper. That way the switch/suspend ordering exists in exactly one place.
 
 ### State and wire contract
 
@@ -51,33 +48,37 @@ A concurrent second enter joins the in-flight promise, matching the TUI's `#vibe
 
 ### Exit (`setMode(false)`)
 
-Exit is a no-op when vibe is off. Otherwise it runs inside `session.runModeExitTeardown(...)`: abort if streaming, `VibeSessionRegistry.global().killAll(parent, ownerScope)`, `deactivateVibeTools(previousTools ?? [])`, `setVibeModeState(undefined)`. It then appends the `"none"` mode change, but only if the TUI path persists one too (to be confirmed against `VibeRuntime.#persistModeExit`, which already persists tombstones), and publishes. The response includes `killed: number`.
+Exit is a no-op when vibe is off. Otherwise it runs inside `session.runModeExitTeardown(...)`: abort if streaming, `VibeSessionRegistry.global().killAll(parent, ownerScope)`, `deactivateVibeTools(previousTools ?? [])`, `setVibeModeState(undefined)`, then publish. `killAll` → `VibeRuntime.#persistModeExit` already writes the worker tombstones and `appendModeChange("none")` atomically (vibe/runtime.ts:475-484), so exit appends nothing more. The response includes `killed: number`.
 
 ### Session transitions
 
 `assertVibeSessionTransitionAllowed` (agent-session.ts:6396) guards only `newSession`, `fork` and `moveSession`. Native rejection already covers those three. During implementation I'll check that `handoff` goes through one of them, and if it doesn't, add an RPC-side guard. `switchSession`, `branch` and `open_session` are not guarded and need the TUI's suspend/reconcile behaviour:
 
-- `beforeSessionChange()`: if vibe is on, run `VibeSessionRegistry.global().suspendScope(ownerScope, session.asyncJobManager)` and remember that the scope was suspended (TUI `#quiesceVibeForSessionSwitch`, 4253-4258).
-- `reconcile()`, ported from TUI `#reconcileModeFromSession` (4510-4534, 4567-4576) plus `#clearTransientModeState` (4490-4506):
+- `beforeSessionChange()` → helper `quiesceVibeForSwitch`: if vibe is on, `VibeSessionRegistry.global().suspendScope(ownerScope, session.asyncJobManager)` and set the suspended-for-switch flag. Called next to plan/goal in the `new_session`/`switch_session`/`branch` case (rpc-mode.ts ~1361-1376) and in `openRpcSession` (501-517).
+- `reconcile()` → helper `reconcileVibeMode` (the logic moved from the TUI):
   - `preserve` = vibe was on, the target's mode is `"vibe"`, and the owner scope matches the target scope
   - if vibe was on and not preserving: `removeVibeToolsPreservingActive()`, clear state, and suspend the scope unless it was already suspended
   - `VibeSessionRegistry.global().rehydrate(parent)`
   - if the target's mode is `"vibe"` and not preserving: re-enter with `persistModeChange: false`; pass `previousTools` from the target's `modeData.previousTools` only when the live toolset was lost to teardown
   - publish if the state changed
-- Wiring in `rpc-mode.ts`: call `vibeMode.beforeSessionChange()`/`reconcile()` alongside plan and goal in the `new_session`/`switch_session`/`branch` case (around 1361-1376) and in `openRpcSession` (501-517). Call `reconcile()` once at startup next to `goalMode.reconcile()` (1061); this covers cold resume of a vibe session. Branch also calls the session-level `#sessionSwitchReconciler`. That reconciler is the TUI's and isn't set in RPC, so the explicit reconcile handles branch.
+- Wiring: `RpcVibeMode` registers `session.setSessionSwitchReconciler(() => vibeMode.reconcile())`, as the TUI does at interactive-mode.ts:2203. `switchSession` calls it after a switch and after a rollback (agent-session.ts:10697, 10790), and `branch` calls it at 2522. That covers `switch_session`, `branch` and `open_session`, plus any session change that doesn't come through the RPC case. No explicit reconcile calls are added for those paths. `reconcile()` also runs once at startup next to `goalMode.reconcile()` (1061) for cold resume. The reconciler slot isn't used by anything else in RPC.
+- Running `reconcile()` twice is harmless: a second run finds the live state already matching the target (`preserve`, or vibe off with a non-vibe target), so it changes and publishes nothing. A test covers this.
 - Mutual exclusion the other way round is already enforced by `rpc-plan-mode.ts:228` and `rpc-goal-mode.ts:270`.
 
-### Commands list
+### No `/vibe` over RPC prompt
 
-`/vibe` is added to the RPC `commands()` output. When the companion sends `/vibe` through `prompt`, the server toggles. When it sends `/vibe <prompt>`, it toggles on and then prompts. This mirrors the existing `/plan` handling at rpc-mode.ts:1184-1216, so typing `/vibe` in the browser composer works too.
+As approved, there's no RPC inline-prompt variant. `/vibe` stays out of the RPC `commands()` output. The companion toggles with `set_vibe_mode` and then sends normal prompts, so turning it off always goes through the confirmation. In the companion server, a composer message matching `/^\/vibe(?:\s|$)/` is rejected (409 on unsupported builds, otherwise 400 `Use the Vibe toggle; /vibe was not sent to the model.`) next to the `/plan` guard at server.mjs:736, so a typed `/vibe` never reaches the model as literal text.
 
 ### OMP tests (`test/rpc-vibe-mode.test.ts`, modeled on `rpc-goal-mode.test.ts`)
 
 - enable → `get_state.vibeMode.enabled === true`; active tools are exactly read/todo/vibe_*; `vibe_mode_changed` is emitted
 - disable → the prior toolset is restored; `killAll` runs (scope has no live workers afterwards)
 - enable while plan mode is enabled, and while goal mode is paused → rejected, state unchanged
-- `switch_session` while vibe is on, to a non-vibe session → vibe is off and the target's tools are intact; switching back re-enters
+- `switch_session` while vibe is on, to a non-vibe session → vibe is off, the source scope is suspended, and the target's tools are intact; switching back re-enters and rehydrates workers
+- `branch` while vibe is on → the reconciler re-anchors to the new session id; exiting vibe afterwards succeeds (regression for issue #10468)
 - startup reconcile of a session whose mode is `"vibe"` → vibe is on with the persisted `previousTools`
+- running reconcile twice → no second `vibe_mode_changed`, state unchanged
+- the TUI `/vibe` enter/exit and switch tests that already exist still pass after moving to the helper
 
 Docs: `docs/vibe-mode.md` gets an RPC section, and the README RPC section and CHANGELOG get an entry. One commit: `feat(coding-agent): expose vibe mode over RPC`.
 
