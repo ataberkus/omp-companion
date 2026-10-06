@@ -14,6 +14,8 @@
     if (s < 86400 * 7) return Math.round(s / 86400) + 'd';
     return new Date(iso).toLocaleDateString('en', { month: 'short', day: 'numeric' });
   };
+  // ago() yields '5m' or a date; only relative units read well with "ago".
+  const agoText = iso => { const a = ago(iso); return /\d[mhd]$/.test(a) ? a + ' ago' : a === 'now' ? 'just now' : a ? 'on ' + a : ''; };
   const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }; // numeric only, so the system's 12/24h choice stays
   // Bounded memo: a hit moves the key to the newest end, the oldest entry falls out past `cap`.
   function memo(cache, key, fn, cap = 400) {
@@ -31,6 +33,7 @@
   // ---------- markdown ----------
   const KEYWORDS = 'const|let|var|function|return|if|else|elif|for|while|do|switch|case|break|continue|import|from|export|default|class|extends|new|async|await|def|lambda|fn|pub|struct|enum|impl|trait|use|mut|match|type|interface|true|false|null|undefined|None|True|False|nil|self|this|public|private|protected|static|void|int|char|bool|float|double|auto|namespace|try|catch|except|finally|throw|raise|with|yield|in|of|not|and|or|is|package|func|go|defer|select|echo|then|fi|done|esac|foreach|param';
   const HASH_COMMENT = /^(py|python|sh|bash|shell|zsh|yaml|yml|toml|rb|ruby|ps1|powershell|pwsh|r|perl|dockerfile|make|makefile|conf|ini)$/i;
+  const C_COMMENT = /^(js|jsx|mjs|cjs|ts|tsx|mts|cts|javascript|typescript|c|h|cc|cpp|cxx|hpp|hh|c\+\+|cs|csharp|java|kt|kts|kotlin|go|rs|rust|swift|scala|dart|php|jsonc|json5|groovy|gradle|zig|proto|sol|scss|less)$/i;
   function highlight(code, lang) {
     if (/^(diff|patch)$/i.test(lang || '')) {
       return code.split('\n').map(l => {
@@ -39,7 +42,7 @@
       }).join('\n');
     }
     const hash = HASH_COMMENT.test(lang || '');
-    const re = new RegExp(String.raw`(\/\/[^\n]*|\/\*[\s\S]*?\*\/` + (hash ? String.raw`|#[^\n]*` : '') + String.raw`)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|` + '`(?:[^`\\\\]|\\\\.)*`' + String.raw`)|\b(` + KEYWORDS + String.raw`)\b|\b(0x[\da-fA-F]+|\d+(?:\.\d+)?)\b`, 'g');
+    const re = new RegExp('(' + [C_COMMENT.test(lang || '') && String.raw`\/\/[^\n]*|\/\*[\s\S]*?\*\/`, hash && String.raw`#[^\n]*`, '(?!)'].filter(Boolean).join('|') + String.raw`)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|` + '`(?:[^`\\\\]|\\\\.)*`' + String.raw`)|\b(` + KEYWORDS + String.raw`)\b|\b(0x[\da-fA-F]+|\d+(?:\.\d+)?)\b`, 'g');
     let out = '', last = 0, m;
     while ((m = re.exec(code))) {
       out += esc(code.slice(last, m.index));
@@ -55,28 +58,33 @@
     const slots = [];
     const hold = html => `\u0000${slots.push(html) - 1}\u0000`;
     let s = src.replace(/(`+)([\s\S]*?[^`])\1(?!`)/g, (_, __, code) => hold(`<code>${esc(code.replace(/^ (.*) $/, '$1'))}</code>`));
-    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)(?:\s+"[^"]*")?\)/g, (_, t, u) => hold(`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`));
-    s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, (_, pre, u) => pre + hold(`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>`));
+    const link = (u, t) => hold(`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`);
+    // Link text excludes '[' and bold bodies stop at the next delimiter, so no opener rescans the rest of the text (crafted input froze the tab).
+    s = s.replace(/<((?:https?:\/\/|mailto:)[^\s<>]+)>/g, (_, u) => link(u, u));
+    s = s.replace(/\[([^[\]\n]+)\]\(((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+)(?:\s+"[^"]*")?\)/g, (_, t, u) => link(u, t));
+    s = s.replace(/(^|[\s(])(https?:\/\/(?:[^\s<>()]|\([^\s<>()]*\))*(?:[^\s<>().,;:!?'"]|\([^\s<>()]*\)))/g, (_, pre, u) => pre + link(u, u));
     s = esc(s);
-    s = s.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
-      .replace(/__(?=\S)([\s\S]*?\S)__(?!\w)/g, '<strong>$1</strong>')
+    s = s.replace(/\*\*(?=\S)((?:[^*]|\*(?!\*))*?\S)\*\*/g, '<strong>$1</strong>')
+      .replace(/__(?=\S)((?:[^_]|_(?!_))*?\S)__(?!\w)/g, '<strong>$1</strong>')
       .replace(/(^|[^*\w])\*(?=\S)([^*\n]*?\S)\*(?!\*)/g, '$1<em>$2</em>')
       .replace(/(^|[^_\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, '$1<em>$2</em>')
-      .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
-    s = breaks ? s.replace(/\n/g, '<br>') : s.replace(/ {2,}\n/g, '<br>').replace(/\n/g, ' ');
+      .replace(/~~(?=\S)((?:[^~]|~(?!~))*?\S)~~/g, '<del>$1</del>');
+    s = breaks ? s.replace(/\n/g, '<br>') : s.replace(/(?<! ) {2,}\n/g, '<br>').replace(/\n/g, ' '); // lookbehind: a long space run is scanned once, not from every space
     return s.replace(/\u0000(\d+)\u0000/g, (_, i) => slots[+i]);
   }
 
   const LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
   const FENCE = /^\s{0,3}(```+|~~~+)\s*([^\s`]*)/;
-  const TABLE_SEP = /^(?=.*\|)\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const isTableSep = l => l.includes('|') && /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(l.trim());
   const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
   const cells = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
 
   // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread.
   const mdCache = new Map();
-  const md = (src, breaks = false) => memo(mdCache, (breaks ? '1' : '0') + String(src ?? ''), () => mdRaw(src, breaks), 800);
-  function mdRaw(src, breaks = false) {
+  const md = (src, breaks = false, depth = 0) => memo(mdCache, (breaks ? '1' : '0') + depth + '\u0000' + String(src ?? ''), () => mdRaw(src, breaks, depth), 800);
+  function mdRaw(src, breaks = false, depth = 0) {
+    // Nesting past 20 levels (crafted '- - - …' or '>>>…') renders as plain text instead of overflowing the stack.
+    if (depth > 20) return `<p>${inline(String(src ?? '').trim(), breaks)}</p>`;
     const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
     let out = '', i = 0;
     const isBlockStart = l => FENCE.test(l) || /^\s{0,3}#{1,6}\s/.test(l) || /^\s*>/.test(l) || LIST.test(l) || /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l);
@@ -92,12 +100,12 @@
         while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
         i++;
         const code = body.join('\n');
-        out += `<div class="codeblock"><div class="bar"><span>${esc(lang || 'text')}</span><button class="copy" data-copy>Copy</button></div><pre><code>${highlight(code, lang)}</code></pre></div>`;
+        out += `<div class="codeblock"><div class="bar"><span>${esc(lang || 'text')}</span><button class="copy" data-copy>Copy</button></div><pre><code>${lang && !/^(text|txt|plain|plaintext|console|log|output)$/i.test(lang) ? highlight(code, lang) : esc(code)}</code></pre></div>`;
         continue;
       }
-      if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/))) { out += `<h${m[1].length}>${inline(m[2])}</h${m[1].length}>`; i++; continue; }
+      if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) { out += `<h${m[1].length}>${inline(m[2].trimEnd().replace(/(^|\s)#+$/, '').trim())}</h${m[1].length}>`; i++; continue; }
       if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { out += '<hr>'; i++; continue; }
-      if (line.includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1])) {
+      if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
         const head = cells(line);
         const align = cells(lines[i + 1]).map(c => c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : '');
         i += 2;
@@ -110,7 +118,7 @@
       if (/^\s*>/.test(line)) {
         const body = [];
         while (i < lines.length && (lines[i].trim() ? /^\s*>/.test(lines[i]) || !isBlockStart(lines[i]) : /^\s*>/.test(lines[i + 1] || ''))) body.push(lines[i++].replace(/^\s*>\s?/, ''));
-        out += `<blockquote>${md(body.join('\n'), breaks)}</blockquote>`;
+        out += `<blockquote>${md(body.join('\n'), breaks, depth + 1)}</blockquote>`;
         continue;
       }
       if (LIST.test(line)) {
@@ -129,17 +137,17 @@
           if (indentOf(l) === baseIndent && (LIST.test(l) ? !sameKind(l) : isBlockStart(l))) break;
           block.push(l); i++;
         }
-        out += mdList(block, baseIndent, breaks);
+        out += mdList(block, baseIndent, breaks, depth);
         continue;
       }
       const para = [];
-      while (i < lines.length && lines[i].trim() && !(para.length && isBlockStart(lines[i])) && !(lines[i].includes('|') && TABLE_SEP.test(lines[i + 1] || ''))) para.push(lines[i++]);
+      while (i < lines.length && lines[i].trim() && !(para.length && isBlockStart(lines[i])) && !(lines[i].includes('|') && isTableSep(lines[i + 1] || ''))) para.push(lines[i++]);
       if (!para.length) para.push(lines[i++]);
       out += `<p>${inline(para.join('\n').trim(), breaks)}</p>`;
     }
     return out;
   }
-  function mdList(block, baseIndent, breaks) {
+  function mdList(block, baseIndent, breaks, depth) {
     const items = [];
     for (const l of block) {
       const m = l.match(LIST);
@@ -152,7 +160,7 @@
       let text = it.lines.join('\n'), cls = '', box = '';
       const t = text.match(/^\[( |x|X)\]\s+/);
       if (t) { cls = ' class="task-item"'; box = `<input type="checkbox" disabled${t[1] === ' ' ? '' : ' checked'} aria-label="${t[1] === ' ' ? 'Not done' : 'Done'}"> `; text = text.slice(t[0].length); }
-      let html = md(text, breaks);
+      let html = md(text, breaks, depth + 1);
       html = html.replace(/^<p>([\s\S]*?)<\/p>/, '$1');
       return `<li${cls}>${box}${html}</li>`;
     }).join('');
@@ -162,7 +170,7 @@
   // ---------- state & api ----------
   const KEY = 'omp-web-token';
   const S = {
-    token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: localStorage.getItem('omp-group-by') || 'time',
+    token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time',
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
@@ -173,35 +181,45 @@
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
   S.home.model = ''; S.home.thinking = '';
-  try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; } catch {}
+  try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; S.groupBy = localStorage.getItem('omp-group-by') || 'time'; } catch {}
   S.advReviews = true; S.advImportant = false; S.advHidden = false;
   try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; S.advHidden = localStorage.getItem('omp-adv-hidden') === '1'; } catch {}
   // OMP_WEB_NO_TOKEN: the companion embeds the token in the page, so nothing asks for it.
-  S.token = document.querySelector('meta[name="omp-token"]')?.content || '';
+  const metaToken = document.querySelector('meta[name="omp-token"]')?.content || '';
+  S.token = metaToken;
   if (!S.token) try { S.token = sessionStorage.getItem(KEY) || ''; } catch {}
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
-  async function api(p, body, { timeout = 30000 } = {}) {
-    if (!S.token) throw Object.assign(new Error('Not connected.'), { auth: true });
+  // `token` probes a pasted token without adopting it; `etag` ({ tag }) makes the GET conditional and resolves null on 304.
+  async function api(p, body, { timeout = 30000, token = S.token, etag } = {}) {
+    if (!token) throw Object.assign(new Error('Not connected.'), { auth: true });
     let res;
     try {
       res = await fetch('/api' + p, {
         method: body === undefined ? 'GET' : 'POST',
-        headers: { Authorization: 'Bearer ' + S.token, 'Content-Type': 'application/json' },
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeout),
       });
     } catch (e) { throw new Error(e.name === 'TimeoutError' ? 'The companion did not answer in time.' : 'The companion is not reachable.'); }
+    // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
+    if (res.status === 304) { await res.text().catch(() => {}); return null; }
     const data = await res.json().catch(() => ({}));
-    if (res.status === 401) { setToken(''); throw Object.assign(new Error('The connection token is no longer valid. Open the link printed by the companion.'), { auth: true }); }
+    if (res.status === 401) {
+      if (token !== S.token) throw Object.assign(new Error('That token was not accepted. Check it and try again.'), { auth: true });
+      // No-token mode: the page's embedded token goes stale when the companion restarts; a reload carries the new one.
+      if (metaToken && token === metaToken) { location.reload(); throw Object.assign(new Error('Reconnecting to the restarted companion…'), { auth: true }); }
+      setToken(''); throw Object.assign(new Error('The connection token is no longer valid. Open the link printed by the companion.'), { auth: true });
+    }
     if (!res.ok) throw new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`);
+    if (etag) etag.tag = res.headers?.get?.('ETag') || '';
     return data;
   }
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; }
+    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -287,7 +305,7 @@
   // ---------- sidebar ----------
   function renderList() {
     const list = $('#list');
-    if (!S.store) { list.innerHTML = ''; return; }
+    if (!S.store) { setIfChanged(list, ''); return; }
     const q = S.search.trim().toLowerCase();
     let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
     if (S.filter === 'active') all = all.filter(it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status));
@@ -300,7 +318,7 @@
     const rest = all.filter(it => !working.includes(it) && !review.includes(it));
     if (S.groupBy === 'project') {
       const by = new Map();
-      for (const it of all) (by.get(it.cwd) || by.set(it.cwd, []).get(it.cwd)).push(it);
+      for (const it of all) { const k = norm(it.cwd); (by.get(k) || by.set(k, []).get(k)).push(it); }
       for (const arr of by.values()) groups.push([arr[0].folder, arr, arr[0].cwd]);
       const top = g => Math.max(...g[1].map(i => +new Date(i.at)));
       groups.sort((a, b) => top(b) - top(a));
@@ -314,7 +332,8 @@
       add('Older', rest.filter(it => new Date(it.updatedAt) < startToday - 7 * day));
     }
     const sel = selKey();
-    const collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]'));
+    let collapsed;
+    try { collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { collapsed = new Set(); }
     const html = groups.map(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return `<div class="group-head"><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>` + (shut ? [] : arr).map(it => `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
@@ -326,6 +345,7 @@
     $('#groupBy')?.setAttribute('aria-pressed', String(S.groupBy === 'project'));
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
     $('#conn').title = S.online ? 'Connected to the local companion' : 'Companion not reachable';
+    $('#conn').setAttribute('aria-label', $('#conn').title);
   }
 
   const ICON_ARCHIVE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>';
@@ -344,14 +364,21 @@
   // ---------- views ----------
   const main = () => $('#main');
   function route() {
-    document.getElementById('app').classList.remove('nav-open');
+    setNav(false);
     if (!S.token) return renderConnect();
     const c = current();
     const view = c.kind + ':' + (c.id || c.file || c.parent || '');
     if (view !== S.view) {
-      S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null; build(c);
-      // Per-file caches only matter for recently viewed sessions; keep them bounded.
+      S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null;
+      // Per-file caches only matter for recently viewed sessions; keep them bounded. The viewed preview moves to the newest end
+      // first so the trim can't evict it, and a cached failure is dropped so it is fetched again.
+      const pf = c.kind === 'native' ? c.file : c.kind === 'changes' && c.parent.startsWith('f:') ? c.parent.slice(2) : '';
+      const pv = pf && S.previews.get(pf);
+      if (pv) { S.previews.delete(pf); if (!pv.error) S.previews.set(pf, pv); }
       trim(S.previews, 20); trim(S.subs, 30); trim(S.bg, 30); trim(S.advTx, 60); trim(groupOpen, 2000); trim(rowOpen, 2000);
+      build(c);
+      // /state carries messages only for the viewed session: fetch the new one now instead of on the next poll.
+      if (S.store && stateSession() && !S.store.sessions.find(x => x.id === stateSession())?.messages) refresh();
     }
     if (!S.models && !S.modelsLoading) { S.modelsLoading = true; ensureModels().then(() => { S.lastSig = ''; renderList(); update(); if (current().kind === 'home') renderHome(); }).catch(() => {}).finally(() => { S.modelsLoading = false; }); }
     update();
@@ -383,7 +410,7 @@
     input.value = drafts.get(S.view) || '';
     autosize(input);
     railObserver.disconnect(); railObserver.observe($('#scroller')); railObserver.observe($('#thread'));
-    if (c.kind === 'native' && !S.previews.has(c.file)) loadPreview(c.file);
+    if (c.kind === 'native') loadPreview(c.file);
     if (c.kind === 'sub') { $('.composer').hidden = true; loadSub(c.file, true); return; }
     if (c.kind === 'changes') { $('.composer-wrap').hidden = true; $('#thread').classList.add('wide'); return; }
     loadBg(bgFile(), true);
@@ -392,9 +419,13 @@
   const drafts = new Map();
   const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'; };
 
+  const previewLoading = new Set();
   async function loadPreview(file) {
+    if (S.previews.has(file) || previewLoading.has(file)) return;
+    previewLoading.add(file);
     try { S.previews.set(file, await api('/omp-sessions/preview?file=' + encodeURIComponent(file))); }
     catch (e) { S.previews.set(file, { error: e.message, messages: [] }); }
+    finally { previewLoading.delete(file); }
     S.lastSig = ''; update();
   }
 
@@ -407,12 +438,13 @@
     loadBg(bgFile());
     if (c.kind === 'session') {
       const s = S.store.sessions.find(x => x.id === c.id);
-      if (!s) { $('#thread').innerHTML = '<div class="history-note">This session is not in the panel anymore.</div>'; $('#topbar').innerHTML = ''; return; }
+      if (!s) { $('#thread').innerHTML = '<div class="history-note">This session is not in the panel anymore.</div>'; setIfChanged($('#topbar'), ''); return; }
       renderChatPlan(s);
       renderSide(s);
       renderTopbarSession(s);
-      loadAdvisorTx(s.sessionFile || '');
-      renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt, retry: s._retry, task: s._task });
+      // Another session's poll may still be in S.store; only the thread waits for this one's messages, the chrome renders now.
+      if (!s.messages) { S.lastSig = ''; $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Loading…</div>'; }
+      else { loadAdvisorTx(s.sessionFile || ''); renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt, retry: s._retry, task: s._task }); }
       renderExtras(s);
       showNotices(s);
       renderQuestions(s);
@@ -426,7 +458,7 @@
       renderSide(null);
       renderChatPlan(null);
       renderTopbarNative(n, pv, c.file);
-      if (!pv) $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session history…</div>';
+      if (!pv) { loadPreview(c.file); $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session history…</div>'; }
       else if (pv.error) $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(pv.error)}</div></div>`;
       else { loadAdvisorTx(c.file); renderThread(withAdvisor(pv.messages, c.file), 'history', c.file); }
       renderExtras(null);
@@ -451,29 +483,30 @@
     return `<span class="ctx ${p >= 85 ? 'hot' : p >= 65 ? 'warm' : ''}" title="${tip}">${p != null ? `<i><b style="width:${p.toFixed(1)}%"></b></i>${Math.round(p)}%` : 'context'} ${tokens ? fmtTokens(tokens) : ''}${win ? ' / ' + fmtTokens(win) : ''}</span>`;
   }
   function metaHtml(cwd, extra) {
-    return `<div class="meta"><span class="path" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}">${esc(cwd)}</span>${extra}</div>`;
+    return `<div class="meta"><button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}" aria-label="Copy path ${esc(cwd)}">${esc(cwd)}</button>${extra}</div>`;
   }
   function renderTopbarSession(s) {
     const p = projectOf(s);
     const extra = [
       `<span class="pill ${s.status}">${s.status === 'running' ? '<span class="spinner" style="width:10px;height:10px"></span>' : ''}${esc(STATUS[s.status] || s.status)}</span>`,
       s.branch && s.branch !== 'workspace' ? `<span>⎇ ${esc(s.branch)}${s.isolated ? ' (worktree)' : ''}</span>` : '',
-      sessionModel(s) ? `<span class="mdl-meta" data-act="model" title="Change model">◆ ${esc(modelLabel(sessionModel(s), s.thinking))}</span>` : '',
+      sessionModel(s) ? `<button type="button" class="btn-reset mdl-meta" data-act="model" title="Change model"><span aria-hidden="true">◆</span> ${esc(modelLabel(sessionModel(s), s.thinking))}</button>` : '',
       s.tokens ? `<span>${fmtTokens(s.tokens)} tokens${s.cost ? ' · $' + s.cost.toFixed(2) : ''}</span>` : '',
       contextMeta(s.contextTokens, s.contextWindow || modelInfo(sessionModel(s))?.contextWindow, s.contextPercent),
       s.status === 'running' && s.tps ? `<span title="Output speed">${s.tps.toFixed(0)} tok/s</span>` : '',
       s.fast?.active ? '<span class="pill" title="Fast mode is active">⚡ Fast</span>' : '',
       s.goal?.objective ? `<span class="goal" title="${esc(`Goal (${s.goal.status}): ${s.goal.objective}`)}">🎯 ${esc(s.goal.objective.slice(0, 60))}</span>` : '',
+      offlinePill(),
     ].join('');
-    const btn = [changesButton(s.messages, 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Show the selected model's provider quota (/usage)" aria-label="Usage">◔ <span class="lbl">Usage</span></button>`];
+    const btn = [changesButton(s.messages || [], 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Show the selected model's provider quota (/usage)" aria-label="Usage">◔ <span class="lbl">Usage</span></button>`];
     if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort" aria-label="Stop">■ <span class="lbl">Stop</span></button>`);
-    if (['review', 'paused', 'error'].includes(s.status) && s.messages.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
+    if (['review', 'paused', 'error'].includes(s.status) && s.messages?.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
     const idle = s.status !== 'running' && s.status !== 'queued';
-    const pref = (key, on, label, yes = true, no = false) => `<button data-pref="${key}" data-value="${esc(JSON.stringify(on ? no : yes))}" role="menuitemcheckbox" aria-checked="${!!on}"><span class="check">${on ? '✓' : ''}</span>${esc(label)}</button>`;
-    const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+    const pref = (key, on, label, yes = true, no = false) => `<button data-pref="${key}" data-value="${esc(JSON.stringify(on ? no : yes))}" aria-pressed="${!!on}"><span class="check" aria-hidden="true">${on ? '✓' : ''}</span>${esc(label)}</button>`;
+    const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><h1 title="${esc(s.title)}">${esc(s.title)}</h1>${metaHtml(p?.path || s.cwd, extra)}</div>
       <div class="actions">${btn.join('')}
-        <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
+        <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
           <button data-act="newHere">New session in this folder</button>
           <button data-copy-text="${esc(s.cwd)}">Copy working directory</button>
           ${s.sessionFile ? `<button data-copy-text="${esc(s.sessionFile)}">Copy OMP session file path</button>` : ''}
@@ -508,11 +541,11 @@
   function renderTopbarNative(n, pv, file) {
     const title = n?.title || pv?.title || 'OMP session';
     const cwd = n?.cwd || pv?.cwd || '';
-    const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
-      <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(ago(n.updatedAt))} ago</span>` : ''}`)}</div>
+    const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
+      <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(agoText(n.updatedAt))}</span>` : ''}${offlinePill()}`)}</div>
       <div class="actions">${changesButton(pv?.messages || [], 'f:' + file)}${sideButton()}
         <button class="btn sm" data-act="newHere" aria-label="New session here">＋ <span class="lbl">New here</span></button>
-        <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
+        <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
           <button data-act="resumeOnly">Add to panel without a message</button>
           <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button>
           <button data-copy-text="${esc(cwd)}">Copy working directory</button>
@@ -522,11 +555,14 @@
       </div>`;
     setIfChanged($('#topbar'), html);
   }
+  // Polls fail silently; phone users never see the sidebar dot, so say it in the view's meta line.
+  const offlinePill = () => S.online === false ? '<span class="pill error">Offline — retrying</span>' : '';
   function setIfChanged(el, html) {
     if (el._html === html) return;
     const open = el.querySelector('.menu.open');
     swapHtml(el, html); el._html = html;
-    if (open) el.querySelector('.menu')?.classList.add('open');
+    const menu = open && el.querySelector('.menu');
+    if (menu) { menu.classList.add('open'); menu.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'true'); }
   }
   // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
   // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
@@ -541,19 +577,43 @@
     }
     return { path };
   }
+  const findUi = (el, k) => { let n = k.a ? el.querySelector(`[data-${k.a}="${CSS.escape(k.v)}"]`) : el; for (const i of k.path) n = n?.children[i]; return n; };
+  // Re-render a container without losing the focused control, its caret, or text typed but not saved yet. The control is found
+  // again by id, or by its data-*/name attributes inside the nearest keyed ancestor; else by a unique data-* match, else by its
+  // path under the nearest anchor. Focus is only moved back when the render dropped it (to body or nowhere); focus outside root is never touched.
+  const attrSel = n => n.id ? '#' + CSS.escape(n.id) : n.tagName.toLowerCase() + [...n.attributes].filter(a => a.name.startsWith('data-') || a.name === 'name').map(a => `[${a.name}="${CSS.escape(a.value)}"]`).join('');
+  function keepFocus(root, render) {
+    const a = document.activeElement;
+    if (!root || !a || a === root || !root.contains(a)) return render();
+    const host = !a.id && a.parentElement?.closest('[data-question],[data-row],[data-plugin],form');
+    const keyed = !!(host && root.contains(host)), own = attrSel(a), sel = (keyed ? attrSel(host) + ' ' : '') + own;
+    const exact = !!a.id || keyed, named = own !== a.tagName.toLowerCase();
+    let path = null; try { path = uiKey(root, a); } catch {}
+    const text = a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(checkbox|radio|button|submit)$/.test(a.type));
+    const v = text ? a.value : null, s0 = text ? a.selectionStart : null, s1 = text ? a.selectionEnd : null;
+    render();
+    const now = document.activeElement;
+    if (now && now !== document.body && now !== a) return; // the render (or a nested keepFocus) already placed focus elsewhere
+    let n = exact ? root.querySelector(sel) : null;
+    if (!n && named) { const same = root.querySelectorAll(own); if (same.length === 1) n = same[0]; }
+    if (!n && path) n = findUi(root, path);
+    if (!n || n === root || n === now || !n.focus) return;
+    if (text && n.value !== v) n.value = v;
+    n.focus({ preventScroll: true });
+    if (text && s0 != null) try { n.setSelectionRange(s0, s1); } catch {}
+  }
   function swapHtml(el, html) {
     const keep = [];
     for (const n of touched) {
       if (!n.isConnected) { touched.delete(n); continue; }
-      if (el.contains(n) && n !== el) keep.push({ ...uiKey(el, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null });
+      if (el.contains(n) && n !== el) keep.push({ ...uiKey(el, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null, stick: n.matches?.('.job-thought pre') && n.scrollHeight - n.scrollTop - n.clientHeight < 8 });
     }
-    el.innerHTML = html;
+    keepFocus(el, () => { el.innerHTML = html; });
     for (const k of keep) {
-      let n = k.a ? el.querySelector(`[data-${k.a}="${CSS.escape(k.v)}"]`) : el;
-      for (const i of k.path) n = n?.children[i];
+      const n = findUi(el, k);
       if (!n) continue;
       if (k.open != null && n.tagName === 'DETAILS') n.open = k.open;
-      n.scrollTop = k.top; n.scrollLeft = k.left;
+      n.scrollTop = k.stick ? n.scrollHeight : k.top; n.scrollLeft = k.left;
       touched.add(n);
     }
   }
@@ -570,7 +630,9 @@
   const line1 = x => String(x || '').split('\n')[0];
   // One-line past-tense description of a tool call: k = summary bucket, v = verb, b = bold object, d = plain detail, c = code detail.
   function toolLine(t, a) {
-    const n = t.name, p = a && (a.path || a.file_path || a.file || a.filePath), files = realFiles(t);
+    const n = t.name;
+    if (!a && (n === 'bash' || n === 'task')) a = clippedArgs(t.args);
+    const p = a && (a.path || a.file_path || a.file || a.filePath), files = realFiles(t);
     if (n === 'read' && p) return { k: 'read', v: 'Read', b: baseName(p).replace(/:.*$/, ''), keys: [String(p).replace(/(?<=[^\\/]):[^\\/]*$/, '')] };
     if (files.length) return { k: 'edit', v: 'Edited', b: [...new Set(files.map(f => baseName(f.path)))].join(', '), keys: files.map(f => f.path) };
     if (['grep', 'glob', 'find'].includes(n)) return { k: 'search', v: 'Searched', d: line1(a?.pattern || a?.query || a?.path) };
@@ -607,6 +669,15 @@
   };
   const argsCache = new Map();
   const parseArgs = s => { if (s && typeof s === 'object') return s; return memo(argsCache, String(s), () => { try { const v = JSON.parse(s); return v && typeof v === 'object' ? v : null; } catch { return null; } }); };
+  // The server clips args at 6,000 chars, which leaves invalid JSON: recover the bash command and task names for the summary and subagent buttons.
+  const jsonStr = s => { try { return JSON.parse('"' + s.replace(/\\(u[\da-fA-F]{0,3})?$/, '') + '"'); } catch { return s; } };
+  function clippedArgs(s) {
+    if (typeof s !== 'string') return null;
+    const cmd = s.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    const names = [...s.matchAll(/"name"\s*:\s*"((?:[^"\\]|\\.)*)"/g)].map(m => ({ name: jsonStr(m[1]) }));
+    return cmd || names.length ? { ...(cmd ? { command: jsonStr(cmd[1]) } : {}), ...(names.length ? { tasks: names } : {}) } : null;
+  }
+  const subtasks = v => `<div class="subtasks">${v.map(x => `<div class="subtask"><div><b>${esc(x?.name || 'task')}</b>${x?.description ? ` <span class="muted">${esc(x.description)}</span>` : ''}</div><button class="btn sm ghost" data-subname="${esc(x?.name || '')}">Open subagent →</button></div>`).join('')}</div>`;
   const shortPath = p => { const parts = String(p).split(/[\\/]/).filter(Boolean); return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : String(p); };
   function keyArg(name, a) {
     if (!a) return '';
@@ -633,10 +704,7 @@
         if (files.length && (k === 'content' || (t.name === 'edit' && typeof v === 'string' && v.includes('\n')))) { out.push(`<details class="raw"><summary>Raw ${esc(k)}</summary>${codeBox(k, v, looksDiff(v) ? 'diff' : '')}</details>`); continue; }
         if (files.length && (k === 'path' || k === 'file_path')) continue;
         if (k === 'command' && typeof v === 'string') { out.push(codeBox(t.name === 'eval' ? 'code' : 'command', v, t.name === 'bash' ? 'bash' : '', a.async ? '<span class="tag">background</span>' : '')); continue; }
-        if (k === 'tasks' && Array.isArray(v)) {
-          out.push(`<div class="subtasks">${v.map(x => `<div class="subtask"><div><b>${esc(x?.name || 'task')}</b>${x?.description ? ` <span class="muted">${esc(x.description)}</span>` : ''}</div><button class="btn sm ghost" data-subname="${esc(x?.name || '')}">Open subagent →</button></div>`).join('')}</div>`);
-          continue;
-        }
+        if (k === 'tasks' && Array.isArray(v)) { out.push(subtasks(v)); continue; }
         if (typeof v === 'string' && (v.includes('\n') || v.length > 120)) {
           const lang = /diff|patch/i.test(k) || looksDiff(v) || (t.name === 'edit' && /^[-+]/m.test(v)) ? 'diff' : extLang(a.path || a.file_path);
           out.push(codeBox(k, v, lang));
@@ -646,13 +714,20 @@
         small.push(`<span><i>${esc(k)}</i> ${esc(String(v))}</span>`);
       }
       if (small.length) out.unshift(`<div class="kv">${small.join('')}</div>`);
-    } else if (t.args && t.args !== '{}') out.push(codeBox('arguments', t.args, 'json'));
+    } else if (t.args && t.args !== '{}') {
+      out.push(codeBox('arguments', t.args, 'json'));
+      const c = t.name === 'task' && clippedArgs(t.args);
+      if (c?.tasks) out.push(subtasks(c.tasks));
+    }
     if (t.result && !(files.length && t.status !== 'error')) out.push(`<div class="result ${t.status === 'error' ? 'bad' : ''}"><div class="bar"><span>${t.status === 'error' ? 'Error' : 'Output'}</span></div><pre>${looksDiff(t.result) ? highlight(t.result, 'diff') : esc(t.result)}</pre></div>`);
     if (t.result && files.length && t.status !== 'error') out.push(`<details class="raw"><summary>Tool output</summary><pre class="fd-raw">${esc(t.result)}</pre></details>`);
     return out.join('') || '<div class="muted" style="padding:4px 0">No details.</div>';
   }
   // Group state survives re-renders; values only exist when the user overrides the default.
   const groupOpen = new Map(), rowOpen = new Map(), bodyCache = new Map();
+  // ponytail: every row body is rendered eagerly, collapsed or not, so Chrome's find-in-page can search closed <details>; the
+  // body cache (1000) covers the server's 600-message cap. Ceiling: thread DOM/HTML size grows with tool output (MBs on long
+  // sessions). Upgrade path: render bodies lazily on the details toggle event if parse/layout time shows up on phones.
   const thinkTitle = text => {
     const line = String(text).split('\n').map(l => l.replace(/[*_#`>]/g, '').trim()).find(Boolean) || 'Thinking';
     return line.length > 110 ? line.slice(0, 110) + '…' : line;
@@ -677,8 +752,8 @@
     const tip = [t.intent, t.ms ? fmtMs(t.ms) : ''].filter(Boolean).join(' · ');
     return `<details class="row tool ${bad ? 'bad' : ''} ${edits ? 'edit' : ''}" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
       <summary title="${esc(tip)}"><span class="ln">${esc(L.v)}${L.b ? ` <b>${esc(L.b)}</b>` : ''}${L.d ? ` <span class="ds">${esc(L.d)}</span>` : ''}${L.c ? ` <code>${esc(L.c.slice(0, 120))}</code>` : ''}</span>
-      ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕</span>' : ''}</summary>
-      <div class="row-body">${memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), diffMode()].join('|'), () => toolBody(t, a), 300)}</div></details>`;
+      ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕<span class="sr-only">failed</span></span>' : ''}</summary>
+      <div class="row-body">${memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, t.result?.slice(-64), realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), diffMode()].join('|'), () => toolBody(t, a), 1000)}</div></details>`;
   }
   function legacyTools(group) {
     // Pair legacy "call"/"result" text records into tool objects.
@@ -715,14 +790,16 @@
     if (S.advHidden) messages = messages.filter(m => m.role !== 'advisor' && m.role !== 'advisor-update');
     const pending = S.pending && S.pending.view === S.view && !S.pending.queued ? S.pending : null;
     const last = messages[messages.length - 1];
+    // Advisor reviews sort by time and can land after a running tool; the live tail is the last main-agent message.
+    const mainEnd = messages.findLastIndex(m => !m.adv), tail = messages[mainEnd];
     const runningTools = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? 1 : 0), 0);
-    const liveOutput = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? m.tool.result?.length || 0 : 0), 0);
+    // The server keeps only the last 8,000 chars of live output, so its length stops changing: sign the tail too.
+    const liveOutput = messages.filter(m => m.tool?.status === 'running').map(m => (m.tool.result?.length || 0) + (m.tool.result?.slice(-64) || '')).join();
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
     // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
     const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || ''].join('|');
     if (sig === S.lastSig) return;
-    S.lastSig = sig;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
     const parts = [];
@@ -741,7 +818,7 @@
         const group = [];
         while (i < messages.length && !messages[i].adv && (messages[i].role === 'tool' || messages[i].role === 'thinking')) group.push(messages[i++]);
         i--;
-        parts.push(activityBlock(group, status === 'running' && i === messages.length - 1));
+        parts.push(activityBlock(group, status === 'running' && i === mainEnd));
         continue;
       }
       if (m.role === 'system') {
@@ -775,11 +852,11 @@
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
       parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
     }
-    if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((last?.role !== 'tool' && last?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
+    if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((tail?.role !== 'tool' && tail?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
       let label = opts.task ? esc(opts.task) : opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
       if (opts.retry) label = `Retrying after an error (attempt ${+opts.retry.attempt} of ${+opts.retry.maxAttempts})${opts.retry.error ? ': ' + esc(opts.retry.error.slice(0, 200)) : ''} <button class="btn sm ghost" data-act="abortRetry">Stop retrying</button>`;
       if (!opts.compacting && !opts.retry && !opts.task && !pending && status === 'running' && idle >= 20) {
-        const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : last?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
+        const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : tail?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
         label = `${waitingOn} · no activity for ${fmtMs(Math.floor(idle) * 1000)}`;
       }
       parts.push(`<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
@@ -790,6 +867,7 @@
     const draft = $('#thread [data-steerinput]'), focused = draft && document.activeElement === draft;
     if (draft && S.editSteer) S.editSteer.text = draft.value;
     swapHtml($('#thread'), parts.join(''));
+    S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -833,7 +911,8 @@
     // A prompt within the top 24px is the current one: a jump parks it 12px down (scroll-margin-top), or less when clamped at the bottom.
     const top = sc.scrollTop;
     const t = dir < 0 ? ticks.filter(b => +b.dataset.y < top - 2).pop() : ticks.find(b => +b.dataset.y > top + 24);
-    if (t) jumpToPrompt(t.dataset.prompt);
+    if (!t) return false;
+    jumpToPrompt(t.dataset.prompt);
     return true;
   }
 
@@ -847,13 +926,15 @@
     const hunks = [];
     let cur = null, delta = 0, adds = 0, dels = 0;
     for (const raw of String(diff || '').split('\n')) {
-      const m = raw.match(/^([ +-])\s*(\d+)\|(.*)$/);
+      const m = raw.match(/^([ +-])\s*(\d+)\|([\s\S]*)$/); // [\s\S]: CRLF content and U+2028/9 are row text too
       if (!m) { if (cur && cur.lines.length) { hunks.push(cur); cur = null; } if (raw.startsWith('…')) hunks.push({ note: raw, lines: [] }); continue; }
-      cur ??= { lines: [] };
       const n = +m[2], text = m[3];
-      if (m[1] === ' ') cur.lines.push({ t: 'ctx', o: n, n: n + delta, text });
-      else if (m[1] === '-') { cur.lines.push({ t: 'del', o: n, text }); delta--; dels++; }
-      else { cur.lines.push({ t: 'add', n, text }); delta++; adds++; }
+      // One edit can touch distant places: a jump in line numbers starts a new hunk so the gap row shows the hidden lines.
+      if (cur && (m[1] === '+' ? cur.n != null && n !== cur.n + 1 : cur.o != null && n !== cur.o + 1)) { hunks.push(cur); cur = null; }
+      cur ??= { lines: [] };
+      if (m[1] === ' ') { cur.lines.push({ t: 'ctx', o: n, n: n + delta, text }); cur.o = n; cur.n = n + delta; }
+      else if (m[1] === '-') { cur.lines.push({ t: 'del', o: n, text }); cur.o = n; delta--; dels++; }
+      else { cur.lines.push({ t: 'add', n, text }); cur.n = n; delta++; adds++; }
     }
     if (cur && cur.lines.length) hunks.push(cur);
     return { hunks, adds, dels };
@@ -874,14 +955,27 @@
     // Common prefix/suffix; the middle is what changed.
     let p = 0;
     while (p < a.length && p < b.length && a[p] === b[p]) p++;
+    if (p && /[\uD800-\uDBFF]/.test(a[p - 1])) p--; // never split a surrogate pair (emoji)
     let s = 0;
     while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+    if (s && /[\uDC00-\uDFFF]/.test(a[a.length - s])) s--;
     if (p + s === 0 || (a.length - p - s > a.length * 0.7 && b.length - p - s > b.length * 0.7)) return null;
     return [[p, a.length - s], [p, b.length - s]];
   }
+  // Highlight the whole line once, then wrap the changed text range in <mark> (closed and reopened around token spans), so
+  // a string or comment that spans the change keeps its colour.
   function codeLine(text, lang, mark) {
-    if (!mark || mark[0] === mark[1]) return highlight(text, lang) || ' ';
-    return highlight(text.slice(0, mark[0]), lang) + `<mark>${highlight(text.slice(mark[0], mark[1]), lang)}</mark>` + highlight(text.slice(mark[1]), lang);
+    const html = highlight(text, lang);
+    if (!mark || mark[0] === mark[1]) return html || ' ';
+    let out = '', pos = 0, on = false;
+    for (let i = 0; i < html.length;) {
+      if (!on && pos === mark[0]) { out += '<mark>'; on = true; }
+      if (on && pos === mark[1]) { out += '</mark>'; on = false; }
+      if (html[i] === '<') { const j = html.indexOf('>', i) + 1; out += on ? '</mark>' + html.slice(i, j) + '<mark>' : html.slice(i, j); i = j; continue; }
+      const j = html[i] === '&' ? html.indexOf(';', i) + 1 : i + 1;
+      out += html.slice(i, j); i = j; pos++;
+    }
+    return on ? out + '</mark>' : out;
   }
   function diffTable(parsed, lang, mode) {
     const rows = [];
@@ -913,8 +1007,11 @@
     });
     return `<div class="diff-scroll"><table class="diff ${mode}" aria-label="${mode === 'split' ? 'Side-by-side' : 'Unified'} diff: old line, new line, code">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
   }
-  const diffMode = () => S.diffMode || (innerWidth > 1000 ? 'split' : 'unified');
-  function fileDiff(f, opts = {}) {
+  // Split panes need room: decide from the thread's width (the chat column is ~860px, the Changes page is wide), not the window's.
+  const diffMode = () => S.diffMode || (($('#thread')?.clientWidth || innerWidth) > 1000 ? 'split' : 'unified');
+  const fdCache = new Map();
+  const fileDiff = (f, opts = {}) => memo(fdCache, [diffMode(), f.op, f.path, opts.meta || '', f.diff].join('\u0000'), () => fileDiffRaw(f, opts), 400);
+  function fileDiffRaw(f, opts = {}) {
     const parsed = parseDiff(f.diff);
     const lang = extLang(f.path);
     const created = f.op === 'write' || f.op === 'create' || (!parsed.dels && parsed.hunks.every(h => h.note || h.lines.every(l => l.t === 'add')) && parsed.hunks[0]?.lines[0]?.n === 1);
@@ -927,7 +1024,7 @@
         <span class="fd-stat"><span class="plus">+${parsed.adds}</span> <span class="minus">−${parsed.dels}</span></span>
         ${opts.meta || ''}
         ${created ? '' : `<span class="seg" role="group" aria-label="Diff layout"><button class="${mode === 'unified' ? 'on' : ''}" aria-pressed="${mode === 'unified'}" data-diffmode="unified" title="Inline">Unified</button><button class="${mode === 'split' ? 'on' : ''}" aria-pressed="${mode === 'split'}" data-diffmode="split" title="Side by side">Split</button></span>`}
-        ${f.path ? `<button class="btn sm ghost" data-copy-text="${esc(f.path)}" title="Copy path">⧉</button>` : ''}
+        ${f.path ? `<button class="btn sm ghost" data-copy-text="${esc(f.path)}" title="Copy path" aria-label="Copy path">⧉</button>` : ''}
       </div>
       ${parsed.hunks.length ? diffTable(parsed, lang, mode) : `<pre class="fd-raw">${esc(f.diff)}</pre>`}
     </div>`;
@@ -949,24 +1046,26 @@
     const file = c.parent.startsWith('f:') ? c.parent.slice(2) : '';
     const pv = file ? S.previews.get(file) : null;
     if (file && !pv) loadPreview(file);
-    const messages = src ? src.messages : pv?.messages || [];
+    const waiting = (src && !src.messages) || (file && !pv);
+    const messages = src ? src.messages || [] : pv?.messages || [];
     const title = src?.title || S.native.find(n => n.file === file)?.title || pv?.title || 'Session';
     const back = src ? '#/s/' + src.id : '#/f/' + encodeURIComponent(file);
     const byFile = collectChanges(messages);
     const all = [...byFile.values()].flat();
     const tot = diffStat(all);
-    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ changes</span></div>
         <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'} · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}</div></div>
       <div class="actions"><span class="seg" role="group" aria-label="Diff layout"><button class="${diffMode() === 'unified' ? 'on' : ''}" aria-pressed="${diffMode() === 'unified'}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" aria-pressed="${diffMode() === 'split'}" data-diffmode="split">Split</button></span></div>`);
-    const sig = ['changes', c.parent, messages.length, messages[messages.length - 1]?.id, diffMode()].join('|');
+    const sig = ['changes', c.parent, diffMode(), waiting ? 'wait' : pv?.error || '', all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
     if (sig === S.lastSig) return;
-    S.lastSig = sig;
-    if (!messages.length && file && !pv) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session…</div>'; return; }
-    if (!byFile.size) { $('#thread').innerHTML = '<div class="history-note">No file edits recorded in this session yet.</div>'; return; }
+    if (waiting) { S.lastSig = sig; $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session…</div>'; return; }
+    if (pv?.error) { S.lastSig = sig; $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(pv.error)}</div></div>`; return; }
+    if (!byFile.size) { S.lastSig = sig; $('#thread').innerHTML = '<div class="history-note">No file edits recorded in this session yet.</div>'; return; }
     const files = [...byFile];
     swapHtml($('#thread'), `<div class="changes-index">${files.map(([p, list], i) => { const st = diffStat(list); return `<a href="#" data-jump="fd-${i}"><span class="fd-path">${esc(shortPath(p))}</span><span class="muted">${list.length > 1 ? list.length + ' edits' : ''}</span><span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></a>`; }).join('')}</div>`
       + files.map(([p, list], i) => `<section class="change-file" id="fd-${i}">${list.map((f, j) => fileDiff(f, { meta: list.length > 1 ? `<span class="muted fd-when">edit ${j + 1}/${list.length} · ${esc(clock(f.at))}</span>` : `<span class="muted fd-when">${esc(clock(f.at))}</span>` })).join('')}</section>`).join(''));
+    S.lastSig = sig;
   }
 
   // ---------- background tasks & plan (side panel) ----------
@@ -1048,16 +1147,19 @@
   }
   async function openAdvMenu(btn) {
     closeThinkMenu();
+    // Claim the menu before the await: a second click closes it instead of stacking another one.
+    const el = document.createElement('div');
+    el.id = 'advMenu'; el.className = 'think-menu adv-menu'; el._btn = btn; el.style.visibility = 'hidden';
+    document.body.appendChild(el);
+    const view = S.view;
     try { S.advCfg = await api('/advisor'); } catch { }
     const c = current();
     const s = c.kind === 'session' && S.store?.sessions.find(x => x.id === c.id);
-    if (!s) return;
+    if (!s || !el.isConnected || S.view !== view || !btn.isConnected) { el.remove(); return; }
     const a = s.advisor || {};
     const role = S.advCfg?.model;
     const files = advisorFiles(s.sessionFile || '');
     const pct = a.contextWindow ? Math.round(a.contextTokens / a.contextWindow * 100) : null;
-    const el = document.createElement('div');
-    el.id = 'thinkMenu'; el.className = 'think-menu adv-menu';
     el.innerHTML = `<div class="tm-head">Advisor</div>
       <label class="adv-toggle"><span>Hide all advisor output in chat (advisor keeps running)</span><span class="switch"><input type="checkbox" data-advhidden ${S.advHidden ? 'checked' : ''}><span></span></span></label>
       <label class="adv-toggle"><span>Show advisor reviews in chat</span><span class="switch"><input type="checkbox" data-advreviews ${S.advReviews ? 'checked' : ''} ${S.advHidden ? 'disabled' : ''}><span></span></span></label>
@@ -1065,14 +1167,15 @@
       <label class="adv-toggle"><span>${a.enabled && !a.noModel ? 'On for this session' : a.noModel ? 'On, but no model set' : s.advisor ? 'Off for this session' : 'Status unknown'}</span><span class="switch"><input type="checkbox" data-advset ${a.enabled ? 'checked' : ''}><span></span></span></label>
       <div class="adv-info">${a.model ? `<div>Model <b>${esc(a.model)}</b></div>` : role ? `<div>Model <b>${esc(role)}</b> <span class="muted">from ${esc(S.advCfg.source)}</span></div>` : '<div>No advisor model set yet.</div>'}
         ${pct != null ? `<div>Context ${fmtTokens(a.contextTokens)} / ${fmtTokens(a.contextWindow)} (${pct}%)</div>` : ''}${typeof a.cost === 'number' ? `<div>Spend $${a.cost.toFixed(4)}</div>` : ''}${a.state && a.enabled ? `<div>State: ${esc(a.state)}</div>` : ''}</div>
-      <button data-advact="model">◆ Change advisor model…</button>
-      <button data-advact="status">↻ Refresh status</button>
-      ${files.map(f => `<button data-sub="${esc(f.file)}">▸ Open ${esc(f.name === '__advisor' ? 'advisor' : f.name.slice(10))} transcript</button>`).join('')}
+      <button data-advact="model"><span aria-hidden="true">◆</span> Change advisor model…</button>
+      <button data-advact="status"><span aria-hidden="true">↻</span> Refresh status</button>
+      ${files.map(f => `<button data-sub="${esc(f.file)}"><span aria-hidden="true">▸</span> Open ${esc(f.name === '__advisor' ? 'advisor' : f.name.slice(10))} transcript</button>`).join('')}
       <div class="adv-note">Changing the model updates ${S.advCfg?.source === 'WATCHDOG.yml' ? 'your <code>WATCHDOG.yml</code>' : 'the <code>advisor</code> model role'} (all sessions) and restarts this session's OMP while it is idle.</div>`;
-    document.body.appendChild(el);
     const r = btn.getBoundingClientRect();
     el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
     el.style.top = (r.top < el.offsetHeight + 12 ? r.bottom + 6 : r.top - el.offsetHeight - 6) + 'px';
+    el.style.visibility = '';
+    el.querySelector('input,button')?.focus();
   }
   async function advisorAction(action, model) {
     const c = current();
@@ -1089,10 +1192,13 @@
     const wait = live || running ? 3000 : 20000;
     if (e.loading || (!force && e.at && Date.now() - e.at < wait)) return;
     e.loading = true; S.bg.set(file, e);
-    try { e.data = await api('/background?file=' + encodeURIComponent(file)); } catch (err) { e.error = err.message; }
+    try { e.data = await api('/background?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
     update();
   }
+  // Live registry entries only carry their last progress time; a running subagent's timer counts from when we first saw it.
+  const seenAt = new Map();
+  const firstSeen = id => { if (!seenAt.has(id)) { seenAt.set(id, new Date().toISOString()); trim(seenAt, 500); } return seenAt.get(id); };
   function bgJobs(data) {
     if (!data) return [];
     const jobs = (data.tasks || []).map(j => ({ ...j }));
@@ -1101,7 +1207,7 @@
       const j = jobs.find(x => x.id === a.id);
       const status = /run|pend|start|queue/i.test(a.status) ? 'running' : /fail|error|abort/i.test(a.status) ? 'error' : a.status ? 'done' : '';
       if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; }
-      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: new Date(a.lastUpdate).toISOString(), transcript: a.sessionFile, live: a });
+      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: firstSeen(a.id), transcript: a.sessionFile, live: a });
     }
     for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
     return jobs;
@@ -1111,7 +1217,7 @@
   function jobCard(j) {
     const running = j.status === 'running';
     const kind = j.type === 'bash' ? 'Bash' : j.agent && j.agent !== 'task' ? `Agent · ${j.agent}` : 'Subagent';
-    const time = running ? since(j.startedAt) : fmtMs(j.durationMs) || (j.finishedAt ? ago(j.finishedAt) + ' ago' : '');
+    const time = running ? since(j.startedAt) : fmtMs(j.durationMs) || (j.finishedAt ? agoText(j.finishedAt) : '');
     const live = j.live?.progress || {};
     const liveLine = running ? [live.currentTool && `▸ ${live.currentTool}`, live.lastIntent || live.intent, live.toolCount && `${live.toolCount} tools`].filter(Boolean).join(' · ') : '';
     const desc = j.type === 'bash' ? '' : firstLine(j.title !== j.id ? j.title : j.task).replace(/^#+\s*/, '');
@@ -1146,6 +1252,8 @@
         `${jobs.length ? `<div class="side-sec"><div class="side-label">Running <span>${running.length}</span></div>${running.map(jobCard).join('') || '<div class="side-empty">Nothing running right now.</div>'}</div>
       ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
       ${advisors.length ? `<div class="side-sec"><div class="side-label">Advisors <span>${advisors.length}</span></div>${advisors.map(x => `<div class="job"><div class="job-top"><b>${esc(x.name === '__advisor' ? 'Default' : x.name.slice('__advisor.'.length))}</b><span class="dur">${esc(ago(x.updatedAt))}</span></div>${x.model ? `<div class="job-sub">${esc(modelName(x.model))}</div>` : ''}<button class="btn sm ghost job-open" data-sub="${esc(x.file)}">Open transcript →</button></div>`).join('')}</div>` : ''}`}`);
+    // A live Reasoning box follows new text until the user scrolls it (swapHtml keeps it pinned while it sits at the bottom).
+    el.querySelectorAll('.job-thought pre').forEach(p => { if (!touched.has(p)) p.scrollTop = p.scrollHeight; });
   }
   function changesButton(messages, key) {
     const files = new Set();
@@ -1163,8 +1271,9 @@
   // ---------- subagent transcript ----------
   async function loadSub(file, force) {
     const e = S.subs.get(file) || {};
-    if (e.loading || (!force && e.at && Date.now() - e.at < 4000)) return;
-    if (e.data && e.data.active !== true && !force && Date.now() - new Date(e.data.updatedAt).getTime() > 120000 && e.at) return;
+    // Quiet transcripts (no activity for 2 minutes) back off to every 30 s instead of stopping for good.
+    const quiet = e.data && e.data.active !== true && Date.now() - new Date(e.data.updatedAt).getTime() > 120000;
+    if (e.loading || (!force && e.at && Date.now() - e.at < (quiet ? 30000 : 4000))) return;
     e.loading = true; S.subs.set(file, e);
     try { e.data = await api('/transcript?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
@@ -1177,9 +1286,9 @@
     const advisor = name === '__advisor' || name.startsWith('__advisor.');
     const d = e?.data;
     const active = !advisor && d && (d.active ?? Date.now() - new Date(d.updatedAt).getTime() < 120000);
-    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><div class="crumb">${parent ? `<a href="${esc(parent.hash)}">← ${esc(parent.title)}</a>` : '<a href="#/new">← Home</a>'} <span>/ ${advisor ? 'advisor' : 'subagent'}</span></div>
-        <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(ago(d.updatedAt))} ago</span>` : ''}`)}</div>
+        <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(agoText(d.updatedAt))}</span>` : ''}${offlinePill()}`)}</div>
       <div class="actions"><div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
         <button data-copy-text="${esc(file)}">Copy transcript path</button>
         <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button></div></div></div>`);
@@ -1201,9 +1310,11 @@
   }
 
   // ---------- model picker ----------
-  async function ensureModels() {
-    if (!S.models) S.models = await api('/models');
-    return S.models;
+  // One /models request at a time: Settings, route() and the picker can all ask at once.
+  let modelsReq = null;
+  function ensureModels() {
+    if (S.models) return Promise.resolve(S.models);
+    return modelsReq ||= api('/models').then(m => (S.models = m)).finally(() => { modelsReq = null; });
   }
   const splitSel = v => { const m = String(v || '').match(/^(.*?)(?::(off|minimal|low|medium|high|xhigh|max|auto))?$/); return { sel: m[1], thinking: m[2] || '' }; };
   function recentModels() {
@@ -1224,8 +1335,20 @@
   const hotkeyList = a => hotkeys()[a].split(',').map(s => s.trim()).filter(Boolean);
   // Unknown modifier names or combos without Ctrl/Alt/Meta are rejected, so a typo can't hijack Enter or plain typing.
   const MODS = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', option: 'alt', shift: 'shift', meta: 'meta', cmd: 'meta', command: 'meta', win: 'meta' };
-  const normCombo = s => { const p = s.toLowerCase().split('+').map(x => x.trim()), key = p.pop(); if (!key || p.some(x => !MODS[x])) return null; const m = new Set(p.map(x => MODS[x])); return m.has('ctrl') || m.has('alt') || m.has('meta') ? [...['ctrl', 'alt', 'shift', 'meta'].filter(x => m.has(x)), key].join('+') : null; };
-  const hotkeyAction = e => { const c = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta', e.key.toLowerCase()].filter(Boolean).join('+'); return HOTKEYS.map(h => h[0]).find(a => hotkeyList(a).some(s => normCombo(s) === c)); };
+  // Key names: a letter, digit, F1–F12, punctuation or a named key; Space, Up, Down, Esc and friends map to the browser's names.
+  const KEY_ALIAS = { space: ' ', spacebar: ' ', up: 'arrowup', down: 'arrowdown', left: 'arrowleft', right: 'arrowright', esc: 'escape', return: 'enter', del: 'delete', ins: 'insert', pgup: 'pageup', pgdn: 'pagedown' };
+  const NAMED_KEYS = new Set([' ', 'enter', 'tab', 'escape', 'backspace', 'delete', 'insert', 'home', 'end', 'pageup', 'pagedown', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
+  const keyName = k => { k = KEY_ALIAS[k] || k; return /^[a-z0-9]$|^f([1-9]|1[0-2])$|^[-=[\]\\;',./`]$/.test(k) || NAMED_KEYS.has(k) ? k : null; };
+  const normCombo = s => { const p = s.toLowerCase().split('+').map(x => x.trim()), key = keyName(p.pop() || ''); if (!key || p.some(x => !MODS[x])) return null; const m = new Set(p.map(x => MODS[x])); return m.has('ctrl') || m.has('alt') || m.has('meta') ? [...['ctrl', 'alt', 'shift', 'meta'].filter(x => m.has(x)), key].join('+') : null; };
+  // The dashboard's own shortcuts always win, so they can't be saved as composer hotkeys.
+  const RESERVED_KEYS = new Set(['ctrl+p', 'ctrl+shift+p', 'meta+p', 'meta+shift+p', 'alt+shift+p', 'alt+arrowup', 'alt+arrowdown', 'alt+n', 'alt+shift+n']);
+  // The typed character wins when it is an ASCII letter or digit (AZERTY Ctrl+A stays select-all); otherwise fall back to
+  // the physical key, so Option+Q on a Mac ('œ'), Cyrillic layouts and Shift+1 ('!') still match.
+  const keyChar = e => { const k = e.key.toLowerCase(); return /^[a-z0-9]$/.test(k) ? k : /^(?:Key|Digit)(.)$/.exec(e.code || '')?.[1].toLowerCase() || k; };
+  const hotkeyAction = e => {
+    const c = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'meta', keyChar(e)].filter(Boolean).join('+');
+    return HOTKEYS.map(h => h[0]).find(a => hotkeyList(a).some(s => normCombo(s) === c));
+  };
   const hotkeyHint = (a, verb) => { const k = hotkeyList(a); return k.length ? ` · ${k.join(', ')} ${verb}` : ''; };
   function pickerRows() {
     const P = S.picker, M = S.models;
@@ -1267,8 +1390,8 @@
     const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [], opener: S.picker?.opener || document.activeElement };
     let el = $('#picker');
     if (!el) { el = document.createElement('div'); el.id = 'picker'; el.className = 'picker-wrap'; document.body.appendChild(el); }
-    el.innerHTML = `<div class="picker" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
-      <div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList"><div class="working"><span class="spinner"></span> Loading models…</div></div>
+    el.innerHTML = `<div class="picker" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" role="combobox" aria-expanded="true" aria-controls="pickerList" aria-autocomplete="list" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
+      <div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList" role="listbox" aria-label="Models"><div class="working"><span class="spinner"></span> Loading models…</div></div>
       <div class="picker-foot"><span>↑↓ to move · Enter to choose · hover to see reasoning levels</span></div></div>`;
     el.hidden = false;
     $('#pickerQ').focus();
@@ -1289,21 +1412,30 @@
     if (!P || !S.models) return;
     const counts = new Map();
     for (const m of S.models.models) counts.set(m.provider, (counts.get(m.provider) || 0) + 1);
-    $('#pickerProvs').innerHTML = `<button class="chip ${!P.provider ? 'sel' : ''}" data-prov="">All</button>` + providerOrder().map(p => `<button class="chip ${P.provider === p ? 'sel' : ''}" data-prov="${esc(p)}">${esc(p)} <small>${counts.get(p)}</small></button>`).join('');
+    keepFocus($('#pickerProvs'), () => { $('#pickerProvs').innerHTML = `<button class="chip ${!P.provider ? 'sel' : ''}" data-prov="">All</button>` + providerOrder().map(p => `<button class="chip ${P.provider === p ? 'sel' : ''}" data-prov="${esc(p)}">${esc(p)} <small>${counts.get(p)}</small></button>`).join(''); });
     const sections = pickerRows();
     P.flat = sections.flatMap(s => s.rows);
     if (P.hi < 0) { const cur = P.flat.findIndex(r => r.sel === P.ctx.model); P.hi = cur >= 0 ? cur : 0; }
     P.hi = Math.min(P.hi, P.flat.length - 1);
     let n = 0;
     const fv = new Set(favs());
-    $('#pickerList').innerHTML = sections.map(s => `<div class="picker-sec">${esc(s.label)}</div>` + s.rows.map(r => {
+    $('#pickerList').innerHTML = sections.map(s => `<div class="picker-sec" role="presentation">${esc(s.label)}</div>` + s.rows.map(r => {
       const i = n++;
       const cur = r.sel === P.ctx.model && (r.isDefault || !r.thinking || r.thinking === P.ctx.thinking);
-      return `<div class="picker-line"><button class="picker-row ${i === P.hi ? 'hi' : ''} ${cur ? 'cur' : ''}" data-pi="${i}"><span class="pn">${esc(r.name)}</span>${r.badge ? `<span class="tag">${esc(r.badge)}${r.thinking ? ' · ' + esc(r.thinking) : ''}</span>` : ''}
+      return `<div class="picker-line" role="presentation"><button class="picker-row ${i === P.hi ? 'hi' : ''} ${cur ? 'cur' : ''}" id="pick-${i}" role="option" aria-selected="${i === P.hi}" data-pi="${i}"><span class="pn">${esc(r.name)}</span>${r.badge ? `<span class="tag">${esc(r.badge)}${r.thinking ? ' · ' + esc(r.thinking) : ''}</span>` : ''}
         <span class="pp">${esc(r.isDefault ? r.provider : r.sel)}</span><span class="pm">${r.m?.reasoning ? '✱' : ''}${r.m?.contextWindow ? ' ' + fmtTokens(r.m.contextWindow) : ''}</span></button>${r.isDefault ? '' : `<button type="button" class="fav ${fv.has(r.sel) ? 'on' : ''}" data-fav="${esc(r.sel)}" aria-pressed="${fv.has(r.sel)}" aria-label="Favorite ${esc(r.name)}" title="${fv.has(r.sel) ? 'Remove from favorites' : 'Add to favorites'}">${fv.has(r.sel) ? '★' : '☆'}</button>`}</div>`;
     }).join('')).join('') || '<div class="side-empty">No models match.</div>';
+    pickerHi(P.hi)?.scrollIntoView({ block: 'nearest' });
+  }
+  // Move the highlight without re-rendering the list, and tell assistive tech which row it is on.
+  function pickerHi(i) {
+    S.picker.hi = i;
+    const old = $('#pickerList .hi'), r = $(`#pickerList [data-pi="${i}"]`), q = $('#pickerQ');
+    old?.classList.remove('hi'); old?.setAttribute('aria-selected', 'false');
+    r?.classList.add('hi'); r?.setAttribute('aria-selected', 'true');
+    if (r) q?.setAttribute('aria-activedescendant', r.id); else q?.removeAttribute('aria-activedescendant');
     renderThink();
-    $('#pickerList .hi')?.scrollIntoView({ block: 'nearest' });
+    return r;
   }
   function renderThink() {
     const P = S.picker;
@@ -1311,9 +1443,9 @@
     if (r && P.thinkSel !== r.sel) { if (P.thinkSel) P.mem[P.thinkSel] = P.thinking; P.thinkSel = r.sel; const m = P.mem[r.sel] ?? thinkGet(r.sel) ?? ''; P.thinking = (!m || (r.m?.thinking || []).includes(m)) ? m : ''; }
     const levels = r?.m?.thinking || [];
     const defLevel = r?.thinking || (r?.isDefault ? splitSel(S.models.roles.default).thinking : '') || S.models.defaultThinking || '';
-    $('#pickerThink').innerHTML = !r ? '' : !r.m || !r.m.reasoning || !levels.length
+    keepFocus($('#pickerThink'), () => { $('#pickerThink').innerHTML = !r ? '' : !r.m || !r.m.reasoning || !levels.length
       ? `<span class="muted">${r.m && !r.m.reasoning ? 'This model has no reasoning levels.' : 'Reasoning follows your OMP config.'}</span>`
-      : `<span class="muted">Reasoning</span><button class="chip ${!P.thinking ? 'sel' : ''}" data-think="">Default${defLevel ? ` <small>${esc(defLevel)}</small>` : ''}</button>` + levels.map(l => `<button class="chip ${P.thinking === l ? 'sel' : ''}" data-think="${esc(l)}">${esc(l)}</button>`).join('');
+      : `<span class="muted">Reasoning</span><button class="chip ${!P.thinking ? 'sel' : ''}" data-think="">Default${defLevel ? ` <small>${esc(defLevel)}</small>` : ''}</button>` + levels.map(l => `<button class="chip ${P.thinking === l ? 'sel' : ''}" data-think="${esc(l)}">${esc(l)}</button>`).join(''); });
   }
   function pickModel(i) {
     const P = S.picker;
@@ -1328,14 +1460,14 @@
   function modelChip(sel, thinking, fallback) {
     const levels = thinkLevels(sel);
     const label = sel ? (levels.length ? modelName(sel) : modelLabel(sel, thinking)) : levels.length ? (S.models?.roles?.default ? 'Default · ' + modelName(splitSel(S.models.roles.default).sel) : 'OMP default') : fallback;
-    return `<button class="model-chip" data-act="model" title="Choose model">◆ <span>${esc(label)}</span> ▾</button>`
-      + (levels.length ? `<button class="model-chip think-chip" data-act="thinkMenu" title="Reasoning level">✦ <span>${esc(thinking || 'default')}</span> ▾</button>` : '');
+    return `<button class="model-chip" data-act="model" title="Choose model"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>`
+      + (levels.length ? `<button class="model-chip think-chip" data-act="thinkMenu" title="Reasoning level" aria-label="Reasoning level: ${esc(thinking || 'default')}" aria-haspopup="true"><span aria-hidden="true">✦</span> <span>${esc(thinking || 'default')}</span> <span aria-hidden="true">▾</span></button>` : '');
   }
   // Reasoning levels of a selector, or of the default role's model when no model is picked.
   const thinkLevels = sel => { const eff = sel || splitSel(S.models?.roles?.default || '').sel; if (!S.models) return []; const m = modelInfo(eff); return m ? (m.reasoning ? m.thinking || [] : []) : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']; };
   // Fast (priority service) toggle; only for models with a service-tier family, or the default role's model.
   const fastOk = sel => !!modelInfo(sel || splitSel(S.models?.roles?.default || '').sel)?.fast;
-  const fastChip = (sel, on) => fastOk(sel) ? `<button class="model-chip fast-chip ${on ? 'on' : ''}" data-act="fastToggle" aria-pressed="${!!on}" title="Fast mode: priority service tier">⚡ <span>Fast ${on ? 'on' : 'off'}</span></button>` : '';
+  const fastChip = (sel, on) => fastOk(sel) ? `<button class="model-chip fast-chip ${on ? 'on' : ''}" data-act="fastToggle" aria-pressed="${!!on}" title="Fast mode: priority service tier"><span aria-hidden="true">⚡</span> <span>Fast ${on ? 'on' : 'off'}</span></button>` : '';
   function openThinkMenu(btn) {
     closeThinkMenu();
     const ctx = pickerCtx();
@@ -1351,9 +1483,11 @@
     el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
     const below = r.top < el.offsetHeight + 12;
     el.style.top = (below ? r.bottom + 6 : r.top - el.offsetHeight - 6) + 'px';
-    el._ctx = ctx;
+    el._ctx = ctx; el._btn = btn;
+    (el.querySelector('.sel') || el.querySelector('button'))?.focus();
   }
-  const closeThinkMenu = () => $('#thinkMenu')?.remove();
+  // ✦ and ⚑ menus; closing hands focus back to the chip when it was inside the menu.
+  const closeThinkMenu = () => document.querySelectorAll('#thinkMenu, #advMenu').forEach(m => { const back = m.contains(document.activeElement) && m._btn; m.remove(); if (back?.isConnected) back.focus(); });
   const defaultLabel = () => { const d = splitSel(S.models?.roles?.default || ''); return d.sel ? `Default · ${modelLabel(d.sel, d.thinking || S.models.defaultThinking)}` : 'OMP default'; };
 
   function renderQuestions(s) {
@@ -1361,17 +1495,21 @@
     el.hidden = !questions.length;
     if (!questions.length) { el.dataset.first = ''; setIfChanged(el, ''); return; }
     const first = el.dataset.first;
-    setIfChanged(el, questions.map(q => `<section class="question" data-question="${esc(q.id)}" aria-label="OMP question">
+    // Answers typed into any pending question, and the focus, survive the re-render.
+    const typed = [...el.querySelectorAll('[data-uiform]')].map(f => [f.dataset.uiform, f.elements.answer.value]);
+    const html = questions.map(q => `<section class="question" data-question="${esc(q.id)}" aria-label="OMP question">
       <strong>${esc(q.title)}</strong>
       ${q.method === 'select' ? `<div class="question-options">${q.options.map((option, i) => { const on = q.checked?.includes(i); return `<button type="button" data-uichoice="${esc(q.id)}" data-uivalue="${esc(option)}"${on ? ' class="checked" aria-pressed="true"' : ''}><span>${on ? '☑ ' : ''}${esc(option)}</span>${q.optionDetails?.[i]?.description ? `<small>${esc(q.optionDetails[i].description)}</small>` : ''}</button>`; }).join('')}</div>` : ''}
       ${q.method === 'confirm' ? `<p>${esc(q.message)}</p><div class="question-actions"><button type="button" class="btn sm primary" data-uiconfirm="${esc(q.id)}" data-confirmed="true">Yes</button><button type="button" class="btn sm" data-uiconfirm="${esc(q.id)}" data-confirmed="false">No</button></div>` : ''}
       ${q.method === 'input' || q.method === 'editor' ? `<form data-uiform="${esc(q.id)}">${q.method === 'input' ? `<input name="answer" maxlength="20000" placeholder="${esc(q.placeholder || 'Your answer')}" aria-label="${esc(q.title)}">` : `<textarea name="answer" maxlength="20000" rows="3" aria-label="${esc(q.title)}">${esc(q.prefill || '')}</textarea>`}<div class="question-actions"><button class="btn sm primary" type="submit">Submit answer</button></div></form>` : ''}
       <button type="button" class="btn sm ghost question-cancel" data-uicancel="${esc(q.id)}">Cancel question</button>
-    </section>`).join(''));
+    </section>`).join('');
+    keepFocus(el, () => setIfChanged(el, html));
+    for (const [id, v] of typed) { const f = el.querySelector(`[data-uiform="${CSS.escape(id)}"]`); if (f && f.elements.answer.value !== v) f.elements.answer.value = v; }
     el.dataset.first = questions[0].id;
     // Take focus for a new question, but never from a field the user is typing in.
     const a = document.activeElement, typing = a && /INPUT|TEXTAREA/.test(a.tagName) && a.value && !el.contains(a);
-    if (first !== questions[0].id && !typing) el.querySelector('input,textarea,[data-uichoice]')?.focus();
+    if (first !== questions[0].id && !typing) el.querySelector('.question')?.querySelector('input,textarea,[data-uichoice],[data-uiconfirm]')?.focus();
   }
 
   async function answerQuestion(id, answer, control) {
@@ -1411,7 +1549,7 @@
         return `<div class="queued-item"><span class="queued-number">${i + 1}</span><div class="queued-content">
           ${editing ? `<textarea data-qinput="${esc(q.id)}" rows="3" aria-label="Edit queued message">${esc(q.text)}</textarea>
             <div class="queued-edit-actions"><button class="btn sm primary" data-qsave="${esc(q.id)}">Save</button><button class="btn sm ghost" data-qclose>Cancel</button></div>`
-          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<img src="${esc(src)}" alt="Queued image">`).join('')}<span>Image attached</span></div>` : ''}`}</div>
+          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<button type="button" class="btn-reset" data-lightbox aria-label="View queued image full size"><img src="${esc(src)}" alt="Queued image"></button>`).join('')}<span>Image attached</span></div>` : ''}`}</div>
           ${queuedActions(q, waiting)}</div>`;
       }).join(''));
   }
@@ -1441,6 +1579,7 @@
     } catch (e) { toast(e.message, 'err'); await refresh(); }
   }
 
+  const editorApplied = new Map(); // session id → last applied set_editor_text id
   function renderComposer(s, native) {
     const input = $('#input'), hint = $('#hint'), buttons = $('#buttons'), line = $('#statusLine');
     const attachment = attached().length > 0;
@@ -1450,10 +1589,11 @@
     const command = /^\/\S/.test(input.value.trim());
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
-    const nAdvChip = !s && native ? `<button class="model-chip adv-chip ${nAdv ? 'on' : ''}" data-act="nativeAdv" title="Advisor for this session once it starts">⚑ <span>Advisor ${nAdv === undefined ? 'default' : nAdv ? 'on' : 'off'}</span></button>` : '';
+    const nAdvChip = !s && native ? `<button class="model-chip adv-chip ${nAdv ? 'on' : ''}" data-act="nativeAdv" title="Advisor for this session once it starts"><span aria-hidden="true">⚑</span> <span>Advisor ${nAdv === undefined ? 'default' : nAdv ? 'on' : 'off'}</span></button>` : '';
     setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s)
       : (choice ? modelChip(choice.model, choice.thinking, 'Saved model') : modelChip(native?.model, native?.thinking, 'Saved model')) + nAdvChip);
-    if (!s && native && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }); }
+    // A failed read is retried on the next render; settings saves clear S.advCfg so the chip follows the new config.
+    if (!s && native && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }).finally(() => { S.advCfgLoading = false; }); }
     if (!s) {
       placeholder = 'Continue this session…';
       hintText = 'Enter to continue · Shift+Enter for a new line';
@@ -1465,9 +1605,9 @@
       btns = `<button class="btn" data-act="follow_up" ${has && !S.busy ? '' : 'disabled'} title="Send after OMP finishes${esc(hotkeyList('follow_up').length ? ` (${hotkeyList('follow_up').join(', ')})` : '')}">Queue</button>
         <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !S.busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
         ${has && !command && !S.busy ? `<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}">■ Stop &amp; send</button>` : ''}
-        <button class="btn danger" data-act="abort" title="Stop the current turn">■</button>`;
+        <button class="btn danger" data-act="abort" title="Stop the current turn" aria-label="Stop the current turn">■</button>`;
     } else {
-      const fresh = !s.messages.some(m => m.role === 'user');
+      const fresh = s.messages ? !s.messages.some(m => m.role === 'user') : !s.prompt && !s.workStartedAt;
       placeholder = fresh ? 'What should OMP do?' : s.status === 'done' ? 'Send a message to reopen this session…' : 'Reply to continue…';
       hintText = 'Enter to send · Shift+Enter new line · / commands · !cmd shell';
       btns = `<button class="btn primary" data-act="send" ${has && !S.busy ? '' : 'disabled'}>${S.busy ? 'Sending…' : 'Send ↵'}</button>`;
@@ -1481,7 +1621,7 @@
     }
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
-    if (s?._editorText && S.editorApplied !== s._editorText.id) { S.editorApplied = s._editorText.id; input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
+    if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id) { editorApplied.set(s.id, s._editorText.id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
@@ -1513,7 +1653,8 @@
 
   // ---------- dialogs ----------
   function modal(title, body) {
-    const returnFocus = document.activeElement;
+    // Opened from a ⋯ menu: the item is hidden once the menu closes, so return focus to the menu's trigger.
+    const returnFocus = document.activeElement?.closest?.('.menu')?.querySelector('[data-act="menu"]') || document.activeElement;
     if (!closeModal()) return toast('Wait for the current dialog to finish.', 'err');
     const el = document.createElement('div');
     el.id = 'modal'; el.className = 'modal'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', title);
@@ -1522,8 +1663,8 @@
     document.body.appendChild(el);
     (el.querySelector('.modal-body textarea, .modal-body button:not([disabled])') || el.querySelector('[data-modal-close]')).focus();
   }
-  const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected) focus.focus(); return true; };
-  const sessionApi = body => api(`/sessions/${current().id}/command`, body);
+  const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected && focus.offsetParent !== null) focus.focus(); else if (el) $('#input')?.focus(); return true; };
+  const sessionApi = (body, opts) => api(`/sessions/${current().id}/command`, body, opts);
   async function togglePlan(id) {
     const s = S.store?.sessions.find(x => x.id === id);
     if (!s || s._planSupported === false || s.planMode?.available === false) return toast('Plan mode requires updated OMP RPC support.', 'err');
@@ -1610,7 +1751,7 @@
   async function exportHtml() {
     try {
       toast('Exporting…');
-      const r = await sessionApi({ type: 'export' });
+      const r = await sessionApi({ type: 'export' }, { timeout: 130000 });
       const url = URL.createObjectURL(new Blob([r.html], { type: 'text/html' }));
       const a = document.createElement('a'); a.href = url; a.download = r.name; a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
@@ -1642,8 +1783,8 @@
         : '<p class="muted">OMP has no OAuth providers to log in to.</p>');
     } catch (e) { toast(e.message, 'err'); }
   }
-  async function sessionAction(body) {
-    try { await sessionApi(body); await refresh(); return true; }
+  async function sessionAction(body, opts) {
+    try { await sessionApi(body, opts); await refresh(); return true; }
     catch (e) { toast(e.message, 'err'); return false; }
   }
 
@@ -1694,8 +1835,10 @@
   async function attachImage(file) {
     if (!file) return;
     if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) || file.size > 25 * 1024 * 1024) return toast('Choose a PNG, JPEG, WebP or GIF under 25 MB.', 'err');
-    if (attached().length >= 6) return toast('Attach up to 6 images per message.', 'err');
-    const view = S.view;
+    const view = S.view, pend = attachPending.get(view) || 0;
+    // Reserve the slot before the first await, so a multi-image pick or paste can't overshoot the limit.
+    if (attached().length + pend >= 6) return toast('Attach up to 6 images per message.', 'err');
+    attachPending.set(view, pend + 1);
     try {
       const bitmap = await createImageBitmap(file);
       let blob = file, mimeType = file.type, preview;
@@ -1732,24 +1875,26 @@
       S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name });
       update(); renderAttachments();
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
+    finally { attachPending.set(view, attachPending.get(view) - 1); }
   }
 
-  async function send(kind) {
+  const attachPending = new Map(); // view → images still being read
+  async function send(kind, retryText) {
     const c = current();
     const input = $('#input');
-    const text = input?.value.trim();
-    const attachment = attached();
+    // A retry resends an earlier prompt as-is: the composer draft and staged images stay for the next message.
+    const retry = retryText != null, text = retry ? retryText : input?.value.trim();
+    const attachment = retry ? [] : attached();
     if ((!text && !attachment.length) || S.busy) return;
     // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
-    if (c.kind === 'session' && !attachment.length && /^!\S/.test(text)) {
+    if (c.kind === 'session' && !retry && !attachment.length && /^!\S/.test(text)) {
       input.value = ''; drafts.delete(S.view); autosize(input);
       if (!await sessionAction({ type: 'bash', command: text.slice(1) })) { input.value = text; drafts.set(S.view, text); autosize(input); }
       return;
     }
     S.busy = true;
     S.pending = { view: S.view, text, imagePreview: attachment.map(a => a.preview), queued: kind === 'follow_up', at: Date.now() };
-    S.attachments = S.attachments.filter(a => a.view !== S.view);
-    input.value = ''; drafts.delete(S.view); autosize(input);
+    if (!retry) { S.attachments = S.attachments.filter(a => a.view !== S.view); input.value = ''; drafts.delete(S.view); autosize(input); }
     S.lastSig = ''; update();
     let retryView = S.view;
     try {
@@ -1772,7 +1917,7 @@
       }
     } catch (e) {
       toast(e.message, 'err');
-      if (text) { drafts.set(retryView, text); const target = S.view === retryView ? $('#input') : null; if (target && !target.value) { target.value = text; autosize(target); } }
+      if (text && !retry) { drafts.set(retryView, text); const target = S.view === retryView ? $('#input') : null; if (target && !target.value) { target.value = text; autosize(target); } }
       S.attachments.push(...attachment.map(a => ({ ...a, view: retryView })));
     } finally {
       S.busy = false; S.pending = null; S.lastSig = ''; update();
@@ -1780,7 +1925,7 @@
   }
   async function sessionCommand(type) {
     const c = current();
-    try { await api(`/sessions/${c.id}/command`, { type }); await refresh(); if (type === 'complete') toast('Marked done'); if (type === 'compact') toast('Context compacted'); return true; }
+    try { await api(`/sessions/${c.id}/command`, { type }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
     catch (e) { toast(e.message, 'err'); return false; }
   }
   async function advisorCommand(action) {
@@ -1818,6 +1963,9 @@
     } catch (e) { toast(e.message, 'err'); }
   }
   async function copyLastReply() {
+    // Copy from the loaded messages while the click still counts as a user gesture (plain-HTTP LAN pages and Safari need one).
+    const s = S.store?.sessions.find(x => x.id === current().id), last = [...(s?.messages || [])].reverse().find(m => m.role === 'assistant' && !m.adv && m.text?.trim());
+    if (last) return copy(last.text, 'Last reply copied');
     try { const { text } = await sessionApi({ type: 'last_reply' }); text ? copy(text, 'Last reply copied') : toast('OMP has not replied yet.'); }
     catch (e) { toast(e.message, 'err'); }
   }
@@ -1874,7 +2022,7 @@
   // ---------- OMP command-line tools ----------
   S.tools = { catalog: null, jobs: [], tool: 'commit', action: '', values: {}, cwd: '', error: '' };
   function buildTools() {
-    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><h1>OMP tools</h1><div class="meta"><span>Run OMP's command-line tools from here. Output appears below each form.</span></div></div></div>
       <div class="settings"><nav class="set-nav" id="toolNav"></nav><div class="set-main"><div id="toolForm"><div class="working"><span class="spinner"></span> Loading tools…</div></div><div id="toolJobs"></div></div></div>`;
     loadTools();
@@ -1885,8 +2033,12 @@
     if (current().kind === 'tools') renderTools();
   }
   async function refreshJobs() {
+    const running = () => S.tools.jobs.filter(j => j.status === 'running').map(j => j.id).join();
+    const was = running();
     try { S.tools.jobs = (await api('/cli')).jobs; } catch { return; }
-    if (current().kind === 'tools') renderToolJobs();
+    if (current().kind !== 'tools') return;
+    renderToolJobs();
+    if (running() !== was) renderToolNav();
   }
   // Jump to a tool with fields already filled (from a session's menu).
   function openTool(tool, action, values = {}, cwd = '') {
@@ -1914,8 +2066,7 @@
     const tool = cat[T.tool];
     if (!tool.actions[T.action]) T.action = Object.keys(tool.actions)[0];
     const a = tool.actions[T.action];
-    const running = id => T.jobs.filter(j => j.tool === id && j.status === 'running').length;
-    $('#toolNav').innerHTML = Object.entries(cat).map(([id, t]) => `<a href="#" data-tool="${esc(id)}" class="${id === T.tool ? 'on' : ''}" ${id === T.tool ? 'aria-current="page"' : ''}>${esc(t.title)}<span>${running(id) ? '<i title="Running">●</i>' : ''}</span></a>`).join('');
+    renderToolNav();
     const folders = toolFolders();
     $('#toolForm').innerHTML = `<section class="set-group tool-pane"><h2>${esc(tool.title)}</h2><p class="set-desc">${esc(tool.description)}</p>
       ${Object.keys(tool.actions).length > 1 ? `<div class="tool-tabs" role="group" aria-label="Action">${Object.entries(tool.actions).map(([id, x]) => `<button type="button" class="${id === T.action ? 'on' : ''}" aria-pressed="${id === T.action}" data-toolaction="${esc(id)}">${esc(x.label)}</button>`).join('')}</div>` : ''}
@@ -1930,8 +2081,14 @@
     const el = $('#toolJobs');
     if (!el) return;
     const jobs = S.tools.jobs.filter(j => j.tool === S.tools.tool);
-    setIfChanged(el, jobs.length ? `<section class="set-group"><h2>Recent runs</h2>${jobs.map(j => `<div class="tool-job ${esc(j.status)}"><div class="tool-job-head"><span class="dot ${j.status === 'running' ? 'running' : j.status === 'error' ? 'error' : 'done'}"></span><code title="${esc(j.cwd)}">${esc(j.command)}</code><span class="muted">${j.status === 'running' ? 'running…' : j.status === 'error' ? `failed${j.exitCode != null ? ' · exit ' + j.exitCode : ''}` : 'done'} · ${esc(ago(j.finishedAt || j.startedAt))}</span>${j.status === 'running' ? `<button class="btn sm danger" data-jobstop="${esc(j.id)}">Stop</button>` : `<button class="btn sm ghost" data-copy-text="${esc(plain(j.output || ''))}">Copy</button>`}</div><pre class="tool-out">${esc(plain(j.output || (j.status === 'running' ? 'Waiting for output…' : '')))}</pre></div>`).join('')}</section>` : '');
-    el.querySelectorAll('.tool-job.running .tool-out').forEach(p => { p.scrollTop = p.scrollHeight; });
+    const atEnd = new Map([...el.querySelectorAll('.tool-job[data-job]')].map(d => { const p = d.querySelector('.tool-out'); return [d.dataset.job, p.scrollHeight - p.scrollTop - p.clientHeight < 8]; }));
+    setIfChanged(el, jobs.length ? `<section class="set-group"><h2>Recent runs</h2>${jobs.map(j => `<div class="tool-job ${esc(j.status)}" data-job="${esc(j.id)}"><div class="tool-job-head"><span class="dot ${j.status === 'running' ? 'running' : j.status === 'error' ? 'error' : 'done'}"></span><code title="${esc(j.cwd)}">${esc(j.command)}</code><span class="muted">${j.status === 'running' ? 'running…' : j.status === 'error' ? `failed${j.exitCode != null ? ' · exit ' + j.exitCode : ''}` : 'done'} · ${esc(ago(j.finishedAt || j.startedAt))}</span>${j.status === 'running' ? `<button class="btn sm danger" data-jobstop="${esc(j.id)}">Stop</button>` : `<button class="btn sm ghost" data-copy-text="${esc(plain(j.output || ''))}">Copy</button>`}</div><pre class="tool-out">${esc(plain(j.output || (j.status === 'running' ? 'Waiting for output…' : '')))}</pre></div>`).join('')}</section>` : '');
+    // Follow running output only where the reader was already at the bottom (or the job is new).
+    el.querySelectorAll('.tool-job.running').forEach(d => { if (atEnd.get(d.dataset.job) !== false) { const p = d.querySelector('.tool-out'); p.scrollTop = p.scrollHeight; } });
+  }
+  function renderToolNav() {
+    const T = S.tools, running = id => T.jobs.filter(j => j.tool === id && j.status === 'running').length;
+    $('#toolNav').innerHTML = Object.entries(T.catalog).map(([id, t]) => `<a href="#" data-tool="${esc(id)}" class="${id === T.tool ? 'on' : ''}" ${id === T.tool ? 'aria-current="page"' : ''}>${esc(t.title)}<span>${running(id) ? '<i title="Running" aria-hidden="true">●</i><span class="sr-only">Running</span>' : ''}</span></a>`).join('');
   }
   function toolValues(form) {
     const a = S.tools.catalog[S.tools.tool].actions[S.tools.action], values = {};
@@ -1960,7 +2117,7 @@
   // ---------- spend ----------
   S.spend = { rows: null, error: '' };
   function buildSpend() {
-    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><h1>Spend</h1><div class="meta"><span>Dollar cost per model, from OMP's usage stats across every session.</span></div></div>
       <div class="actions"><button class="btn sm ghost" data-act="spendReload" title="Sync OMP usage stats again" aria-label="Reload spend">↻ <span class="lbl">Reload</span></button></div></div>
       <div class="settings"><div class="set-main" id="spend"></div></div>`;
@@ -1988,13 +2145,13 @@
     }
     const byCost = (a, b) => b[1] - a[1];
     const sorted = [...models].filter(([, v]) => v.all > 0).sort((a, b) => b[1].month - a[1].month || b[1].all - a[1].all);
-    const monthName = new Date().toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    const monthName = new Date().toLocaleDateString('en', { month: 'long', year: 'numeric' });
     el.innerHTML = `<div class="spend-cards">${[['Today', total.today], [monthName, total.month], ['All time', total.all]].map(([k, v]) => `<div><span>${esc(k)}</span><b>${usd(v)}</b></div>`).join('')}</div>
       <section class="set-group"><h2>By model</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Today</th><th class="num">This month</th><th class="num">All time</th></tr></thead><tbody>
         ${sorted.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
       </tbody></table></div></div></section>
       <section class="set-group"><h2>${esc(monthName)} by day</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Day</th><th class="num">Total</th><th>Models</th></tr></thead><tbody>
-        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
+        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
       </tbody></table></div></div></section>`;
   }
 
@@ -2006,14 +2163,26 @@
   const human = key => { const last = key.split('.').pop().replace(/_/g, ' ').replace(/([a-z0-9])([A-Z])/g, '$1 $2'); return last[0].toUpperCase() + last.slice(1); };
   const fmtVal = v => v === undefined ? 'not set' : typeof v === 'string' ? v : JSON.stringify(v);
   const stringList = v => Array.isArray(v) && v.every(x => typeof x === 'string');
-  S.set = { data: null, q: '', group: '', changed: false, error: '', plugins: null, pluginError: '' };
+  // saving/pluginSaving: in-flight keys and plugin ids, so any re-render keeps their rows locked.
+  S.set = { data: null, q: '', group: '', changed: false, error: '', plugins: null, pluginError: '', saving: new Set(), pluginSaving: new Set(), descOpen: new Set() };
+  const setId = key => 'set-' + String(key).replace(/[^\w-]/g, '_');
+  // Focus-preserving re-renders: keepFocus(), next to swapHtml().
+  // Re-render one setting row by key, never a captured node: a full re-render may have replaced it meanwhile.
+  function redrawRow(key, flash) {
+    const row = document.querySelector(`[data-row="${CSS.escape(key)}"]`), x = S.set.data?.settings.find(s => s.key === key);
+    if (!row || !x) return;
+    keepFocus(row.parentElement, () => { row.outerHTML = settingRow(x); });
+    if (!flash) return;
+    const nr = document.querySelector(`[data-row="${CSS.escape(key)}"]`);
+    nr?.classList.add('saved'); setTimeout(() => nr?.classList.remove('saved'), 1200);
+  }
 
   function buildSettings() {
-    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button>
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><h1>OMP settings</h1><div class="meta" id="setMeta"></div></div>
       <div class="actions"><button class="btn sm" data-act="ompUpdate">Update OMP</button><button class="btn sm ghost" data-act="setReload" title="Read the settings again" aria-label="Reload settings">↻ <span class="lbl">Reload</span></button></div></div>
       <div class="settings"><nav class="set-nav" id="setNav"></nav>
-        <div class="set-main" id="setMain"><div class="update-status" id="updateStatus" role="status" aria-live="polite" hidden></div><div class="set-tools"><input id="setSearch" placeholder="Search settings and plugins… (e.g. approval, compaction, theme)" value="${esc(S.set.q)}" spellcheck="false" autocomplete="off">
+        <div class="set-main" id="setMain"><div class="update-status" id="updateStatus" role="status" aria-live="polite" hidden></div><div class="set-tools"><input id="setSearch" aria-label="Search settings and plugins" placeholder="Search settings and plugins… (e.g. approval, compaction, theme)" value="${esc(S.set.q)}" spellcheck="false" autocomplete="off">
           <label class="check"><input type="checkbox" id="setChanged" ${S.set.changed ? 'checked' : ''}> Changed only</label></div>
           <div id="setList"><div class="working"><span class="spinner"></span> Reading OMP settings…</div></div></div></div>`;
     renderUpdateStatus();refreshUpdater();loadSettings();
@@ -2031,7 +2200,7 @@
   }
   async function refreshUpdater() {
     try { S.ompUpdate = await api('/omp-update'); }
-    catch (e) { if (S.ompUpdate.status !== 'running') S.ompUpdate = { status: 'error', output: e.message }; }
+    catch {} // a failed status read is not a failed update: keep what we knew
     if (current().kind === 'settings') renderUpdateStatus();
   }
   async function updateOmp() {
@@ -2042,11 +2211,13 @@
     if (current().kind === 'settings') renderUpdateStatus();
   }
 
+  // Settings and plugins render as soon as they arrive; the slow model list (`omp models --json`) only fills in chip labels afterwards.
   async function loadSettings() {
-    const [d, p] = await Promise.all([api('/settings').catch(e => ({ _error: e.message })), api('/plugins').catch(e => ({ _error: e.message })), ensureModels().catch(() => {})]);
-    if (d._error) S.set.error = d._error; else { S.set.data = placeSettings(d); S.set.error = ''; }
+    const [d, p] = await Promise.all([api('/settings').catch(e => ({ _error: e.message })), api('/plugins').catch(e => ({ _error: e.message }))]);
+    if (d._error) { S.set.error = d._error; if (S.set.data) toast(d._error, 'err'); } else { S.set.data = placeSettings(d); S.set.error = ''; }
     if (p._error) S.set.pluginError = p._error; else { S.set.plugins = p; S.set.pluginError = ''; }
     if (current().kind === 'settings') renderSettings();
+    if (!S.models) ensureModels().then(() => { if (current().kind === 'settings') renderSettings(); }, () => {});
   }
   // OMP files the model role map under "internal", but it is the setting people look for first.
   const placeSettings = d => { for (const x of d.settings) if (MODEL_MAPS.has(x.key)) x.group = x.key === 'modelRoles' ? 'model' : 'tasks'; d.settings.sort((a, b) => (b.key === 'modelRoles') - (a.key === 'modelRoles')); return d; };
@@ -2059,7 +2230,7 @@
     const d = S.set.data, plug = S.set.plugins?.plugins || [];
     const shown = d ? settingsView() : [];
     const changed = d ? d.settings.filter(x => x.modified).length : 0;
-    $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<span class="path" data-copy-text="${esc(d.file)}" title="Copy path">${esc(d.file)}</span>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
+    $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(d.file)}" title="Copy path" aria-label="Copy path ${esc(d.file)}">${esc(d.file)}</button>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
     $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
       const n = shown.filter(x => x.group === g).length, m = d.settings.filter(x => x.group === g && x.modified).length;
       return `<a href="#" data-setgroup="${esc(g)}" class="${n ? '' : 'dim'}">${esc(groupLabel(g))}<span>${m ? `<i title="${m} changed">●</i>` : ''}${n}</span></a>`;
@@ -2067,64 +2238,65 @@
   }
   function renderSettings() {
     const d = S.set.data;
-    if (!d && !S.set.plugins) { $('#setList').innerHTML = hotkeysSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); return; }
+    if (!d && !S.set.plugins) { keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); }); return; }
     renderSettingsChrome();
     const groups = d ? (() => { const by = new Map(settingGroups(d).map(g => [g, []])); for (const x of settingsView()) (by.get(x.group) || by.set(x.group, []).get(x.group)).push(x); return [...by].filter(([, list]) => list.length).map(([g, list]) => `<section class="set-group" id="sg-${esc(g)}"><h2>${esc(groupLabel(g))}${g === 'internal' ? ' <small>used by OMP itself; change with care</small>' : ''}</h2>${list.map(settingRow).join('')}</section>`).join(''); })() : (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : '');
-    $('#setList').innerHTML = hotkeysSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : ''));
+    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
   }
   function hotkeysSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean), h = hotkeys();
     const rows = HOTKEYS.filter(([a, label, desc]) => !q.length || q.every(w => ('hotkeys keyboard shortcuts ' + label + ' ' + desc + ' ' + h[a]).toLowerCase().includes(w))).filter(([a, , , def]) => !S.set.changed || h[a] !== def);
     if (!rows.length) return '';
-    return `<section class="set-group" id="sg-hotkeys"><h2>Hotkeys <small>composer, while OMP is working · saved in this browser</small></h2><p class="set-desc">Comma-separated, e.g. <code>Ctrl+Enter, Alt+Q</code>. Modifiers: Ctrl, Alt, Shift, Meta/Cmd. Leave empty to turn off. Plain Enter always steers. Some browsers keep Ctrl+Q or Cmd+Q for themselves.</p>`
-      + rows.map(([a, label, desc, def]) => `<div class="set-row ${h[a] !== def ? 'mod' : ''}"><div class="set-info"><div class="set-name">${esc(label)}${h[a] !== def ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${esc(desc)}</div>${h[a] !== def ? `<div class="set-def">Default: <code>${esc(def || 'none')}</code></div>` : ''}</div>
-        <div class="set-ctl"><input data-hotkey="${a}" value="${esc(h[a])}" placeholder="None" spellcheck="false" autocomplete="off">${h[a] !== def ? `<button class="btn sm ghost" data-hotkeyreset="${a}">Reset</button>` : ''}</div></div>`).join('') + '</section>';
+    return `<section class="set-group" id="sg-hotkeys"><h2>Hotkeys <small>composer, while OMP is working · saved in this browser</small></h2><p class="set-desc">Comma-separated, e.g. <code>Ctrl+Enter, Alt+Q</code>. Modifiers: Ctrl, Alt, Shift, Meta/Cmd. Keys: a letter, digit, Enter, Space, Tab, Up/Down/Left/Right, Esc or F1–F12. Leave empty to turn off. Plain Enter always steers. Some browsers keep Ctrl+Q or Cmd+Q for themselves.</p>`
+      + rows.map(([a, label, desc, def]) => `<div class="set-row ${h[a] !== def ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="hk-${a}-name">${esc(label)}${h[a] !== def ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${esc(desc)}</div>${h[a] !== def ? `<div class="set-def">Default: <code>${esc(def || 'none')}</code></div>` : ''}</div>
+        <div class="set-ctl"><input data-hotkey="${a}" aria-labelledby="hk-${a}-name" value="${esc(h[a])}" placeholder="None" spellcheck="false" autocomplete="off">${h[a] !== def ? `<button class="btn sm ghost" data-hotkeyreset="${a}" aria-label="Reset ${esc(label)} hotkey">Reset</button>` : ''}</div></div>`).join('') + '</section>';
   }
   function saveHotkey(action, value) {
     try { localStorage.setItem('omp-hotkeys', JSON.stringify({ ...hotkeys(), [action]: value })); } catch {}
     renderSettings(); toast('Saved hotkeys');
   }
   function settingRow(x) {
-    return `<div class="set-row ${x.modified ? 'mod' : ''}" data-row="${esc(x.key)}">
-      <div class="set-info"><div class="set-name">${x.key.includes('.') ? `<span class="set-parent">${esc(x.key.split('.').slice(0, -1).map(human).join(' › '))} ›</span>` : ''}${esc(human(x.key))}${x.modified ? '<span class="tag mod">changed</span>' : ''}</div><code class="set-key" data-copy-text="${esc(x.key)}" title="Copy key">${esc(x.key)}</code>
-        ${x.description ? `<div class="set-desc${x.description.length > 220 ? ' long' : ''}" title="${x.description.length > 220 ? 'Click to expand' : ''}">${esc(x.description)}</div>` : ''}
+    const id = setId(x.key), long = x.description?.length > 220, open = S.set.descOpen.has(x.key);
+    return `<div class="set-row ${x.modified ? 'mod' : ''}${S.set.saving.has(x.key) ? ' saving' : ''}" data-row="${esc(x.key)}">
+      <div class="set-info"><div class="set-name" id="${id}-name">${x.key.includes('.') ? `<span class="set-parent">${esc(x.key.split('.').slice(0, -1).map(human).join(' › '))} ›</span>` : ''}${esc(human(x.key))}${x.modified ? '<span class="tag mod">changed</span>' : ''}</div><button type="button" class="btn-reset" data-copy-text="${esc(x.key)}" title="Copy key" aria-label="Copy key ${esc(x.key)}"><code class="set-key">${esc(x.key)}</code></button>
+        ${x.description ? `<div class="set-desc${long ? ' long' : ''}${open ? ' open' : ''}" id="${id}-desc">${esc(x.description)}</div>${long ? `<button type="button" class="btn-reset set-more muted" data-desc aria-expanded="${open}" aria-controls="${id}-desc">${open ? 'Show less' : 'Show more'}</button>` : ''}` : ''}
         ${x.modified && !x.sensitive && x.default !== undefined ? `<div class="set-def">Default: <code>${esc(fmtVal(x.default).slice(0, 200))}</code></div>` : ''}</div>
-      <div class="set-ctl">${settingControl(x)}${x.modified || (x.sensitive && x.isSet) ? `<button class="btn sm ghost" data-setreset="${esc(x.key)}" title="Remove from config.yml and use OMP's default">Reset</button>` : ''}</div></div>`;
+      <div class="set-ctl">${settingControl(x)}${x.modified || (x.sensitive && x.isSet) ? `<button class="btn sm ghost" data-setreset="${esc(x.key)}" title="Remove from config.yml and use OMP's default" aria-label="Reset ${esc(human(x.key))}">Reset</button>` : ''}</div></div>`;
   }
   function settingControl(x) {
-    const k = esc(x.key), v = x.value;
-    if (x.sensitive) return `<input type="password" data-set="${k}" data-kind="string" placeholder="${x.isSet ? '•••••• set. Type to replace' : 'Not set'}" autocomplete="new-password">`;
-    if (x.type === 'boolean') return `<label class="switch"><input type="checkbox" data-set="${k}" data-kind="boolean" ${v ? 'checked' : ''}><span></span></label>`;
+    const k = esc(x.key), v = x.value, lb = `aria-labelledby="${setId(x.key)}-name"`;
+    if (x.sensitive) return `<input type="password" data-set="${k}" data-kind="string" ${lb} placeholder="${x.isSet ? '•••••• set. Type to replace' : x.type === 'record' || x.type === 'array' ? 'Not set (JSON)' : 'Not set'}" autocomplete="new-password">`;
+    if (x.type === 'boolean') return `<label class="switch"><input type="checkbox" data-set="${k}" data-kind="boolean" ${lb} ${v ? 'checked' : ''}><span></span></label>`;
     if (x.type === 'enum' || x.options) {
       const opts = [...(x.options || [])];
       if (v !== undefined && !opts.includes(String(v))) opts.unshift(String(v));
-      return `<select data-set="${k}" data-kind="string">${v === undefined ? '<option value="" selected>Not set</option>' : ''}${opts.map(o => `<option ${String(v) === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+      return `<select data-set="${k}" data-kind="string" ${lb}>${v === undefined ? '<option value="" selected>Not set</option>' : ''}${opts.map(o => `<option ${String(v) === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
     }
-    if (x.type === 'number') return `<input type="number" step="any" data-set="${k}" data-kind="number" value="${v ?? ''}" placeholder="Not set">`;
+    if (x.type === 'number') return `<input type="number" step="any" data-set="${k}" data-kind="number" ${lb} value="${v ?? ''}" placeholder="Not set">`;
     if (x.type === 'record' && MODEL_MAPS.has(x.key)) {
       const entries = Object.entries(v || {});
-      return `<div class="model-map">${entries.map(([name, sel]) => { const s = splitSel(sel); return `<div class="mm-row"><span class="mm-name">${esc(name)}</span><button class="model-chip" data-mmkey="${k}" data-mmname="${esc(name)}" title="${esc(sel)}">◆ <span>${esc(modelLabel(s.sel, s.thinking) || sel)}</span> ▾</button><button class="btn sm ghost" data-mmdel="${k}" data-mmname="${esc(name)}" title="Remove">✕</button></div>`; }).join('')}
-        <form class="mm-add" data-mmadd="${k}"><input placeholder="${x.key === 'modelRoles' ? 'Add role (e.g. plan, commit)' : 'Add agent name'}" spellcheck="false"><button class="btn sm">Add…</button></form></div>`;
+      return `<div class="model-map">${entries.map(([name, sel]) => { const s = splitSel(sel), label = modelLabel(s.sel, s.thinking) || sel; return `<div class="mm-row"><span class="mm-name">${esc(name)}</span><button class="model-chip" data-mmkey="${k}" data-mmname="${esc(name)}" title="${esc(sel)}" aria-label="${esc(name)} model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button><button class="btn sm ghost" data-mmdel="${k}" data-mmname="${esc(name)}" title="Remove" aria-label="Remove ${esc(name)}">✕</button></div>`; }).join('')}
+        <form class="mm-add" data-mmadd="${k}"><input placeholder="${x.key === 'modelRoles' ? 'Add role (e.g. plan, commit)' : 'Add agent name'}" aria-label="${x.key === 'modelRoles' ? 'New role name' : 'New agent name'}" spellcheck="false"><button class="btn sm">Add…</button></form></div>`;
     }
-    if (x.type === 'array' && (v === undefined || stringList(v))) return `<textarea data-set="${k}" data-kind="lines" rows="${Math.min(8, Math.max(2, (v || []).length + 1))}" placeholder="One per line" spellcheck="false">${esc((v || []).join('\n'))}</textarea>`;
-    if (x.type === 'array' || x.type === 'record') return `<textarea data-set="${k}" data-kind="json" rows="${Math.min(10, Math.max(2, JSON.stringify(v ?? (x.type === 'array' ? [] : {}), null, 2).split('\n').length))}" spellcheck="false">${esc(JSON.stringify(v ?? (x.type === 'array' ? [] : {}), null, 2))}</textarea>`;
-    return `<input data-set="${k}" data-kind="string" value="${esc(v ?? '')}" placeholder="Not set" spellcheck="false">`;
+    // One-per-line only when the value is (or defaults to) a list of strings; empty lists of objects need the JSON editor.
+    if (x.type === 'array' && (v === undefined || stringList(v)) && (v?.length || (stringList(x.default) && x.default.length))) return `<textarea data-set="${k}" data-kind="lines" ${lb} rows="${Math.min(8, Math.max(2, (v || []).length + 1))}" placeholder="One per line" spellcheck="false">${esc((v || []).join('\n'))}</textarea>`;
+    if (x.type === 'array' || x.type === 'record') return `<textarea data-set="${k}" data-kind="json" ${lb} rows="${Math.min(10, Math.max(2, JSON.stringify(v ?? (x.type === 'array' ? [] : {}), null, 2).split('\n').length))}" spellcheck="false">${esc(JSON.stringify(v ?? (x.type === 'array' ? [] : {}), null, 2))}</textarea>`;
+    return `<input data-set="${k}" data-kind="string" ${lb} value="${esc(v ?? '')}" placeholder="Not set" spellcheck="false">`;
   }
   async function saveSetting(key, value, reset) {
-    const row = document.querySelector(`[data-row="${CSS.escape(key)}"]`);
-    row?.classList.add('saving');
+    S.set.saving.add(key);
+    document.querySelector(`[data-row="${CSS.escape(key)}"]`)?.classList.add('saving');
     try {
       S.set.data = placeSettings(await api(reset ? '/settings/reset' : '/settings', reset ? { key } : { key, value }));
-      const x = S.set.data.settings.find(s => s.key === key);
-      if (row && x) { row.outerHTML = settingRow(x); const nr = document.querySelector(`[data-row="${CSS.escape(key)}"]`); nr?.classList.add('saved'); setTimeout(() => nr?.classList.remove('saved'), 1200); }
+      S.set.saving.delete(key); S.advCfg = null;
+      redrawRow(key, true);
       toast(reset ? `Reset ${key}` : `Saved ${key}`);
-      if (/^modelRoles$|^defaultThinkingLevel$|^enabledModels$|Providers$/.test(key)) { S.models = null; ensureModels().then(() => { if (current().kind === 'settings') renderSettings(); }, () => {}); }
+      if (/^modelRoles$|^defaultThinkingLevel$|^enabledModels$|Providers$/.test(key)) { S.models = null; modelsReq = null; ensureModels().then(() => { if (current().kind === 'settings') renderSettings(); }, () => {}); }
       if (current().kind === 'settings') renderSettingsChrome();
     } catch (e) {
+      S.set.saving.delete(key);
       toast(e.message, 'err');
-      row?.classList.remove('saving');
-      const x = S.set.data?.settings.find(s => s.key === key);
-      if (row && x) row.outerHTML = settingRow(x);
+      redrawRow(key);
     }
   }
   function settingInput(el) {
@@ -2133,17 +2305,27 @@
     if (!x) return;
     if (kind === 'boolean') return saveSetting(key, el.checked);
     const raw = el.value;
-    if (kind === 'number') { if (raw.trim() === '') return x.value === undefined ? null : saveSetting(key, null, true); const n = Number(raw); if (!isFinite(n)) return toast('Enter a number', 'err'); return n === x.value ? null : saveSetting(key, n); }
+    if (kind === 'number') { if (el.validity?.badInput) return toast('Enter a number', 'err'); if (raw.trim() === '') return x.value === undefined ? null : saveSetting(key, null, true); const n = Number(raw); if (!isFinite(n)) return toast('Enter a number', 'err'); return n === x.value ? null : saveSetting(key, n); }
     if (kind === 'lines') { const list = raw.split('\n').map(s => s.trim()).filter(Boolean); return JSON.stringify(list) === JSON.stringify(x.value || []) ? null : saveSetting(key, list); }
     if (kind === 'json') { let v; try { v = JSON.parse(raw); } catch { el.classList.add('bad'); return toast('That is not valid JSON', 'err'); } el.classList.remove('bad'); return JSON.stringify(v) === JSON.stringify(x.value) ? null : saveSetting(key, v); }
-    if (x.sensitive) { if (!raw) return; el.value = ''; return saveSetting(key, raw); }
+    if (x.sensitive) {
+      if (!raw) return;
+      let v = raw;
+      if (x.type === 'record' || x.type === 'array') { try { v = JSON.parse(raw); } catch { return toast('That is not valid JSON', 'err'); } }
+      el.value = ''; return saveSetting(key, v);
+    }
     if (raw === '' && x.value !== undefined) return saveSetting(key, null, true);
     if (raw !== (x.value ?? '')) return saveSetting(key, raw);
   }
   function pickMapModel(key, name) {
     const x = S.set.data?.settings.find(s => s.key === key);
-    const cur = splitSel((x?.value || {})[name] || '');
-    openPicker({ model: cur.sel, thinking: cur.thinking, allowDefault: false, apply: (sel, th) => saveSetting(key, { ...(x?.value || {}), [name]: sel + (th ? ':' + th : '') }) });
+    if (!x) return; // settings are reloading: saving now would replace the whole map
+    const cur = splitSel((x.value || {})[name] || '');
+    openPicker({ model: cur.sel, thinking: cur.thinking, allowDefault: false, apply: (sel, th) => {
+      const y = S.set.data?.settings.find(s => s.key === key);
+      if (!y) return toast('Settings are reloading. Try again in a moment.', 'err');
+      saveSetting(key, { ...(y.value || {}), [name]: sel + (th ? ':' + th : '') });
+    } });
   }
   function pluginBase(id) { return String(id).split('@')[0]; }
   function pluginsSection() {
@@ -2156,53 +2338,69 @@
       const installed = p.plugins.filter(match);
       const known = new Set(p.plugins.map(x => pluginBase(x.id).toLowerCase()));
       const avail = (p.available || []).filter(a => match(a) && !known.has(pluginBase(a.id).toLowerCase()));
-      inner = `<form class="mm-add" data-plugininstall style="max-width:1000px;margin-bottom:10px"><input placeholder="Install a plugin… (e.g. owner/repo or name@version)" spellcheck="false" autocomplete="off"><button class="btn sm">Install</button></form>`
+      inner = `<form class="mm-add" data-plugininstall style="max-width:1000px;margin-bottom:10px"><input aria-label="Install a plugin" placeholder="Install a plugin… (e.g. owner/repo or name@version)" spellcheck="false" autocomplete="off"><button class="btn sm">Install</button></form>`
         + (installed.map(pluginRow).join('') || '<div class="history-note">No installed plugins match.</div>')
-        + (avail.length ? '<div class="section-label" style="margin-top:10px">Available</div>' + avail.map(a => `<div class="set-row" data-plugin="${esc(a.id)}"><div class="set-info"><div class="set-name">${esc(pluginBase(a.id))}</div><code class="set-key" title="Plugin id">${esc(a.id)}</code>${a.description ? `<div class="set-desc">${esc(a.description)}</div>` : ''}</div><div class="set-ctl"><button class="btn sm" data-pluginaction="install" data-plugin="${esc(a.id)}">Install</button></div></div>`).join('') : '');
+        + (avail.length ? '<div class="section-label" style="margin-top:10px">Available</div>' + avail.map(a => `<div class="set-row${S.set.pluginSaving.has(a.id) ? ' saving' : ''}" data-plugin="${esc(a.id)}"><div class="set-info"><div class="set-name" id="${setId(a.id)}-plugin">${esc(pluginBase(a.id))}</div><code class="set-key" title="Plugin id">${esc(a.id)}</code>${a.description ? `<div class="set-desc">${esc(a.description)}</div>` : ''}</div><div class="set-ctl"><button class="btn sm" data-pluginaction="install" data-plugin="${esc(a.id)}" aria-label="Install ${esc(pluginBase(a.id))}">Install</button></div></div>`).join('') : '');
     }
     return `<section class="set-group" id="sg-plugins"><h2>Plugins</h2><p class="set-desc">Turning a plugin off doesn't affect copies of its skills installed elsewhere, such as <code>~/.agents/skills</code>. To turn a skill off everywhere, add its name to <code>skills.ignoredSkills</code>. Run <code>/reload-plugins</code> or restart sessions to apply changes.</p>${inner}</section>`;
   }
   function pluginRow(x) {
-    return `<div class="set-row${x.enabled ? '' : ' mod'}" data-plugin="${esc(x.id)}"><div class="set-info"><div class="set-name">${esc(pluginBase(x.id))}${x.enabled ? '' : '<span class="tag mod">disabled</span>'}</div><code class="set-key" data-copy-text="${esc(x.id)}" title="Copy plugin id">${esc(x.id)}${x.version ? ` · ${esc(x.version)}` : ''}</code>${x.description ? `<div class="set-desc">${esc(x.description)}</div>` : ''}</div><div class="set-ctl"><label class="switch" title="${x.enabled ? 'Disable' : 'Enable'}"><input type="checkbox" data-plugin-toggle="${esc(x.id)}" ${x.enabled ? 'checked' : ''}><span></span></label><button class="btn sm ghost" data-pluginaction="uninstall" data-plugin="${esc(x.id)}" title="Uninstall this plugin">Remove</button></div></div>`;
+    return `<div class="set-row${x.enabled ? '' : ' mod'}${S.set.pluginSaving.has(x.id) ? ' saving' : ''}" data-plugin="${esc(x.id)}"><div class="set-info"><div class="set-name" id="${setId(x.id)}-plugin">${esc(pluginBase(x.id))}${x.enabled ? '' : '<span class="tag mod">disabled</span>'}</div><button type="button" class="btn-reset" data-copy-text="${esc(x.id)}" title="Copy plugin id" aria-label="Copy plugin id ${esc(x.id)}"><code class="set-key">${esc(x.id)}${x.version ? ` · ${esc(x.version)}` : ''}</code></button>${x.description ? `<div class="set-desc">${esc(x.description)}</div>` : ''}</div><div class="set-ctl"><label class="switch" title="${x.enabled ? 'Disable' : 'Enable'}"><input type="checkbox" data-plugin-toggle="${esc(x.id)}" aria-labelledby="${setId(x.id)}-plugin" ${x.enabled ? 'checked' : ''}><span></span></label><button class="btn sm ghost" data-pluginaction="uninstall" data-plugin="${esc(x.id)}" title="Uninstall this plugin" aria-label="Remove ${esc(pluginBase(x.id))}">Remove</button></div></div>`;
   }
   async function savePlugin(action, id) {
+    if (S.set.pluginSaving.has(id)) return;
+    S.set.pluginSaving.add(id);
     document.querySelector(`[data-plugin="${CSS.escape(id)}"]`)?.classList.add('saving');
     try {
       S.set.plugins = await api('/plugins', { action, id });
       S.set.pluginError = '';
       toast(action === 'install' ? `Installed ${id}` : action === 'uninstall' ? `Removed ${id}` : action === 'enable' ? `Enabled ${id}` : `Disabled ${id}`);
     } catch (e) { toast(e.message, 'err'); }
+    S.set.pluginSaving.delete(id);
     if (current().kind === 'settings') renderSettings();
   }
 
   // ---------- home / new session ----------
   function buildHome() {
-    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation">☰</button><div class="title-block"><h1>New session</h1></div></div><div class="home"><div class="home-inner" id="home"></div></div>`;
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button><div class="title-block"><h1>New session</h1></div></div><div class="home"><div class="home-inner" id="home"></div></div>`;
     renderHome();
-    if (!S.home.roots) api('/browse').then(r => { S.home.roots = r.roots; S.home.recent = r.recent; renderHome(); }).catch(e => toast(e.message, 'err'));
+    if (!S.home.roots) loadRoots();
   }
+  function loadRoots() {
+    S.home.browseError = '';
+    if (current().kind === 'home') renderHome();
+    api('/browse').then(r => { S.home.roots = r.roots; S.home.recent = r.recent; }, e => { S.home.browseError = e.message; }).then(() => { if (current().kind === 'home') renderHome(); });
+  }
+  const folderListHtml = () => { const f = S.home.filter.toLowerCase(); return S.home.listing.dirs.filter(d => d.name.toLowerCase().includes(f)).map(d => `<button data-go="${esc(d.path)}">${esc(d.name)}</button>`).join('') || `<div class="sub" style="padding:6px 8px;margin:0">${f ? 'No match' : 'No subfolders'}</div>`; };
+  // Typing in the filter only redraws the list, so the input (and any IME composition) stays intact.
+  function renderFolderList() { const el = $('.folder-list'); if (el && S.home.listing) setIfChanged(el, folderListHtml()); }
+  const homeRecentHtml = () => {
+    const recent = items().filter(it => !it.archived).slice(0, 5);
+    return recent.length ? `<div class="section-label">Pick up where you left off</div><div class="session-list" style="margin:0">${recent.map(it => `
+        <button class="item ${it.status === 'history' ? 'history' : ''}" data-key="${esc(it.key)}"><span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span><span></span><span class="m">${esc(it.folder)}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span></button>`).join('')}</div>` : '';
+  };
+  // Polls call this on the home view so the recent sessions' status stays current.
+  function renderHomeRecent() { const el = $('#homeRecent'); if (el) setIfChanged(el, homeRecentHtml()); }
   function renderHome() {
     const el = $('#home');
     if (!el) return;
     const h = S.home, l = h.listing;
-    const f = h.filter.toLowerCase();
-    const recentSessions = items().filter(it => !it.archived).slice(0, 5);
-    el.innerHTML = `
+    const html = `
       <div><h2>Where do you want to work?</h2></div>
       <p class="sub">Pick a folder, say what to do, press Enter. Earlier sessions are in the sidebar.</p>
       <div>
         <div class="section-label">Recent folders</div>
-        <div class="chips">${(h.recent || []).map(r => `<button class="chip ${l && norm(l.path) === norm(r.path) ? 'sel' : ''}" data-go="${esc(r.path)}" title="${esc(r.path)}">${esc(r.name)} <small>${esc(ago(r.lastUsed))}</small></button>`).join('') || (h.roots ? '<span class="sub" style="margin:0">None yet</span>' : '<span class="spinner"></span>')}</div>
+        <div class="chips">${(h.recent || []).map(r => `<button class="chip ${l && norm(l.path) === norm(r.path) ? 'sel' : ''}" data-go="${esc(r.path)}" title="${esc(r.path)}">${esc(r.name)} <small>${esc(ago(r.lastUsed))}</small></button>`).join('') || (h.roots ? '<span class="sub" style="margin:0">None yet</span>' : h.browseError ? `<span class="sub" style="margin:0">Could not list folders: ${esc(h.browseError)}</span> <button type="button" class="btn sm" data-act="homeRetry">Retry</button>` : '<span class="spinner"></span>')}</div>
       </div>
       <div class="folder-box">
         <form class="folder-head" id="pathForm">
           ${l?.parent ? `<button type="button" class="btn sm" data-go="${esc(l.parent)}" title="Parent folder">↑</button>` : ''}
-          <input id="pathInput" placeholder="Paste or type a folder path, e.g. C:\\Users\\you\\code\\app" value="${esc(l?.path || '')}" spellcheck="false">
+          <input id="pathInput" aria-label="Folder path" placeholder="Paste or type a folder path, e.g. C:\\Users\\you\\code\\app" value="${esc(h.path ?? l?.path ?? '')}" spellcheck="false">
           <button class="btn sm">Open</button>
         </form>
         ${l ? `
-          <input class="folder-filter" id="folderFilter" placeholder="Filter ${l.dirs.length} subfolders…" value="${esc(h.filter)}">
-          <div class="folder-list">${l.dirs.filter(d => d.name.toLowerCase().includes(f)).map(d => `<button data-go="${esc(d.path)}">${esc(d.name)}</button>`).join('') || '<div class="sub" style="padding:6px 8px;margin:0">No subfolders</div>'}</div>`
+          <input class="folder-filter" id="folderFilter" aria-label="Filter subfolders" placeholder="Filter ${l.dirs.length} subfolders…" value="${esc(h.filter)}">
+          <div class="folder-list">${folderListHtml()}</div>`
         : `<div style="padding:10px 12px" class="chips">${(h.roots || []).map(r => `<button class="chip" data-go="${esc(r.path)}">${esc(r.name)}</button>`).join('')}</div>`}
       </div>
       ${l ? `
@@ -2216,14 +2414,15 @@
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}${fastChip(h.model, h.fast)}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
-            <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…">⚙ Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
+            <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…"><span aria-hidden="true">⚙</span> Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
           </div>
         </div>
       </div>` : ''}
-      ${recentSessions.length ? `<div><div class="section-label">Pick up where you left off</div><div class="session-list" style="margin:0">${recentSessions.map(it => `
-        <button class="item ${it.status === 'history' ? 'history' : ''}" data-key="${esc(it.key)}"><span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span><span></span><span class="m">${esc(it.folder)}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span></button>`).join('')}</div></div>` : ''}`;
+      <div id="homeRecent">${homeRecentHtml()}</div>`;
+    // Late /browse or /models results re-render home: keep the typed path, the prompt's focus and its caret.
+    keepFocus(el, () => { el.innerHTML = html; });
     renderAttachments();
     renderSlash();
     if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
@@ -2233,30 +2432,33 @@
     if (!preview) return;
     const list = attached();
     preview.hidden = !list.length;
-    setIfChanged(preview, list.map(a => `<div class="attach-item"><img src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join(''));
+    setIfChanged(preview, list.map(a => `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View ${esc(a.name)} full size"><img src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"></button><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join(''));
   }
   async function goFolder(dir) {
     if (!dir) return;
+    const seq = S.home.seq = (S.home.seq || 0) + 1;
     try {
-      S.home.listing = await api('/browse?path=' + encodeURIComponent(dir));
+      const listing = await api('/browse?path=' + encodeURIComponent(dir));
+      if (seq !== S.home.seq) return; // a later click won
+      S.home.listing = listing; S.home.path = undefined;
       S.home.filter = '';
       renderHome();
       $('#homePrompt')?.focus();
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) { if (seq === S.home.seq) toast(e.message, 'err'); }
   }
   async function startSession() {
     const l = S.home.listing;
     if (!l || S.busy) return;
     S.busy = true; renderHome();
-    const attachment = attached();
-    S.attachments = S.attachments.filter(a => a.view !== S.view);
+    const attachment = attached(), view = S.view;
+    S.attachments = S.attachments.filter(a => a.view !== view);
     try {
       const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}), ...imagePayload(attachment) });
       S.home.prompt = '';
       await refresh();
       location.hash = '#/s/' + s.id;
     } catch (e) {
-      S.attachments.push(...attachment.map(a => ({ ...a, view: S.view })));
+      S.attachments.push(...attachment.map(a => ({ ...a, view })));
       toast(e.message, 'err');
     }
     S.busy = false;
@@ -2270,7 +2472,7 @@
   // ---------- connect ----------
   function renderConnect() {
     S.view = 'connect';
-    $('#list').innerHTML = '';
+    setIfChanged($('#list'), ''); // not innerHTML: a stale _html cache would skip the redraw after reconnecting
     main().innerHTML = `<div class="center"><form class="card" id="connectForm">
       <h2>Connect to your companion</h2>
       <p>Open the link printed by <code>node companion/server.mjs</code>, or paste its connection token here.</p>
@@ -2280,10 +2482,16 @@
   }
 
   // ---------- polling ----------
+  // /state?session=<id> sends messages only for the viewed session (for a Changes page, its parent); the rest stay summaries.
+  const stateSession = () => { const c = current(); return c.kind === 'session' ? c.id : c.kind === 'changes' && c.parent.startsWith('s:') ? c.parent.slice(2) : ''; };
+  let stateSeq = 0, stateShown = 0;
   async function refresh() {
+    const seq = ++stateSeq, etag = { tag: S.stateTag };
     try {
-      S.store = await api('/state');
+      const st = await api('/state?session=' + encodeURIComponent(stateSession()), undefined, { etag });
       S.online = true; S.fails = 0;
+      // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
+      if (seq > stateShown) { stateShown = seq; if (st) { S.store = st; S.stateTag = etag.tag; } }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
     if (Date.now() - S.nativeAt > 20000) {
       S.nativeAt = Date.now();
@@ -2291,16 +2499,34 @@
     }
     renderList();
     update();
+    if (current().kind === 'home') renderHomeRecent();
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
   async function loop() {
-    if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
-    const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued');
-    // Back off while the companion is unreachable instead of hammering it every second.
-    setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
+    try {
+      if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
+    } catch (e) { console.error('Refresh failed:', e); } finally { // a render that throws must not end polling for good
+      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued');
+      // Back off while the companion is unreachable instead of hammering it every second.
+      setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
+    }
   }
+  // Hidden tabs (and the desktop app in the tray) poll every 8 s; catch up at once when shown again.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); });
 
   // ---------- events ----------
+  const closeMenu = m => { if (!m) return; m.classList.remove('open'); m.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'false'); };
+  const closeMenus = () => document.querySelectorAll('.menu.open').forEach(closeMenu);
+  const overlayOpen = () => !!(S.picker || $('#modal') || $('#lightbox'));
+  const keyIs = (e, k) => keyChar(e) === k;
+  // The phone drawer (≤820 px) covers the page, so the page is inert while it is open.
+  function setNav(open, moveFocus) {
+    $('#app').classList.toggle('nav-open', open);
+    const m = main();
+    if (m) m.inert = open && innerWidth <= 820;
+    document.querySelectorAll('[data-act="nav"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
+    if (moveFocus) (open ? $('#newBtn') : m?.querySelector('[data-act="nav"]'))?.focus();
+  }
   function pickerCtx() {
     const c = current();
     if (c.kind === 'home') return { model: S.home.model, thinking: S.home.thinking, allowDefault: true, apply: (sel, th) => { S.home.model = sel; S.home.thinking = th; thinkSet(sel, th); renderHome(); $('#homePrompt')?.focus(); } };
@@ -2329,7 +2555,10 @@
     if (!list.length) { toast('No available default, smol, or slow models', 'err'); return; }
     const cur = ctx.model || splitSel(S.models.roles.default || '').sel;
     const curTh = ctx.thinking || (!ctx.model ? splitSel(S.models.roles.default || '').thinking : '');
-    const i = list.findIndex(([, v]) => { const s = splitSel(v); return s.sel === cur && (s.thinking || '') === curTh; });
+    // A role without a ":level" suffix matches on the model alone: OMP reports the session's live level, which the role never set.
+    const match = ok => list.findIndex(([, v]) => { const s = splitSel(v); return s.sel === cur && ok(s.thinking || ''); });
+    let i = match(th => th === curTh);
+    if (i < 0) i = match(th => !th);
     const [, val] = list[i < 0 ? (dir < 0 ? list.length - 1 : 0) : (i + dir + list.length) % list.length];
     const s = splitSel(val);
     closePicker();
@@ -2345,12 +2574,15 @@
       if (fav) { toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top; return; }
       const row = t.closest('[data-pi]'), prov = t.closest('[data-prov]'), th = t.closest('[data-think]');
       if (row) pickModel(+row.dataset.pi);
-      else if (prov) { S.picker.provider = prov.dataset.prov; S.picker.hi = 0; renderPicker(); $('#pickerQ').focus(); }
-      else if (th) { S.picker.thinking = th.dataset.think; const k = S.picker.flat[S.picker.hi]?.sel; if (k) S.picker.mem[k] = S.picker.thinking; renderThink(); $('#pickerQ').focus(); }
+      // Keyboard activation (detail 0) keeps focus on the chip via keepFocus; a pointer click returns to the search box.
+      else if (prov) { S.picker.provider = prov.dataset.prov; S.picker.hi = 0; renderPicker(); if (e.detail) $('#pickerQ').focus(); }
+      else if (th) { S.picker.thinking = th.dataset.think; const k = S.picker.flat[S.picker.hi]?.sel; if (k) S.picker.mem[k] = S.picker.thinking; renderThink(); if (e.detail) $('#pickerQ').focus(); }
       else if (!t.closest('.picker')) closePicker();
       return;
     }
     if (t.closest('#modal')) {
+      const mc = t.closest('[data-copy]');
+      if (mc) { copy(mc.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
       // The backdrop only dismisses a dialog with nothing typed into it.
       const dirty = [...t.closest('#modal').querySelectorAll('textarea,input:not([type=checkbox]):not([type=radio])')].some(f => f.value.trim());
       if ((t.id === 'modal' && !dirty) || t.closest('[data-modal-close]')) closeModal();
@@ -2358,14 +2590,14 @@
       if (br) doBranch(br.dataset.branch);
       if (lg) { closeModal(); sessionAction({ type: 'login', provider: lg.dataset.login }); }
       const sw = t.closest('[data-switch]');
-      if (sw && !sw.disabled) { $('#modal').querySelectorAll('[data-switch]').forEach(b => { b.disabled = true; }); sessionAction({ type: 'switch_session', file: sw.dataset.switch }).then(ok => { if (ok) { closeModal(); S.lastSig = ''; refreshNative(); toast('Switched session'); } else $('#modal')?.querySelectorAll('[data-switch]').forEach(b => { b.disabled = false; }); }); }
+      if (sw && !sw.disabled) { $('#modal').querySelectorAll('[data-switch]').forEach(b => { b.disabled = true; }); sessionAction({ type: 'switch_session', file: sw.dataset.switch }, { timeout: 70000 }).then(ok => { if (ok) { closeModal(); S.lastSig = ''; refreshNative(); toast('Switched session'); } else $('#modal')?.querySelectorAll('[data-switch]').forEach(b => { b.disabled = false; }); }); }
       if (t.closest('[data-launch-clear]')) saveLaunch(t.closest('form'), true);
       return;
     }
     const sl = t.closest('[data-slash]');
     if (sl) { pickSlash(sl.dataset.slash); return; }
     const pf = t.closest('[data-pref]');
-    if (pf) { pf.closest('.menu')?.classList.remove('open'); sessionAction({ type: 'pref', key: pf.dataset.pref, value: JSON.parse(pf.dataset.value) }); return; }
+    if (pf) { closeMenu(pf.closest('.menu')); sessionAction({ type: 'pref', key: pf.dataset.pref, value: JSON.parse(pf.dataset.value) }); return; }
     const choice = t.closest('[data-uichoice]');
     if (choice) { answerQuestion(choice.dataset.uichoice, { value: choice.dataset.uivalue }, choice); return; }
     const yesNo = t.closest('[data-uiconfirm]');
@@ -2376,7 +2608,7 @@
     if (steerAct) {
       const id = steerAct.dataset.id;
       if (steerAct.dataset.steeract === 'edit_steer') {
-        const old = S.store.sessions.find(s => s.id === current().id)?.messages.find(m => m.id === id)?.text || '';
+        const old = S.store.sessions.find(s => s.id === current().id)?.messages?.find(m => m.id === id)?.text || '';
         S.editSteer = { id, text: old, focus: true }; S.lastSig = ''; update();
       } else { steerAct.disabled = true; steerCommand('cancel_steer', id); }
       return;
@@ -2395,8 +2627,8 @@
     if (qsave) { queuedAction('edit_follow_up', qsave.dataset.qsave, $('#queued textarea')?.value); return; }
     const qremove = t.closest('[data-qremove]');
     if (qremove) { if (confirm('Remove this queued message? It has not been sent to OMP.')) queuedAction('cancel_follow_up', qremove.dataset.qremove); return; }
-    const ld = t.closest('.set-desc.long');
-    if (ld) { ld.classList.toggle('open'); return; }
+    const ld = t.closest('[data-desc], .set-desc.long');
+    if (ld) { const key = ld.closest('[data-row]')?.dataset.row; if (key == null) return; S.set.descOpen.has(key) ? S.set.descOpen.delete(key) : S.set.descOpen.add(key); redrawRow(key); return; }
     const aa = t.closest('[data-advact]');
     if (aa) {
       if (aa.dataset.advact === 'status') advisorAction('status');
@@ -2405,7 +2637,7 @@
     }
     const ts = t.closest('[data-thinkset]');
     if (ts) { const ctx = $('#thinkMenu')._ctx; closeThinkMenu(); ctx.apply(ctx.model, ts.dataset.thinkset); return; }
-    if (!t.closest('#thinkMenu, [data-act="thinkMenu"], [data-act="advMenu"]')) closeThinkMenu();
+    if (!t.closest('#thinkMenu, #advMenu, [data-act="thinkMenu"], [data-act="advMenu"]')) closeThinkMenu();
     const sg = t.closest('[data-setgroup]');
     if (sg) { e.preventDefault(); document.getElementById('sg-' + sg.dataset.setgroup)?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); return; }
     const sr = t.closest('[data-setreset]');
@@ -2417,7 +2649,7 @@
     const mm = t.closest('[data-mmkey]');
     if (mm) { pickMapModel(mm.dataset.mmkey, mm.dataset.mmname); return; }
     const md = t.closest('[data-mmdel]');
-    if (md) { const x = S.set.data?.settings.find(s => s.key === md.dataset.mmdel); const v = { ...(x?.value || {}) }; delete v[md.dataset.mmname]; saveSetting(md.dataset.mmdel, v); return; }
+    if (md) { const x = S.set.data?.settings.find(s => s.key === md.dataset.mmdel); if (!x) return; const v = { ...(x.value || {}) }; delete v[md.dataset.mmname]; saveSetting(md.dataset.mmdel, v); return; }
     const dm = t.closest('[data-diffmode]');
     if (dm) { S.diffMode = dm.dataset.diffmode; try { localStorage.setItem('omp-diff-mode', S.diffMode); } catch {} S.lastSig = ''; $('#topbar')._html = ''; update(); return; }
     const prompt = t.closest('[data-prompt]');
@@ -2433,15 +2665,15 @@
       if (j) openSub(j.transcript); else { toast('That subagent transcript is not available yet.'); loadBg(bgFile(), true); }
       return;
     }
-    if (!t.closest('.menu')) document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open'));
+    if (!t.closest('.menu')) closeMenus();
     const copyBtn = t.closest('[data-copy]');
     if (copyBtn) { copy(copyBtn.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
     const ct = t.closest('[data-copy-text]');
-    if (ct) { copy(ct.dataset.copyText); ct.closest('.menu')?.classList.remove('open'); return; }
+    if (ct) { copy(ct.dataset.copyText); closeMenu(ct.closest('.menu')); return; }
     const ns = t.closest('[data-new-session]');
     if (ns) { newSession(ns.dataset.newSession); return; }
     const gl = t.closest('[data-group]');
-    if (gl) { const c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); localStorage.setItem('omp-collapsed', JSON.stringify([...c])); renderList(); return; }
+    if (gl) { let c; try { c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { c = new Set(); } c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); try { localStorage.setItem('omp-collapsed', JSON.stringify([...c])); } catch {} renderList(); return; }
     const ar = t.closest('[data-archive]');
     if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const nt = t.closest('[data-newtab]');
@@ -2465,9 +2697,11 @@
     const a = t.closest('[data-act]');
     if (!a) return;
     const act = a.dataset.act, c = current();
-    if (act === 'nav') document.getElementById('app').classList.toggle('nav-open');
-    else if (act === 'menu') a.closest('.menu').classList.toggle('open');
-    else if (act === 'advisor') { a.closest('.menu')?.classList.remove('open'); advisorCommand(a.dataset.advisor); }
+    if (act === 'nav') setNav(!$('#app').classList.contains('nav-open'), true);
+    else if (act === 'menu') { const m = a.closest('.menu'), open = !m.classList.contains('open'); closeMenus(); if (open) { m.classList.add('open'); a.setAttribute('aria-expanded', 'true'); } }
+    // First target with a layout box: the hidden desktop ☰ and unrendered fields don't count.
+    else if (act === 'skip') [$('#input'), $('#homePrompt'), $('#pathInput'), ...main().querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),a[href],[tabindex="0"]')].find(n => n?.getClientRects().length)?.focus();
+    else if (act === 'advisor') { closeMenu(a.closest('.menu')); advisorCommand(a.dataset.advisor); }
     else if (act === 'attach') $('#imageInput')?.click();
     else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.name !== a.dataset.name); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
@@ -2477,14 +2711,14 @@
     else if (act === 'homeLaunch') openLaunch('home');
     else if (act === 'clearTodos') { if (confirm('Clear the task plan for this session?')) editTodos(phases => { phases.length = 0; }); }
     else if (['compact', 'tree', 'lastReply', 'cycleModel', 'cycleThinking', 'launch', 'newSession', 'switchSession', 'share', 'commit'].includes(act)) {
-      a.closest('.menu')?.classList.remove('open');
+      closeMenu(a.closest('.menu'));
       const s = S.store?.sessions.find(x => x.id === c.id);
       if (act === 'compact') openCompact();
       else if (act === 'tree') openTree();
       else if (act === 'lastReply') copyLastReply();
       else if (act === 'cycleModel' || act === 'cycleThinking') cycle(act === 'cycleModel' ? 'cycle_model' : 'cycle_thinking');
       else if (act === 'launch') { if (!S.models) ensureModels().then(() => openLaunch('session'), () => openLaunch('session')); else openLaunch('session'); }
-      else if (act === 'newSession') { if (confirm('Start a fresh OMP session in this panel entry? The current conversation is kept in its own session file and stays in OMP history.')) sessionAction({ type: 'new_session' }).then(ok => { if (ok) { S.lastSig = ''; refreshNative(); toast('Started a fresh session'); } }); }
+      else if (act === 'newSession') { if (confirm('Start a fresh OMP session in this panel entry? The current conversation is kept in its own session file and stays in OMP history.')) sessionAction({ type: 'new_session' }, { timeout: 70000 }).then(ok => { if (ok) { S.lastSig = ''; refreshNative(); toast('Started a fresh session'); } }); }
       else if (act === 'switchSession') openSwitch();
       else if (act === 'share' && s?.sessionFile) openTool('share', 'share', { session: s.sessionFile });
       else if (act === 'commit' && s) openTool('commit', 'run', { dryRun: true }, s.cwd);
@@ -2494,7 +2728,7 @@
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
     else if (['rename', 'branch', 'handoff', 'export', 'stats', 'login'].includes(act)) {
-      a.closest('.menu')?.classList.remove('open');
+      closeMenu(a.closest('.menu'));
       if (act === 'rename') { const s = S.store.sessions.find(x => x.id === c.id); const name = prompt('Session name', s?.title || ''); if (name?.trim() && name.trim() !== s?.title) sessionAction({ type: 'rename', name: name.trim() }); }
       else ({ branch: openBranch, handoff: openHandoff, export: exportHtml, stats: showStats, login: openLogin })[act]();
     }
@@ -2506,12 +2740,12 @@
       try { localStorage.setItem('omp-side', S.sideOpen ? '1' : '0'); } catch {}
       $('#topbar')._html = ''; update();
     }
-    else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} a.closest('.menu')?.classList.remove('open'); S.lastSig = ''; $('#topbar')._html = ''; update(); }
+    else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} closeMenu(a.closest('.menu')); S.lastSig = ''; $('#topbar')._html = ''; update(); }
     else if (act === 'ompUpdate') updateOmp();
-    else if (act === 'setReload') { S.set.data = null; S.set.plugins = null; loadSettings(); }
+    else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
     else if (act === 'spendReload') loadSpend();
-    else if (act === 'advMenu') { $('#thinkMenu') ? closeThinkMenu() : openAdvMenu(t.closest('[data-act]')); }
-    else if (act === 'thinkMenu') { $('#thinkMenu') ? closeThinkMenu() : openThinkMenu(t.closest('[data-act]')); }
+    else if (act === 'advMenu') { $('#advMenu') ? closeThinkMenu() : openAdvMenu(a); }
+    else if (act === 'thinkMenu') { $('#thinkMenu') ? closeThinkMenu() : openThinkMenu(a); }
     else if (act === 'nativeAdv') { S.nativeAdv.set(c.file, !(S.nativeAdv.get(c.file) ?? S.advCfg?.enabled)); update(); }
     else if (act === 'fastToggle') {
       if (c.kind === 'home') { S.home.fast = !S.home.fast; renderHome(); }
@@ -2520,9 +2754,10 @@
     else if (act === 'model') { const ctx = pickerCtx(); if (ctx) openPicker(ctx); }
     else if (act === 'retry') {
       const s = S.store.sessions.find(x => x.id === c.id);
-      const lastUser = [...s.messages].reverse().find(m => m.role === 'user');
-      if (lastUser?.hasImage) { if (lastUser.text !== 'Image attached') $('#input').value = lastUser.text; update(); toast(attached().length ? 'Image is still attached; press Send to retry.' : 'Reattach the image before retrying.', 'err'); }
-      else if (lastUser) { $('#input').value = lastUser.text; send('prompt'); }
+      const lastUser = [...(s?.messages || [])].reverse().find(m => m.role === 'user'), input = $('#input');
+      if (lastUser?.hasImage) { if (lastUser.text !== 'Image attached' && !input.value.trim()) { input.value = lastUser.text; drafts.set(S.view, input.value); autosize(input); } update(); toast(attached().length ? 'Image is still attached; press Send to retry.' : 'Reattach the image before retrying.', 'err'); }
+      // Resend the old text; the draft and images staged for the next message stay put.
+      else if (lastUser) send('prompt', lastUser.text);
     }
     else if (act === 'newHere') {
       const s = c.kind === 'session' ? S.store.sessions.find(x => x.id === c.id) : null;
@@ -2530,6 +2765,7 @@
     }
     else if (act === 'resumeOnly') { const adv = S.nativeAdv.get(c.file); api('/omp-sessions/resume', { file: c.file, ...(adv === undefined ? {} : { advisor: adv }) }).then(async s => { await refreshNative(); location.hash = '#/s/' + s.id; }).catch(err => toast(err.message, 'err')); }
     else if (act === 'start') startSession();
+    else if (act === 'homeRetry') loadRoots();
   });
   document.addEventListener('auxclick', e => {
     const item = e.button === 1 && e.target.closest('.item[data-key]');
@@ -2541,16 +2777,19 @@
     if (!item) return;
     e.preventDefault();
     const m = document.createElement('div');
-    m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu';
+    m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu'; m._item = item;
     m.innerHTML = `<button data-newtab="${esc(item.dataset.key)}">Open in new tab</button>`;
     document.body.appendChild(m);
-    m.style.left = Math.min(e.clientX, innerWidth - m.offsetWidth - 4) + 'px';
-    m.style.top = Math.min(e.clientY, innerHeight - m.offsetHeight - 4) + 'px';
+    // The keyboard context-menu key reports no pointer position: anchor to the row instead.
+    const at = e.clientX || e.clientY ? { left: e.clientX, top: e.clientY } : item.getBoundingClientRect();
+    m.style.left = Math.min(at.left, innerWidth - m.offsetWidth - 4) + 'px';
+    m.style.top = Math.min(at.top, innerHeight - m.offsetHeight - 4) + 'px';
+    m.querySelector('button').focus({ preventScroll: true });
   });
   addEventListener('blur', closeCtx);
   addEventListener('resize', closeCtx);
   document.addEventListener('scroll', closeCtx, true);
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ctxMenu')) { const item = $('#ctxMenu')._item; closeCtx(); if (item?.isConnected) item.focus(); } });
   // Click any chat, queued or not-yet-sent image to see it full size.
   function openLightbox(src, alt) {
     if (!safeImg(src)) return;
@@ -2567,7 +2806,7 @@
   document.addEventListener('click', e => {
     const lb = e.target.closest?.('#lightbox');
     if (lb) { if (e.target.tagName !== 'IMG' && !e.target.closest('a')) closeLightbox(); return; }
-    const img = e.target.closest?.('.msg-image-btn')?.querySelector('img') || e.target.closest?.('img.msg-image, .attach-preview img, .queued-image img');
+    const img = e.target.closest?.('.msg-image-btn, [data-lightbox]')?.querySelector('img') || e.target.closest?.('img.msg-image');
     if (img) { e.preventDefault(); e.stopPropagation(); openLightbox(img.src, img.alt); }
   }, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#lightbox')) { e.stopPropagation(); closeLightbox(); } }, true);
@@ -2591,12 +2830,8 @@
     else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
-    else if (t.id === 'folderFilter') {
-      S.home.filter = t.value;
-      const pos = t.selectionStart;
-      renderHome();
-      const nf = $('#folderFilter'); nf.focus(); nf.setSelectionRange(pos, pos);
-    }
+    else if (t.id === 'pathInput') S.home.path = t.value;
+    else if (t.id === 'folderFilter') { S.home.filter = t.value; renderFolderList(); }
   });
   document.addEventListener('change', e => {
     if (e.target.matches?.('[data-advset]')) { advisorAction(e.target.checked ? 'on' : 'off'); return; }
@@ -2606,19 +2841,40 @@
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
-    else if (e.target.dataset?.hotkey) { const v = e.target.value.split(',').map(s => s.trim()).filter(Boolean), bad = v.filter(s => !normCombo(s)); if (bad.length) toast(`Not a usable hotkey: ${bad.join(', ')}. Use Ctrl, Alt or Meta plus a key, e.g. Alt+Q`, 'err'); else saveHotkey(e.target.dataset.hotkey, v.join(', ')); }
+    else if (e.target.dataset?.hotkey) {
+      const v = e.target.value.split(',').map(s => s.trim()).filter(Boolean), bad = v.filter(s => !normCombo(s)), taken = v.filter(s => RESERVED_KEYS.has(normCombo(s)));
+      if (bad.length) toast(`Not a usable hotkey: ${bad.join(', ')}. Use Ctrl, Alt or Meta plus a letter, digit or key name (Enter, Space, Tab, Up, Down, Esc, F1…), e.g. Alt+Q`, 'err');
+      else if (taken.length) toast(`Already used by the dashboard: ${taken.join(', ')}`, 'err');
+      else saveHotkey(e.target.dataset.hotkey, v.join(', '));
+    }
   });
   document.addEventListener('paste', e => {
     if (e.target.id !== 'input' && e.target.id !== 'homePrompt') return;
+    // Office apps put a picture of the selection next to the text: paste the text.
+    if (e.clipboardData?.getData('text/plain')) return;
     const files = [...(e.clipboardData?.items || [])].filter(item => item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
     if (files.length) { e.preventDefault(); files.forEach(attachImage); }
   });
+  // Dropped images attach to the composer; no file drop may navigate away from the dashboard.
+  const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+  document.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    if (e.target.closest?.('.composer')) [...e.dataTransfer.files].forEach(attachImage);
+  });
   document.addEventListener('submit', e => {
     e.preventDefault();
-    if (e.target.hasAttribute('data-compact')) { const instructions = e.target.elements.instructions.value.trim(); closeModal(); sessionAction({ type: 'compact', ...(instructions ? { instructions } : {}) }).then(ok => ok && toast('Compacting context…')); return; }
+    if (e.target.hasAttribute('data-compact') || e.target.hasAttribute('data-handoff')) {
+      const f = e.target, instructions = f.elements.instructions.value.trim(), compact = f.hasAttribute('data-compact');
+      const lock = on => f.querySelectorAll('button,textarea').forEach(x => { x.disabled = on; });
+      lock(true);
+      // Keep the dialog and the typed instructions until OMP accepts the request.
+      sessionAction(compact ? { type: 'compact', ...(instructions ? { instructions } : {}) } : { type: 'handoff', instructions }).then(ok => { if (!ok) return lock(false); if ($('#modal')?.contains(f)) closeModal(); if (compact) toast('Compacting context…'); });
+      return;
+    }
     if (e.target.dataset.launch) { saveLaunch(e.target); return; }
     if (e.target.hasAttribute('data-toolform')) { runTool(e.target); return; }
-    if (e.target.hasAttribute('data-handoff')) { const instructions = e.target.elements.instructions.value.trim(); closeModal(); sessionAction({ type: 'handoff', instructions }); return; }
     if (e.target.hasAttribute('data-uiform')) { answerQuestion(e.target.dataset.uiform, { value: e.target.elements.answer.value }, e.target); return; }
     if (e.target.dataset.mmadd) { const name = e.target.querySelector('input').value.trim(); if (!/^[\w.-]{1,60}$/.test(name)) return toast('Use letters, numbers, dots, dashes or underscores', 'err'); pickMapModel(e.target.dataset.mmadd, name); return; }
     if (e.target.hasAttribute('data-plugininstall')) { const v = e.target.querySelector('input').value.trim(); if (v) savePlugin('install', v); return; }
@@ -2626,19 +2882,20 @@
     if (e.target.id === 'connectForm') {
       const t = $('#tokenInput').value.trim();
       if (!t) return;
-      S.token = t;
-      api('/state').then(() => { setToken(t); refreshNative(); toast('Connected'); }).catch(err => { S.token = ''; toast(err.message, 'err'); });
+      // Probe without adopting the token: a wrong one keeps the form (and the pasted text) with its own message.
+      api('/state?session=', undefined, { token: t }).then(() => { setToken(t); refreshNative(); toast('Connected'); }).catch(err => toast(err.message, 'err'));
     }
   });
+  // A resting pointer gets synthetic mouseovers when the list scrolls under it; only real pointer movement takes the highlight back.
+  document.addEventListener('mousemove', e => { if (S.picker && (e.movementX || e.movementY)) S.picker.kbd = false; });
   document.addEventListener('mouseover', e => {
     const row = e.target.closest?.('#picker [data-pi]');
-    if (!row || !S.picker || +row.dataset.pi === S.picker.hi) return;
-    $('#pickerList .hi')?.classList.remove('hi');
-    row.classList.add('hi'); S.picker.hi = +row.dataset.pi; renderThink();
+    if (!row || !S.picker || S.picker.kbd || +row.dataset.pi === S.picker.hi) return;
+    pickerHi(+row.dataset.pi);
   });
   document.addEventListener('keydown', e => {
     if (e.isComposing || e.keyCode === 229) return; // IME composition: Enter confirms a character, not the message
-    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'p') { e.preventDefault(); if (!S.picker && !$('#modal') && current().kind === 'session') togglePlan(current().id); return; }
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && keyIs(e, 'p')) { e.preventDefault(); if (!S.picker && !$('#modal') && current().kind === 'session') togglePlan(current().id); return; }
     // Keep keyboard focus inside whichever dialog is on top.
     const dialog = $('#lightbox') || (S.picker ? $('#picker .picker') : $('#modal'));
     if (dialog && e.key === 'Tab') {
@@ -2649,14 +2906,15 @@
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     }
     // Ctrl+P cycles model roles from the composer (and closes the picker); elsewhere it stays the browser's Print.
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p' && (S.picker || e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
+    if ((e.ctrlKey || e.metaKey) && keyIs(e, 'p') && (S.picker || e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Escape' && $('#modal') && !S.picker) { e.stopPropagation(); closeModal(); return; }
-    if (e.key === 'Escape' && $('#thinkMenu')) { closeThinkMenu(); return; }
+    if (e.key === 'Escape' && ($('#thinkMenu') || $('#advMenu'))) { closeThinkMenu(); return; }
     const t = e.target;
     if (S.picker) {
       if (e.key === 'Escape') { e.preventDefault(); closePicker(); return; }
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.picker.hi = Math.max(0, Math.min(S.picker.flat.length - 1, S.picker.hi + (e.key === 'ArrowDown' ? 1 : -1))); $('#pickerList .hi')?.classList.remove('hi'); const r = $(`#pickerList [data-pi="${S.picker.hi}"]`); r?.classList.add('hi'); r?.scrollIntoView({ block: 'nearest' }); renderThink(); return; }
-      if (e.key === 'Enter' && !t.closest('[data-fav]')) { e.preventDefault(); pickModel(S.picker.hi); return; }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.picker.kbd = true; pickerHi(Math.max(0, Math.min(S.picker.flat.length - 1, S.picker.hi + (e.key === 'ArrowDown' ? 1 : -1))))?.scrollIntoView({ block: 'nearest' }); return; }
+      // Enter in the search box picks the highlighted row; focused buttons (rows, providers, levels, ★) activate natively.
+      if (e.key === 'Enter' && t.id === 'pickerQ') { e.preventDefault(); pickModel(S.picker.hi); return; }
       return;
     }
     if ((t.id === 'input' || t.id === 'homePrompt') && S.slash) {
@@ -2670,7 +2928,9 @@
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const b = $('#thread [data-steersave]'); if (b && !b.disabled) saveSteer(b); return; }
       if (e.key === 'Escape') { e.preventDefault(); S.editSteer = null; S.lastSig = ''; update(); return; }
     }
-    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !$('#modal') && stepPrompt(e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
+    // On a Mac, Option+↑/↓ moves the caret inside text fields: leave it alone there.
+    const macField = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform || '') && /INPUT|TEXTAREA/.test(t.tagName);
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !macField && !$('#modal') && stepPrompt(e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
     if (t.id === 'input') {
       const s = current().kind === 'session' && S.store?.sessions.find(x => x.id === current().id);
       const live = s && (s.status === 'running' || s.status === 'queued'), act = live && hotkeyAction(e);
@@ -2680,28 +2940,31 @@
     if (t.id === 'homePrompt' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); startSession(); return; }
     if (t.id === 'folderFilter' && e.key === 'Enter') { e.preventDefault(); const first = $('.folder-list [data-go]'); if (first) goFolder(first.dataset.go); return; }
     if (t.id === 'search' && e.key === 'Enter') { const first = $('#list [data-key]'); if (first) openItem(first.dataset.key); return; }
-    if (e.altKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newSession(); return; }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && keyIs(e, 'n')) { e.preventDefault(); if (!overlayOpen()) newSession(); return; }
     if (e.key === 'Escape') {
-      document.querySelectorAll('.menu.open').forEach(m => m.classList.remove('open')); document.getElementById('app').classList.remove('nav-open');
+      const menu = t.closest?.('.menu.open');
+      closeMenus(); menu?.querySelector('[data-act="menu"]')?.focus();
+      if ($('#app').classList.contains('nav-open')) setNav(false, true);
       if (t.id === 'search') { t.value = ''; S.search = ''; renderList(); t.blur(); }
       else if (innerWidth <= 1100 && S.sideOpen && $('#tasks') && !$('#tasks').hidden) { S.sideOpen = false; $('#topbar')._html = ''; update(); }
       return;
     }
-    if (e.key === '/' && !/INPUT|TEXTAREA/.test(t.tagName)) { e.preventDefault(); $('#search').focus(); }
+    if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(t.tagName) && !overlayOpen()) { e.preventDefault(); $('#search').focus(); }
   });
   $('#newBtn').addEventListener('click', () => newSession());
   $('#groupBy').addEventListener('click', e => {
     S.groupBy = S.groupBy === 'project' ? 'time' : 'project';
-    localStorage.setItem('omp-group-by', S.groupBy);
+    try { localStorage.setItem('omp-group-by', S.groupBy); } catch {}
     e.currentTarget.classList.toggle('on', S.groupBy === 'project');
     renderList();
   });
   $('#groupBy').classList.toggle('on', S.groupBy === 'project');
-  $('#scrim').addEventListener('click', () => document.getElementById('app').classList.remove('nav-open'));
+  $('#scrim').addEventListener('click', () => setNav(false, true));
   $('#disconnect').addEventListener('click', () => setToken(''));
   window.addEventListener('hashchange', () => {
-    const planDialog = $('#modal.plan-review-modal');
-    if (planDialog && (current().kind !== 'session' || current().id !== planDialog._planOwner)) { closePicker(); planDialog.remove(); }
+    // Overlays act on the view they were opened from: close them all when the view changes (a submitting plan review refuses).
+    const c = current();
+    if (c.kind + ':' + (c.id || c.file || c.parent || '') !== S.view) { closePicker(); closeThinkMenu(); closeCtx(); closeLightbox(); closeMenus(); closeModal(); }
     const t = new URLSearchParams(location.hash.slice(1)).get('token');
     if (t) { history.replaceState(null, '', location.pathname); setToken(t); refreshNative(); return; }
     route();

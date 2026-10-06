@@ -9,16 +9,17 @@
 </head>
 <body>
 <div id="app" class="app">
+  <button type="button" class="btn skip-link" data-act="skip">Skip to main content</button>
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <div class="logo">π</div>
+      <div class="logo" aria-hidden="true">π</div>
       <div class="brand-text"><b>OMP</b><span>Control Room</span></div>
-      <span class="conn" id="conn" title="Connection"></span>
+      <span class="conn" id="conn" title="Connection" role="img" aria-label="Connecting"></span>
     </div>
-    <button class="btn new-btn" id="newBtn"><span>＋</span> New session <kbd>Alt N</kbd></button>
+    <button class="btn new-btn" id="newBtn" aria-keyshortcuts="Alt+N"><span aria-hidden="true">＋</span> New session <kbd aria-hidden="true">Alt N</kbd></button>
     <div class="search-wrap">
       <input id="search" class="search" placeholder="Search sessions…" aria-label="Search sessions" autocomplete="off"/>
-      <kbd>/</kbd>
+      <kbd aria-hidden="true">/</kbd>
     </div>
     <div class="filters" id="filters" role="group" aria-label="Filter sessions">
       <button data-filter="all" class="on" aria-pressed="true">All</button>
@@ -29,9 +30,9 @@
     </div>
     <div class="session-list" id="list"></div>
     <div class="sidebar-foot">
-      <a href="#/settings" title="Every OMP setting, editable">⚙ Settings</a>
-      <a href="#/tools" title="OMP command-line tools: commit, worktrees, stats, sharing, skills, plugins…">🧰 Tools</a>
-      <a href="#/spend" title="Dollar spend per model: today, this month, all time">$ Spend</a>
+      <a href="#/settings" title="Every OMP setting, editable"><span aria-hidden="true">⚙</span> Settings</a>
+      <a href="#/tools" title="OMP command-line tools: commit, worktrees, stats, sharing, skills, plugins…"><span aria-hidden="true">🧰</span> Tools</a>
+      <a href="#/spend" title="Dollar spend per model: today, this month, all time"><span aria-hidden="true">$</span> Spend</a>
       <button class="link" id="disconnect">Disconnect</button>
     </div>
   </aside>

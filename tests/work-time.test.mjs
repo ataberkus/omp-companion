@@ -128,7 +128,7 @@ test('sidebar work timers carry minutes into hours and keep completed durations 
     location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams, AbortSignal,
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout: fn => timers.set(fn.name, fn), ResizeObserver: class { observe() {} disconnect() {} },
-    fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? { projects: [], sessions: [session], archived: [] } : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
+    fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url.startsWith('/api/state') ? { projects: [], sessions: [session], archived: [] } : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
   });
   await new Promise(setImmediate);
   const label = () => elements.get('list').innerHTML.match(/class="work-time"[^>]*>([^<]*)<\/span>/)?.[1];

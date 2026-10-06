@@ -23,7 +23,7 @@ async function composer(status, saved) {
     setTimeout() {}, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} },
     fetch: async (url, opts) => {
       if (url === '/api/sessions/session/command') sent.push(JSON.parse(opts.body).type);
-      return { ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? { projects: [], sessions: [session], archived: [] } : url === '/api/models' ? { models: [], roles: {} } : { sessions: [], queuedMessages: [] }) };
+      return { ok: true, status: 200, json: async () => structuredClone(url.startsWith('/api/state') ? { projects: [], sessions: [session], archived: [] } : url === '/api/models' ? { models: [], roles: {} } : { sessions: [], queuedMessages: [] }) };
     },
   });
   await new Promise(setImmediate);

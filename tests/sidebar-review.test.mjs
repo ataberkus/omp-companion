@@ -22,7 +22,7 @@ test('pending questions take review priority until the last question clears', as
     location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams, AbortSignal,
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout: fn => timers.set(fn.name, fn), ResizeObserver: class { observe() {} disconnect() {} },
-    fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url === '/api/state' ? store : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
+    fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(url.startsWith('/api/state') ? store : url === '/api/models' ? { models: [], roles: {} } : { sessions: [] }) }),
   });
   await new Promise(setImmediate);
   const groups = () => new Map([...elements.get('list').innerHTML.matchAll(/data-group="([^"]+)"[\s\S]*?<\/button>([\s\S]*?)(?=<button\b[^>]*\bdata-group=|$)/g)]

@@ -12,7 +12,7 @@ for (const kind of ['session', 'home']) test(`${kind} slash completion finds ski
     ...Array.from({ length: 9 }, (_, i) => ({ name: 'command-' + i, aliases: [] })),
   ];
   const listeners = new Map();
-  const node = id => ({ id, tagName: 'TEXTAREA', innerHTML: '', value: '', style: {}, dataset: {}, scrollHeight: 20, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, setAttribute() {}, removeAttribute() {}, querySelector: () => null, querySelectorAll: () => [], focus() {} });
+  const node = id => ({ id, tagName: 'TEXTAREA', innerHTML: '', value: '', style: {}, dataset: {}, children: [], scrollHeight: 20, classList: { add() {}, remove() {}, toggle() {} }, addEventListener() {}, setAttribute() {}, removeAttribute() {}, querySelector: () => null, querySelectorAll: () => [], focus() {} });
   const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect', 'slash', 'scroller', 'tasks', 'chatPlan', 'extras', 'questions', 'queued', 'statusLine', 'modelSlot', 'hint', 'buttons', 'imagePreview'].map(id => [id, node(id)]));
   if (kind === 'home') { elements.delete('input'); for (const id of ['home', 'homePrompt', 'pathInput']) elements.set(id, node(id)); }
   const document = {
@@ -28,7 +28,7 @@ for (const kind of ['session', 'home']) test(`${kind} slash completion finds ski
     localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} },
     fetch: async url => ({ ok: true, status: 200, json: async () => structuredClone(
-      url === '/api/state' ? { projects: [], sessions: [session], archived: [] }
+      url.startsWith('/api/state') ? { projects: [], sessions: [session], archived: [] }
         : url === '/api/models' ? { models: [], roles: {} }
         : url.startsWith('/api/browse') ? { roots: [], recent: [], path: '/project', dirs: [] }
         : url.startsWith('/api/commands?') ? { commands } : { sessions: [] }) }),

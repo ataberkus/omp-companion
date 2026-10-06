@@ -7,6 +7,7 @@ import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
 import { RpcProcess } from './rpc.mjs';
 const exec=promisify(execFile);
 const now=()=>new Date().toISOString();
@@ -356,7 +357,10 @@ export async function createCompanion(options={}){
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let saveChain=Promise.resolve();
  // Only the current thought is live; completed messages remain in OMP's transcript.
  const subagentThoughts=new Map();
- const persist=()=>{const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);saveChain=saveChain.catch(()=>{}).then(async()=>{await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600});await fs.rename(stateFile+'.tmp',stateFile);});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
+ // Windows: antivirus/indexers briefly lock workspace.json, making rename fail with EPERM/EACCES/EBUSY; retry like graceful-fs.
+ const replaceFile=async(from,to)=>{for(let i=0;;i++){try{return await fs.rename(from,to);}catch(e){if(i>=20||!['EPERM','EACCES','EBUSY'].includes(e.code))throw e;await new Promise(r=>setTimeout(r,50*(i+1)));}}};
+ let lastSaved;
+ const persist=()=>{const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);saveChain=saveChain.catch(()=>{}).then(async()=>{if(snapshot===lastSaved)return;await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600,flush:true});await replaceFile(stateFile+'.tmp',stateFile);lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
@@ -993,12 +997,14 @@ async function spend(){
  }
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
  let refreshBusy=false;
- const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}finally{refreshBusy=false;}},4000);refreshTimer.unref();
+ const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}},4000);refreshTimer.unref();
  const staticFiles=new Map();const csp="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
  const digest=data=>createHash('sha1').update(data).digest('base64url').slice(0,12);
  const staticFile=async file=>{const st=await fs.stat(file);let c=staticFiles.get(file);if(c?.mtime!==st.mtimeMs||c.size!==st.size){const data=await fs.readFile(file);c={mtime:st.mtimeMs,size:st.size,data,hash:digest(data)};staticFiles.set(file,c);}return c;};
  const server=createServer(async(req,res)=>{
-  const json=(value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'});res.end(JSON.stringify(value));};
+ // Big JSON (the viewed session's messages, transcripts, settings) goes out gzipped when the client accepts it; zlib runs off the event loop.
+ const send=(status,headers,body)=>{if(body.length<1024||!/\bgzip\b/.test(req.headers['accept-encoding']||'')){res.writeHead(status,headers);res.end(body);return;}gzip(body,{level:1},(e,z)=>{if(res.headersSent)return;res.writeHead(status,e?headers:{...headers,'Content-Encoding':'gzip'});res.end(e?body:z);});};
+ const json=(value,status=200)=>send(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'},JSON.stringify(value));
   try{
    // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's LAN addresses, still rejecting DNS-rebinding names.
    const a=server.address(),port=a?.port,names=new Set(['127.0.0.1','localhost']);
@@ -1025,7 +1031,13 @@ async function spend(){
    }
    const provided=Buffer.from(req.headers.authorization||'');const expected=Buffer.from('Bearer '+token);
    if(provided.length!==expected.length||!timingSafeEqual(provided,expected))throw error('Invalid connection token.',401);
-   if(req.method==='GET'&&url.pathname==='/api/state'){json(store);return;}
+   if(req.method==='GET'&&url.pathname==='/api/state'){
+    if(!url.searchParams.has('session')){json(store);return;}
+    // ?session=<id> (the dashboard's polls): messages only for that session, no activity log; ETag so unchanged polls send nothing.
+    const id=url.searchParams.get('session'),body=JSON.stringify({...store,activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined})}),tag=`"${digest(body)}"`;
+    if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
+    send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
+   }
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions'){json({dir:ompSessionsDir,sessions:await listNativeSessions()});return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions/preview'){const file=sessionFileParam(url.searchParams.get('file'));let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}json({...head,file,contextTokens:await lastContext(file).catch(()=>undefined),messages:await importMessages(file,150)});return;}
    if(req.method==='GET'&&url.pathname==='/api/settings'){try{json(await listSettings());}catch(e){throw error(`Could not read OMP settings: ${e.message}`,502);}return;}
