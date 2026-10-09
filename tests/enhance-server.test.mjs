@@ -1,6 +1,60 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { internals } from '../companion/server.mjs';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createCompanion, internals } from '../companion/server.mjs';
+
+const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
+const image = { type: 'image', mimeType: 'image/png', data: png };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+// Fake enhancer: records argv/stdin/pid, then behaves by the draft: HANG never exits, EMPTY answers nothing,
+// anything else reads one file and answers "ENHANCED <first draft line>" inside a code fence.
+const FAKE_ENHANCER = dir => `import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const out = ${JSON.stringify(dir)};
+writeFileSync(join(out, 'pid-' + process.pid), '');
+writeFileSync(join(out, 'argv.json'), JSON.stringify(process.argv.slice(2)));
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', d => { input += d; });
+process.stdin.on('end', () => {
+  writeFileSync(join(out, 'stdin.txt'), input, 'utf8');
+  const emit = e => process.stdout.write(JSON.stringify(e) + '\\n');
+  if (input.includes('HANG')) { setInterval(() => {}, 1e9); return; }
+  emit({ type: 'session', cwd: process.cwd() });
+  if (input.includes('EMPTY')) return;
+  emit({ type: 'tool_execution_start', toolName: 'read', args: { path: join(process.cwd(), 'src', 'a.js') } });
+  const draft = input.split('<draft>\\n')[1].split('\\n')[0];
+  emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '\`\`\`\\nENHANCED ' + draft + '\\n\`\`\`' }] } });
+});`;
+
+async function boot(t, { config = '' } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-enhance-'));
+  const state = { app: null };
+  t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
+  // Role lookup reads <agent dir>/config.yml: point it at this test's own copy, never the developer's.
+  process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
+  await mkdir(join(dir, 'agent'), { recursive: true });
+  await writeFile(join(dir, 'agent', 'config.yml'), config);
+  const enh = join(dir, 'enh.mjs');
+  await writeFile(enh, FAKE_ENHANCER(dir));
+  const now = new Date().toISOString();
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: 'm1', role: 'user', text: 'earlier question', at: now }], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
+  state.app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, enhancePrefix: [enh] });
+  state.app.server.listen(0, '127.0.0.1');
+  await once(state.app.server, 'listening');
+  const base = `http://127.0.0.1:${state.app.server.address().port}/api`;
+  const call = async (path, body) => {
+    const res = await fetch(base + path, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${state.app.token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    return { status: res.status, body: await res.json() };
+  };
+  const settle = async id => { for (let i = 0; i < 100; i++) { const r = await call('/enhance?id=' + id); if (r.body.status !== 'running') return r.body; await sleep(50); } throw new Error('enhance never finished'); };
+  return { dir, state, call, settle };
+}
 
 test('enhance model resolution order', () => {
   const { enhanceModel } = internals;
@@ -38,4 +92,72 @@ test('step labels and result cleanup', () => {
   assert.equal(internals.cleanEnhanced('```md\nDo X\n```'), 'Do X');
   assert.equal(internals.cleanEnhanced('```\n```'), '');
   assert.equal(internals.cleanEnhanced('  Do `x` here \n'), 'Do `x` here');
+});
+
+test('lockdown overlay pins every write-capable feature off and stops MCP discovery', () => {
+  const o = internals.ENHANCE_OVERLAY;
+  for (const line of ['tools:\n  xdev: false', 'advisor:\n  enabled: false', 'autolearn:\n  enabled: false\n  autoContinue: false', 'experimentalContextManagement: false', 'backend: "off"', 'checkpoint:\n  enabled: false', 'todo:\n  enabled: false', 'ask:\n  enabled: false', 'disabledProviders:\n  - native\n  - mcp-json']) assert.ok(o.includes(line), line);
+});
+
+test('stdin round trip: draft and images reach the enhancer, never argv', async t => {
+  const { dir, call, settle } = await boot(t);
+  const draft = 'fix "it" --model=x @evil\nğüşıöç 🚀';
+  const start = await call('/enhance', { session: 'session', text: draft, images: [image] });
+  assert.equal(start.status, 202);
+  assert.equal(start.body.model, 'OMP default');
+  const job = await settle(start.body.id);
+  assert.equal(job.status, 'done');
+  assert.equal(job.text, 'ENHANCED fix "it" --model=x @evil');
+  assert.equal(job.step, 'reading src/a.js');
+  const argv = JSON.parse(await readFile(join(dir, 'argv.json'), 'utf8'));
+  assert.ok(!argv.some(a => a.includes('fix "it"') || a.includes('ğüş')));
+  assert.match(argv.at(-1), /^@.*enhance[\\/][^\\/]+[\\/]image-1\.png$/);
+  assert.ok(argv.includes('--config=' + join(dir, 'enhance-overlay.yml')));
+  const stdin = await readFile(join(dir, 'stdin.txt'), 'utf8');
+  assert.match(stdin, /^<conversation>\nUser: earlier question\n<\/conversation>\n/);
+  assert.ok(stdin.endsWith('<draft>\nfix "it" --model=x @evil\nğüşıöç 🚀\n</draft>'));
+  assert.equal((await call('/enhance?id=' + start.body.id)).status, 404); // read once, then dropped
+  assert.deepEqual(await readdir(join(dir, 'enhance')).catch(() => []), []); // images removed
+});
+
+test('empty result is an error, not a blank draft', async t => {
+  const { call, settle } = await boot(t);
+  const { body } = await call('/enhance', { session: 'session', text: 'EMPTY' });
+  const job = await settle(body.id);
+  assert.equal(job.status, 'error');
+  assert.equal(job.error, 'The enhancer returned no text.');
+});
+
+test('requests need exactly one target and a real session', async t => {
+  const { dir, call } = await boot(t);
+  assert.equal((await call('/enhance', { text: 'x' })).status, 400);
+  assert.equal((await call('/enhance', { text: 'x', session: 'session', path: dir })).status, 400);
+  assert.equal((await call('/enhance', { text: 'x', session: 'nope' })).status, 404);
+  assert.equal((await call('/enhance', { text: '   ', session: 'session' })).status, 400);
+});
+
+test('stop cancels, cap is 3, close cleans up', async t => {
+  const { dir, state, call, settle } = await boot(t);
+  const ids = [];
+  for (let i = 0; i < 3; i++) ids.push((await call('/enhance', { session: 'session', text: 'HANG', images: [image] })).body.id);
+  const fourth = await call('/enhance', { session: 'session', text: 'HANG' });
+  assert.equal(fourth.status, 409);
+  assert.equal(fourth.body.error, 'Wait for the running enhance to finish.');
+  for (let i = 0; i < 100 && (await readdir(dir)).filter(f => f.startsWith('pid-')).length < 3; i++) await sleep(50);
+  assert.equal((await call('/enhance/stop', { id: ids[0] })).status, 200);
+  assert.equal((await settle(ids[0])).status, 'cancelled');
+  const pids = (await readdir(dir)).filter(f => f.startsWith('pid-')).map(f => Number(f.slice(4)));
+  assert.equal(pids.length, 3);
+  await state.app.close(); state.app = null;
+  assert.deepEqual(pids.filter(alive), []);
+  assert.deepEqual(await readdir(join(dir, 'enhance')).catch(() => []), []);
+});
+
+test('a configured enhance role is used and reported', async t => {
+  const { dir, call, settle } = await boot(t, { config: 'modelRoles:\n  default: a/b\n  enhance: fast/model:low\n' });
+  const { body } = await call('/enhance', { session: 'session', text: 'go' });
+  assert.equal(body.model, 'fast/model:low');
+  await settle(body.id);
+  const argv = JSON.parse(await readFile(join(dir, 'argv.json'), 'utf8'));
+  assert.ok(argv.includes('--model=@enhance') && !argv.some(a => a.startsWith('--thinking')));
 });

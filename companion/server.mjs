@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 import { RpcProcess } from './rpc.mjs';
@@ -368,8 +369,39 @@ async function modelRoles(){
    const t=line.match(/^defaultThinkingLevel:\s*(\w+)/);if(t)defaultThinking=t[1];}}catch{}
  return {roles,defaultThinking};
 }
+// Per-run lockdown for the enhancer. `--tools` alone is not exclusive: OMP force-adds manage_skill/learn (autolearn),
+// context tools, memory tools, and xd:// `write` (device route to MCP); MCP tools also join any explicit list.
+// Verified on OMP 18.8.6: with this overlay plus --approval-mode=always-ask only read/grep/glob remain and no MCP server starts.
+const ENHANCE_OVERLAY=`tools:
+  xdev: false
+advisor:
+  enabled: false
+autolearn:
+  enabled: false
+  autoContinue: false
+compaction:
+  experimentalContextManagement: false
+memory:
+  backend: "off"
+checkpoint:
+  enabled: false
+todo:
+  enabled: false
+ask:
+  enabled: false
+disabledProviders:
+  - native
+  - mcp-json
+`;
+const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on.
+- Keep the user's intent, scope and language. Do not add requirements they did not ask for.
+- Look up only what the draft refers to: at most 6 tool calls. Name real files, symbols and commands you confirmed. Never invent paths.
+- If images are attached, use what they show to make the prompt concrete; they stay attached to the final message, so refer to them rather than re-describing everything.
+- Include acceptance criteria or a verification step only when the draft implies one.
+- Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
+`;
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 export async function createCompanion(options={}){
@@ -379,6 +411,8 @@ export async function createCompanion(options={}){
  const ompExecutable=ompSource?'bun':ompEntry,ompPrefix=ompSource?[path.resolve(ompEntry)]:[];
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
+ const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceSystem=path.join(dataDir,'enhance-system.md');
+ await fs.writeFile(enhanceOverlay,ENHANCE_OVERLAY,{mode:0o600});await fs.writeFile(enhanceSystem,ENHANCE_SYSTEM,{mode:0o600});
  const stateFile=path.join(dataDir,'workspace.json');
  const queuedImageFile=id=>path.join(dataDir,'queued-images',id+'.json');
  let store;
@@ -985,6 +1019,49 @@ async function spend(){
  const sessionFileParam=value=>{const file=path.resolve(text(value,'Session file',4000));if(!file.endsWith('.jsonl')||!samePath(path.dirname(path.dirname(file)),ompSessionsDir))throw error('Not an OMP session file.');return file;};
  // Tools page: each run is a background job the dashboard polls; stdin is closed so a prompt fails instead of hanging.
  const cliJobs=[];const cliProcs=new Map();
+ // Enhance jobs: one read-only `omp -p` per click; the dashboard polls GET /api/enhance until it settles.
+ const enhanceJobs=new Map();
+ const IMAGE_EXT={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif'};
+ async function startEnhance(body){
+  const draft=text(body.text,'Draft',20000);
+  if(!!body.session===!!body.path)throw error('Choose a session or a folder to enhance in.');
+  const s=body.session?store.sessions.find(x=>x.id===body.session):null;
+  if(body.session&&!s)throw error('Session not found.',404);
+  const cwd=s?s.cwd:await resolveDir(body.path);
+  const images=chatImages(body);
+  if([...enhanceJobs.values()].filter(j=>j.status==='running').length>=3)throw error('Wait for the running enhance to finish.',409);
+  const selector=s?(s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'')):modelChoice(body).selector;
+  const pick=enhanceModel((await modelRoles()).roles,selector);
+  const id=randomUUID(),dir=path.join(dataDir,'enhance',id);
+  const files=[];
+  if(images.length){await fs.mkdir(dir,{recursive:true,mode:0o700});for(const [i,img] of images.entries()){const f=path.join(dir,`image-${i+1}.${IMAGE_EXT[img.mimeType]||'png'}`);await fs.writeFile(f,Buffer.from(img.data,'base64'),{mode:0o600});files.push(f);}}
+  const job={id,sessionId:s?.id||null,status:'running',step:'',model:pick.label,text:'',error:'',dir};
+  const child=spawn(ompExecutable,[...ompPrefix,...(options.enhancePrefix||[]),...enhanceArgs({model:pick.model,thinking:pick.thinking,overlay:enhanceOverlay,system:enhanceSystem,images:files})],{cwd,stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});
+  job.child=child;enhanceJobs.set(id,job);
+  let stderr='',answer='';
+  child.stdin.on('error',()=>{});child.stdin.end(enhanceInput(draft,s?.messages??[]),'utf8');
+  child.stderr.on('data',b=>{stderr=(stderr+b).slice(-8000);});
+  createInterface({input:child.stdout,crlfDelay:Infinity}).on('line',line=>{let f;try{f=JSON.parse(line);}catch{return;}
+   if(f.type==='tool_execution_start')job.step=stepLabel(f.toolName,f.args,cwd);
+   else if(f.type==='message_end'&&f.message?.role==='assistant')answer=contentText(f.message.content);});
+  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},150000);timer.unref();
+  job.closed=new Promise(resolve=>{let done=false;const finish=async(code,err)=>{if(done)return;done=true;clearTimeout(timer);
+   const out=cleanEnhanced(answer);
+   if(job.timedOut)Object.assign(job,{status:'error',error:'Enhance timed out.'});
+   else if(job.stopped)job.status='cancelled';
+   else if(code===0&&!err&&out)Object.assign(job,{status:'done',text:out});
+   else if(code===0&&!err)Object.assign(job,{status:'error',error:'The enhancer returned no text.'});
+   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().split(/\r?\n/).filter(Boolean).pop()||`OMP exited (${code}).`});
+   delete job.child;job.finishedAt=now();
+   await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});
+   setTimeout(()=>{if(enhanceJobs.get(id)===job)enhanceJobs.delete(id);},5*60000).unref();
+   resolve();};
+   child.on('error',e=>finish(null,e));child.on('close',code=>finish(code));});
+  return {id,model:job.model};
+ }
+ // Resolves once the enhancer process has exited and its image folder is gone.
+ async function stopEnhance(job){if(job.child){job.stopped=true;job.child.kill();}await job.closed;}
+ const stopAllEnhance=()=>Promise.allSettled([...enhanceJobs.values()].map(stopEnhance));
  async function cliArgs(body){
   const tool=CLI_TOOLS[body.tool],spec=tool&&Object.hasOwn(tool.actions,body.action)?tool.actions[body.action]:null;
   if(!spec||!Object.hasOwn(CLI_TOOLS,body.tool))throw error('Unknown OMP command.');
@@ -1097,6 +1174,9 @@ async function spend(){
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
    if(req.method==='GET'&&url.pathname==='/api/cli'){json({tools:cliCatalog(),jobs:cliJobs});return;}
+   if(req.method==='GET'&&url.pathname==='/api/enhance'){const job=enhanceJobs.get(url.searchParams.get('id'));if(!job)throw error('Enhance not found.',404);
+    if(job.status!=='running')enhanceJobs.delete(job.id);
+    json({id:job.id,status:job.status,step:job.step,model:job.model,...(job.status==='done'?{text:job.text}:{}),...(job.error?{error:job.error}:{})});return;}
    if(req.method==='GET'&&url.pathname==='/api/spend'){try{json(await spend());}catch(e){throw error(`Could not read OMP usage stats: ${String(e.stderr||e.message).trim()}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
@@ -1118,7 +1198,7 @@ async function spend(){
    if(req.method==='GET'&&url.pathname==='/api/browse'){json(await browse(url.searchParams.get('path')||''));return;}
    if(req.method!=='POST')throw error('Route not found.',404);
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);
-   const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
+   const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||url.pathname==='/api/enhance'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
    const buffers=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>cap)throw error('Request body too large.',413);buffers.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(buffers).toString());}catch{throw error('Invalid JSON.');}
    if(!body||typeof body!=='object'||Array.isArray(body))throw error('JSON object required.');
    if(url.pathname==='/api/projects'){
@@ -1135,6 +1215,8 @@ async function spend(){
    if(url.pathname==='/api/plugins'){json(await pluginAction(body));return;}
    if(url.pathname==='/api/cli'){json(await runCli(body),202);return;}
    if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
+   if(url.pathname==='/api/enhance'){json(await startEnhance(body),202);return;}
+   if(url.pathname==='/api/enhance/stop'){const job=enhanceJobs.get(body.id);if(!job)throw error('Enhance not found.',404);await stopEnhance(job);json({status:job.status});return;}
    if(url.pathname==='/api/omp-update'){
     if(updateState.status==='running')throw error('OMP update is already running.',409);
     updateState={status:'running',startedAt:now()};void runUpdate(updateState.startedAt);json(updateState,202);return;
@@ -1179,7 +1261,7 @@ async function spend(){
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
- const close=async()=>{closing=true;clearInterval(refreshTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);await enhanceStops;};
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
