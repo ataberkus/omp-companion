@@ -1768,7 +1768,7 @@
       status = `<span class="grow">Plan ready for review. Approval is required before implementation.</span><button class="btn sm primary" data-plan-review="${esc(s.id)}" ${S.planBusy.has(s.id) ? 'disabled' : ''}>Review plan</button>`;
       placeholder = 'Type feedback to keep planning without approving…';
     }
-    if (enhancing) status = `<span class="grow">Enhancing with ${esc(modelName(enhancing.model) || 'OMP')} · ${esc(enhancing.step || 'starting')}…</span>`;
+    if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…</span>`; }
     else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.

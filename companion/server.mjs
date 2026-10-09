@@ -1011,7 +1011,9 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
    removed=false;
    for(let i=0;i<20;i++){
     try{await git(root,['worktree','remove','--force',s.cwd]);removed=true;break;}
-    catch{if(!await exists(s.cwd)){await git(root,['worktree','prune']).catch(()=>{});removed=true;break;}await new Promise(r=>setTimeout(r,50*(i+1)));}
+    // On Windows `remove` can drop git's record and the files yet fail on the empty folder a dying process still holds;
+    // retries then say "not a working tree". Once git no longer lists it, only the leftover folder remains.
+    catch{if(!await worktreeListed(root,s.cwd)){await git(root,['worktree','prune']).catch(()=>{});await fs.rm(s.cwd,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});removed=true;break;}await new Promise(r=>setTimeout(r,50*(i+1)));}
    }
    if(removed)await git(root,['branch','-D',s.branch]).catch(()=>{});
    else console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);
@@ -1020,6 +1022,8 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   else s.hidden=true;
   await persist();return {discarded:true};
  }
+ // Unknown (git failed) counts as still listed, so the worktree is retried rather than abandoned.
+ async function worktreeListed(root,dir){try{return (await git(root,['worktree','list','--porcelain'])).split(/\r?\n/).some(l=>l.startsWith('worktree ')&&samePath(l.slice(9),dir));}catch{return true;}}
  const ompSessionsDir=path.resolve(options.ompSessionsDir||process.env.OMP_SESSIONS_DIR||path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'sessions'));
  const headCache=new Map();
  const insideSessions=(value,exts)=>{const file=path.resolve(text(value,'File',4000));const rel=path.relative(ompSessionsDir,file);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!exts.some(x=>file.endsWith(x)))throw error('Not an OMP session file.');return file;};

@@ -249,3 +249,19 @@ test('a first send that fails before recording a message restores the draft mark
   assert.ok(!after.messages.some(m => m.role === 'user'));
   assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
 });
+
+test('a worktree git already dropped but whose empty folder lingers still counts as removed', async t => {
+  const { dir, call } = await boot(t);
+  const repo = join(dir, 'repo');
+  await mkdir(repo);
+  const git = (...a) => exec('git', ['-C', repo, ...a]);
+  await git('init', '-q'); await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+  const { body: s } = await call('/quick-start', { path: repo, isolate: true, draft: true });
+  // Windows: `worktree remove` deleted the files and git's record, but a lingering handle kept the empty folder.
+  await git('worktree', 'remove', '--force', s.cwd);
+  await mkdir(s.cwd);
+  assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
+  assert.equal((await call('/state')).body.sessions.some(x => x.id === s.id), false, 'session dropped, not just hidden');
+  assert.ok(!(await git('branch')).stdout.includes('omp-web/'));
+  assert.equal(await readdir(s.cwd).then(() => true, () => false), false, 'leftover folder deleted');
+});
