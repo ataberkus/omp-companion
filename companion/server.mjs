@@ -359,7 +359,8 @@ function stepLabel(toolName,args,cwd){
 }
 function cleanEnhanced(text){
  const t=String(text||'').trim();const m=t.match(/^```[\w-]*\n([\s\S]*?)\n?```$/);
- return (m?m[1]:t).trim();
+ // A lone opening fence (```, ```md) is no prompt at all.
+ return /^```[\w-]*$/.test(t)?'':(m?m[1]:t).trim();
 }
 // modelRoles and defaultThinkingLevel straight from config.yml: cheap, so enhance needs no `omp models` call.
 async function modelRoles(){
@@ -1001,11 +1002,14 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
  // session file, and its isolated worktree and branch. A worktree Windows still holds stays recorded for next startup.
  async function discardDraft(s){
   if(!s.draft||sent(s))return {discarded:false};
+  // OMP's transcript is the truth: after a crash mid first send, workspace.json can still say draft with no messages.
+  const recorded=s.sessionFile?(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user'):false;
+  if(recorded){delete s.draft;await persist();return {discarded:false};}
   await Promise.allSettled([...enhanceJobs.values()].filter(j=>j.sessionId===s.id).map(stopEnhance));
   const rpc=runners.get(s.id);
   if(rpc){const stopped=new Promise(r=>rpc.child.once('close',r));if(!rpc.stopping)rpc.kill();if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;}
   // rmdir (not rm -r) only succeeds on an empty folder, so OMP's other sessions for the same cwd are never touched.
-  if(s.sessionFile&&!(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user')){await fs.rm(s.sessionFile,{force:true}).catch(()=>{});await fs.rmdir(path.dirname(s.sessionFile)).catch(()=>{});}
+  if(s.sessionFile){await fs.rm(s.sessionFile,{force:true}).catch(()=>{});await fs.rmdir(path.dirname(s.sessionFile)).catch(()=>{});}
   let removed=true;
   const root=store.projects.find(p=>p.id===s.projectId)?.path;
   if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){

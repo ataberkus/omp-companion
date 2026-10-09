@@ -278,3 +278,27 @@ test('a worktree git already dropped but whose empty folder lingers still counts
   assert.ok(!(await git('branch')).stdout.includes('omp-web/'));
   assert.equal(await readdir(s.cwd).then(() => true, () => false), false, 'leftover folder deleted');
 });
+
+test('startup cleanup keeps a draft whose transcript already has a user message (crash mid first send)', async t => {
+  const { dir, call, restart, state } = await boot(t);
+  const repo = join(dir, 'repo');
+  await mkdir(repo);
+  const git = (...a) => exec('git', ['-C', repo, ...a]);
+  await git('init', '-q'); await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+  const { body: s } = await call('/quick-start', { path: repo, isolate: true, draft: true });
+  // The crash window: OMP already recorded the prompt, workspace.json still says draft with no messages.
+  const transcript = join(dir, 'crashed.jsonl');
+  await writeFile(transcript, [JSON.stringify({ type: 'session', cwd: s.cwd, id: 'x' }), JSON.stringify({ type: 'message', message: { role: 'user', content: 'do the work' } })].join('\n') + '\n');
+  state.app.store.sessions.find(x => x.id === s.id).sessionFile = transcript;
+  await state.app.flush?.();
+  await restart();
+  const kept = (await call('/state')).body.sessions.find(x => x.id === s.id);
+  assert.ok(kept, 'session kept');
+  assert.ok(!kept.draft, 'no longer a draft');
+  assert.ok((await git('worktree', 'list')).stdout.includes(s.id.slice(0, 8)) || (await git('branch')).stdout.includes('omp-web/'), 'worktree and branch kept');
+  assert.ok(await exists(transcript));
+});
+
+test('a result that is only a bare fence counts as empty', () => {
+  for (const t of ['```', '```md', '  ```  ', '```\n```']) assert.equal(internals.cleanEnhanced(t), '', JSON.stringify(t));
+});
