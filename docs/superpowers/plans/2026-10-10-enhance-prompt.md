@@ -14,7 +14,7 @@
 
 - No new npm dependencies. No shell: every process uses `spawn`/`execFile` with an argument array and `windowsHide: true`.
 - The draft text never appears in argv; it goes only on the enhancer's stdin.
-- Enhancer flags, verbatim: `-p --mode json --no-session --no-title --no-skills --no-extensions --no-lsp --tools=read,grep,glob,find --max-time=120`, plus `--config=<overlay>` with `advisor:\n  enabled: false\n`.
+- Enhancer flags, verbatim: `-p --mode json --no-session --no-title --no-skills --no-extensions --no-lsp --tools=read,grep,glob --approval-mode=always-ask --max-time=120`, plus `--config=<overlay>`. The overlay is the spec §2 lockdown YAML, verbatim (`tools.xdev:false`, advisor/autolearn/context-management/memory/checkpoint/todo/ask off, `disabledProviders: [native, mcp-json]`). No `find`: OMP 18.8.6 aborts with exit 2 when it is requested.
 - Limits: draft 1–20 000 chars; at most 3 running jobs (409 `Wait for the running enhance to finish.`); server kill at 150 s → `Enhance timed out.`; finished jobs dropped 5 min after finishing or on the first `GET` that reads them.
 - Model order: `modelRoles.enhance` → `--model=@enhance` (no `--thinking`); else the session/composer selector + `--thinking=low`; else no model flag.
 - Conversation tail: last 6 `user`/`assistant` messages, each truncated to 1 500 chars, wrapped in `<conversation>`, then `<draft>`.
@@ -47,7 +47,7 @@
     - `read` → `reading <path relative to cwd>`;
     - `grep` → `searching "<pattern>"`;
     - `glob` → `listing <pattern>`;
-    - `find` → `finding "<query ?? pattern>"`;
+    - `find` → `finding "<query ?? pattern>"` (kept for OMP builds that expose it; never requested);
     - other → the tool name.
 
     Truncated to 80 chars.
@@ -65,7 +65,7 @@ test('enhance model resolution order', () => {
 });
 test('enhancer argv is fixed, read-only, and never carries the draft', () => {
   const a = internals.enhanceArgs({ model: '@enhance', thinking: null, overlay: 'O.yml', system: 'S.md', images: ['C:\\d i r\\image-1.png'] });
-  assert.deepEqual(a.slice(0, 10), ['-p', '--mode', 'json', '--no-session', '--no-title', '--no-skills', '--no-extensions', '--no-lsp', '--tools=read,grep,glob,find', '--max-time=120']);
+  assert.deepEqual(a.slice(0, 11), ['-p', '--mode', 'json', '--no-session', '--no-title', '--no-skills', '--no-extensions', '--no-lsp', '--tools=read,grep,glob', '--approval-mode=always-ask', '--max-time=120']);
   assert.ok(a.includes('--config=O.yml') && a.includes('--model=@enhance') && a.includes('--append-system-prompt=S.md'));
   assert.ok(!a.some(x => x.startsWith('--thinking')));
   assert.equal(a.at(-1), '@C:\\d i r\\image-1.png');
@@ -113,7 +113,7 @@ test('step labels and result cleanup', () => {
   - cwd: the session's `cwd`, or `resolveDir(path)`.
   - Selector: for a session, `s.modelSelector` or `` `${s.provider}/${s.model}` `` when `s.model !== 'OMP default'`; for `path`, `modelChoice(body).selector`.
 - Files written at startup (static, `0o600`):
-  - `dataDir/enhance-overlay.yml` = `advisor:\n  enabled: false\n`;
+  - `dataDir/enhance-overlay.yml` = the spec §2 lockdown YAML, verbatim (exported as `internals.ENHANCE_OVERLAY` so a test can parse-check its keys);
   - `dataDir/enhance-system.md` = the spec §3 system prompt, verbatim.
 - Images go to `dataDir/enhance/<id>/image-<n>.<png|jpg|webp|gif>`. The directory is removed (`fs.rm` recursive, force) on every terminal state.
 - Stdout: line JSON (`readline`):
@@ -399,6 +399,23 @@ test('a send in flight defers discard; a failed send discards after it settles',
 - [ ] **Step 2: Smoke run.** Start an isolated, loopback-only companion: `OMP_WEB_HOST=127.0.0.1 OMP_WEB_NO_TOKEN= OMP_WEB_DATA_DIR=<tmp> OMP_WEB_PORT=4599 OMP_WEB_NO_OPEN=1 node companion/server.mjs`. Then run spec §7 smoke items 1–6 in a browser tab. Expected: each observed and screenshotted.
   - Item 4: set `modelRoles.enhance` to a bogus model, then restore the user's config afterwards.
   - Item 6: in a scratch git repo under `%TEMP%`, never in a user project.
+  - **Lockdown check (required)** against the real OMP, with the overlay file the companion wrote. In a scratch repo containing `note.txt` and an `AGENTS.md` sentinel, pipe a prompt asking the model to:
+    1. create `probe.txt`;
+    2. save a managed skill `enh-probe-skill`;
+    3. call any MCP or device tool;
+    4. read `note.txt`;
+    5. quote the sentinel;
+    6. list its tools.
+
+    Expected:
+    - the only `tool_execution_start` names are `read`/`grep`/`glob`;
+    - `probe.txt` absent;
+    - no `enh-probe-skill` under `~/.omp/agent/managed-skills`;
+    - no `MCP server` lines on stderr;
+    - a project `.mcp.json` whose server writes a marker file leaves no marker;
+    - the sentinel is quoted.
+
+    Delete the scratch repo and any probe skill afterwards.
 - [ ] **Step 3: Clean up:**
   - the temp data dir and scratch repo;
   - any `~/.omp/agent/sessions/-tmp-…` folder the smoke created;

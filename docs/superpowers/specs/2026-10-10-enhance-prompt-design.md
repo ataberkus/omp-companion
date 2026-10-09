@@ -63,8 +63,8 @@ The response and `GET` report the model actually used, for the status line.
 
 ```
 omp -p --mode json --no-session --no-title --no-skills --no-extensions --no-lsp
-    --tools=read,grep,glob,find --max-time=120
-    --config=<overlay.yml>          # advisor.enabled: false
+    --tools=read,grep,glob --approval-mode=always-ask --max-time=120
+    --config=<overlay.yml>          # lockdown overlay, see below
     --model=… [--thinking=…]
     --append-system-prompt=<enhancer instructions>
     [@<image-1> @<image-2> …]
@@ -74,16 +74,48 @@ cwd: session cwd / path
 
 - Spawned with `spawn(ompExecutable, [...ompPrefix, ...args])`, never through a shell, `windowsHide: true`.
 - The draft goes in on **stdin**, so long drafts avoid the Windows 32K command-line limit.
-- The overlay is a static file written once to `dataDir/enhance-overlay.yml`. Verified: `advisor.enabled: false` in a `--config` overlay suppresses the advisor for the run. Without it the user's global advisor reviews every enhance.
-- Images are written to `dataDir/enhance/<jobId>/image-<n>.<ext>` (mode 0600) and passed as `@path` arguments. Verified: `omp -p` with stdin plus `@image.png` delivers `[text, image]` content. The directory is removed when the job ends, however it ends.
-- `--no-session` writes no session file. Only the four read-only tools are enabled. Rules (AGENTS.md / CLAUDE.md) stay **enabled**: they are the project context.
-- MCP servers still connect at startup (OMP has no `--no-mcp`), which adds a few seconds. They are inert, because no MCP tools are enabled.
+- **Lockdown overlay**: a static file written once to `dataDir/enhance-overlay.yml`. `--tools` alone does **not** make the run read-only. On OMP 18.8.6, with the user's config (`autolearn.enabled: true`, four MCP servers), `--tools=read,grep,glob` still exposed `manage_skill`, which created a real skill in `~/.omp/agent/managed-skills`. It also exposed `write` (xd:// devices, which route to MCP tools). With `tools.xdev: false`, the MCP tools mount directly instead, and one was called on the live Blender. The verified overlay:
+
+  ```yaml
+  tools:
+    xdev: false                 # no `write` / xd:// device route
+  advisor:
+    enabled: false
+  autolearn:
+    enabled: false              # no manage_skill / learn, no post-turn capture
+    autoContinue: false
+  compaction:
+    experimentalContextManagement: false   # no context_notes / new_context
+  memory:
+    backend: "off"              # no recall/retain/reflect/memory_edit or background memory writes
+  checkpoint:
+    enabled: false
+  todo:
+    enabled: false
+  ask:
+    enabled: false
+  disabledProviders:            # stop MCP discovery: user + .omp/ configs, project .mcp.json
+    - native
+    - mcp-json
+  ```
+
+  `--approval-mode=always-ask` is a second fence. Print mode has no UI, so any tool above the `read` tier fails closed with "requires approval but no interactive UI". MCP tools never declare a tier and default to `exec`. `read`/`grep`/`glob` are `read` tier and run normally.
+
+  Verified together: the tools are exactly `read, grep, glob`. Write, skill-save and MCP attempts all fail. No MCP server process starts. A trivial run takes about 3.5 s instead of about 7 s.
+- **Tool list:** `find` is not in it. On this OMP build it is not a built-in, and `--tools=…,find` aborts with `Built-in tool unavailable in this session: find` (exit 2).
+- **What the lockdown costs:**
+  - Disabling the `native` provider drops OMP's own `.omp/` sources (`.omp/rules`, `.omp/AGENTS.md`, `SYSTEM.md`) for the enhancer only.
+  - Repo-root `AGENTS.md` / `CLAUDE.md` still load; verified with a sentinel.
+  - Foreign tools' home configs (`~/.claude.json`, `~/.cursor/mcp.json`, …) stay unloaded, because they are opt-in via `enabledProviders`, which is empty.
+  - A repo's own foreign MCP config (e.g. `.cursor/mcp.json`) can still start its servers. Their tools are blocked by `always-ask`.
+  - The overlay's `disabledProviders` replaces the user's list for this run. The user's is `[]` today; a non-empty user list would be overridden for the enhancer only.
+- `--no-session` writes no session file.
 
 ### Events → job state
 
 Stdout is read line by line as JSON:
 
-- `tool_execution_start` → `step` = short label: `reading <path>`, `searching "<pattern>"`, `listing <glob>`, `finding "<query>"`. Paths are shown relative to the cwd and truncated to 80 characters.
+- `tool_execution_start` → `step` = short label: `reading <path>`, `searching "<pattern>"`, `listing <glob>`. Paths are shown relative to the cwd and truncated to 80 characters.
 - `message_end` where role is `assistant` → remember its text content (the last one wins).
 - Exit code 0 with non-empty text → `done`, and `text` is that text trimmed, with any wrapping code fence removed.
 - Nonzero exit or no text → `error`. The reason is the last stderr line (ANSI stripped). `Model "@enhance" not found`-style output passes through unchanged.
