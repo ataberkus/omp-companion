@@ -1004,7 +1004,8 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   await Promise.allSettled([...enhanceJobs.values()].filter(j=>j.sessionId===s.id).map(stopEnhance));
   const rpc=runners.get(s.id);
   if(rpc){const stopped=new Promise(r=>rpc.child.once('close',r));if(!rpc.stopping)rpc.kill();if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;}
-  if(s.sessionFile&&!(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user'))await fs.rm(s.sessionFile,{force:true}).catch(()=>{});
+  // rmdir (not rm -r) only succeeds on an empty folder, so OMP's other sessions for the same cwd are never touched.
+  if(s.sessionFile&&!(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user')){await fs.rm(s.sessionFile,{force:true}).catch(()=>{});await fs.rmdir(path.dirname(s.sessionFile)).catch(()=>{});}
   let removed=true;
   const root=store.projects.find(p=>p.id===s.projectId)?.path;
   if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){
@@ -1086,7 +1087,8 @@ async function spend(){
    else if(job.stopped)job.status='cancelled';
    else if(code===0&&!err&&out)Object.assign(job,{status:'done',text:out});
    else if(code===0&&!err)Object.assign(job,{status:'error',error:'The enhancer returned no text.'});
-   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().split(/\r?\n/).filter(Boolean).pop()||`OMP exited (${code}).`});
+   // OMP prints the error first and a "Run `omp …`" hint after it; skip warnings (e.g. MCP connect failures).
+   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||`OMP exited (${code}).`});
    delete job.child;job.finishedAt=now();
    await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});
    setTimeout(()=>{if(enhanceJobs.get(id)===job)enhanceJobs.delete(id);},5*60000).unref();

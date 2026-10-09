@@ -30,6 +30,8 @@ process.stdin.on('end', () => {
   writeFileSync(join(out, 'stdin.txt'), input, 'utf8');
   const emit = e => process.stdout.write(JSON.stringify(e) + '\\n');
   if (input.includes('HANG')) { setInterval(() => {}, 1e9); return; }
+  // Shaped like OMP's real failure: a warning, the error, a blank line, then a hint.
+  if (input.includes('FAIL')) { process.stderr.write('Warning: MCP server "x" failed to connect\\nModel "@enhance" not found\\n\\nRun \`omp models find <pattern>\` to search, or \`omp models\` to list all.\\n'); process.exit(1); }
   emit({ type: 'session', cwd: process.cwd() });
   if (input.includes('EMPTY')) return;
   emit({ type: 'tool_execution_start', toolName: 'read', args: { path: join(process.cwd(), 'src', 'a.js') } });
@@ -40,11 +42,13 @@ process.stdin.on('end', () => {
 // Fake OMP session runner: records its pid; `prompt` drops a marker, then answers after 300 ms;
 // get_state reports a session file that holds only a header (no user message).
 const FAKE_OMP = (dir, { fail = false } = {}) => fail ? 'process.exit(1);' : `import { createInterface } from 'node:readline';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const out = ${JSON.stringify(dir)};
 writeFileSync(join(out, 'omp-pid-' + process.pid), '');
-const file = join(out, 'native-' + process.pid + '.jsonl');
+// Like OMP: one folder per working directory, the session file inside it.
+mkdirSync(join(out, 'native-' + process.pid), { recursive: true });
+const file = join(out, 'native-' + process.pid, 'session.jsonl');
 writeFileSync(file, JSON.stringify({ type: 'session', cwd: process.cwd(), id: 'x' }) + '\\n');
 const send = o => process.stdout.write(JSON.stringify(o) + '\\n');
 send({ type: 'ready' });
@@ -148,6 +152,14 @@ test('stdin round trip: draft and images reach the enhancer, never argv', async 
   assert.deepEqual(await readdir(join(dir, 'enhance')).catch(() => []), []); // images removed
 });
 
+test('a failed run reports OMP\'s error line, not its trailing hint', async t => {
+  const { call, settle } = await boot(t);
+  const { body } = await call('/enhance', { session: 'session', text: 'FAIL' });
+  const job = await settle(body.id);
+  assert.equal(job.status, 'error');
+  assert.equal(job.error, 'Model "@enhance" not found');
+});
+
 test('empty result is an error, not a blank draft', async t => {
   const { call, settle } = await boot(t);
   const { body } = await call('/enhance', { session: 'session', text: 'EMPTY' });
@@ -209,11 +221,12 @@ test('lone discard removes the session, its empty session file and only after OM
   const { body: s } = await call('/quick-start', { path: dir, draft: true });
   await call('/commands?session=' + s.id);
   const [pid] = await ompPids(dir);
-  const file = join(dir, `native-${pid}.jsonl`);
+  const file = join(dir, `native-${pid}`, 'session.jsonl');
   assert.ok(await exists(file));
   assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
   assert.equal(alive(pid), false, 'OMP process had exited before discard answered');
   assert.equal(await exists(file), false);
+  assert.equal(await readdir(join(dir, `native-${pid}`)).then(() => true, () => false), false, 'its emptied folder is removed too');
   assert.equal((await call('/state')).body.sessions.some(x => x.id === s.id), false);
   // Normal sessions are never discarded.
   assert.deepEqual((await call('/sessions/session/command', { type: 'discard' })).body, { discarded: false });
