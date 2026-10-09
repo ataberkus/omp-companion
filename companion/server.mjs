@@ -399,6 +399,8 @@ export async function createCompanion(options={}){
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();});
  }
  function event(s,f){
+  // Ghost-text predictions arrive per keystroke; they are not session activity.
+  if(f.type==='response'&&(f.command==='predict_word'||f.command==='predict_word_feedback'))return;
   s.updatedAt=now();
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
@@ -520,7 +522,16 @@ export async function createCompanion(options={}){
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  // Composer ghost text (OMP's spelling.autocomplete engine). Never starts OMP; any failure means no suggestion.
+  if(body.type==='predict_word'||body.type==='predict_word_feedback'){
+   const rpc=runners.get(s.id),draft=body.text,cursor=body.cursor;
+   if(typeof draft!=='string'||draft.length>200000||!Number.isInteger(cursor)||cursor<0||cursor>draft.length)throw error('Invalid draft.');
+   if(!rpc?.alive)return {suffix:null};
+   if(body.type==='predict_word_feedback'){if(typeof body.suggestion!=='string'||!body.suggestion||body.suggestion.length>200)throw error('Invalid suggestion.');void rpc.send({type:body.type,text:draft,cursor,suggestion:body.suggestion,accepted:body.accepted===true}).catch(()=>{});return {};}
+   // The first request can wait minutes while OMP's prediction daemon loads its engine.
+   try{const r=await rpc.send({type:'predict_word',text:draft,cursor},155000);return {suffix:typeof r?.suffix==='string'&&r.suffix?r.suffix:null};}catch{return {suffix:null};}
+  }
   const prompting=['prompt','steer','follow_up','interrupt'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
   if(prompting&&s._task)throw error(`Wait for OMP to finish first (${s._task.replace(/…$/,'').toLowerCase()}).`);
@@ -1120,7 +1131,7 @@ async function spend(){
     const set=new Set(store.archived);if(body.archived===false)set.delete(key);else set.add(key);store.archived=[...set];await persist();json({archived:store.archived});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
-   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(body.type==='answer'?command(s,body):lock(s.id,()=>command(s,body))));return;}
+   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(['answer','predict_word','predict_word_feedback'].includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });

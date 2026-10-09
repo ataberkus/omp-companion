@@ -400,6 +400,7 @@
         <div class="status-line" id="statusLine"></div>
         <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
         <div class="composer">
+          <div class="ghost" id="ghost" aria-hidden="true" hidden></div>
           <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
@@ -473,6 +474,50 @@
     const c = current();
     if (c.kind === 'session') { const s = S.store?.sessions.find(x => x.id === c.id); if (s) renderComposer(s); }
     else if (c.kind === 'native') renderComposer(null, S.native.find(x => x.file === c.file) || S.previews.get(c.file));
+  }
+
+  // ---------- ghost-text word completion (OMP predict_word, engine from spelling.autocomplete) ----------
+  // ghost: { id, view, text, suffix, fb }; fb is the draft/suggestion as first shown, which OMP's feedback expects.
+  let ghost = null, ghostTimer, ghostSeq = 0;
+  const ghostLive = input => !!ghost && !!input && ghost.view === S.view && input.value === ghost.text && input.selectionStart === input.value.length && input.selectionEnd === input.value.length && !S.slash;
+  const ghostFeedback = (g, accepted) => api(`/sessions/${g.id}/command`, { type: 'predict_word_feedback', ...g.fb, accepted }).catch(() => {});
+  function renderGhost() {
+    const input = $('#input'), el = $('#ghost');
+    if (!el) return;
+    const on = ghostLive(input);
+    el.hidden = !on;
+    if (!on) return;
+    el.innerHTML = esc(ghost.text) + `<i>${esc(ghost.suffix)}</i>`;
+    el.style.width = input.clientWidth + 'px'; el.style.height = input.clientHeight + 'px'; el.scrollTop = input.scrollTop;
+  }
+  function predictWord(input) {
+    const prev = ghost, typed = prev && prev.view === S.view && input.value.startsWith(prev.text) ? input.value.slice(prev.text.length) : null;
+    // Typing the suggestion's own letters just shortens it.
+    if (typed && prev.suffix.length > typed.length && prev.suffix.startsWith(typed)) { ghost = { ...prev, text: input.value, suffix: prev.suffix.slice(typed.length) }; renderGhost(); return; }
+    // Feedback only for what the user did with it: typed it out (accepted) or typed past it (rejected). Backspace, clears and view switches say nothing.
+    if (typed) ghostFeedback(prev, typed.startsWith(prev.suffix));
+    ghost = null; renderGhost(); clearTimeout(ghostTimer);
+    const c = current(), text = input.value, cursor = input.selectionStart, seq = ++ghostSeq, view = S.view;
+    if (c.kind !== 'session' || cursor !== text.length || input.selectionEnd !== cursor || /^[/!]/.test(text) || !/[\p{L}\p{M}']$/u.test(text)) return;
+    ghostTimer = setTimeout(async () => {
+      try {
+        const r = await api(`/sessions/${c.id}/command`, { type: 'predict_word', text, cursor }, { timeout: 160000 });
+        if (seq !== ghostSeq || !r?.suffix) return;
+        ghost = { id: c.id, view, text, suffix: r.suffix, fb: { text, cursor, suggestion: r.suffix } }; renderGhost();
+      } catch { }
+    }, 120);
+  }
+  function acceptGhost(input) {
+    if (!ghostLive(input)) return false;
+    const g = ghost; ghost = null; ghostSeq++;
+    input.value = g.text + g.suffix; drafts.set(S.view, input.value); autosize(input);
+    ghostFeedback(g, true); updateComposer(); renderGhost();
+    return true;
+  }
+  function dismissGhost(input) {
+    if (!ghostLive(input)) return false;
+    ghost = null; ghostSeq++; renderGhost();
+    return true;
   }
 
   function contextMeta(tokens, win, pct) {
@@ -1627,6 +1672,7 @@
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
     setIfChanged(line, status);
+    renderGhost();
   }
 
   // ---------- extension UI: links, widgets, status, notifications ----------
@@ -2820,9 +2866,11 @@
     else if (d.tagName === 'DETAILS') touched.add(d);
   }, true);
   document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); if (e.target.id === 'scroller') markPromptRail(); }, true);
+  // Moving the caret off the end hides the suggestion; returning brings it back.
+  document.addEventListener('selectionchange', () => { if (ghost) renderGhost(); });
   document.addEventListener('input', e => {
     const t = e.target;
-    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); }
+    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); predictWord(t); }
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
@@ -2932,6 +2980,9 @@
     const macField = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform || '') && /INPUT|TEXTAREA/.test(t.tagName);
     if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !macField && !$('#modal') && stepPrompt(e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
     if (t.id === 'input') {
+      // Tab takes the ghost-text completion; without one it moves focus as usual.
+      if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && acceptGhost(t)) { e.preventDefault(); return; }
+      if (e.key === 'Escape' && dismissGhost(t)) { e.preventDefault(); return; }
       const s = current().kind === 'session' && S.store?.sessions.find(x => x.id === current().id);
       const live = s && (s.status === 'running' || s.status === 'queued'), act = live && hotkeyAction(e);
       if (act) { e.preventDefault(); send(act); return; }
