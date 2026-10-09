@@ -178,6 +178,7 @@
     noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
     planBusy: new Set(), planSubmitted: new Set(),
     enhance: new Map(), // view → { id, original, model, step } while an enhance runs
+    sendingBash: null, discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -370,7 +371,9 @@
     const c = current();
     const view = c.kind + ':' + (c.id || c.file || c.parent || '');
     if (view !== S.view) {
+      const prev = S.view;
       S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null;
+      leaveDraft(prev, c);
       // Per-file caches only matter for recently viewed sessions; keep them bounded. The viewed preview moves to the newest end
       // first so the trim can't evict it, and a cached failure is dropped so it is fetched again.
       const pf = c.kind === 'native' ? c.file : c.kind === 'changes' && c.parent.startsWith('f:') ? c.parent.slice(2) : '';
@@ -567,10 +570,43 @@
     input.selectionStart = input.selectionEnd = input.value.length;
     drafts.set(S.view, input.value); autosize(input); updateComposer();
   }
+  // Enhance on New session: create the session in the picked folder as a draft (no prompt yet), start its OMP,
+  // carry the draft and images over, and enhance there. Leaving it unsent discards it (leaveDraft).
+  const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
+  async function enhanceFromHome() {
+    const l = S.home.listing, draft = S.home.prompt;
+    if (!l || S.busy || enhanceBlocked(draft)) return;
+    S.busy = true; renderHome();
+    let s;
+    try { s = await api('/quick-start', { ...homeStartBody(l), draft: true }); }
+    catch (e) { S.busy = false; if (current().kind === 'home') renderHome(); toast(e.message, 'err'); return; }
+    api('/commands?session=' + encodeURIComponent(s.id)).catch(() => {}); // starts OMP in the picked folder
+    const view = 'session:' + s.id, moved = attached();
+    for (const a of moved) a.view = view;
+    drafts.set(view, draft); S.home.prompt = ''; S.busy = false;
+    await refresh();
+    location.hash = '#/s/' + s.id; route(); // build the session view now so the enhance renders there
+    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft);
+  }
+  // A draft session left for New session, another session or history is discarded; its own sub-views and
+  // Settings/Tools/Spend keep it. A send still in flight decides first (the server would otherwise race it).
+  function leaveDraft(prev, c) {
+    if (!prev.startsWith('session:') || !['home', 'session', 'native'].includes(c.kind)) return;
+    if (!S.store?.sessions.find(x => 'session:' + x.id === prev)?.draft) return;
+    if (S.pending?.view === prev || S.sendingBash === prev) { S.discardAfterSend.add(prev); return; }
+    discardView(prev);
+  }
+  function discardView(view) {
+    S.enhance.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
+    api(`/sessions/${encodeURIComponent(view.slice('session:'.length))}/command`, { type: 'discard' }).then(() => refresh()).catch(() => {});
+  }
+  // After a send settles: if the user left its draft session meanwhile, let the server decide (no-op once sent).
+  function afterSend(view) { if (S.discardAfterSend.delete(view) && S.view !== view) discardView(view); }
   function enhanceCurrent() {
     const c = current(), view = S.view;
     const running = S.enhance.get(view);
     if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
+    if (c.kind === 'home') return enhanceFromHome();
     const input = $('#input');
     if (!input || enhanceBlocked(input.value) || S.busy) return;
     const text = input.value.trim(), images = imagePayload(attached());
@@ -1733,6 +1769,7 @@
       placeholder = 'Type feedback to keep planning without approving…';
     }
     if (enhancing) status = `<span class="grow">Enhancing with ${esc(modelName(enhancing.model) || 'OMP')} · ${esc(enhancing.step || 'starting')}…</span>`;
+    else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
     if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id) { editorApplied.set(s.id, s._editorText.id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
@@ -2003,10 +2040,13 @@
     const retry = retryText != null, text = retry ? retryText : input?.value.trim();
     const attachment = retry ? [] : attached();
     if ((!text && !attachment.length) || S.busy || S.enhance.has(S.view)) return;
+    const sendView = S.view;
     // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
     if (c.kind === 'session' && !retry && !attachment.length && /^!\S/.test(text)) {
       input.value = ''; drafts.delete(S.view); autosize(input);
-      if (!await sessionAction({ type: 'bash', command: text.slice(1) })) { input.value = text; drafts.set(S.view, text); autosize(input); }
+      S.sendingBash = sendView;
+      try { if (!await sessionAction({ type: 'bash', command: text.slice(1) })) { drafts.set(sendView, text); if (S.view === sendView) { input.value = text; autosize(input); } } }
+      finally { S.sendingBash = null; afterSend(sendView); }
       return;
     }
     S.busy = true;
@@ -2038,6 +2078,7 @@
       S.attachments.push(...attachment.map(a => ({ ...a, view: retryView })));
     } finally {
       S.busy = false; S.pending = null; S.lastSig = ''; update();
+      afterSend(sendView);
     }
   }
   async function sessionCommand(type) {
@@ -2533,6 +2574,7 @@
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
             <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…"><span aria-hidden="true">⚙</span> Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
+            <span id="homeEnhance">${enhanceButton(S.view, h.prompt)}</span>
             <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
           </div>
         </div>
@@ -2570,7 +2612,7 @@
     const attachment = attached(), view = S.view;
     S.attachments = S.attachments.filter(a => a.view !== view);
     try {
-      const s = await api('/quick-start', { path: l.path, prompt: S.home.prompt, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}), ...imagePayload(attachment) });
+      const s = await api('/quick-start', { ...homeStartBody(l), prompt: S.home.prompt, ...imagePayload(attachment) });
       S.home.prompt = '';
       await refresh();
       location.hash = '#/s/' + s.id;
@@ -2947,7 +2989,7 @@
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
     else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
-    else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); }
+    else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
     else if (t.id === 'pathInput') S.home.path = t.value;
