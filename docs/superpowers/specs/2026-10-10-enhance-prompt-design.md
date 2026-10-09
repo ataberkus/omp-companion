@@ -128,20 +128,20 @@ Assistant: …              (last 6 user/assistant messages, each truncated to 1
 
 A session created by Enhance is a **draft session** until its first message goes out. Picking workspace A, pressing Enhance, then going back to New session and picking B must not leave A's session, OMP process or worktree behind.
 
-- **Marker:** quick-start with `draft: true` sets `s.draft = true` on the stored session. The marker is cleared, and the session becomes a normal one, the first time `command()` sends a `prompt`, `steer`, `follow_up`, `interrupt` or `bash` for it, including slash commands. Queueing a follow-up also counts.
+- **Marker:** quick-start with `draft: true` sets `s.draft = true` on the stored session. The marker is cleared, and the session becomes a normal one, the first time `command()` handles a `prompt`, `steer`, `follow_up`, `interrupt` or `bash` for it, including slash commands and queued follow-ups. It is cleared **synchronously at the top of `command()`, before any `await`**: the prompt and bash paths `await start(s)` before they record the user message (server.mjs:671, 747), so "no user message yet" is not a safe test on its own.
 - **Visible:** while `s.draft` is set, the status line reads `Draft · discarded if you leave without sending`.
 - **What counts as leaving** (frontend, on route change from `#/s/<id>` of a draft session to):
   - New session (`#/new`, Alt+N, `＋ New here`), including then picking another folder;
   - another panel session or an OMP-history item.
 
   Settings, Tools, Spend, and that session's own subagent, changes and transcript views do **not** count, so the user can, for example, set the `enhance` role and come back. Discard is fire-and-forget: navigation never waits for it.
-- **Discard** (`POST /api/sessions/<id>/command {type:'discard'}`, lock-free like `predict_word`). It is a no-op unless `s.draft` is still set and the session has no user message. This guards against a race with Send. When it runs:
-  1. Stop the session's running enhance job, if any.
-  2. Stop its OMP process (`runners.get(id)?.kill()`) and wait for it to close (as `hide` does).
+- **Discard** (`POST /api/sessions/<id>/command {type:'discard'}`) runs **under the session lock** (`lock(s.id, …)`), like every other command except `answer` and `predict_word`. Discard is not on a per-keystroke path. Because it is serialised behind any Send in flight, and Send clears `s.draft` first, discard can't kill a session whose first prompt is being dispatched. Under the lock it is a no-op unless `s.draft` is still set and the session has no user message. When it runs:
+  1. Stop the session's running enhance job, if any, and **await its process's `close` event**.
+  2. Stop its OMP process and **await `close`**, using the same pattern as `discoverCommands` (server.mjs:380-382: `once('close')`, `kill()` unless already stopping, await only if still alive). `hide` (line 701) kills without waiting, which isn't enough here.
   3. Delete its OMP session file only if `readSessionHead` shows no user message. In a file that has messages, it is left alone and the session is simply hidden.
-  4. If `s.isolated` and `s.branch` starts with `omp-web/`: `git worktree remove --force <cwd>`, then `git branch -D <branch>`, both in the project path. Failures are logged, not shown, because the session is already gone from the UI.
-  5. Remove the session from `store.sessions` (not just hidden), drop its staged attachments and in-tab draft on the client, and persist.
-- **Tab closed or companion quit while a draft session exists:** in-tab drafts don't survive a reload, so the session would come back empty. On companion **startup**, every stored session that still has `draft: true` and no user message is discarded the same way.
+  4. If `s.isolated` and `s.branch` starts with `omp-web/`: `git worktree remove --force <cwd>`, then `git branch -D <branch>`, both in the project path. On Windows a just-exited process tree (OMP's LSP/MCP children, antivirus, indexers) can briefly keep the folder busy. So the remove is retried with growing backoff like `replaceFile` (server.mjs:361): up to 20 tries, 50 ms × attempt, retrying on a failing `git worktree remove`.
+  5. If the worktree still can't be removed, the session is **not** dropped from the store. It keeps `draft: true`, is marked `hidden: true` so it leaves the sidebar, and is retried by the startup cleanup below. Otherwise it is removed from `store.sessions` (not just hidden). Either way the client drops its staged attachments and in-tab draft, and the store is persisted.
+- **Tab closed or companion quit while a draft session exists:** in-tab drafts don't survive a reload, so the session would come back empty. On companion **startup**, every stored session that still has `draft: true` and no user message, hidden or not, is discarded the same way. No OMP processes exist at that point, so worktree removal normally succeeds then. A worktree that still fails stays recorded for the next startup.
 - **Known limit:** with two dashboard tabs, leaving the draft in one tab discards it even if the other tab is showing it. The other tab sees the session disappear on its next poll. This is acceptable, because draft sessions are short-lived and single-tab in practice.
 
 ## 5. Frontend (`local-dist/app.js`, `app.css`)
@@ -163,7 +163,9 @@ A session created by Enhance is a **draft session** until its first message goes
 | A fourth job while three are running | 409 toast `Wait for the running enhance to finish.` |
 | Draft edited while running | Not applied; info toast with `Use enhanced prompt` action |
 | Companion shutdown | Processes killed; images directory removed |
-| Leaving a draft session without sending | Session, OMP process, empty session file and its worktree/branch removed (§4) |
+| Leaving a draft session without sending | Session, OMP process, empty session file and its worktree/branch removed after both processes have exited (§4) |
+| Worktree still busy after 20 retries | Session hidden but kept with `draft: true`; removal retried on the next companion startup |
+| Send and leave in quick succession | Discard waits behind Send on the session lock, finds `draft` cleared, and does nothing |
 | Draft session left over after a crash or tab close | Discarded on the next companion startup |
 
 ## 7. Testing
@@ -180,6 +182,7 @@ A session created by Enhance is a **draft session** until its first message goes
   - Undo restores the original draft.
   - New-session Enhance moves the attachments and draft to the new session's view.
   - Leaving a draft session for New session or another session sends `discard`; leaving for Settings does not; a session that has sent a message is never discarded (server no-op).
+  - Server (with a fake `omp` via the existing `ompCommand` option): a `prompt` and a `discard` sent back to back for a draft session leave the session in the store with its message, and a lone `discard` removes it only after the fake process has exited.
   - Server: model resolution order (`@enhance` → session model with `--thinking=low` → none) and the argument list never contains the draft text. Tested by exporting the argument builder for unit use.
 
 ## Out of scope
