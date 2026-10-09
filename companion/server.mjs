@@ -331,8 +331,45 @@ const CLI_TOOLS={
 // The catalog the dashboard renders: no argv, only what the forms need.
 const cliCatalog=()=>Object.fromEntries(Object.entries(CLI_TOOLS).map(([id,t])=>[id,{title:t.title,description:t.description,actions:Object.fromEntries(Object.entries(t.actions).map(([a,x])=>[a,{label:x.label,cwd:x.cwd,confirm:x.confirm,confirmIf:x.confirmIf,command:'omp '+x.args.join(' '),fields:(x.fields||[]).map(({flag,arg,...f})=>({...f,flag}))}]))}]));
 
+// Enhance prompt: a one-shot read-only `omp -p` that rewrites a composer draft.
+// `enhance` role wins; otherwise the composer's model at low thinking so an xhigh session doesn't make every enhance slow.
+function enhanceModel(roles,selector){
+ if(roles?.enhance)return {model:'@enhance',thinking:null,label:roles.enhance};
+ if(selector)return {model:selector,thinking:'low',label:selector};
+ return {model:null,thinking:null,label:roles?.default||'OMP default'};
+}
+// The draft never goes in argv (stdin only): no quoting hazards and no Windows 32K command-line limit.
+function enhanceArgs({model,thinking,overlay,system,images}){
+ return ['-p','--mode','json','--no-session','--no-title','--no-skills','--no-extensions','--no-lsp','--tools=read,grep,glob','--approval-mode=always-ask','--max-time=120',
+  `--config=${overlay}`,...(model?[`--model=${model}`]:[]),...(thinking?[`--thinking=${thinking}`]:[]),`--append-system-prompt=${system}`,...images.map(f=>'@'+f)];
+}
+function enhanceInput(draft,messages){
+ const tail=messages.filter(m=>m.role==='user'||m.role==='assistant').slice(-6).map(m=>`${m.role==='user'?'User':'Assistant'}: ${String(m.text||'').slice(0,1500)}`);
+ return (tail.length?`<conversation>\n${tail.join('\n')}\n</conversation>\n`:'')+`<draft>\n${draft}\n</draft>`;
+}
+function stepLabel(toolName,args,cwd){
+ const a=args||{};let s;
+ if(toolName==='read')s='reading '+(a.path?path.relative(cwd,path.resolve(cwd,String(a.path))).replace(/\\/g,'/'):'a file');
+ else if(toolName==='grep')s=`searching "${a.pattern??''}"`;
+ else if(toolName==='glob')s='listing '+(a.pattern??'files');
+ else if(toolName==='find')s=`finding "${a.query??a.pattern??''}"`;
+ else s=String(toolName||'working');
+ return s.length>80?s.slice(0,79)+'…':s;
+}
+function cleanEnhanced(text){
+ const t=String(text||'').trim();const m=t.match(/^```[\w-]*\n([\s\S]*?)\n?```$/);
+ return (m?m[1]:t).trim();
+}
+// modelRoles and defaultThinkingLevel straight from config.yml: cheap, so enhance needs no `omp models` call.
+async function modelRoles(){
+ const roles={};let defaultThinking='';
+ try{const cfg=await fs.readFile(path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'config.yml'),'utf8');let inRoles=false;
+  for(const line of cfg.split(/\r?\n/)){if(/^modelRoles:\s*$/.test(line)){inRoles=true;continue;}if(inRoles){const m=line.match(/^\s+([\w-]+):\s*(\S+)/);if(m){roles[m[1]]=m[2].replace(/^["']|["']$/g,'');continue;}if(/^\S/.test(line))inRoles=false;}
+   const t=line.match(/^defaultThinkingLevel:\s*(\w+)/);if(t)defaultThinking=t[1];}}catch{}
+ return {roles,defaultThinking};
+}
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 export async function createCompanion(options={}){
@@ -901,10 +938,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   if(modelCache&&Date.now()-modelCache.at<10*60000)return modelCache.data;
   const {stdout}=await execOmp(['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true});
   const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow,fast:fastCapable(m)}));
-  const roles={};let defaultThinking='';
-  try{const cfg=await fs.readFile(path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'config.yml'),'utf8');let inRoles=false;
-   for(const line of cfg.split(/\r?\n/)){if(/^modelRoles:\s*$/.test(line)){inRoles=true;continue;}if(inRoles){const m=line.match(/^\s+([\w-]+):\s*(\S+)/);if(m){roles[m[1]]=m[2].replace(/^["']|["']$/g,'');continue;}if(/^\S/.test(line))inRoles=false;}
-    const t=line.match(/^defaultThinkingLevel:\s*(\w+)/);if(t)defaultThinking=t[1];}}catch{}
+  const {roles,defaultThinking}=await modelRoles();
   modelCache={at:Date.now(),data:{models,roles,defaultThinking,thinkingLevels:THINKING}};return modelCache.data;
  }
  async function ensureProject(dir,name){
