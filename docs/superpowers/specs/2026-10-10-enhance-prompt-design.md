@@ -117,7 +117,7 @@ Assistant: …              (last 6 user/assistant messages, each truncated to 1
 
 - **Existing session, OMP not running:** in parallel with `POST /api/enhance`, the frontend calls `GET /api/commands?session=<id>`. That route already runs `start(s)` under the session lock (it is what the slash menu uses). Once OMP is up, ghost text works and the next Send doesn't wait for OMP to start. No new endpoint.
 - **New-session screen:**
-  1. Enhance calls `POST /api/quick-start` with the same options as Start (`path`, `isolate`, `model`, `thinking`, `fast`, `advisor`, `launch`) but **no prompt and no images**. This creates and starts the session.
+  1. Enhance calls `POST /api/quick-start` with the same options as Start (`path`, `isolate`, `model`, `thinking`, `fast`, `advisor`, `launch`) but **no prompt and no images**. This only creates and saves the session: with an empty prompt, `createSession` persists without starting OMP, and quick-start starts OMP only as a side effect of the `advisor`/`fast` options. So the frontend then calls `GET /api/commands?session=<id>`, the same start path as an existing session that isn't running (above), so OMP always starts on the picked folder.
   2. The staged attachments move from the home view to the new session's view (`a.view = 'session:' + id`), so they stay attached for Send.
   3. The draft is stored as the new view's draft, the browser navigates to `#/s/<id>`, and the enhance starts there in session mode (cwd = the new session's cwd, including an isolated worktree).
   4. If quick-start fails, the user stays on the home screen with the draft and attachments unchanged, and an error toast is shown.
