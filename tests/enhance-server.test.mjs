@@ -5,6 +5,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const exec = promisify(execFile);
+const exists = p => readFile(p).then(() => true, () => false);
+const ompPids = async dir => (await readdir(dir)).filter(f => f.startsWith('omp-pid-')).map(f => Number(f.slice(8)));
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
 const image = { type: 'image', mimeType: 'image/png', data: png };
@@ -32,28 +37,51 @@ process.stdin.on('end', () => {
   emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '\`\`\`\\nENHANCED ' + draft + '\\n\`\`\`' }] } });
 });`;
 
-async function boot(t, { config = '' } = {}) {
+// Fake OMP session runner: records its pid; `prompt` drops a marker, then answers after 300 ms;
+// get_state reports a session file that holds only a header (no user message).
+const FAKE_OMP = (dir, { fail = false } = {}) => fail ? 'process.exit(1);' : `import { createInterface } from 'node:readline';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const out = ${JSON.stringify(dir)};
+writeFileSync(join(out, 'omp-pid-' + process.pid), '');
+const file = join(out, 'native-' + process.pid + '.jsonl');
+writeFileSync(file, JSON.stringify({ type: 'session', cwd: process.cwd(), id: 'x' }) + '\\n');
+const send = o => process.stdout.write(JSON.stringify(o) + '\\n');
+send({ type: 'ready' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  if (c.type === 'prompt') { writeFileSync(join(out, 'prompt-seen'), ''); setTimeout(() => send({ type: 'response', id: c.id, success: true, command: c.type, data: { agentInvoked: false } }), 300); continue; }
+  const data = c.type === 'get_state' ? { todoPhases: [], sessionFile: file } : c.type === 'get_subagents' ? { subagents: [] } : {};
+  send({ type: 'response', id: c.id, success: true, command: c.type, data });
+}`;
+
+async function boot(t, { config = '', omp = {} } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-enhance-'));
-  const state = { app: null };
+  const state = { app: null, base: '' };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
   // Role lookup reads <agent dir>/config.yml: point it at this test's own copy, never the developer's.
   process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
   await mkdir(join(dir, 'agent'), { recursive: true });
   await writeFile(join(dir, 'agent', 'config.yml'), config);
-  const enh = join(dir, 'enh.mjs');
+  const enh = join(dir, 'enh.mjs'), fakeOmp = join(dir, 'omp.mjs');
   await writeFile(enh, FAKE_ENHANCER(dir));
+  await writeFile(fakeOmp, FAKE_OMP(dir, omp));
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: 'm1', role: 'user', text: 'earlier question', at: now }], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
-  state.app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, enhancePrefix: [enh] });
-  state.app.server.listen(0, '127.0.0.1');
-  await once(state.app.server, 'listening');
-  const base = `http://127.0.0.1:${state.app.server.address().port}/api`;
+  const start = async () => {
+    state.app = await createCompanion({ dataDir: dir, ompSessionsDir: dir, ompCommand: process.execPath, ompArgs: [fakeOmp], enhancePrefix: [enh] });
+    state.app.server.listen(0, '127.0.0.1');
+    await once(state.app.server, 'listening');
+    state.base = `http://127.0.0.1:${state.app.server.address().port}/api`;
+  };
+  await start();
+  const restart = async () => { await state.app.close(); await start(); };
   const call = async (path, body) => {
-    const res = await fetch(base + path, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${state.app.token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const res = await fetch(state.base + path, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${state.app.token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
     return { status: res.status, body: await res.json() };
   };
   const settle = async id => { for (let i = 0; i < 100; i++) { const r = await call('/enhance?id=' + id); if (r.body.status !== 'running') return r.body; await sleep(50); } throw new Error('enhance never finished'); };
-  return { dir, state, call, settle };
+  return { dir, state, call, settle, restart };
 }
 
 test('enhance model resolution order', () => {
@@ -160,4 +188,64 @@ test('a configured enhance role is used and reported', async t => {
   await settle(body.id);
   const argv = JSON.parse(await readFile(join(dir, 'argv.json'), 'utf8'));
   assert.ok(argv.includes('--model=@enhance') && !argv.some(a => a.startsWith('--thinking')));
+});
+
+test('discard sent while the first prompt holds the lock keeps the session', async t => {
+  const { dir, call } = await boot(t);
+  const { body: s } = await call('/quick-start', { path: dir, draft: true });
+  assert.equal(s.draft, true);
+  await call('/commands?session=' + s.id); // starts OMP
+  const sending = call(`/sessions/${s.id}/command`, { type: 'prompt', message: 'hi' });
+  for (let i = 0; i < 100 && !(await exists(join(dir, 'prompt-seen'))); i++) await sleep(20);
+  const [r1, r2] = await Promise.all([sending, call(`/sessions/${s.id}/command`, { type: 'discard' })]);
+  assert.equal(r1.status, 200);
+  assert.deepEqual(r2.body, { discarded: false });
+  const kept = (await call('/state')).body.sessions.find(x => x.id === s.id);
+  assert.ok(kept && !kept.draft && kept.messages.some(m => m.role === 'user'));
+});
+
+test('lone discard removes the session, its empty session file and only after OMP exited', async t => {
+  const { dir, call } = await boot(t);
+  const { body: s } = await call('/quick-start', { path: dir, draft: true });
+  await call('/commands?session=' + s.id);
+  const [pid] = await ompPids(dir);
+  const file = join(dir, `native-${pid}.jsonl`);
+  assert.ok(await exists(file));
+  assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
+  assert.equal(alive(pid), false, 'OMP process had exited before discard answered');
+  assert.equal(await exists(file), false);
+  assert.equal((await call('/state')).body.sessions.some(x => x.id === s.id), false);
+  // Normal sessions are never discarded.
+  assert.deepEqual((await call('/sessions/session/command', { type: 'discard' })).body, { discarded: false });
+});
+
+test('isolated draft: worktree and branch removed; leftover drafts cleaned on startup', async t => {
+  const { dir, call, restart } = await boot(t);
+  const repo = join(dir, 'repo');
+  await mkdir(repo);
+  const git = (...a) => exec('git', ['-C', repo, ...a]);
+  await git('init', '-q'); await git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+  const { body: s } = await call('/quick-start', { path: repo, isolate: true, draft: true });
+  assert.match(s.branch, /^omp-web\//);
+  await call('/commands?session=' + s.id);
+  assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
+  assert.ok(!(await git('worktree', 'list')).stdout.includes(s.id));
+  assert.ok(!(await git('branch')).stdout.includes('omp-web/'));
+  // A draft left behind by a closed tab or crash is removed on the next start, worktree included.
+  const { body: left } = await call('/quick-start', { path: repo, isolate: true, draft: true });
+  await restart();
+  assert.equal((await call('/state')).body.sessions.some(x => x.id === left.id), false);
+  assert.ok(!(await git('worktree', 'list')).stdout.includes(left.id));
+  assert.ok(!(await git('branch')).stdout.includes('omp-web/'));
+});
+
+test('a first send that fails before recording a message restores the draft marker', async t => {
+  const { dir, call } = await boot(t, { omp: { fail: true } });
+  const { body: s } = await call('/quick-start', { path: dir, draft: true });
+  const sent = await call(`/sessions/${s.id}/command`, { type: 'prompt', message: 'hi' });
+  assert.equal(sent.body.status, 'error');
+  const after = (await call('/state')).body.sessions.find(x => x.id === s.id);
+  assert.equal(after.draft, true);
+  assert.ok(!after.messages.some(m => m.role === 'user'));
+  assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
 });

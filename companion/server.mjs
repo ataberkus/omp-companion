@@ -600,7 +600,14 @@ export async function createCompanion(options={}){
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
+  // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
+  if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
+   delete s.draft;
+   try{return await command(s,body,checkedImages,queuedId);}finally{if(!sent(s)){s.draft=true;scheduleSave();}}
+  }
+  if(body.type==='discard')return discardDraft(s);
   // Composer ghost text (OMP's spelling.autocomplete engine). Never starts OMP; any failure means no suggestion.
   if(body.type==='predict_word'||body.type==='predict_word_feedback'){
    const rpc=runners.get(s.id),draft=body.text,cursor=body.cursor;
@@ -980,14 +987,38 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   let branch='workspace';try{branch=await git(dir,['branch','--show-current'])||'detached';}catch{}
   p={id:randomUUID(),name:String(name||'').trim().slice(0,80)||path.basename(dir)||dir,path:dir,description:'',branch,color:colors[store.projects.length%colors.length]};store.projects.push(p);activity(null,`Added project ${p.name}`);return p;
  }
- async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch}){
+ async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch,draft=false}){
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
   if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);await fs.mkdir(path.dirname(wt),{recursive:true});
    try{await git(p.path,['worktree','add','-b',b,wt,'HEAD']);cwd=wt;branch=b;}catch(e){isolated=false;notes.push(`Worktree isolation skipped (needs a Git repository with at least one commit). Working directly in ${p.path}.`);}}
-  const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(launch?{launch}:{})};
+  const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(launch?{launch}:{}),...(draft?{draft:true}:{})};
   if(selector){const i=selector.indexOf('/');s.modelSelector=selector;s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking){s.thinkingChoice=thinking;s.thinking=thinking;}
   for(const n of notes)append(s,'system',n);store.sessions.unshift(s);activity(s,sessionFile?`Resumed ${title}`:`Started ${title}`,'running');
   if(prompt)await command(s,{type:'prompt',message:prompt});else await persist();return s;
+ }
+ const sent=s=>s.messages.some(m=>m.role==='user'||m.id?.startsWith('tool-bash-'))||!!s.queuedMessages?.length;
+ // Removes an Enhance-created session nobody sent anything to: enhance job, OMP process (awaited), its empty
+ // session file, and its isolated worktree and branch. A worktree Windows still holds stays recorded for next startup.
+ async function discardDraft(s){
+  if(!s.draft||sent(s))return {discarded:false};
+  await Promise.allSettled([...enhanceJobs.values()].filter(j=>j.sessionId===s.id).map(stopEnhance));
+  const rpc=runners.get(s.id);
+  if(rpc){const stopped=new Promise(r=>rpc.child.once('close',r));if(!rpc.stopping)rpc.kill();if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;}
+  if(s.sessionFile&&!(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user'))await fs.rm(s.sessionFile,{force:true}).catch(()=>{});
+  let removed=true;
+  const root=store.projects.find(p=>p.id===s.projectId)?.path;
+  if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){
+   removed=false;
+   for(let i=0;i<20;i++){
+    try{await git(root,['worktree','remove','--force',s.cwd]);removed=true;break;}
+    catch{if(!await exists(s.cwd)){await git(root,['worktree','prune']).catch(()=>{});removed=true;break;}await new Promise(r=>setTimeout(r,50*(i+1)));}
+   }
+   if(removed)await git(root,['branch','-D',s.branch]).catch(()=>{});
+   else console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);
+  }
+  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);}
+  else s.hidden=true;
+  await persist();return {discarded:true};
  }
  const ompSessionsDir=path.resolve(options.ompSessionsDir||process.env.OMP_SESSIONS_DIR||path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'sessions'));
  const headCache=new Map();
@@ -1225,7 +1256,7 @@ async function spend(){
     const dir=await resolveDir(body.path);const images=chatImages(body);const raw=typeof body.prompt==='string'?body.prompt.trim().slice(0,200000):'';const p=await ensureProject(dir);
     const title=(typeof body.title==='string'&&body.title.trim().slice(0,120))||raw.split('\n')[0].slice(0,70)||`New session · ${p.name}`;
     const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);
-    const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking,launch});
+    const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking,launch,draft:body.draft===true});
     // A title cut from the prompt is a placeholder: OMP's RPC mode never auto-titles, so /rename asks it to (see event()).
     if(!(typeof body.title==='string'&&body.title.trim())&&!launch?.noTitle)s.autoTitle=true;
     if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
@@ -1262,6 +1293,8 @@ async function spend(){
   }catch(e){json({error:e.message},e.status||500);}
  });
  const close=async()=>{closing=true;clearInterval(refreshTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);await enhanceStops;};
+ // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
+ for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  await persist();return {server,store,token,close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
