@@ -150,6 +150,8 @@ A session created by Enhance is a **draft session** until its first message goes
 - Polls `GET /api/enhance?id=` every 500 ms while the view's job runs. On `done`, applies the result as described in §1.
 - The button is rendered by `renderComposer` and the home composer bar. The status line uses the existing `#statusLine`; on the home screen the job never runs, because Enhance moves to the new session first.
 - Draft discard hooks into the existing `route()` change handling: remember the previous view; if it was a draft session and the new view counts as leaving (§4), send `discard`.
+  - **In-flight guard:** skip `discard` while a send for that view is still in flight. The server lock alone can't order them: the server reads the whole request body (server.mjs:1081) before it takes the lock (1134). A Send with several MB of images can therefore lose the lock to a tiny `discard` sent just after it, leaving the Send with a 404 and its draft restored into a view that no longer exists. The guard checks `S.pending?.view === prevView` (set by `send()` before its request, app.js:1942) **and** a new `S.sendingBash` view marker set around the `!cmd` path (1890-1893), which sends `bash` without setting `S.pending`.
+  - **After the guard:** when that send finishes, the session either has a message (no longer a draft) or the send failed. On failure, if the user is no longer on that view, `discard` is sent then, from the send's `finally`.
 - The keyboard shortcut is added to the global keydown handler, next to Ctrl+P.
 
 ## 6. Error handling summary
@@ -165,7 +167,7 @@ A session created by Enhance is a **draft session** until its first message goes
 | Companion shutdown | Processes killed; images directory removed |
 | Leaving a draft session without sending | Session, OMP process, empty session file and its worktree/branch removed after both processes have exited (§4) |
 | Worktree still busy after 20 retries | Session hidden but kept with `draft: true`; removal retried on the next companion startup |
-| Send and leave in quick succession | Discard waits behind Send on the session lock, finds `draft` cleared, and does nothing |
+| Send and leave in quick succession | The client skips `discard` while that view's send is in flight; if the send fails after the user left, `discard` is sent then. On the server, a send that takes the lock first clears `draft` before any `await`, so a later discard does nothing |
 | Draft session left over after a crash or tab close | Discarded on the next companion startup |
 
 ## 7. Testing
@@ -182,6 +184,7 @@ A session created by Enhance is a **draft session** until its first message goes
   - Undo restores the original draft.
   - New-session Enhance moves the attachments and draft to the new session's view.
   - Leaving a draft session for New session or another session sends `discard`; leaving for Settings does not; a session that has sent a message is never discarded (server no-op).
+  - Leaving a draft session while its Send (or `!cmd`) request is still pending sends no `discard`. If that request then fails, `discard` is sent once it settles.
   - Server (with a fake `omp` via the existing `ompCommand` option): a `prompt` and a `discard` sent back to back for a draft session leave the session in the store with its message, and a lone `discard` removes it only after the fake process has exited.
   - Server: model resolution order (`@enhance` → session model with `--thinking=low` → none) and the argument list never contains the draft text. Tested by exporting the argument builder for unit use.
 
