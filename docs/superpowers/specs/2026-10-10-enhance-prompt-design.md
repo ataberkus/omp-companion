@@ -117,18 +117,39 @@ Assistant: …              (last 6 user/assistant messages, each truncated to 1
 
 - **Existing session, OMP not running:** in parallel with `POST /api/enhance`, the frontend calls `GET /api/commands?session=<id>`. That route already runs `start(s)` under the session lock (it is what the slash menu uses). Once OMP is up, ghost text works and the next Send doesn't wait for OMP to start. No new endpoint.
 - **New-session screen:**
-  1. Enhance calls `POST /api/quick-start` with the same options as Start (`path`, `isolate`, `model`, `thinking`, `fast`, `advisor`, `launch`) but **no prompt and no images**. This only creates and saves the session: with an empty prompt, `createSession` persists without starting OMP, and quick-start starts OMP only as a side effect of the `advisor`/`fast` options. So the frontend then calls `GET /api/commands?session=<id>`, the same start path as an existing session that isn't running (above), so OMP always starts on the picked folder.
+  1. Enhance calls `POST /api/quick-start` with the same options as Start (`path`, `isolate`, `model`, `thinking`, `fast`, `advisor`, `launch`) plus `draft: true`, but **no prompt and no images**. This only creates and saves the session: with an empty prompt, `createSession` persists without starting OMP, and quick-start starts OMP only as a side effect of the `advisor`/`fast` options. So the frontend then calls `GET /api/commands?session=<id>`, the same start path as an existing session that isn't running (above), so OMP always starts on the picked folder.
   2. The staged attachments move from the home view to the new session's view (`a.view = 'session:' + id`), so they stay attached for Send.
   3. The draft is stored as the new view's draft, the browser navigates to `#/s/<id>`, and the enhance starts there in session mode (cwd = the new session's cwd, including an isolated worktree).
   4. If quick-start fails, the user stays on the home screen with the draft and attachments unchanged, and an error toast is shown.
 - **OMP-history view (`native`):** enhance runs in `path` mode with the view's cwd and model choice. It does not resume the session, because resuming requires sending a message.
 - **Images:** the view's staged attachments are sent with the enhance request (`imagePayload`). They are not removed from the composer.
 
+### Draft sessions (discarded if you leave without sending)
+
+A session created by Enhance is a **draft session** until its first message goes out. Picking workspace A, pressing Enhance, then going back to New session and picking B must not leave A's session, OMP process or worktree behind.
+
+- **Marker:** quick-start with `draft: true` sets `s.draft = true` on the stored session. The marker is cleared, and the session becomes a normal one, the first time `command()` sends a `prompt`, `steer`, `follow_up`, `interrupt` or `bash` for it, including slash commands. Queueing a follow-up also counts.
+- **Visible:** while `s.draft` is set, the status line reads `Draft · discarded if you leave without sending`.
+- **What counts as leaving** (frontend, on route change from `#/s/<id>` of a draft session to):
+  - New session (`#/new`, Alt+N, `＋ New here`), including then picking another folder;
+  - another panel session or an OMP-history item.
+
+  Settings, Tools, Spend, and that session's own subagent, changes and transcript views do **not** count, so the user can, for example, set the `enhance` role and come back. Discard is fire-and-forget: navigation never waits for it.
+- **Discard** (`POST /api/sessions/<id>/command {type:'discard'}`, lock-free like `predict_word`). It is a no-op unless `s.draft` is still set and the session has no user message. This guards against a race with Send. When it runs:
+  1. Stop the session's running enhance job, if any.
+  2. Stop its OMP process (`runners.get(id)?.kill()`) and wait for it to close (as `hide` does).
+  3. Delete its OMP session file only if `readSessionHead` shows no user message. In a file that has messages, it is left alone and the session is simply hidden.
+  4. If `s.isolated` and `s.branch` starts with `omp-web/`: `git worktree remove --force <cwd>`, then `git branch -D <branch>`, both in the project path. Failures are logged, not shown, because the session is already gone from the UI.
+  5. Remove the session from `store.sessions` (not just hidden), drop its staged attachments and in-tab draft on the client, and persist.
+- **Tab closed or companion quit while a draft session exists:** in-tab drafts don't survive a reload, so the session would come back empty. On companion **startup**, every stored session that still has `draft: true` and no user message is discarded the same way.
+- **Known limit:** with two dashboard tabs, leaving the draft in one tab discards it even if the other tab is showing it. The other tab sees the session disappear on its next poll. This is acceptable, because draft sessions are short-lived and single-tab in practice.
+
 ## 5. Frontend (`local-dist/app.js`, `app.css`)
 
 - State: `S.enhance = Map<view, { id, original, model, step, pollTimer }>`.
 - Polls `GET /api/enhance?id=` every 500 ms while the view's job runs. On `done`, applies the result as described in §1.
 - The button is rendered by `renderComposer` and the home composer bar. The status line uses the existing `#statusLine`; on the home screen the job never runs, because Enhance moves to the new session first.
+- Draft discard hooks into the existing `route()` change handling: remember the previous view; if it was a draft session and the new view counts as leaving (§4), send `discard`.
 - The keyboard shortcut is added to the global keydown handler, next to Ctrl+P.
 
 ## 6. Error handling summary
@@ -142,6 +163,8 @@ Assistant: …              (last 6 user/assistant messages, each truncated to 1
 | A fourth job while three are running | 409 toast `Wait for the running enhance to finish.` |
 | Draft edited while running | Not applied; info toast with `Use enhanced prompt` action |
 | Companion shutdown | Processes killed; images directory removed |
+| Leaving a draft session without sending | Session, OMP process, empty session file and its worktree/branch removed (§4) |
+| Draft session left over after a crash or tab close | Discarded on the next companion startup |
 
 ## 7. Testing
 
@@ -151,10 +174,12 @@ Assistant: …              (last 6 user/assistant messages, each truncated to 1
   3. Cancel mid-run.
   4. Set `modelRoles.enhance` to a bad model: error toast.
   5. Enhance in a session whose OMP is stopped: OMP starts.
+  6. Enhance on New session in folder A with *Isolated git worktree* ticked, then Alt+N and pick folder B: A's session is gone from the sidebar, its `omp` process has exited, and `git worktree list` / `git branch` in A no longer show `omp-web/…`. Repeat without leaving and press Send: the session stays.
 - **Permanent tests (`tests/enhance.test.mjs`), only for the boundaries:**
   - The result is applied only when the draft is unchanged; otherwise the offer toast appears.
   - Undo restores the original draft.
   - New-session Enhance moves the attachments and draft to the new session's view.
+  - Leaving a draft session for New session or another session sends `discard`; leaving for Settings does not; a session that has sent a message is never discarded (server no-op).
   - Server: model resolution order (`@enhance` → session model with `--thinking=low` → none) and the argument list never contains the draft text. Tested by exporting the argument builder for unit use.
 
 ## Out of scope
