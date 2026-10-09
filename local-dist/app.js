@@ -177,6 +177,7 @@
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
     noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
     planBusy: new Set(), planSubmitted: new Set(),
+    enhance: new Map(), // view → { id, original, model, step } while an enhance runs
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -404,7 +405,7 @@
           <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span class="hint" id="hint"></span><span id="buttons" style="display:flex;gap:6px"></span></div>
+          <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span class="hint" id="hint"></span><span id="buttons" style="display:flex;gap:6px"></span></div>
         </div>
       </div>`;
     const input = $('#input');
@@ -518,6 +519,71 @@
     if (!ghostLive(input)) return false;
     ghost = null; ghostSeq++; renderGhost();
     return true;
+  }
+
+  // ---------- enhance prompt: a read-only OMP run rewrites the draft with project context ----------
+  const enhanceBlocked = v => !v.trim() || /^[/!]/.test(v.trim());
+  function enhanceButton(view, draft) {
+    return S.enhance.has(view)
+      ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" title="Stop enhancing (Ctrl+Shift+E)">■ Cancel</button>`
+      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.busy ? 'disabled' : ''}>✨ Enhance</button>`;
+  }
+  const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
+  async function startEnhance(view, body, original) {
+    const job = { id: null, original, model: '', step: '' };
+    S.enhance.set(view, job); refreshComposer();
+    let r;
+    try { r = await api('/enhance', body, { timeout: 60000 }); }
+    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); } toast(e.message, 'err'); return; }
+    // Cancelled while the request was in flight: stop the job it just created.
+    if (S.enhance.get(view) !== job) { api('/enhance/stop', { id: r.id }).catch(() => {}); return; }
+    Object.assign(job, { id: r.id, model: r.model }); refreshComposer();
+    pollEnhance(view);
+  }
+  async function pollEnhance(view) {
+    const job = S.enhance.get(view);
+    if (!job?.id) return;
+    let r;
+    try { r = await api('/enhance?id=' + encodeURIComponent(job.id)); }
+    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); toast(e.message, 'err'); } return; }
+    if (S.enhance.get(view) !== job) return;
+    if (r.status === 'running') { job.step = r.step || ''; if (r.model) job.model = r.model; refreshComposer(); setTimeout(() => pollEnhance(view), 500); return; }
+    S.enhance.delete(view); refreshComposer();
+    if (r.status === 'done') applyEnhanced(view, job.original, r.text);
+    else if (r.status === 'error') toast(r.error || 'Enhance failed.', 'err');
+  }
+  function applyEnhanced(view, original, text) {
+    const input = S.view === view ? $('#input') : null;
+    if (!input) { if ((drafts.get(view) ?? '') === original) drafts.set(view, text); return; }
+    // The user (or an extension) changed the draft meanwhile: offer the result instead of overwriting.
+    if (input.value !== original) return toast('Enhanced prompt ready', '', { label: 'Use enhanced prompt', run: () => { if (S.view === view) replaceDraft($('#input'), text); } });
+    replaceDraft(input, text);
+    toast('Prompt enhanced', '', { label: 'Undo', run: () => { if (S.view === view) replaceDraft($('#input'), original); } });
+  }
+  // insertText keeps the swap on the browser's undo stack (Ctrl+Z); plain assignment is the fallback.
+  function replaceDraft(input, text) {
+    input.focus(); input.select?.();
+    if (!document.execCommand?.('insertText', false, text)) input.value = text;
+    input.selectionStart = input.selectionEnd = input.value.length;
+    drafts.set(S.view, input.value); autosize(input); updateComposer();
+  }
+  function enhanceCurrent() {
+    const c = current(), view = S.view;
+    const running = S.enhance.get(view);
+    if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
+    const input = $('#input');
+    if (!input || enhanceBlocked(input.value) || S.busy) return;
+    const text = input.value.trim(), images = imagePayload(attached());
+    let body;
+    if (c.kind === 'session') {
+      body = { session: c.id, text, ...images };
+      api('/commands?session=' + encodeURIComponent(c.id)).catch(() => {}); // starts OMP alongside, so Send is instant afterwards
+    } else if (c.kind === 'native') {
+      const n = S.native.find(x => x.file === c.file) || S.previews.get(c.file), ch = S.nativeChoice.get(c.file);
+      if (!n?.cwd) return toast('This session has no folder to read.', 'err');
+      body = { path: n.cwd, model: ch?.model || n.model || undefined, thinking: ch?.thinking || undefined, text, ...images };
+    } else return;
+    startEnhance(view, body, input.value);
   }
 
   function contextMeta(tokens, win, pct) {
@@ -1386,7 +1452,7 @@
   const keyName = k => { k = KEY_ALIAS[k] || k; return /^[a-z0-9]$|^f([1-9]|1[0-2])$|^[-=[\]\\;',./`]$/.test(k) || NAMED_KEYS.has(k) ? k : null; };
   const normCombo = s => { const p = s.toLowerCase().split('+').map(x => x.trim()), key = keyName(p.pop() || ''); if (!key || p.some(x => !MODS[x])) return null; const m = new Set(p.map(x => MODS[x])); return m.has('ctrl') || m.has('alt') || m.has('meta') ? [...['ctrl', 'alt', 'shift', 'meta'].filter(x => m.has(x)), key].join('+') : null; };
   // The dashboard's own shortcuts always win, so they can't be saved as composer hotkeys.
-  const RESERVED_KEYS = new Set(['ctrl+p', 'ctrl+shift+p', 'meta+p', 'meta+shift+p', 'alt+shift+p', 'alt+arrowup', 'alt+arrowdown', 'alt+n', 'alt+shift+n']);
+  const RESERVED_KEYS = new Set(['ctrl+p', 'ctrl+shift+p', 'meta+p', 'meta+shift+p', 'alt+shift+p', 'alt+arrowup', 'alt+arrowdown', 'alt+n', 'alt+shift+n', 'ctrl+shift+e', 'meta+shift+e']);
   // The typed character wins when it is an ASCII letter or digit (AZERTY Ctrl+A stays select-all); otherwise fall back to
   // the physical key, so Option+Q on a Mac ('œ'), Cyrillic layouts and Shift+1 ('!') still match.
   const keyChar = e => { const k = e.key.toLowerCase(); return /^[a-z0-9]$/.test(k) ? k : /^(?:Key|Digit)(.)$/.exec(e.code || '')?.[1].toLowerCase() || k; };
@@ -1631,6 +1697,8 @@
     renderAttachments();
     let placeholder, hintText, btns, status = '';
     const has = !!input.value.trim() || !!attachment;
+    // While an enhance runs the draft is about to be replaced: nothing can be sent from it.
+    const enhancing = S.enhance.get(S.view), busy = S.busy || !!enhancing;
     const command = /^\/\S/.test(input.value.trim());
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
@@ -1642,20 +1710,20 @@
     if (!s) {
       placeholder = 'Continue this session…';
       hintText = 'Enter to continue · Shift+Enter for a new line';
-      btns = `<button class="btn primary" data-act="send" ${has && !S.busy ? '' : 'disabled'}>${S.busy ? 'Starting…' : 'Continue ↵'}</button>`;
+      btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${S.busy ? 'Starting…' : 'Continue ↵'}</button>`;
       status = `<span class="grow">From OMP history${native?.cwd ? ' · ' + esc(native.cwd) : ''}. Don't continue it here while it's still open in a terminal.</span>`;
     } else if (s.status === 'running' || s.status === 'queued') {
       placeholder = 'Steer OMP while it works…';
       hintText = (command ? 'Enter runs command' + hotkeyHint('follow_up', 'queues for later') : 'Enter steers now' + hotkeyHint('interrupt', 'stops & sends') + hotkeyHint('follow_up', 'queues'));
-      btns = `<button class="btn" data-act="follow_up" ${has && !S.busy ? '' : 'disabled'} title="Send after OMP finishes${esc(hotkeyList('follow_up').length ? ` (${hotkeyList('follow_up').join(', ')})` : '')}">Queue</button>
-        <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !S.busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
-        ${has && !command && !S.busy ? `<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}">■ Stop &amp; send</button>` : ''}
+      btns = `<button class="btn" data-act="follow_up" ${has && !busy ? '' : 'disabled'} title="Send after OMP finishes${esc(hotkeyList('follow_up').length ? ` (${hotkeyList('follow_up').join(', ')})` : '')}">Queue</button>
+        <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
+        ${has && !command && !busy ? `<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}">■ Stop &amp; send</button>` : ''}
         <button class="btn danger" data-act="abort" title="Stop the current turn" aria-label="Stop the current turn">■</button>`;
     } else {
       const fresh = s.messages ? !s.messages.some(m => m.role === 'user') : !s.prompt && !s.workStartedAt;
       placeholder = fresh ? 'What should OMP do?' : s.status === 'done' ? 'Send a message to reopen this session…' : 'Reply to continue…';
       hintText = 'Enter to send · Shift+Enter new line · / commands · !cmd shell';
-      btns = `<button class="btn primary" data-act="send" ${has && !S.busy ? '' : 'disabled'}>${S.busy ? 'Sending…' : 'Send ↵'}</button>`;
+      btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${S.busy ? 'Sending…' : 'Send ↵'}</button>`;
       if (s.status === 'error') status = `<span class="grow">⚠ ${esc(s.error || 'OMP reported an error.')}</span><button class="btn sm" data-act="retry">Retry last message</button>`;
       else if (s.status === 'review') status = `<span class="grow">OMP finished. Review the result, reply to keep going, or mark it done.</span>`;
       else if (s.status === 'paused' && !fresh) status = `<span class="grow">Idle. Reply to continue from where it left off.</span>`;
@@ -1664,10 +1732,13 @@
       status = `<span class="grow">Plan ready for review. Approval is required before implementation.</span><button class="btn sm primary" data-plan-review="${esc(s.id)}" ${S.planBusy.has(s.id) ? 'disabled' : ''}>Review plan</button>`;
       placeholder = 'Type feedback to keep planning without approving…';
     }
+    if (enhancing) status = `<span class="grow">Enhancing with ${esc(modelName(enhancing.model) || 'OMP')} · ${esc(enhancing.step || 'starting')}…</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
     if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id) { editorApplied.set(s.id, s._editorText.id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
+    input.readOnly = !!enhancing;
+    const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
@@ -1931,7 +2002,7 @@
     // A retry resends an earlier prompt as-is: the composer draft and staged images stay for the next message.
     const retry = retryText != null, text = retry ? retryText : input?.value.trim();
     const attachment = retry ? [] : attached();
-    if ((!text && !attachment.length) || S.busy) return;
+    if ((!text && !attachment.length) || S.busy || S.enhance.has(S.view)) return;
     // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
     if (c.kind === 'session' && !retry && !attachment.length && /^!\S/.test(text)) {
       input.value = ''; drafts.delete(S.view); autosize(input);
@@ -2749,6 +2820,7 @@
     else if (act === 'skip') [$('#input'), $('#homePrompt'), $('#pathInput'), ...main().querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),a[href],[tabindex="0"]')].find(n => n?.getClientRects().length)?.focus();
     else if (act === 'advisor') { closeMenu(a.closest('.menu')); advisorCommand(a.dataset.advisor); }
     else if (act === 'attach') $('#imageInput')?.click();
+    else if (act === 'enhance') enhanceCurrent();
     else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.name !== a.dataset.name); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
@@ -2953,6 +3025,8 @@
       else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
     }
+    // Ctrl+Shift+E enhances the composer draft (again cancels a running enhance).
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && keyIs(e, 'e') && (e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); enhanceCurrent(); return; }
     // Ctrl+P cycles model roles from the composer (and closes the picker); elsewhere it stays the browser's Print.
     if ((e.ctrlKey || e.metaKey) && keyIs(e, 'p') && (S.picker || e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Escape' && $('#modal') && !S.picker) { e.stopPropagation(); closeModal(); return; }
