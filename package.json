@@ -5,8 +5,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predesktop": "node scripts/check-build.mjs",
     "desktop": "tauri dev",
+    "prebuild": "node scripts/check-build.mjs",
     "build": "tauri build",
+    "predist": "node scripts/check-build.mjs",
     "dist": "tauri build"
   },
   "devDependencies": {
