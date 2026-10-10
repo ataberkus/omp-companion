@@ -501,7 +501,9 @@ export async function createCompanion(options={}){
  function event(s,f){
   // Ghost-text predictions arrive per keystroke; they are not session activity.
   if(f.type==='response'&&(f.command==='predict_word'||f.command==='predict_word_feedback'))return;
-  s.updatedAt=now();
+  // The 4 s background refresh (get_state/get_subagents) is not an update: bumping on it made every idle live session
+  // dirty, so the whole workspace.json (tens of MB) was rewritten every refresh.
+  if(!(f.type==='response'&&(f.command==='get_state'||f.command==='get_subagents')))s.updatedAt=now();
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
   if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;startWork(s);s.status='running';s.error=undefined;}
