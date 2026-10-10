@@ -1372,14 +1372,13 @@
     const desc = j.type === 'bash' ? '' : firstLine(j.title !== j.id ? j.title : j.task).replace(/^#+\s*/, '');
     const output = j.output || j.summary || '';
     return `<div class="job ${esc(j.status)}" data-key="job:${esc(j.id)}">
-      <div class="job-top"><span class="dot ${running ? 'running' : j.status === 'error' ? 'error' : j.status === 'stale' ? 'paused' : 'done'}"></span><b title="${esc(j.id)}">${esc(j.type === 'bash' ? (j.title || j.id) : j.id)}</b><span class="dur">${esc(time)}</span></div>
+      <div class="job-top"><span class="dot ${running ? 'running' : j.status === 'error' ? 'error' : j.status === 'stale' ? 'paused' : 'done'}"></span><b title="${esc(j.id)}">${esc(j.type === 'bash' ? (j.title || j.id) : j.id)}</b><span class="dur">${esc(time)}</span>${j.transcript ? `<button class="btn sm ghost job-watch" data-sub="${esc(j.transcript)}" aria-label="${running ? 'Watch' : 'Open'} subagent" title="${running ? 'Watch' : 'Open'} subagent transcript">${running ? 'Watch' : 'Open'} →</button>` : ''}</div>
       <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelLabel(j.model, j.thinking)) : ''}${j.cost ? ' · $' + j.cost.toFixed(j.cost < 0.01 ? 4 : 2) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
-      ${desc ? `<div class="job-desc">${esc(desc.slice(0, 220))}</div>` : ''}
-      ${liveLine ? `<div class="job-live">${esc(liveLine)}</div>` : ''}
-      ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}" open><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
+      ${desc ? `<div class="job-desc" title="${esc(desc.slice(0, 600))}">${esc(desc.slice(0, 220))}</div>` : ''}
+      ${liveLine ? `<div class="job-live" title="${esc(liveLine)}">${esc(liveLine)}</div>` : ''}
+      ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}"><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
       ${j.command ? `<pre class="job-cmd">${esc(j.command.slice(0, 600))}${j.command.length > 600 ? `\n… ${j.command.length - 600} more characters` : ''}</pre>` : ''}
       ${output && !running ? `<details class="job-out"><summary>Output</summary><pre>${esc(output.slice(0, 6000))}${output.length > 6000 ? `\n… showing the first 6000 of ${output.length} characters${j.transcript ? '. Open the subagent for the full transcript.' : ''}` : ''}</pre></details>` : ''}
-      ${j.transcript ? `<button class="btn sm ghost job-open" data-sub="${esc(j.transcript)}">${running ? 'Watch' : 'Open'} subagent →</button>` : ''}
     </div>`;
   }
   function renderSide(s) {
@@ -1402,7 +1401,7 @@
       ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
       ${advisors.length ? `<div class="side-sec"><div class="side-label">Advisors <span>${advisors.length}</span></div>${advisors.map(x => `<div class="job"><div class="job-top"><b>${esc(x.name === '__advisor' ? 'Default' : x.name.slice('__advisor.'.length))}</b><span class="dur">${esc(ago(x.updatedAt))}</span></div>${x.model ? `<div class="job-sub">${esc(modelName(x.model))}</div>` : ''}<button class="btn sm ghost job-open" data-sub="${esc(x.file)}">Open transcript →</button></div>`).join('')}</div>` : ''}`}`);
     // A live Reasoning box follows new text until the user scrolls it (swapHtml keeps it pinned while it sits at the bottom).
-    el.querySelectorAll('.job-thought pre').forEach(p => { if (!touched.has(p)) p.scrollTop = p.scrollHeight; });
+    el.querySelectorAll('.job-thought[open] pre').forEach(p => { if (!touched.has(p)) p.scrollTop = p.scrollHeight; });
   }
   function changesButton(messages, key) {
     const files = new Set();
@@ -3028,7 +3027,7 @@
     else if (d.classList?.contains('row')) remember(rowOpen, d.dataset.rid);
     else if (d.hasAttribute?.('data-finished')) S.finishedOpen = d.open;
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
-    else if (d.tagName === 'DETAILS') touched.add(d);
+    else if (d.tagName === 'DETAILS') { touched.add(d); const p = d.open && d.matches('.job-thought') && d.querySelector('pre'); if (p && !touched.has(p)) p.scrollTop = p.scrollHeight; }
   }, true);
   document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); if (e.target.id === 'scroller') markPromptRail(); }, true);
   // Moving the caret off the end hides the suggestion; returning brings it back.
