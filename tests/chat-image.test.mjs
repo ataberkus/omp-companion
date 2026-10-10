@@ -9,6 +9,8 @@ import { createCompanion } from '../companion/server.mjs';
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
 const image = { type: 'image', mimeType: 'image/png', data: png };
 const preview = `data:image/png;base64,${png}`;
+// A header-only PNG claiming 1568×1568 pixels: ≈1,534 estimated tokens, never forwarded to OMP.
+const big = (() => { const b = Buffer.alloc(33); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]).copy(b); b.write('IHDR', 12, 'ascii'); b.writeUInt32BE(1568, 16); b.writeUInt32BE(1568, 20); return { type: 'image', mimeType: 'image/png', data: b.toString('base64') }; })();
 
 test('image-only, steered and resumed chat messages reach OMP while invalid images are rejected', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-image-'));
@@ -30,7 +32,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data }) + '\\n');
 }`);
   const now = new Date().toISOString();
-  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }, { id: 'tight', projectId: 'project', title: 'Tight', status: 'paused', cwd: dir, model: 'OMP default', native: false, contextWindow: 5000, contextTokens: 1000, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
   const nativeDir = join(dir, 'native');
   const nativeFile = join(nativeDir, 'project', 'history.jsonl');
   await mkdir(join(nativeDir, 'project'), { recursive: true });
@@ -74,8 +76,20 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.notEqual(multi.status, 'error');
   assert.deepEqual(multi.messages.find(m => m.role === 'user')?.imagePreview, [preview, preview, preview]);
   assert.match(await readFile(join(dir, 'advisor.log'), 'utf8'), /^\/advisor off$/m);
-  const [tooMany] = await post('/sessions/session/command', { type: 'prompt', message: '', images: Array(7).fill(image) });
-  assert.equal(tooMany, 400);
+  // No fixed image count: seven small images fit the 4,000 tokens left in "tight"…
+  const [manyStatus, many] = await post('/sessions/tight/command', { type: 'prompt', message: 'With text', images: Array(7).fill(image) });
+  assert.equal(manyStatus, 200);
+  assert.notEqual(many.status, 'error');
+  // …but three ~1,534-token images don't, and nothing reaches OMP or the transcript.
+  const before = many.messages.length;
+  const [fullStatus, full] = await post('/sessions/tight/command', { type: 'prompt', message: 'With text', images: [big, big, big] });
+  assert.equal(fullStatus, 400);
+  assert.match(full.error, /Not enough context left.*3 images ≈ 4,602.*only 4,000 of 5,000 tokens remain/);
+  assert.equal(app.store.sessions.find(s => s.id === 'tight').messages.length, before);
+  // Unknown context window (OMP default model): images are limited only by upload size.
+  const [unknownStatus, unknown] = await post('/sessions/session/command', { type: 'follow_up', message: 'With text', images: Array(7).fill(image) });
+  assert.equal(unknownStatus, 200);
+  assert.notEqual(unknown.status, 'error');
   await app.flush();
   const saved = JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8'));
   assert.equal(saved.sessions.find(s => s.id === resumed.id).messages.find(m => m.role === 'user' && m.imagePreview)?.imagePreview, preview);

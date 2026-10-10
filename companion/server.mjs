@@ -36,10 +36,31 @@ function advisorMessage(m,id,at){
  const notes=m.details.notes.slice(0,32).filter(n=>typeof n?.note==='string'&&n.note.trim()).map(n=>({note:n.note.slice(0,10000),severity:['nit','concern','blocker'].includes(n.severity)?n.severity:'nit',...(typeof n.advisor==='string'?{advisor:n.advisor.slice(0,80)}:{})}));
  return notes.length?{id,role:'advisor',text:notes.map(n=>n.note).join('\n').slice(-100000),notes,at}:null;
 }
-const MAX_IMAGE_BYTES=5*1024*1024,MAX_IMAGES=6;
+const MAX_IMAGE_BYTES=5*1024*1024;
+// Prompt cost estimates: ~4 characters per text token; images as Anthropic bills them, (w×h)/750 after its
+// 1568px / 1.15 MP downscale (the costliest common provider). The dashboard (app.js) uses the same formula.
+const textTokens=t=>Math.ceil(String(t||'').length/4);
+const imageTokens=(w,h)=>{if(!(w>0&&h>0))return 1600;const k=Math.min(1,1568/Math.max(w,h),Math.sqrt(1.15e6/(w*h)));return Math.ceil(w*h*k*k/750);};
+// Pixel size from the file header; null when the header can't be read (costed as the 1600-token maximum).
+function imageSize({mimeType,data}){
+ try{const b=Buffer.from(data,'base64');
+  if(mimeType==='image/png')return [b.readUInt32BE(16),b.readUInt32BE(20)];
+  if(mimeType==='image/gif')return [b.readUInt16LE(6),b.readUInt16LE(8)];
+  if(mimeType==='image/webp'){const k=b.toString('ascii',12,16);
+   if(k==='VP8X')return [1+b.readUIntLE(24,3),1+b.readUIntLE(27,3)];
+   if(k==='VP8L'){const v=b.readUInt32LE(21);return [1+(v&0x3fff),1+((v>>>14)&0x3fff)];}
+   if(k==='VP8 ')return [b.readUInt16LE(26)&0x3fff,b.readUInt16LE(28)&0x3fff];}
+  if(mimeType==='image/jpeg')for(let i=2;i+9<b.length;){
+   if(b[i]!==0xff||b[i+1]===0xff){i++;continue;}const m=b[i+1];
+   if(m>=0xc0&&m<=0xcf&&m!==0xc4&&m!==0xc8&&m!==0xcc)return [b.readUInt16BE(i+7),b.readUInt16BE(i+5)];
+   i+=m===0x01||(m>=0xd0&&m<=0xd8)?2:2+b.readUInt16BE(i+2);}
+ }catch{}
+ return null;
+}
+const imagesTokens=images=>images.reduce((n,i)=>n+imageTokens(...(imageSize(i)||[])),0);
 function chatImages(body){
  if(body.images===undefined)return [];
- if(!Array.isArray(body.images)||!body.images.length||body.images.length>MAX_IMAGES)throw error(`Attach 1 to ${MAX_IMAGES} images.`);
+ if(!Array.isArray(body.images)||!body.images.length)throw error('Attach at least one image.');
  const images=body.images.map(image=>{const data=image?.data;
   if(image?.type!=='image'||!['image/png','image/jpeg','image/webp','image/gif'].includes(image.mimeType)||typeof data!=='string'||data.length>Math.ceil(MAX_IMAGE_BYTES/3)*4||!data.length||data.length%4||!/^[A-Za-z0-9+/]+={0,2}$/.test(data))throw error('Use a PNG, JPEG, WebP or GIF image up to 5 MB.');
   const bytes=Buffer.from(data,'base64');
@@ -791,7 +812,7 @@ export async function createCompanion(options={}){
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
   if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';activity(s,`Completed ${s.title}`,'done');await persist();return s;}
-  if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);}
+  if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);const full=contextError(s,body.message,images);if(full)throw error(full);}
   if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
    if(images.length)throw error('Remove image attachments before checking /usage.');
    const rpc=await start(s);await refresh(s,rpc);
@@ -853,17 +874,32 @@ export async function createCompanion(options={}){
    await persist();return s;
   }catch(e){if(slashCommand){await persist();throw error(e.message);}delete s._interrupt;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
  }
+ // Room left in the session's context window, or null when the window is unknown (no runner state yet and the
+ // model isn't in the cached model list, e.g. "OMP default"): then only the upload size limits images.
+ function contextLeft(s){
+  const sel=s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'');
+  const win=s.contextWindow||(sel&&modelCache?.data.models.find(m=>m.selector===sel)?.contextWindow);
+  return win>0?{left:Math.max(0,win-(s.contextTokens||0)),win}:null;
+ }
+ function contextError(s,message,images){
+  const c=images.length?contextLeft(s):null;if(!c)return '';
+  const img=imagesTokens(images),txt=textTokens(message),n=v=>v.toLocaleString('en-US');
+  return img+txt>c.left?`Not enough context left for this message: it needs about ${n(img+txt)} tokens (${images.length} ${images.length===1?'image':'images'} ≈ ${n(img)}, text ≈ ${n(txt)}), but only ${n(c.left)} of ${n(c.win)} tokens remain. Remove some images, or run /compact or start a new session.`:'';
+ }
  async function sendQueued(s){
   while(s.queuedMessages?.length&&s.status==='running'){
-   // Follow-up mode "all" delivers every queued message as one prompt, like OMP's own queue.
+   // Follow-up mode "all" delivers every queued message as one prompt, like OMP's own queue,
+   // unless their combined text and images don't fit the context left; then they go one at a time.
    let batch=s.prefs?.followUpMode==='all'?s.queuedMessages.slice():[s.queuedMessages[0]];
    const load=async list=>{const out=[];for(const q of list)if(q.hasImage)out.push(...JSON.parse(await fs.readFile(queuedImageFile(q.id),'utf8')));return out;};
-   let raw=await load(batch);if(raw.length>MAX_IMAGES){batch=[batch[0]];raw=await load(batch);}
+   let raw=await load(batch);if(batch.length>1&&contextError(s,batch.map(q=>q.text).join('\n\n'),raw)){batch=[batch[0]];raw=await load(batch);}
    const item=batch[0],images=raw.length?chatImages({images:raw}):[];
    const message=batch.length>1?batch.map(q=>q.text).filter(Boolean).join('\n\n'):item.text;
    const preview=batch.length>1?batch.flatMap(q=>[].concat(q.imagePreview??[])):item.imagePreview;
    s.status='review';
-   await command(s,{type:'prompt',message,preview:Array.isArray(preview)&&!preview.length?undefined:preview},images,item.id);
+   // A message that alone no longer fits stays queued: the user can compact, edit or remove it.
+   try{await command(s,{type:'prompt',message,preview:Array.isArray(preview)&&!preview.length?undefined:preview},images,item.id);}
+   catch(e){notice(s,'error',e.message);return;}
    if(s.status==='error'){s.messages=s.messages.filter(m=>m.id!==item.id);await persist();return;}
    if(closing)return;
    const sent=new Set(batch.map(q=>q.id));s.queuedMessages=s.queuedMessages.filter(q=>!sent.has(q.id));
@@ -1245,7 +1281,7 @@ async function spend(){
    if(req.method!=='POST')throw error('Route not found.',404);
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);
    const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||url.pathname==='/api/enhance'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
-   const buffers=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>cap)throw error('Request body too large.',413);buffers.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(buffers).toString());}catch{throw error('Invalid JSON.');}
+   const buffers=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>cap)throw error(cap>256*1024?'This message is too large to upload: text and images together must stay under 48 MB. Remove some images and try again.':'Request body too large.',413);buffers.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(buffers).toString());}catch{throw error('Invalid JSON.');}
    if(!body||typeof body!=='object'||Array.isArray(body))throw error('JSON object required.');
    if(url.pathname==='/api/projects'){
     const dir=await resolveDir(body.path);if(store.projects.some(p=>samePath(p.path,dir)))throw error('This directory is already registered.');

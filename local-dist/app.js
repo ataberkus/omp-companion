@@ -1988,16 +1988,26 @@
   const images = list => [].concat(list || []).filter(safeImg).map(src => `<button type="button" class="msg-image-btn" aria-label="View attached image full size"><img class="msg-image" src="${esc(src)}" alt="Attached image"></button>`).join('');
   const attached = () => S.attachments.filter(a => a.view === S.view);
   const imagePayload = list => list.length ? { images: list.map(a => a.image), preview: list.map(a => a.preview) } : {};
+  // Same estimates as the companion's imageTokens/textTokens: ~4 characters per token; images (w×h)/750 after
+  // Anthropic's 1568px / 1.15 MP downscale. The companion checks again on send.
+  const imageTokens = (w, h) => { const k = Math.min(1, 1568 / Math.max(w, h), Math.sqrt(1.15e6 / (w * h))); return Math.ceil(w * h * k * k / 750); };
+  // Context left in the viewed chat, or null when its window is unknown (OMP default model, models not loaded): then only the upload size limits images.
+  function contextLeft() {
+    const c = current();
+    let win, used = 0;
+    if (c.kind === 'session') { const s = S.store?.sessions.find(x => x.id === c.id); win = s && (s.contextWindow || modelInfo(sessionModel(s))?.contextWindow); used = s?.contextTokens || 0; }
+    else if (c.kind === 'native') { const pv = S.previews.get(c.file), n = S.native.find(x => x.file === c.file); win = modelInfo(S.nativeChoice.get(c.file)?.model || n?.model || pv?.model)?.contextWindow; used = pv?.contextTokens || 0; }
+    else if (c.kind === 'home') win = modelInfo(S.home.model)?.contextWindow;
+    return win > 0 ? { left: Math.max(0, win - used), win } : null;
+  }
+  const UPLOAD_MAX = 45 * 1024 * 1024; // the companion accepts 48 MB per chat request; the rest is text and JSON
   async function attachImage(file) {
     if (!file) return;
     if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) || file.size > 25 * 1024 * 1024) return toast('Choose a PNG, JPEG, WebP or GIF under 25 MB.', 'err');
-    const view = S.view, pend = attachPending.get(view) || 0;
-    // Reserve the slot before the first await, so a multi-image pick or paste can't overshoot the limit.
-    if (attached().length + pend >= 6) return toast('Attach up to 6 images per message.', 'err');
-    attachPending.set(view, pend + 1);
+    const view = S.view;
     try {
       const bitmap = await createImageBitmap(file);
-      let blob = file, mimeType = file.type, preview;
+      let blob = file, mimeType = file.type, preview, width = bitmap.width, height = bitmap.height;
       try {
         const canvas = document.createElement('canvas');
         const draw = max => {
@@ -2008,11 +2018,12 @@
           ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
         };
-        if (file.size > 5 * 1024 * 1024) {
+        // Models see at most ~1568px, so larger images are scaled down here: fewer bytes to upload, same tokens.
+        if (file.size > 5 * 1024 * 1024 || Math.max(width, height) > 1568) {
           draw(1568);
           blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .82));
           if (!blob) throw new Error('Could not resize this image.');
-          mimeType = 'image/jpeg';
+          mimeType = 'image/jpeg'; width = canvas.width; height = canvas.height;
         }
         draw(1024);
         preview = canvas.toDataURL('image/jpeg', .8);
@@ -2025,16 +2036,24 @@
         reader.readAsDataURL(blob);
       });
       if (S.view !== view) return;
+      // Checked after the last await, so images read in parallel are each measured against everything already attached.
+      const list = attached(), tokens = imageTokens(width, height);
+      const room = contextLeft();
+      if (room) {
+        const draft = (current().kind === 'home' ? S.home.prompt : $('#input')?.value) || '';
+        const img = list.reduce((n, a) => n + a.tokens, tokens), txt = Math.ceil(draft.length / 4);
+        if (img + txt > room.left) throw new Error(`Not enough context left for another image: this message would need about ${fmtTokens(img + txt)} tokens (${list.length + 1} ${list.length ? 'images' : 'image'} ≈ ${fmtTokens(img)}, text ≈ ${fmtTokens(txt)}), but only ${fmtTokens(room.left)} of ${fmtTokens(room.win)} remain. Send what you have, or run /compact or start a new session.`);
+      }
+      const bytes = list.reduce((n, a) => n + a.image.data.length + a.preview.length, data.length + preview.length);
+      if (bytes > UPLOAD_MAX) throw new Error(`Too many large images for one message: they add up to ${(bytes / 1048576).toFixed(0)} MB, over the ${UPLOAD_MAX / 1048576} MB upload limit. Send these first, then attach the rest.`);
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[mimeType];
       const stem = (file.name || 'pasted-image').replace(/\.[A-Za-z0-9]+$/, '') || 'pasted-image';
       const name = `${stem}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-      S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name });
+      S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name, tokens });
       update(); renderAttachments();
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
-    finally { attachPending.set(view, attachPending.get(view) - 1); }
   }
 
-  const attachPending = new Map(); // view → images still being read
   async function send(kind, retryText) {
     const c = current();
     const input = $('#input');
