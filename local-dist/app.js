@@ -323,7 +323,9 @@
       for (const it of all) { const k = norm(it.cwd); (by.get(k) || by.set(k, []).get(k)).push(it); }
       for (const arr of by.values()) groups.push([arr[0].folder, arr, arr[0].cwd]);
       const top = g => Math.max(...g[1].map(i => +new Date(i.at)));
-      groups.sort((a, b) => top(b) - top(a));
+      // A just-settled session gets a fresh `at`; it must not lift its folder above one that is still working.
+      const busy = g => g[1].some(i => !i.needsReview && (i.status === 'running' || i.status === 'queued')) ? 0 : 1;
+      groups.sort((a, b) => busy(a) - busy(b) || top(b) - top(a));
     } else {
       add('Working now', working);
       add('Needs your review', review);
