@@ -179,21 +179,16 @@ async function importMessages(file,limit=400){
  return out.slice(-limit);
 }
 
-function modelUsageText(data,provider,model){
- if(!Array.isArray(data.reports))throw new Error('OMP returned an invalid usage report.');
+// Single parser for `omp usage --json`: the /usage chat snapshot and the live usage panel both render from this.
+function modelUsage(data,provider,model){
+ if(!Array.isArray(data?.reports))throw new Error('OMP returned an invalid usage report.');
  const clean=v=>String(v??'').replace(/[\r\n\t`]/g,' ');
  const number=v=>Number.isFinite(v)?v:undefined;
  const amount=v=>v.toLocaleString('en-US',{maximumFractionDigits:2});
  const identity=(meta,fallback)=>[meta?.email||meta?.accountId||meta?.projectId||fallback,meta?.orgName||meta?.orgId,meta?.planType].filter(Boolean).map(clean).join(' · ');
- const lines=[`Usage: ${clean(provider)}/${clean(model)}`,'All reported provider accounts; limits may be shared across models.'];
- const reports=data.reports.filter(r=>r.provider===provider);
- for(const [i,r] of reports.entries()){
-  lines.push('',identity(r.metadata,`Account ${i+1}`));
-  if(Number.isFinite(new Date(r.fetchedAt).getTime()))lines.push(`Fetched: ${new Date(r.fetchedAt).toISOString()}`);
-  for(const note of r.notes||[])lines.push(clean(note));
+ const accounts=data.reports.filter(r=>r.provider===provider).map((r,i)=>{
   if(!Array.isArray(r.limits))throw new Error('OMP returned invalid usage limits.');
-  if(!r.limits.length)lines.push('  Remaining quota unavailable: no limits reported.');
-  for(const limit of r.limits){
+  const limits=r.limits.map(limit=>{
    const a=limit.amount||{},used=number(a.used),cap=number(a.limit),left=number(a.remaining),leftFraction=number(a.remainingFraction);
    let fraction=number(a.usedFraction);
    if(fraction===undefined&&used!==undefined)fraction=cap>0?used/cap:a.unit==='percent'?used/100:undefined;
@@ -206,13 +201,29 @@ function modelUsageText(data,provider,model){
    if(!values.length)values.push('Remaining quota unavailable');
    if(used!==undefined&&a.unit!=='percent')values.push(`${amount(used)}${cap!==undefined?' / '+amount(cap):''} ${clean(a.unit==='unknown'?'':a.unit)} used`);
    const scope=limit.scope||{},window=limit.window;
-   lines.push(`  ${clean(limit.label||limit.id)}${window?.label?' · '+clean(window.label):''}${scope.modelId?' · model: '+clean(scope.modelId):''}${scope.tier?' · tier: '+clean(scope.tier):''}`,`    ${values.join(' · ')}`);
-   if(Number.isFinite(window?.resetsAt)&&Number.isFinite(new Date(window.resetsAt).getTime()))lines.push(`    ${clean(window.resetLabel||'Resets')}: ${new Date(window.resetsAt).toISOString()}`);
-   for(const note of limit.notes||[])lines.push('    '+clean(note));
+   const resets=Number.isFinite(window?.resetsAt)&&Number.isFinite(new Date(window.resetsAt).getTime());
+   return {label:clean(limit.label||limit.id),detail:[window?.label,scope.modelId&&'model: '+scope.modelId,scope.tier&&'tier: '+scope.tier].filter(Boolean).map(clean).join(' · '),
+    fraction,summary:values.join(' · '),resetsAt:resets?window.resetsAt:undefined,resetLabel:resets?clean(window.resetLabel||'Resets'):undefined,notes:(limit.notes||[]).map(clean)};
+  });
+  return {name:identity(r.metadata,`Account ${i+1}`),fetchedAt:Number.isFinite(new Date(r.fetchedAt).getTime())?new Date(r.fetchedAt).toISOString():undefined,notes:(r.notes||[]).map(clean),limits,unavailable:limits.length?undefined:'no limits reported'};
+ });
+ for(const a of Array.isArray(data.accountsWithoutUsage)?data.accountsWithoutUsage:[])if(a.provider===provider)accounts.push({name:identity(a,'Account'),notes:[],limits:[],unavailable:'no usage data'});
+ return {provider:clean(provider),model:clean(model),accounts,unavailable:data.reports.some(r=>r.provider===provider)?undefined:`${clean(provider)} did not report usage limits`};
+}
+function modelUsageText(u){
+ const lines=[`Usage: ${u.provider}/${u.model}`,'All reported provider accounts; limits may be shared across models.'];
+ for(const a of u.accounts){
+  lines.push('',a.name);
+  if(a.fetchedAt)lines.push(`Fetched: ${a.fetchedAt}`);
+  lines.push(...a.notes);
+  if(a.unavailable)lines.push(`  Remaining quota unavailable: ${a.unavailable}.`);
+  for(const l of a.limits){
+   lines.push(`  ${l.label}${l.detail?' · '+l.detail:''}`,`    ${l.summary}`);
+   if(l.resetsAt!==undefined)lines.push(`    ${l.resetLabel}: ${new Date(l.resetsAt).toISOString()}`);
+   for(const note of l.notes)lines.push('    '+note);
   }
  }
- for(const a of Array.isArray(data.accountsWithoutUsage)?data.accountsWithoutUsage:[])if(a.provider===provider)lines.push('',identity(a,'Account'), '  Remaining quota unavailable: no usage data.');
- if(!reports.length)lines.push('',`Remaining quota unavailable: ${clean(provider)} did not report usage limits.`);
+ if(u.unavailable)lines.push('',`Remaining quota unavailable: ${u.unavailable}.`);
  return ['```text',...lines,'```'].join('\n');
 }
 
@@ -696,6 +707,12 @@ export async function createCompanion(options={}){
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
+ // `omp usage` for the session's provider, parsed once for both the /usage chat snapshot and GET /api/usage.
+ async function providerUsage(s){
+  const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');
+  try{const {stdout}=await execOmp(['usage','--provider',provider,'--json'],{cwd:s.cwd,timeout:20000,maxBuffer:4*1024*1024,windowsHide:true});return modelUsage(JSON.parse(stdout),provider,model);}
+  catch(e){throw error(`Could not read ${provider} usage: ${String(e.stderr||e.message).trim()}`,502);}
+ }
  async function command(s,body,checkedImages,queuedId){
   const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
@@ -886,10 +903,7 @@ export async function createCompanion(options={}){
   if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
    if(images.length)throw error('Remove image attachments before checking /usage.');
    const rpc=await start(s);await refresh(s,rpc);
-   const provider=s.provider,model=s.model;if(!provider||!model)throw error('Select a model before checking /usage.');
-   let report;
-   try{const {stdout}=await execOmp(['usage','--provider',provider,'--json'],{cwd:s.cwd,timeout:20000,maxBuffer:4*1024*1024,windowsHide:true});report=modelUsageText(JSON.parse(stdout),provider,model);}
-   catch(e){throw error(`Could not read ${provider} usage: ${String(e.stderr||e.message).trim()}`,502);}
+   const report=modelUsageText(await providerUsage(s));
    append(s,'user',body.message,queuedId||randomUUID());append(s,'assistant',report);s.updatedAt=now();
    await persist();return s;
   }
@@ -1335,6 +1349,12 @@ async function spend(){
     json({id:job.id,status:job.status,step:job.step,model:job.model,...(job.status==='done'?{text:job.text}:{}),...(job.error?{error:job.error}:{})});return;}
    if(req.method==='GET'&&url.pathname==='/api/spend'){try{json(await spend());}catch(e){throw error(`Could not read OMP usage stats: ${String(e.stderr||e.message).trim()}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
+   if(req.method==='GET'&&url.pathname==='/api/usage'){
+    const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
+    // Sessions on "OMP default" have no provider until OMP reports its model, as /usage resolves it.
+    if(!s.provider||!s.model)await lock(s.id,async()=>{const rpc=await start(s);await refresh(s,rpc);await persist();});
+    json({...await providerUsage(s),updatedAt:now()});return;
+   }
    if(req.method==='GET'&&url.pathname==='/api/accounts'){try{json(await listAccounts());}catch(e){throw error(`Could not list provider accounts: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
     if(url.searchParams.has('path')){json({commands:await discoverCommands(await resolveDir(url.searchParams.get('path')))});return;}

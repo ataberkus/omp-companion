@@ -650,7 +650,7 @@
       s.goal?.objective ? `<span class="goal" title="${esc(`Goal (${s.goal.status}): ${s.goal.objective}`)}">🎯 ${esc(s.goal.objective.slice(0, 60))}</span>` : '',
       offlinePill(),
     ].join('');
-    const btn = [changesButton(s.messages || [], 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Show the selected model's provider quota (/usage)" aria-label="Usage">◔ <span class="lbl">Usage</span></button>`];
+    const btn = [changesButton(s.messages || [], 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Live provider quota for the selected model" aria-label="Usage" aria-haspopup="dialog">◔ <span class="lbl">Usage</span></button>`];
     if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort" aria-label="Stop">■ <span class="lbl">Stop</span></button>`);
     if (['review', 'paused', 'error'].includes(s.status) && s.messages?.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
     const idle = s.status !== 'running' && s.status !== 'queued';
@@ -1655,6 +1655,61 @@
   // ✦ and ⚑ menus; closing hands focus back to the chip when it was inside the menu.
   const closeThinkMenu = () => document.querySelectorAll('#thinkMenu, #advMenu').forEach(m => { const back = m.contains(document.activeElement) && m._btn; m.remove(); if (back?.isConnected) back.focus(); });
   const defaultLabel = () => { const d = splitSel(S.models?.roles?.default || ''); return d.sel ? `Default · ${modelLabel(d.sel, d.thinking || S.models.defaultThinking)}` : 'OMP default'; };
+
+  // ---------- live usage panel ----------
+  // Polls /api/usage every 2 min while open and the tab is visible; one request in flight at most; errors keep the last good data.
+  const USAGE_POLL = 2 * 60 * 1000;
+  S.usage = { sid: '', data: null, error: '', at: '', busy: false, timer: 0 };
+  function openUsage(btn) {
+    closeUsage();
+    const c = current(); if (c.kind !== 'session') return;
+    if (S.usage.sid !== c.id) S.usage = { sid: c.id, data: null, error: '', at: '', busy: false, timer: 0 };
+    const el = document.createElement('div');
+    el.id = 'usagePanel'; el.className = 'usage-panel'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Plan usage limits');
+    document.body.appendChild(el); el._btn = btn;
+    const r = btn.getBoundingClientRect();
+    el.style.top = r.bottom + 6 + 'px'; el.style.right = Math.max(8, innerWidth - r.right) + 'px';
+    renderUsage(); usagePoll();
+  }
+  function closeUsage() { const el = $('#usagePanel'); if (!el) return; clearTimeout(S.usage.timer); el.remove(); }
+  async function usagePoll() {
+    if (!$('#usagePanel')) return; // closeUsage already cleared the timer
+    clearTimeout(S.usage.timer);
+    if (document.hidden || S.usage.busy) return; // a running poll reschedules itself when it lands
+    const u = S.usage; u.busy = true; renderUsage();
+    try { u.data = await api('/usage?session=' + encodeURIComponent(u.sid), undefined, { timeout: 30000 }); u.error = ''; u.at = u.data.updatedAt; }
+    catch (e) { u.error = e.message; }
+    u.busy = false;
+    if (S.usage !== u) return; // the panel moved to another session meanwhile
+    renderUsage();
+    clearTimeout(u.timer);
+    if ($('#usagePanel') && !document.hidden) u.timer = setTimeout(usagePoll, USAGE_POLL);
+  }
+  const usageReset = t => {
+    const ms = t - Date.now();
+    if (ms <= 0) return 'resetting';
+    if (ms < 864e5) { const m = Math.round(ms / 6e4); return `resets in ${m >= 60 ? Math.floor(m / 60) + 'h ' : ''}${m % 60}m`; }
+    return 'Resets ' + new Date(t).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  };
+  function renderUsage() {
+    const el = $('#usagePanel'); if (!el) return;
+    const { data, error, at, busy } = S.usage;
+    const row = l => {
+      const pct = l.fraction === undefined ? undefined : Math.max(0, l.fraction * 100);
+      return `<div class="ul-row" title="${esc(l.summary + (l.notes.length ? '\n' + l.notes.join('\n') : ''))}">
+        <div class="ul-line"><span class="ul-name">${esc(l.label)}${l.detail ? ` <small>${esc(l.detail)}</small>` : ''}</span>
+        <span class="ul-meta">${l.resetsAt !== undefined ? esc(usageReset(l.resetsAt)) + ' ' : ''}<b>${pct === undefined ? esc(l.summary) : Math.round(pct) + '%'}</b></span></div>
+        <div class="ul-bar"><i class="${pct >= 90 ? 'hot' : ''}" style="width:${Math.min(100, pct || 0)}%"></i></div></div>`;
+    };
+    const body = !data ? (error ? '' : '<div class="working"><span class="spinner"></span> Checking usage…</div>')
+      : data.accounts.map(a => `<section class="ul-acct"><div class="ul-head">${esc(a.name)}</div>${a.notes.map(n => `<div class="ul-note">${esc(n)}</div>`).join('')}
+        ${a.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(a.unavailable)}.</div>` : a.limits.map(row).join('')}</section>`).join('')
+        + (data.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(data.unavailable)}.</div>` : '');
+    el.innerHTML = `<div class="ul-top"><span>Usage${data ? ` · ${esc(data.provider)}/${esc(data.model)}` : ''}</span>
+      <button class="btn-reset" data-act="usageChat" title="Post a /usage snapshot to the chat">/usage ↗</button></div>${body}
+      ${error ? `<div class="ul-err">${esc(error)}</div>` : ''}
+      <div class="ul-foot">${busy ? '<span class="spinner"></span> Refreshing…' : at ? 'Updated ' + esc(new Date(at).toLocaleTimeString()) + ' · every 2 min' : ''}</div>`;
+  }
 
   function renderQuestions(s) {
     const el = $('#questions'), questions = s?.uiRequests || [];
@@ -2761,7 +2816,7 @@
     }
   }
   // Hidden tabs (and the desktop app in the tray) poll every 8 s; catch up at once when shown again.
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); usagePoll(); });
 
   // ---------- events ----------
   const closeMenu = m => { if (!m) return; m.classList.remove('open'); m.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'false'); };
@@ -2888,6 +2943,7 @@
     const ts = t.closest('[data-thinkset]');
     if (ts) { const ctx = $('#thinkMenu')._ctx; closeThinkMenu(); ctx.apply(ctx.model, ts.dataset.thinkset); return; }
     if (!t.closest('#thinkMenu, #advMenu, [data-act="thinkMenu"], [data-act="advMenu"]')) closeThinkMenu();
+    if (!t.closest('#usagePanel, [data-act="usage"]')) closeUsage();
     const sg = t.closest('[data-setgroup]');
     if (sg) { e.preventDefault(); document.getElementById('sg-' + sg.dataset.setgroup)?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); return; }
     const sr = t.closest('[data-setreset]');
@@ -2974,7 +3030,8 @@
       else if (act === 'share' && s?.sessionFile) openTool('share', 'share', { session: s.sessionFile });
       else if (act === 'commit' && s) openTool('commit', 'run', { dryRun: true }, s.cwd);
     }
-    else if (act === 'usage') { toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
+    else if (act === 'usage') { $('#usagePanel') ? closeUsage() : openUsage(a); }
+    else if (act === 'usageChat') { closeUsage(); toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
     else if (act === 'commitRelated' && !S.busy) {
       const s = S.store?.sessions.find(x => x.id === c.id);
       const queue = s?.status === 'running' || s?.status === 'queued';
@@ -3175,6 +3232,7 @@
     if ((e.ctrlKey || e.metaKey) && keyIs(e, 'p') && (S.picker || e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Escape' && $('#modal') && !S.picker) { e.stopPropagation(); closeModal(); return; }
     if (e.key === 'Escape' && ($('#thinkMenu') || $('#advMenu'))) { closeThinkMenu(); return; }
+    if (e.key === 'Escape' && $('#usagePanel')) { const b = $('#usagePanel')._btn; closeUsage(); if (b?.isConnected) b.focus(); return; }
     const t = e.target;
     if (S.picker) {
       if (e.key === 'Escape') { e.preventDefault(); closePicker(); return; }
@@ -3233,7 +3291,7 @@
   window.addEventListener('hashchange', () => {
     // Overlays act on the view they were opened from: close them all when the view changes (a submitting plan review refuses).
     const c = current();
-    if (c.kind + ':' + (c.id || c.file || c.parent || '') !== S.view) { closePicker(); closeThinkMenu(); closeCtx(); closeLightbox(); closeMenus(); closeModal(); }
+    if (c.kind + ':' + (c.id || c.file || c.parent || '') !== S.view) { closePicker(); closeThinkMenu(); closeUsage(); closeCtx(); closeLightbox(); closeMenus(); closeModal(); }
     const t = new URLSearchParams(location.hash.slice(1)).get('token');
     if (t) { history.replaceState(null, '', location.pathname); setToken(t); refreshNative(); return; }
     route();
