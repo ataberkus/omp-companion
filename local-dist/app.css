@@ -705,6 +705,8 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 .modal-list button:hover:not([disabled]){border-color:var(--accent-line)}
 .modal-list button[disabled]{opacity:.5;cursor:not-allowed}
 .modal-list small{color:var(--green)}
+.modal-list button[aria-pressed="true"]{border-color:var(--accent-line)}
+.modal-body h4{margin:4px 0 6px;font-size:13px}
 .stats{display:grid;grid-template-columns:max-content 1fr;gap:8px 16px;margin:0}
 .stats dt{color:var(--muted)}
 .stats dd{margin:0;overflow-wrap:anywhere}
