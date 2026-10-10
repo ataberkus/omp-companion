@@ -79,6 +79,15 @@ async function git(cwd,args){return (await exec('git',['-C',cwd,...args],{timeou
 const samePath=(a,b)=>{const n=v=>path.resolve(v||'');return process.platform==='win32'?n(a).toLowerCase()===n(b).toLowerCase():n(a)===n(b);};
 async function resolveDir(value){let dir=text(value,'Directory path',4000);if(dir==='~'||dir.startsWith('~/')||dir.startsWith('~\\'))dir=path.join(os.homedir(),dir.slice(2));if(!path.isAbsolute(dir))throw error('Use an absolute directory path.');let stat;try{dir=await fs.realpath(dir);stat=await fs.stat(dir);}catch{throw error('Directory does not exist on this machine.');}if(!stat.isDirectory())throw error('Path must be a directory.');return dir;}
 const exists=p=>fs.access(p).then(()=>true,()=>false);
+// Opens a console window on this machine in `dir` (a phone using the panel opens it on the computer, not the phone).
+// `dir` is only the working directory, never part of a command line. Windows: `start` gives the new cmd its own
+// console window (a detached child has none, so cmd would read EOF and exit at once).
+function openTerminal(dir){
+ const shell=process.env.ComSpec||'cmd.exe';
+ const [cmd,args]=process.platform==='win32'?[shell,['/c','start','',shell]]:process.platform==='darwin'?['open',['-a','Terminal',dir]]:['x-terminal-emulator',[]];
+ const child=spawn(cmd,args,{cwd:dir,detached:process.platform!=='win32',stdio:'ignore',windowsHide:true});
+ return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not open a terminal: ${e.message}`,500)));child.once('spawn',()=>{child.unref();resolve();});});
+}
 // Keep only what the dashboard shows from OMP's subagent registry entries.
 const subagentView=e=>{const p=e?.progress||{};const pick=o=>Object.fromEntries(Object.entries(o||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).map(([k,v])=>[k,typeof v==='string'?v.slice(0,300):v]));
  return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(e?.status||p.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
@@ -446,6 +455,8 @@ export async function createCompanion(options={}){
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
  // Enhance reasoning level when no `enhance` role is set (Settings page); the role carries its own level.
  if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
+ // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
+ store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.
@@ -476,13 +487,53 @@ export async function createCompanion(options={}){
    await rpc.send({type:'get_state'});
    if(!list)throw error('OMP did not provide its slash commands. Update OMP and try again.',502);
    return list;
-  }finally{
-   const stopped=new Promise(resolve=>rpc.child.once('close',resolve));
-   if(!rpc.stopping)rpc.kill();
-   if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;
-   commandProbes.delete(rpc);
-  }
+  }finally{await stopProbe(rpc);}
  }
+ async function stopProbe(rpc){
+  const stopped=new Promise(resolve=>rpc.child.once('close',resolve));
+  if(!rpc.stopping)rpc.kill();
+  if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;
+  commandProbes.delete(rpc);
+ }
+ // `/session pin` with no account lists "N. <label>[ (active)]" lines under "OAuth accounts for <provider>:".
+ const accountLabels=out=>/^OAuth accounts for /.test(out)?out.split(/\r?\n/).map(l=>l.match(/^\d+\. (.+?)(?: \(active\))?$/)?.[1]).filter(Boolean):[];
+ // OMP has no RPC that lists stored accounts, so a throwaway session selects one model per logged-in provider and reads
+ // `/session pin`. RPC set_model does not change OMP's saved default model.
+ async function probeAccounts(){
+  const out=[];
+  const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...(options.ompArgs??['--mode','rpc-ui','--no-session'])],os.homedir(),f=>{if(f.type==='command_output')out.push(typeof f.text==='string'?f.text:contentText(f.content));},()=>{});
+  commandProbes.add(rpc);
+  try{
+   const providers=(await rpc.send({type:'get_login_providers'}))?.providers;
+   const models=(await rpc.send({type:'get_available_models'},60000))?.models;
+   const list=[];
+   for(const p of Array.isArray(providers)?providers.filter(p=>p.authenticated):[]){
+    const m=Array.isArray(models)&&models.find(m=>m.provider===p.id);if(!m)continue;
+    try{await rpc.send({type:'set_model',provider:m.provider,modelId:m.id});}catch{continue;}
+    out.length=0;await rpc.send({type:'prompt',message:'/session pin'});
+    const accounts=accountLabels(out.join('\n').trim());
+    if(accounts.length)list.push({id:String(p.id),name:String(p.name||p.id),accounts});
+   }
+   return list;
+  }finally{await stopProbe(rpc);}
+ }
+ // A probe takes seconds (an OMP start plus a model switch per provider), so the dialog is served from this cache,
+ // filled at startup and refreshed in the background on every read. A login bumps the generation: a probe that
+ // started before it may have missed the new account, so its result is dropped and another probe runs.
+ let accountCache,accountProbe,accountGen=0;
+ function refreshAccounts(){
+  if(closing)return Promise.reject(error('The companion is closing.'));
+  if(accountProbe)return accountProbe;
+  const gen=accountGen;
+  return accountProbe=probeAccounts().then(list=>{if(gen===accountGen)accountCache=list;return list;}).finally(()=>{accountProbe=undefined;if(gen!==accountGen&&!closing)refreshAccounts().catch(()=>{});});
+ }
+ async function listAccounts(){
+  let list=accountCache;
+  if(list)refreshAccounts().catch(()=>{});
+  else while(!(list=accountCache))await refreshAccounts();
+  return {providers:list.map(p=>({...p,selected:store.accountChoices[p.id]??null}))};
+ }
+ const accountsChanged=()=>{accountGen++;accountCache=undefined;refreshAccounts().catch(()=>{});};
  // Session toggles the dashboard can change; values are validated in command().
  const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),followUpMode:v=>({type:'set_follow_up_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
  const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],followUpMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
@@ -534,6 +585,7 @@ export async function createCompanion(options={}){
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
   if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);
+   if(s._capture){s._capture.push(text);return;}
    // Our own background /rename reports back in chat text; keep it out of the transcript.
    if(s._titling>Date.now()&&/^(Session renamed to |Session name not changed|Could not generate a session title|Rename failed:)/.test(text)){delete s._titling;return;}
    const adv=parseAdvisorStatus(text);if(adv)s.advisor={enabled:adv.enabled??s.advisor?.enabled??adv.state==='running',...adv,at:now()};if(!(adv&&s._silentAdvisorUntil>Date.now()))append(s,adv?'system':'assistant',text);}
@@ -621,6 +673,20 @@ export async function createCompanion(options={}){
  }
  // The status reply can arrive after send() resolves, so stay silent until it shows up (or a few seconds pass).
  async function advisorStatus(s,rpc){s._silentAdvisorUntil=Date.now()+5000;try{await rpc.send({type:'prompt',message:'/advisor status'});}catch{s._silentAdvisorUntil=0;}}
+ // Runs a local slash command and returns its output instead of adding it to the chat. OMP writes a command's
+ // command_output frames before its response, so they all land while the capture is open.
+ async function slashOutput(s,rpc,message){const out=s._capture=[];try{await rpc.send({type:'prompt',message});}finally{if(s._capture===out)delete s._capture;}return out.join('\n').trim();}
+ // OMP rotates between a provider's OAuth accounts unless the session is pinned (/session pin applies to the current
+ // model's provider and survives restarts of that session). Pins the account the user chose, once per runner and choice.
+ async function applyAccount(s,rpc){
+  const provider=s.provider,label=store.accountChoices[provider],key=provider+'\n'+label;
+  if(!provider||!label||rpc.account===key)return;
+  rpc.account=key;
+  const out=await slashOutput(s,rpc,`/session pin ${label}`).catch(e=>e.message);
+  if(out.startsWith('Pinned '))return;
+  if(/streaming/i.test(out)){delete rpc.account;return;}
+  notice(s,'warning',`Could not switch ${provider} to ${label}: ${out||'OMP did not answer.'}`);
+ }
  async function refresh(s,rpc){const promptId=s._promptId,run=s._run;try{const state=await rpc.send({type:'get_state'});
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,...(state.followUpMode?{followUp:state.followUpMode}:{}),interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
@@ -810,7 +876,7 @@ export async function createCompanion(options={}){
   // OAuth runs until the user finishes in the browser; the link arrives as open_url, pasted codes as input questions.
   if(body.type==='login'){
    const id=text(body.provider,'Provider',100);const rpc=await start(s);notice(s,'info',`Starting ${id} login…`);
-   rpc.send({type:'login',providerId:id},0).then(()=>notice(s,'info',`Logged in to ${id}.`),e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave();});
+   rpc.send({type:'login',providerId:id},0).then(()=>{notice(s,'info',`Logged in to ${id}.`);accountsChanged();},e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave();});
    return s;
   }
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
@@ -861,6 +927,8 @@ export async function createCompanion(options={}){
   if(body.type==='prompt'&&s.status==='running'&&!slashCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
    const rpc=await start(s);
+   // Before the turn starts: OMP refuses to change the account mid-stream.
+   if(prompting&&s.status!=='running')await applyAccount(s,rpc);
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
    // Only prompt dispatch executes slash commands; steer would queue their literal text.
    // Stop & send: OMP aborts the turn and starts this prompt in one step (abort_and_prompt).
@@ -1213,6 +1281,8 @@ async function spend(){
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
  let refreshBusy=false;
  const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}},4000);refreshTimer.unref();
+ // Fill the account cache shortly after startup, so the first Choose provider accounts… opens instantly.
+ const accountTimer=setTimeout(()=>refreshAccounts().catch(()=>{}),1000);accountTimer.unref();
  const staticFiles=new Map();const csp="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
  const digest=data=>createHash('sha1').update(data).digest('base64url').slice(0,12);
  const staticFile=async file=>{const st=await fs.stat(file);let c=staticFiles.get(file);if(c?.mtime!==st.mtimeMs||c.size!==st.size){const data=await fs.readFile(file);c={mtime:st.mtimeMs,size:st.size,data,hash:digest(data)};staticFiles.set(file,c);}return c;};
@@ -1265,6 +1335,7 @@ async function spend(){
     json({id:job.id,status:job.status,step:job.step,model:job.model,...(job.status==='done'?{text:job.text}:{}),...(job.error?{error:job.error}:{})});return;}
    if(req.method==='GET'&&url.pathname==='/api/spend'){try{json(await spend());}catch(e){throw error(`Could not read OMP usage stats: ${String(e.stderr||e.message).trim()}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
+   if(req.method==='GET'&&url.pathname==='/api/accounts'){try{json(await listAccounts());}catch(e){throw error(`Could not list provider accounts: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
     if(url.searchParams.has('path')){json({commands:await discoverCommands(await resolveDir(url.searchParams.get('path')))});return;}
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
@@ -1303,6 +1374,9 @@ async function spend(){
    if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
    if(url.pathname==='/api/enhance'){json(await startEnhance(body),202);return;}
    if(url.pathname==='/api/enhance/settings'){if(!THINKING.includes(body.thinking))throw error('Unknown reasoning level.');store.enhanceThinking=body.thinking;await persist();json({thinking:store.enhanceThinking});return;}
+   // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
+   if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist();json({provider,account});return;}
+   if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
    if(url.pathname==='/api/enhance/stop'){const job=enhanceJobs.get(body.id);if(!job)throw error('Enhance not found.',404);await stopEnhance(job);json({status:job.status});return;}
    if(url.pathname==='/api/omp-update'){
     if(updateState.status==='running')throw error('OMP update is already running.',409);
@@ -1348,7 +1422,7 @@ async function spend(){
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
- const close=async()=>{closing=true;clearInterval(refreshTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);await enhanceStops;};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  await persist();return {server,store,token,close,flush:()=>saveChain};

@@ -660,6 +660,7 @@
       <div class="actions">${btn.join('')}
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
           <button data-act="newHere">New session in this folder</button>
+          <button data-act="terminal" data-path="${esc(s.cwd)}">Open terminal in this folder</button>
           <button data-copy-text="${esc(s.cwd)}">Copy working directory</button>
           ${s.sessionFile ? `<button data-copy-text="${esc(s.sessionFile)}">Copy OMP session file path</button>` : ''}
           ${s.sessionFile ? `<button data-copy-text="omp --resume &quot;${esc(s.sessionFile)}&quot;">Copy terminal resume command</button>` : ''}
@@ -685,6 +686,7 @@
           ${pref('interruptMode', s.modes?.interrupt === 'wait', 'Hold steers until the turn ends', 'wait', 'immediate')}
           <div class="menu-sep"></div>
           <button data-act="login">Log in to a provider…</button>
+          <button data-act="accounts">Choose provider accounts…</button>
           ${idle ? '<button class="danger" data-act="hide">Remove from panel</button>' : ''}
         </div></div>
       </div>`;
@@ -700,6 +702,7 @@
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
           <button data-act="resumeOnly">Add to panel without a message</button>
           <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button>
+          ${cwd ? `<button data-act="terminal" data-path="${esc(cwd)}">Open terminal in this folder</button>` : ''}
           <button data-copy-text="${esc(cwd)}">Copy working directory</button>
           <button data-copy-text="${esc(file)}">Copy OMP session file path</button>
           <button data-copy-text="omp --resume &quot;${esc(file)}&quot;">Copy terminal resume command</button>
@@ -1955,6 +1958,26 @@
         : '<p class="muted">OMP has no OAuth providers to log in to.</p>');
     } catch (e) { toast(e.message, 'err'); }
   }
+  // Providers with several logged-in OAuth accounts; the choice applies to every session's next message.
+  // The dialog opens at once; the list is normally cached by the companion, and only the first read after startup or a login waits on OMP.
+  async function openAccounts() {
+    modal('Provider accounts', '<p class="muted" role="status">Reading logged-in accounts…</p>');
+    const dialog = $('#modal');
+    if (dialog?.getAttribute('aria-label') !== 'Provider accounts') return; // another dialog is still busy
+    try {
+      const { providers } = await api('/accounts', undefined, { timeout: 120000 });
+      if ($('#modal') !== dialog) return;
+      const many = providers.filter(p => p.accounts.length > 1);
+      dialog.querySelector('.modal-body').innerHTML = many.length
+        ? many.map(p => `<h4>${esc(p.name)}</h4><div class="modal-list">${p.accounts.map(a => `<button data-account="${esc(a)}" data-provider="${esc(p.id)}" aria-pressed="${a === p.selected}">${esc(a)}${a === p.selected ? ' <small>✓ in use</small>' : ''}</button>`).join('')}</div>${p.selected && !p.accounts.includes(p.selected) ? `<p class="muted">${esc(p.selected)} is no longer logged in. Pick another account.</p>` : p.selected ? '' : '<p class="muted">No choice yet: OMP picks between these accounts itself.</p>'}`).join('') + '<p class="muted">Each session switches to the chosen account before its next message.</p>'
+        : '<p class="muted">No provider has more than one logged-in account. Log in again with another account to choose between them.</p>';
+      dialog.querySelector('.modal-body button')?.focus();
+    } catch (e) { if ($('#modal') === dialog) closeModal(); toast(e.message, 'err'); }
+  }
+  async function chooseAccount(provider, account) {
+    try { await api('/accounts', { provider, account }); closeModal(); await refresh(); toast(`Using ${account} for ${provider}`); }
+    catch (e) { toast(e.message, 'err'); }
+  }
   async function sessionAction(body, opts) {
     try { await sessionApi(body, opts); await refresh(); return true; }
     catch (e) { toast(e.message, 'err'); return false; }
@@ -2812,9 +2835,10 @@
       // The backdrop only dismisses a dialog with nothing typed into it.
       const dirty = [...t.closest('#modal').querySelectorAll('textarea,input:not([type=checkbox]):not([type=radio])')].some(f => f.value.trim());
       if ((t.id === 'modal' && !dirty) || t.closest('[data-modal-close]')) closeModal();
-      const br = t.closest('[data-branch]'), lg = t.closest('[data-login]');
+      const br = t.closest('[data-branch]'), lg = t.closest('[data-login]'), ac = t.closest('[data-account]');
       if (br) doBranch(br.dataset.branch);
       if (lg) { closeModal(); sessionAction({ type: 'login', provider: lg.dataset.login }); }
+      if (ac) chooseAccount(ac.dataset.provider, ac.dataset.account);
       const sw = t.closest('[data-switch]');
       if (sw && !sw.disabled) { $('#modal').querySelectorAll('[data-switch]').forEach(b => { b.disabled = true; }); sessionAction({ type: 'switch_session', file: sw.dataset.switch }, { timeout: 70000 }).then(ok => { if (ok) { closeModal(); S.lastSig = ''; refreshNative(); toast('Switched session'); } else $('#modal')?.querySelectorAll('[data-switch]').forEach(b => { b.disabled = false; }); }); }
       if (t.closest('[data-launch-clear]')) saveLaunch(t.closest('form'), true);
@@ -2962,10 +2986,10 @@
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
-    else if (['rename', 'branch', 'handoff', 'export', 'stats', 'login'].includes(act)) {
+    else if (['rename', 'branch', 'handoff', 'export', 'stats', 'login', 'accounts'].includes(act)) {
       closeMenu(a.closest('.menu'));
       if (act === 'rename') { const s = S.store.sessions.find(x => x.id === c.id); const name = prompt('Session name', s?.title || ''); if (name?.trim() && name.trim() !== s?.title) sessionAction({ type: 'rename', name: name.trim() }); }
-      else ({ branch: openBranch, handoff: openHandoff, export: exportHtml, stats: showStats, login: openLogin })[act]();
+      else ({ branch: openBranch, handoff: openHandoff, export: exportHtml, stats: showStats, login: openLogin, accounts: openAccounts })[act]();
     }
     else if (act === 'hide') { if (confirm('Remove this session from the panel? The OMP session file is kept, so you can continue it later from history.')) sessionCommand('hide').then(ok => { if (ok) { refreshNative(); location.hash = '#/new'; } }); }
     else if (['side', 'openPlan', 'sideTab', 'closeSide'].includes(act)) {
@@ -2976,6 +3000,8 @@
       $('#topbar')._html = ''; update();
     }
     else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} closeMenu(a.closest('.menu')); S.lastSig = ''; $('#topbar')._html = ''; update(); }
+    // Opens on the computer running the companion (cmd on Windows), also when the panel is used from a phone.
+    else if (act === 'terminal') { closeMenu(a.closest('.menu')); api('/terminal', { path: a.dataset.path }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err')); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
     else if (act === 'spendReload') loadSpend();

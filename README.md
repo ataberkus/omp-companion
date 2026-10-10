@@ -37,8 +37,9 @@
 - **Smart composer:** send, steer a running turn (edit or cancel a steer until OMP reads it), queue follow-ups, attach images (button, paste or drag and drop), switch model or reasoning level from a searchable picker with favourites (Ctrl+P cycles configured default/smol/slow roles), toggle fast mode (⚡ chip, shown only for models with a priority service tier: Anthropic, OpenAI/Codex, Google, and their OpenRouter variants) in new and live sessions, use the ⚑ advisor menu to turn the advisor on or off (also before continuing a session from OMP history, applied before the first message), change its model, open its transcript, and filter its output in the chat (hide all while it keeps running, show reviews, important notes only), complete `/commands` in both new and live sessions (find skills by name, e.g. `/front` completes to `/skill:frontend-design`), complete the current word with Tab from OMP's local word predictor (n-gram or the tiny SmolLM2 model), rewrite the draft with **✨ Enhance** (below), and run `!command` in the session's shell.
 - **Enhance prompt:** **✨** (or **Ctrl+Shift+E**) in every composer (live sessions, New session, and continuing a session from OMP history) rewrites your draft into a concrete prompt. Each click is one read-only `omp -p` run limited to read/grep/glob; it uses the repo's `AGENTS.md`/`CLAUDE.md`, the conversation tail and attached images to name real files and symbols. The draft is replaced in place, with **Undo** in the toast or Ctrl+Z; nothing is sent automatically, and **✕** cancels a run. The model is OMP's `enhance` role if set, otherwise the composer's model at the reasoning level set under *Settings › Enhance* (default low). On New session it creates a draft session, discarded if you leave without sending.
 - **Provider usage in chat:** `/usage` (or **◔ Usage** in the top bar) shows the selected model's provider quotas, remaining percentages and amounts, and reset times for every reported account. It works during a running turn without steering it or queueing another prompt.
+- **Choose provider accounts:** logged in to the same provider more than once (for example two Claude subscriptions)? **⋯ › Choose provider accounts…** lists each provider's OAuth accounts; pick the one to use. Every session switches to it with OMP's own `/session pin` before its next message, so the choice covers new and running sessions, survives restarts (it's saved in `workspace.json`), and OMP no longer rotates that session to another account. Without a choice, OMP picks between the accounts itself. *Enhance prompt* runs (`omp -p`) have no session to pin and still use OMP's automatic pick. Reading the accounts from OMP takes a few seconds, so the companion reads them at startup and after each login from the panel, and refreshes them in the background each time the dialog opens: an account added with `omp login` in a terminal shows up the next time you open it.
 - **Answer OMP's questions** (`ask` tool and extension prompts) directly in the browser. Sessions with unanswered questions move to *Needs your review* until the last question is answered or cancelled, then return to their current work state. Extension notifications, status lines, widgets and sign-in links appear in the chat.
-- **Session tools:** rename, browse the full **session tree**, copy the last reply, cycle OMP's model and thinking level, export as HTML, share a link, session stats, commit the folder's changes, provider login, copy the working directory or `omp --resume` command, and **✓ Mark done**. While idle: branch from an earlier message, hand off to a fresh context, compact with optional instructions, start a fresh OMP session (`/new`), switch the entry to another saved session, or remove it from the panel. Per-session toggles cover fast mode, auto-compaction, auto-retry and steer/follow-up delivery (*Deliver all steers at once*, *Send all queued follow-ups together*, *Hold steers until the turn ends*).
+- **Session tools:** rename, browse the full **session tree**, copy the last reply, cycle OMP's model and thinking level, export as HTML, share a link, session stats, commit the folder's changes, provider login, **open a terminal in the session's folder** (`cmd` on Windows, Terminal on macOS, `x-terminal-emulator` on Linux; it opens on the computer running the companion, also when you use the panel from a phone), copy the working directory or `omp --resume` command, and **✓ Mark done**. While idle: branch from an earlier message, hand off to a fresh context, compact with optional instructions, start a fresh OMP session (`/new`), switch the entry to another saved session, or remove it from the panel. Per-session toggles cover fast mode, auto-compaction, auto-retry and steer/follow-up delivery (*Deliver all steers at once*, *Send all queued follow-ups together*, *Hold steers until the turn ends*).
 - **Stop & send:** while OMP is working, **■ Stop & send** cancels the current turn and sends your message in its place. Plain Enter still steers; Ctrl+Enter, Alt+Enter or Ctrl+Q queue it for after the turn.
 - **Hotkeys:** *Settings › Hotkeys* sets the composer keys for **Queue** and **Stop & send** (comma-separated, e.g. `Ctrl+Enter, Alt+Q`; empty turns one off). A combo is Ctrl, Alt or Meta (plus optional Shift) and a letter, digit or key name such as Enter, Space, Tab, Up, Down or Esc. Letters follow your keyboard layout; when a combo types something else (Option+letter on a Mac, non-Latin layouts) the key's position counts instead. The dashboard's own shortcuts (Ctrl+P, Ctrl+Shift+E, Alt+Shift+P, Alt+↑/↓, Alt+N) can't be reused. They're saved in this browser. Some browsers keep Ctrl+Q / Cmd+Q for themselves (Firefox on Linux, macOS), so use another combo there.
 - **Prompt rail:** the thin strip right of the chat has one tick per prompt you sent, placed where it sits in the conversation. Hover a tick to preview the prompt, click to jump to it; **Alt+↑ / Alt+↓** step to the previous / next prompt. The highlighted tick is the prompt you're reading.
@@ -58,8 +59,6 @@ Requires **Node.js 22+** and a working OMP install (`omp --version` works and a 
 node companion/server.mjs
 ```
 
-On Windows you can double-click `start.bat` instead.
-
 The dashboard opens in your browser, already connected. Press **Alt+N** (or click **New session**), pick a folder, type a prompt and press Enter. Keep the companion terminal open while you work.
 
 With **Group by project** enabled, click **+** beside a workspace's session count to open **New session** with that folder already selected.
@@ -78,19 +77,23 @@ Click **◔ Usage** in a session's top bar, or send `/usage` (or `/usage show`),
 
 ## Desktop app (Windows)
 
-The same dashboard in its own window, with the companion running inside the app: no console window, no browser tab.
+The same dashboard in its own window, with the companion running inside the app: no console window, no browser tab. Node.js is bundled, so the installed app needs only OMP.
 
-```sh
+Building needs Node.js 22+ (it is copied into the app), Rust and the MSVC C++ build tools:
+
+```bat
+winget install --id Rustlang.Rustup -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 npm install
-npm run dist
+npm run build
 ```
 
-Run `dist/OMP Control Room Setup <version>.exe`. It installs for your user only (no admin rights) and adds **OMP Control Room** to the Start menu. The installer is unsigned, so Windows SmartScreen may show *Unknown publisher* on first run: choose **More info → Run anyway**. For development, `npm run desktop` starts the app from this checkout.
+Run `src-tauri/target/release/bundle/nsis/OMP Control Room_<version>_x64-setup.exe`. It installs for your user only (no admin rights) and adds **OMP Control Room** to the Start menu. The installer is unsigned, so Windows SmartScreen may show *Unknown publisher* on first run: choose **More info → Run anyway**. For development, `npm run desktop` starts the app from this checkout. After upgrading Node.js, delete `src-tauri/binaries/` to bundle the new version.
 
 - **Closing the window** hides it to the tray; sessions keep working. Open it again from the tray icon (double-click or **Open**) or by launching the app again.
 - **Quit** (tray menu) stops the companion and every OMP process it started. If sessions are still working it asks first; they are saved as paused. Signing out or shutting Windows down quits without asking.
 - **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. The token changes every time the app starts, so copy a fresh link after restarting it. Allow the Windows Firewall prompt for **private networks only**.
-- **One companion at a time.** The desktop app and `start.bat` share `~/.omp-web`, so each refuses to start while the other is running on the same port.
+- **One companion at a time.** The desktop app and `node companion/server.mjs` share `~/.omp-web`, so each refuses to start while the other is running on the same port.
 - `OMP_BIN`, `OMP_WEB_PORT`, `OMP_WEB_DATA_DIR` and the other variables below still apply. `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN` are ignored: the app always starts on `127.0.0.1` with a token.
 
 ## Good to know
@@ -109,7 +112,7 @@ Run `dist/OMP Control Room Setup <version>.exe`. It installs for your user only 
 - **Worktrees:** tick **Isolated git worktree** when starting a session in a Git repo. You get an `omp-web/<id>` branch off HEAD. Uncommitted changes and dependencies are not copied. Worktrees are never merged or deleted automatically.
 - **Not in the panel:** importing from Claude Code or Codex (`--from-claude`, `--from-codex`) needs OMP's terminal picker, and `--profile` sessions live in a separate store the panel does not list. Use the terminal for those, and for the interactive `omp stats` dashboard server and skill publishing.
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
-- **Security:** `node companion/server.mjs` listens only on `127.0.0.1`; `start.bat` opens it to your network with no token (see [Phone or tablet on your network](#phone-or-tablet-on-your-network)). It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. Unless `OMP_WEB_NO_TOKEN=1`, the token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. Sessions opened in a new tab share the token through the tab's session storage.
+- **Security:** `node companion/server.mjs` listens only on `127.0.0.1` unless you set `OMP_WEB_HOST` (see [Phone or tablet on your network](#phone-or-tablet-on-your-network)). It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. Unless `OMP_WEB_NO_TOKEN=1`, the token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. Sessions opened in a new tab share the token through the tab's session storage.
 
 ### Native plan mode
 
@@ -119,9 +122,9 @@ The project stays read-only until you explicitly approve implementation or turn 
 
 The installed OMP must expose `set_plan_mode`, `review_plan` and `approve_plan`. Older builds show **Requires updated OMP RPC support**; the companion does not simulate planning or silently approve it.
 
-`start.bat` runs the patched sibling checkout (`..\oh-my-pi\packages\coding-agent\src\cli.ts`) automatically when it exists and Bun is on PATH; the checkout needs its dependencies, generated tool views and native bindings prepared. The console prints `Using OMP: …` when it does. Otherwise it falls back to `omp` on PATH.
+The desktop app started from this checkout (`npm run desktop`) runs the patched sibling checkout (`..\oh-my-pi\packages\coding-agent\src\cli.ts`) automatically when it exists and Bun is on PATH; the checkout needs its dependencies, generated tool views and native bindings prepared. Otherwise it falls back to `omp` on PATH.
 
-Set `OMP_BIN` before `start.bat` to override, for example with a compiled OMP executable containing the same RPC changes. Restart companion sessions after changing the runtime.
+Set `OMP_BIN` before starting the app or `node companion/server.mjs` to override, for example with a compiled OMP executable containing the same RPC changes. Restart companion sessions after changing the runtime.
 
 ### Native goal mode
 
@@ -135,10 +138,10 @@ In `rpc-ui`, automatic continuation follows `goal.continuationModes`'s `interact
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OMP_BIN` | `omp` (sibling `oh-my-pi` checkout via `start.bat`, if present with Bun) | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
+| `OMP_BIN` | `omp` (sibling `oh-my-pi` checkout in the desktop app's development run, if present with Bun) | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
 | `OMP_WEB_PORT` | `4545` | Companion port |
-| `OMP_WEB_HOST` | `127.0.0.1` (`0.0.0.0` via `start.bat`) | Bind address; `0.0.0.0` opens it to your local network (see below) |
-| `OMP_WEB_NO_TOKEN` | unset (`1` via `start.bat`) | `1` serves the token inside the page, so no device is asked for it |
+| `OMP_WEB_HOST` | `127.0.0.1` | Bind address; `0.0.0.0` opens it to your local network (see below) |
+| `OMP_WEB_NO_TOKEN` | unset | `1` serves the token inside the page, so no device is asked for it |
 | `OMP_WEB_DATA_DIR` | `~/.omp-web` | Panel state, sessions and worktrees |
 | `OMP_SESSIONS_DIR` | `<agent dir>/sessions` | OMP's native session store |
 | `PI_CODING_AGENT_DIR` | `~/.omp/agent` | OMP agent directory (`config.yml`, `WATCHDOG.yml`) |
@@ -157,15 +160,16 @@ Your browser may block HTTPS-to-localhost requests. If it does, use the local da
 
 ### Phone or tablet on your network
 
-`start.bat` listens on every network adapter and doesn't ask for a token. The console prints a `LAN:` address per adapter (usually the `192.168.x.x` one); open it on a phone on the same Wi-Fi. Allow Node.js through Windows Firewall for private networks when prompted.
+In the desktop app, use the tray's **Allow phones on my network** and **Copy phone link** (see [Desktop app](#desktop-app-windows)); the token stays required.
 
-**Anyone on that network can open the address and run commands on this PC.** Use it only on networks you trust. To lock it back down to this PC with a token:
+Without the app, start the companion on every network adapter:
 
 ```bat
-set OMP_WEB_HOST=127.0.0.1
-set OMP_WEB_NO_TOKEN=0
-start.bat
+set OMP_WEB_HOST=0.0.0.0
+node companion/server.mjs
 ```
+
+The console prints a `LAN:` address per adapter (usually the `192.168.x.x` one); open it on a phone on the same Wi-Fi. Allow Node.js through Windows Firewall for private networks when prompted. Adding `set OMP_WEB_NO_TOKEN=1` skips the token prompt, but then **anyone on that network can open the address and run commands on this PC**; use it only on networks you trust.
 
 ## Development
 
@@ -173,6 +177,6 @@ start.bat
 node --test "tests/*.test.mjs"
 ```
 
-`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. `desktop/` is the Electron shell that runs the companion in-process for the Windows app. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan and goal modes require the RPC support described above.
+`companion/` is the Node server. `local-dist/` is the prebuilt dashboard, which you edit directly because the frontend source isn't in this repo. `src-tauri/` is the Tauri shell for the Windows app; it starts the bundled Node.js with `desktop/host.mjs`, which runs the companion and talks to the shell over stdin/stdout. The companion speaks OMP's RPC protocol (`--mode rpc-ui`, with protocol v2 framing when OMP offers it). Native plan and goal modes require the RPC support described above.
 
 **Not supported:** attaching to already-running terminal sessions, automatic Git merges, and custom extension TUIs beyond select, confirm, text and editor prompts.
