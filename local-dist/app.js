@@ -410,7 +410,7 @@
           <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span class="hint" id="hint"></span><span id="buttons" style="display:flex;gap:6px"></span></div>
+          <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span id="commitSlot"></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
         </div>
       </div>`;
     const input = $('#input');
@@ -1295,7 +1295,7 @@
   function advisorChip(s) {
     const a = s.advisor;
     const label = !a ? 'Advisor' : !a.enabled ? 'Advisor off' : a.noModel ? 'Advisor: no model' : 'Advisor' + (a.model ? ' · ' + modelName(a.model.split(', ')[0]) : ' on');
-    return `<button class="model-chip adv-chip ${a?.enabled && !a.noModel ? 'on' : ''}" data-act="advMenu" title="Advisor: a second model that reviews each turn">⚑ <span>${esc(label)}</span> ▾</button>`;
+    return `<button class="model-chip adv-chip ${a?.enabled && !a.noModel ? 'on' : ''}" data-act="advMenu" title="Advisor: a second model that reviews each turn"><span aria-hidden="true">⚑</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>`;
   }
   async function openAdvMenu(btn) {
     closeThinkMenu();
@@ -1511,23 +1511,30 @@
       const hits = pool.filter(m => { const t = (m.name + ' ' + m.selector).toLowerCase(); return words.every(w => t.includes(w)); });
       const score = m => (m.name.toLowerCase().startsWith(q) ? 0 : m.id.toLowerCase().startsWith(q) ? 1 : 2) + (m.provider === 'openrouter' ? 0.5 : 0);
       const fav = new Set(favs());
-      return [{ label: `${hits.length} match${hits.length === 1 ? '' : 'es'}`, rows: hits.sort((a, b) => fav.has(b.selector) - fav.has(a.selector) || score(a) - score(b) || newest(a, b)).slice(0, 300).map(m => row(m)) }];
+      return [{ label: `${hits.length} match${hits.length === 1 ? '' : 'es'}`, pp: 'sel', rows: hits.sort((a, b) => fav.has(b.selector) - fav.has(a.selector) || score(a) - score(b) || newest(a, b)).slice(0, 300).map(m => row(m)) }];
     }
     const sections = [];
     if (!P.provider) {
       const def = splitSel(M.roles.default);
       if (P.ctx.allowDefault) sections.push({ label: 'Default', rows: [{ sel: '', name: 'OMP default', provider: def.sel ? modelLabel(def.sel, def.thinking) : 'from your OMP config', badge: '', isDefault: true, thinking: '', m: modelInfo(def.sel) }] });
       const fv = favs().map(sel => modelInfo(sel)).filter(Boolean).map(m => row(m));
-      if (fv.length) sections.push({ label: '★ Favorites', rows: fv });
-      const roles = Object.entries(M.roles || {}).filter(([r]) => !['image', 'vision'].includes(r)).map(([r, v]) => { const s = splitSel(v); const m = modelInfo(s.sel); return m && row(m, r, s.thinking); }).filter(Boolean);
-      if (roles.length) sections.push({ label: 'Your OMP roles', rows: roles });
-      const rec = recentModels().map(([sel, th]) => { const m = modelInfo(sel); return m && row(m, 'recent', th); }).filter(Boolean);
-      if (rec.length) sections.push({ label: 'Recently used', rows: rec });
+      if (fv.length) sections.push({ label: '★ Favorites', pp: 'provider', rows: fv });
+      // Roles sharing a model and reasoning level are one row: picking it applies the same selection either way.
+      const roles = new Map();
+      for (const [r, v] of Object.entries(M.roles || {})) {
+        if (['image', 'vision'].includes(r)) continue;
+        const s = splitSel(v), m = modelInfo(s.sel), k = s.sel + '\n' + s.thinking;
+        if (!m) continue;
+        if (roles.has(k)) roles.get(k).badge += ', ' + r; else roles.set(k, row(m, r, s.thinking));
+      }
+      if (roles.size) sections.push({ label: 'Your OMP roles', pp: 'provider', rows: [...roles.values()] });
+      const rec = recentModels().filter(([sel, th]) => !roles.has(sel + '\n' + (th || ''))).map(([sel, th]) => { const m = modelInfo(sel); return m && row(m, '', th); }).filter(Boolean);
+      if (rec.length) sections.push({ label: 'Recently used', pp: 'provider', rows: rec });
     }
     for (const prov of providerOrder()) {
       if (P.provider && prov !== P.provider) continue;
       const ms = pool.filter(m => m.provider === prov);
-      if (ms.length) sections.push({ label: prov, rows: ms.sort(newest).map(m => row(m)) });
+      if (ms.length) sections.push({ label: prov, pp: 'id', rows: ms.sort(newest).map(m => row(m)) });
     }
     return sections;
   }
@@ -1546,6 +1553,8 @@
       <div class="picker-foot"><span>↑↓ to move · Enter to choose · hover to see reasoning levels</span></div></div>`;
     el.hidden = false;
     $('#pickerQ').focus();
+    // One scrolling line of providers: a plain mouse wheel scrolls it sideways.
+    const provs = $('#pickerProvs'); if (provs) provs.onwheel = e => { if (e.deltaY && !e.deltaX && provs.scrollWidth > provs.clientWidth) { provs.scrollLeft += e.deltaY; e.preventDefault(); } };
     try { await ensureModels(); } catch (e) { $('#pickerList').innerHTML = `<div class="side-empty">${esc(e.message)}</div>`; return; }
     if (!S.picker) return;
     $('#pickerQ').placeholder = `Search ${S.models.models.length} models… (e.g. opus, gpt 6, gemini flash)`;
@@ -1563,18 +1572,21 @@
     if (!P || !S.models) return;
     const counts = new Map();
     for (const m of S.models.models) counts.set(m.provider, (counts.get(m.provider) || 0) + 1);
-    keepFocus($('#pickerProvs'), () => { $('#pickerProvs').innerHTML = `<button class="chip ${!P.provider ? 'sel' : ''}" data-prov="">All</button>` + providerOrder().map(p => `<button class="chip ${P.provider === p ? 'sel' : ''}" data-prov="${esc(p)}">${esc(p)} <small>${counts.get(p)}</small></button>`).join(''); });
+    keepFocus($('#pickerProvs'), () => { const el = $('#pickerProvs'), x = el.scrollLeft; el.innerHTML = `<button class="chip ${!P.provider ? 'sel' : ''}" data-prov="">All</button>` + providerOrder().map(p => `<button class="chip ${P.provider === p ? 'sel' : ''}" data-prov="${esc(p)}">${esc(p)} <small>${counts.get(p)}</small></button>`).join(''); el.scrollLeft = x; });
     const sections = pickerRows();
     P.flat = sections.flatMap(s => s.rows);
     if (P.hi < 0) { const cur = P.flat.findIndex(r => r.sel === P.ctx.model); P.hi = cur >= 0 ? cur : 0; }
     P.hi = Math.min(P.hi, P.flat.length - 1);
     let n = 0;
     const fv = new Set(favs());
+    // Every row has all five cells so the list-wide subgrid keeps the columns aligned across sections.
     $('#pickerList').innerHTML = sections.map(s => `<div class="picker-sec" role="presentation">${esc(s.label)}</div>` + s.rows.map(r => {
       const i = n++;
       const cur = r.sel === P.ctx.model && (r.isDefault || !r.thinking || r.thinking === P.ctx.thinking);
-      return `<div class="picker-line" role="presentation"><button class="picker-row ${i === P.hi ? 'hi' : ''} ${cur ? 'cur' : ''}" id="pick-${i}" role="option" aria-selected="${i === P.hi}" data-pi="${i}"><span class="pn">${esc(r.name)}</span>${r.badge ? `<span class="tag">${esc(r.badge)}${r.thinking ? ' · ' + esc(r.thinking) : ''}</span>` : ''}
-        <span class="pp">${esc(r.isDefault ? r.provider : r.sel)}</span><span class="pm">${r.m?.reasoning ? '✱' : ''}${r.m?.contextWindow ? ' ' + fmtTokens(r.m.contextWindow) : ''}</span></button>${r.isDefault ? '' : `<button type="button" class="fav ${fv.has(r.sel) ? 'on' : ''}" data-fav="${esc(r.sel)}" aria-pressed="${fv.has(r.sel)}" aria-label="Favorite ${esc(r.name)}" title="${fv.has(r.sel) ? 'Remove from favorites' : 'Add to favorites'}">${fv.has(r.sel) ? '★' : '☆'}</button>`}</div>`;
+      const tag = [r.badge, r.thinking].filter(Boolean).join(' · ');
+      const pp = r.isDefault || s.pp === 'provider' ? r.provider : s.pp === 'id' ? r.m?.id || r.sel : r.sel;
+      return `<div class="picker-line" role="presentation"><button class="picker-row ${i === P.hi ? 'hi' : ''} ${cur ? 'cur' : ''}" id="pick-${i}" role="option" aria-selected="${i === P.hi}" data-pi="${i}"${r.sel ? ` title="${esc(r.sel)}"` : ''}><span class="pn">${esc(r.name)}</span><span class="${tag ? 'tag' : ''}">${esc(tag)}</span>
+        <span class="pp">${esc(pp)}</span><span class="pm">${r.m?.reasoning ? '✱' : ''}${r.m?.contextWindow ? ' ' + fmtTokens(r.m.contextWindow) : ''}</span></button>${r.isDefault ? '<span></span>' : `<button type="button" class="fav ${fv.has(r.sel) ? 'on' : ''}" data-fav="${esc(r.sel)}" aria-pressed="${fv.has(r.sel)}" aria-label="Favorite ${esc(r.name)}" title="${fv.has(r.sel) ? 'Remove from favorites' : 'Add to favorites'}">${fv.has(r.sel) ? '★' : '☆'}</button>`}</div>`;
     }).join('')).join('') || '<div class="side-empty">No models match.</div>';
     pickerHi(P.hi)?.scrollIntoView({ block: 'nearest' });
   }
@@ -1780,6 +1792,7 @@
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     input.readOnly = !!enhancing;
     const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
+    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Commit related changes</button><button class="btn sm ghost" data-act="commit" type="button" title="Commit changes in this folder…" ${S.busy ? 'disabled' : ''}>Commit</button>` : '');
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
@@ -1823,6 +1836,7 @@
   }
   const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected && focus.offsetParent !== null) focus.focus(); else if (el) $('#input')?.focus(); return true; };
   const sessionApi = (body, opts) => api(`/sessions/${current().id}/command`, body, opts);
+  const COMMIT_RELATED = 'Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit.';
   async function togglePlan(id) {
     const s = S.store?.sessions.find(x => x.id === id);
     if (!s || s._planSupported === false || s.planMode?.available === false) return toast('Plan mode requires updated OMP RPC support.', 'err');
@@ -2937,6 +2951,14 @@
       else if (act === 'commit' && s) openTool('commit', 'run', { dryRun: true }, s.cwd);
     }
     else if (act === 'usage') { toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
+    else if (act === 'commitRelated' && !S.busy) {
+      const s = S.store?.sessions.find(x => x.id === c.id);
+      const queue = s?.status === 'running' || s?.status === 'queued';
+      S.busy = true; update();
+      sessionApi({ type: queue ? 'follow_up' : 'prompt', message: COMMIT_RELATED })
+        .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
+        .finally(() => { S.busy = false; update(); });
+    }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
