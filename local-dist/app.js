@@ -660,6 +660,7 @@
       <div class="actions">${btn.join('')}
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
           <button data-act="newHere">New session in this folder</button>
+          <button data-act="terminal" data-path="${esc(s.cwd)}">Open terminal in this folder</button>
           <button data-copy-text="${esc(s.cwd)}">Copy working directory</button>
           ${s.sessionFile ? `<button data-copy-text="${esc(s.sessionFile)}">Copy OMP session file path</button>` : ''}
           ${s.sessionFile ? `<button data-copy-text="omp --resume &quot;${esc(s.sessionFile)}&quot;">Copy terminal resume command</button>` : ''}
@@ -701,6 +702,7 @@
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
           <button data-act="resumeOnly">Add to panel without a message</button>
           <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button>
+          ${cwd ? `<button data-act="terminal" data-path="${esc(cwd)}">Open terminal in this folder</button>` : ''}
           <button data-copy-text="${esc(cwd)}">Copy working directory</button>
           <button data-copy-text="${esc(file)}">Copy OMP session file path</button>
           <button data-copy-text="omp --resume &quot;${esc(file)}&quot;">Copy terminal resume command</button>
@@ -2998,6 +3000,8 @@
       $('#topbar')._html = ''; update();
     }
     else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} closeMenu(a.closest('.menu')); S.lastSig = ''; $('#topbar')._html = ''; update(); }
+    // Opens on the computer running the companion (cmd on Windows), also when the panel is used from a phone.
+    else if (act === 'terminal') { closeMenu(a.closest('.menu')); api('/terminal', { path: a.dataset.path }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err')); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
     else if (act === 'spendReload') loadSpend();

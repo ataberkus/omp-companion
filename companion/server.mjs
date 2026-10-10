@@ -79,6 +79,15 @@ async function git(cwd,args){return (await exec('git',['-C',cwd,...args],{timeou
 const samePath=(a,b)=>{const n=v=>path.resolve(v||'');return process.platform==='win32'?n(a).toLowerCase()===n(b).toLowerCase():n(a)===n(b);};
 async function resolveDir(value){let dir=text(value,'Directory path',4000);if(dir==='~'||dir.startsWith('~/')||dir.startsWith('~\\'))dir=path.join(os.homedir(),dir.slice(2));if(!path.isAbsolute(dir))throw error('Use an absolute directory path.');let stat;try{dir=await fs.realpath(dir);stat=await fs.stat(dir);}catch{throw error('Directory does not exist on this machine.');}if(!stat.isDirectory())throw error('Path must be a directory.');return dir;}
 const exists=p=>fs.access(p).then(()=>true,()=>false);
+// Opens a console window on this machine in `dir` (a phone using the panel opens it on the computer, not the phone).
+// `dir` is only the working directory, never part of a command line. Windows: `start` gives the new cmd its own
+// console window (a detached child has none, so cmd would read EOF and exit at once).
+function openTerminal(dir){
+ const shell=process.env.ComSpec||'cmd.exe';
+ const [cmd,args]=process.platform==='win32'?[shell,['/c','start','',shell]]:process.platform==='darwin'?['open',['-a','Terminal',dir]]:['x-terminal-emulator',[]];
+ const child=spawn(cmd,args,{cwd:dir,detached:process.platform!=='win32',stdio:'ignore',windowsHide:true});
+ return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not open a terminal: ${e.message}`,500)));child.once('spawn',()=>{child.unref();resolve();});});
+}
 // Keep only what the dashboard shows from OMP's subagent registry entries.
 const subagentView=e=>{const p=e?.progress||{};const pick=o=>Object.fromEntries(Object.entries(o||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).map(([k,v])=>[k,typeof v==='string'?v.slice(0,300):v]));
  return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(e?.status||p.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
@@ -1367,6 +1376,7 @@ async function spend(){
    if(url.pathname==='/api/enhance/settings'){if(!THINKING.includes(body.thinking))throw error('Unknown reasoning level.');store.enhanceThinking=body.thinking;await persist();json({thinking:store.enhanceThinking});return;}
    // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
    if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist();json({provider,account});return;}
+   if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
    if(url.pathname==='/api/enhance/stop'){const job=enhanceJobs.get(body.id);if(!job)throw error('Enhance not found.',404);await stopEnhance(job);json({status:job.status});return;}
    if(url.pathname==='/api/omp-update'){
     if(updateState.status==='running')throw error('OMP update is already running.',409);
