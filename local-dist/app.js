@@ -2424,13 +2424,18 @@
     if (S.set.changed && !role && th === 'low') return '';
     const r = splitSel(role), label = role ? modelLabel(r.sel, r.thinking) || role : "Composer's model";
     const levels = S.models?.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+    // With a role, the row edits the role's `:level` suffix; no suffix means OMP's default level (shown, not offered).
+    const lv = role ? r.thinking : th, mod = !role && th !== 'low';
+    const opts = role && !lv ? [['', 'OMP default'], ...levels.map(l => [l, l])] : (levels.includes(lv) ? levels : [lv, ...levels]).map(l => [l, l]);
     return `<section class="set-group" id="sg-enhance"><h2>✨ Enhance <small>prompt enhancer</small></h2>
       <div class="set-row ${role ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-model-name">Model${role ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Composer's model: the model of the session (or New session) you enhance in. A picked model is saved as OMP's <code>enhance</code> model role, together with its reasoning level.</div></div>
         <div class="set-ctl">${roles ? `<button class="model-chip" data-mmkey="modelRoles" data-mmname="enhance" title="${esc(role || "Composer's model")}" aria-label="Enhance model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>${role ? `<button class="btn sm ghost" data-mmdel="modelRoles" data-mmname="enhance">Use composer's model</button>` : ''}` : '<span class="muted">Needs OMP settings</span>'}</div></div>
-      <div class="set-row ${th !== 'low' ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level${th !== 'low' ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${role ? 'Not used while an enhance model is set: that model uses the level picked with it.' : "Applied to the composer's model for enhancing only. Saved by the dashboard."}</div>${th !== 'low' ? '<div class="set-def">Default: <code>low</code></div>' : ''}</div>
-        <div class="set-ctl"><select data-enhthinking aria-labelledby="enh-think-name" ${role ? 'disabled' : ''}>${(levels.includes(th) ? levels : [th, ...levels]).map(l => `<option ${l === th ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div></div></section>`;
+      <div class="set-row ${mod ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level${mod ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${role ? `Saved with the <code>enhance</code> model role${lv ? '' : '. None set: OMP\'s default level applies, which may be slow. Pick one'}.` : "Applied to the composer's model for enhancing only. Saved by the dashboard."}</div>${mod ? '<div class="set-def">Default: <code>low</code></div>' : ''}</div>
+        <div class="set-ctl"><select data-enhthinking aria-labelledby="enh-think-name">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === lv ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div></section>`;
   }
   async function saveEnhanceThinking(thinking) {
+    const x = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = x?.value?.enhance;
+    if (role) { if (thinking) saveSetting('modelRoles', { ...x.value, enhance: splitSel(role).sel + ':' + thinking }); return; }
     try { await api('/enhance/settings', { thinking }); if (S.store) S.store.enhanceThinking = thinking; toast('Saved enhance reasoning level'); }
     catch (e) { toast(e.message, 'err'); }
     if (current().kind === 'settings') renderSettings();
