@@ -533,8 +533,8 @@
   const enhanceBlocked = v => !v.trim() || /^[/!]/.test(v.trim());
   function enhanceButton(view, draft) {
     return S.enhance.has(view)
-      ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" title="Stop enhancing (Ctrl+Shift+E)">■ Cancel</button>`
-      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.busy ? 'disabled' : ''}>✨ Enhance</button>`;
+      ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`
+      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.busy ? 'disabled' : ''}>✨</button>`;
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
   async function startEnhance(view, body, original) {

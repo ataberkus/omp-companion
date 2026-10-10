@@ -22,11 +22,11 @@ OMP has no prompt enhancer of its own. The RPC `btw` side question is not used: 
 
 ## 1. User-facing behaviour
 
-- **Button:** `✨ Enhance` in the composer bar, next to `＋ Image`. Present on every composer: live sessions, the New-session screen, and continuing a session from OMP history. Disabled when the draft is empty, starts with `/` or `!`, or an enhance is already running in this view.
+- **Button:** icon-only `✨` (accessible name "Enhance prompt") in the composer bar, next to `＋ Image`. Present on every composer: live sessions, the New-session screen, and continuing a session from OMP history. Disabled when the draft is empty, starts with `/` or `!`, or an enhance is already running in this view.
 - **Shortcut:** Ctrl+Shift+E (Cmd+Shift+E on macOS) while the composer has focus. It is listed in the button's title and added to the dashboard-shortcut list that composer hotkeys can't reuse. Firefox reserves Ctrl+Shift+E for its network monitor; the button still works there.
 - **While running:**
   - The textarea is read-only, so the user can't type into a draft that is about to be replaced.
-  - The button turns into `■ Cancel`.
+  - The button turns into `✕` (accessible name "Cancel enhance"). Not `■`: that glyph is the red Stop-turn button beside it while a turn runs.
   - The status line shows progress: `Enhancing with <model> · reading local-dist/app.js…`. The step text comes from the enhancer's tool calls.
   - Send stays disabled until the enhance finishes or is cancelled.
 - **Done:**

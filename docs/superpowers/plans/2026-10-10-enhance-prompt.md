@@ -18,7 +18,7 @@
 - Limits: draft 1–20 000 chars; at most 3 running jobs (409 `Wait for the running enhance to finish.`); server kill at 150 s → `Enhance timed out.`; finished jobs dropped 5 min after finishing or on the first `GET` that reads them.
 - Model order: `modelRoles.enhance` → `--model=@enhance` (no `--thinking`); else the session/composer selector + `--thinking=low`; else no model flag.
 - Conversation tail: last 6 `user`/`assistant` messages, each truncated to 1 500 chars, wrapped in `<conversation>`, then `<draft>`.
-- Copy: button `✨ Enhance` / `■ Cancel`; title `Rewrite this draft with project context (Ctrl+Shift+E)`; status `Enhancing with <model> · <step>…`; draft status `Draft · discarded if you leave without sending`; toasts `Prompt enhanced` + `Undo`, `Enhanced prompt ready` + `Use enhanced prompt`.
+- Copy: icon-only button `✨` / `✕` (aria-labels `Enhance prompt` / `Cancel enhance`); title `Rewrite this draft with project context (Ctrl+Shift+E)`; status `Enhancing with <model> · <step>…`; draft status `Draft · discarded if you leave without sending`; toasts `Prompt enhanced` + `Undo`, `Enhanced prompt ready` + `Use enhanced prompt`.
 - Shortcut `Ctrl+Shift+E` / `Meta+Shift+E`, added to `RESERVED_KEYS`.
 - Draft discard: under `lock(s.id, …)`; awaits `close` of both the enhance process and the OMP runner; worktree remove retried up to 20 times at 50 ms × attempt; if the worktree still fails, the session is hidden and kept with `draft: true` for startup cleanup.
 

@@ -82,13 +82,13 @@ test('Enhance replaces the draft, Undo restores it, Send is blocked meanwhile', 
   assert.ok(d.calls.some(c => c.url === '/api/commands?session=a'), 'OMP is started alongside');
   assert.equal(d.input.readOnly, true);
   assert.match(d.elements.get('statusLine').innerHTML, /Enhancing with m · reading src\/a\.js…/);
-  assert.match(d.elements.get('enhanceSlot').innerHTML, /Cancel/);
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Cancel enhance"[^>]*>✕</);
   await d.key('Enter');
   assert.ok(!d.calls.some(c => c.body?.type === 'prompt'), 'Enter does not send while enhancing');
   await d.runPolls();
   assert.equal(d.input.value, 'Better');
   assert.equal(d.input.readOnly, false);
-  assert.match(d.elements.get('enhanceSlot').innerHTML, /Enhance/);
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Enhance prompt"[^>]*>✨</);
   d.toastAction('Undo');
   assert.equal(d.input.value, 'fix it');
 });
