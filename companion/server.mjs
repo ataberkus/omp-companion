@@ -457,8 +457,10 @@ export async function createCompanion(options={}){
  const subagentThoughts=new Map();
  // Windows: antivirus/indexers briefly lock workspace.json, making rename fail with EPERM/EACCES/EBUSY; retry like graceful-fs.
  const replaceFile=async(from,to)=>{for(let i=0;;i++){try{return await fs.rename(from,to);}catch(e){if(i>=20||!['EPERM','EACCES','EBUSY'].includes(e.code))throw e;await new Promise(r=>setTimeout(r,50*(i+1)));}}};
- let lastSaved;
- const persist=()=>{const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);saveChain=saveChain.catch(()=>{}).then(async()=>{if(snapshot===lastSaved)return;await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600,flush:true});await replaceFile(stateFile+'.tmp',stateFile);lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
+ // One write in flight plus at most one queued; the queued one serializes when it starts, so it covers every caller that joined it.
+ // Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save, and a slow disk ran the heap out.
+ let lastSaved,nextSave;
+ const persist=()=>{if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{nextSave=undefined;const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);if(snapshot===lastSaved)return;await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600,flush:true});await replaceFile(stateFile+'.tmp',stateFile);lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
