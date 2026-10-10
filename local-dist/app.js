@@ -417,6 +417,7 @@
     input.value = drafts.get(S.view) || '';
     autosize(input);
     railObserver.disconnect(); railObserver.observe($('#scroller')); railObserver.observe($('#thread'));
+    ghostObserver.disconnect(); ghostObserver.observe(input);
     if (c.kind === 'native') loadPreview(c.file);
     if (c.kind === 'sub') { $('.composer').hidden = true; loadSub(c.file, true); return; }
     if (c.kind === 'changes') { $('.composer-wrap').hidden = true; $('#thread').classList.add('wide'); return; }
@@ -496,6 +497,8 @@
     el.innerHTML = esc(ghost.text) + `<i>${esc(ghost.suffix)}</i>`;
     el.style.width = input.clientWidth + 'px'; el.style.height = input.clientHeight + 'px'; el.scrollTop = input.scrollTop;
   }
+  // The composer flex-shrinks the textarea (images, toolbar wrap, window resize); the ghost must keep its box.
+  const ghostObserver = new ResizeObserver(() => { if (ghost) renderGhost(); });
   function predictWord(input) {
     const prev = ghost, typed = prev && prev.view === S.view && input.value.startsWith(prev.text) ? input.value.slice(prev.text.length) : null;
     // Typing the suggestion's own letters just shortens it.
@@ -3029,7 +3032,7 @@
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
     else if (d.tagName === 'DETAILS') { touched.add(d); const p = d.open && d.matches('.job-thought') && d.querySelector('pre'); if (p && !touched.has(p)) p.scrollTop = p.scrollHeight; }
   }, true);
-  document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); if (e.target.id === 'scroller') markPromptRail(); }, true);
+  document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); if (e.target.id === 'scroller') markPromptRail(); else if (e.target.id === 'input' && ghost) renderGhost(); }, true);
   // Moving the caret off the end hides the suggestion; returning brings it back.
   document.addEventListener('selectionchange', () => { if (ghost) renderGhost(); });
   document.addEventListener('input', e => {

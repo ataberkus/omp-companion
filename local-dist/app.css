@@ -107,7 +107,7 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .menu-pop button.danger{color:var(--red)}
 .menu-pop.ctx-menu{display:block;position:fixed;right:auto;top:0;min-width:160px}
 
-.body{flex:1;display:flex;min-height:0}
+.body{flex:1;display:flex;min-height:min(140px,25vh)}
 .scroller{flex:1;overflow-y:auto;min-width:0}
 .prompt-rail{position:relative;flex:0 0 14px;margin:8px 0;z-index:var(--z-float)}
 .prompt-rail button{position:absolute;left:2px;right:2px;height:4px;margin-top:-2px;padding:0;border:0;border-radius:2px;background:var(--faint);opacity:.8;cursor:pointer;transition:opacity .12s,background .12s}
@@ -192,11 +192,15 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .tok-c{color:var(--faint);font-style:italic}.tok-s{color:oklch(.82 .13 160)}.tok-k{color:oklch(.76 .17 340)}.tok-n{color:var(--cyan)}
 
 /* composer */
-.composer-wrap{padding:0 24px 18px;display:flex;flex-direction:column;max-height:70vh;max-height:70dvh}
+.composer-wrap{padding:0 24px 18px;display:flex;flex-direction:column;min-height:0;max-height:70vh;max-height:70dvh}
 .composer-wrap[hidden]{display:none}
-/* Short screens: the panels above the composer shrink and scroll inside themselves; the composer keeps its full size. */
+/* Short screens / long drafts: the panels above and the composer's draft and image previews shrink and scroll inside
+   themselves; the toolbar never shrinks, and the chat keeps a usable strip (.body min-height). */
 .composer-wrap>*{width:100%}
-.composer-wrap>.composer{flex-shrink:0}
+.composer-wrap>.composer{display:flex;flex-direction:column;min-height:0}
+.composer-wrap>.composer[hidden]{display:none}
+.composer-wrap>.composer>.attach-preview{overflow-y:auto}
+.composer-wrap>.composer>.composer-bar{flex-shrink:0}
 .questions{max-width:860px;max-height:min(42vh,360px);overflow-y:auto;margin:0 auto 10px}
 .questions[hidden]{display:none}
 .question{padding:13px 15px;border:1px solid var(--input);border-radius:12px;background:var(--panel)}
