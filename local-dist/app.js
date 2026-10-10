@@ -1677,7 +1677,8 @@
     clearTimeout(S.usage.timer);
     if (document.hidden || S.usage.busy) return; // a running poll reschedules itself when it lands
     const u = S.usage; u.busy = true; renderUsage();
-    try { u.data = await api('/usage?session=' + encodeURIComponent(u.sid), undefined, { timeout: 30000 }); u.error = ''; u.at = u.data.updatedAt; }
+    // Server worst case: runner start (sessions without a model) + the 20 s `omp usage --json` limit.
+    try { u.data = await api('/usage?session=' + encodeURIComponent(u.sid), undefined, { timeout: 70000 }); u.error = ''; u.at = u.data.updatedAt; }
     catch (e) { u.error = e.message; }
     u.busy = false;
     if (S.usage !== u) return; // the panel moved to another session meanwhile
@@ -1701,10 +1702,12 @@
         <span class="ul-meta">${l.resetsAt !== undefined ? esc(usageReset(l.resetsAt)) + ' ' : ''}<b>${pct === undefined ? esc(l.summary) : Math.round(pct) + '%'}</b></span></div>
         <div class="ul-bar"><i class="${pct >= 90 ? 'hot' : ''}" style="width:${Math.min(100, pct || 0)}%"></i></div></div>`;
     };
+    const acct = a => `<section class="ul-acct"><div class="ul-head">${esc(a.name)}</div>${a.notes.map(n => `<div class="ul-note">${esc(n)}</div>`).join('')}
+        ${a.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(a.unavailable)}.</div>` : a.limits.map(row).join('')}</section>`;
+    // The session's provider comes first; the server already orders them.
     const body = !data ? (error ? '' : '<div class="working"><span class="spinner"></span> Checking usage…</div>')
-      : data.accounts.map(a => `<section class="ul-acct"><div class="ul-head">${esc(a.name)}</div>${a.notes.map(n => `<div class="ul-note">${esc(n)}</div>`).join('')}
-        ${a.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(a.unavailable)}.</div>` : a.limits.map(row).join('')}</section>`).join('')
-        + (data.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(data.unavailable)}.</div>` : '');
+      : data.providers.map(p => `<section class="ul-prov"><h3 class="ul-prov-name">${esc(p.provider)}</h3>
+        ${p.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(p.unavailable)}.</div>` : ''}${p.accounts.map(acct).join('')}</section>`).join('');
     el.innerHTML = `<div class="ul-top"><span>Usage${data ? ` · ${esc(data.provider)}/${esc(data.model)}` : ''}</span>
       <button class="btn-reset" data-act="usageChat" title="Post a /usage snapshot to the chat">/usage ↗</button></div>${body}
       ${error ? `<div class="ul-err">${esc(error)}</div>` : ''}
@@ -3031,7 +3034,7 @@
       else if (act === 'commit' && s) openTool('commit', 'run', { dryRun: true }, s.cwd);
     }
     else if (act === 'usage') { $('#usagePanel') ? closeUsage() : openUsage(a); }
-    else if (act === 'usageChat') { closeUsage(); toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }); }
+    else if (act === 'usageChat') { closeUsage(); toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }, { timeout: 70000 }); }
     else if (act === 'commitRelated' && !S.busy) {
       const s = S.store?.sessions.find(x => x.id === c.id);
       const queue = s?.status === 'running' || s?.status === 'queued';

@@ -44,8 +44,9 @@ process.stdout.write(JSON.stringify(data));
         limit('spend-only', { unit: 'usd', used: 2.5 }),
       ] },
       { provider: 'beta', fetchedAt: Date.parse('2099-01-01T00:00:00Z'), metadata: { email: 'beta-account' }, limits: [limit('daily', { unit: 'percent', usedFraction: 0.9 })] },
+      { provider: 'delta', fetchedAt: Date.parse('2099-01-01T00:00:00Z'), metadata: { email: 'delta-account' }, limits: null },
     ],
-    accountsWithoutUsage: [{ provider: 'alpha', email: 'unreported-account' }],
+    accountsWithoutUsage: [{ provider: 'alpha', email: 'unreported-account' }, { provider: 'gamma', email: 'gamma-account' }],
   };
   const usageFile = join(dir, 'usage-data.json');
   await writeFile(usageFile, JSON.stringify(snapshot));
@@ -67,15 +68,21 @@ process.stdout.write(JSON.stringify(data));
   const [okStatus, live] = await usage('blank');
   assert.equal(okStatus, 200);
   assert.equal(live.provider, 'alpha');
-  const [alpha] = live.accounts;
-  assert.equal(alpha.name, 'alpha-account · Pro');
-  const byLabel = Object.fromEntries(alpha.limits.map(l => [l.label, l]));
+  // The session's provider first, then every other logged-in provider in OMP's order.
+  assert.deepEqual(live.providers.map(p => p.provider), ['alpha', 'beta', 'delta', 'gamma']);
+  const [alpha, beta, delta, gamma] = live.providers;
+  assert.equal(alpha.accounts[0].name, 'alpha-account · Pro');
+  const byLabel = Object.fromEntries(alpha.accounts[0].limits.map(l => [l.label, l]));
   assert.equal(byLabel['five-hour'].fraction, 0.25);
   assert.equal(byLabel['five-hour'].resetsAt, Date.parse('2099-01-01T05:00:00Z'));
   assert.equal(byLabel.overage.fraction, 1.25);
   assert.equal(byLabel['spend-only'].fraction, undefined);
-  assert.deepEqual(live.accounts.at(-1), { name: 'unreported-account', notes: [], limits: [], unavailable: 'no usage data' });
-  assert.ok(!live.accounts.some(a => a.name.includes('beta-account')));
+  assert.deepEqual(alpha.accounts.at(-1), { name: 'unreported-account', notes: [], limits: [], unavailable: 'no usage data' });
+  assert.equal(beta.accounts[0].name, 'beta-account');
+  assert.equal(beta.accounts[0].limits[0].fraction, 0.9);
+  // A malformed report only marks its own account; a provider with no usage data still lists its account.
+  assert.deepEqual(delta.accounts, [{ name: 'delta-account', notes: [], limits: [], unavailable: 'invalid usage limits reported' }]);
+  assert.deepEqual(gamma, { provider: 'gamma', accounts: [{ name: 'gamma-account', notes: [], limits: [], unavailable: 'no usage data' }] });
   assert.equal((await usage('missing'))[0], 404);
   await command({ type: 'prompt', message: 'Keep working' });
   await command({ type: 'follow_up', message: 'Future user turn' });
@@ -93,7 +100,10 @@ process.stdout.write(JSON.stringify(data));
   assert.match(report, /spend-only\n    Remaining quota unavailable · 2\.5 usd used/);
   assert.match(report, /Resets: 2099-01-01T05:00:00\.000Z/);
   assert.match(report, /unreported-account\n  Remaining quota unavailable/);
-  assert.doesNotMatch(report, /beta-account/);
+  assert.match(report, /beta-account/);
+  assert.match(report, /delta-account\n  Remaining quota unavailable: invalid usage limits reported/);
+  assert.match(report, /gamma-account\n  Remaining quota unavailable: no usage data/);
+  assert.deepEqual([...report.matchAll(/^== (\w+) ==$/gm)].map(m => m[1]), ['alpha', 'beta', 'delta', 'gamma']);
   assert.equal(session._promptId, promptId);
   assert.deepEqual(session.queuedMessages.map(m => m.text), ['Future user turn']);
   assert.ok(!session.messages.some(m => m.steer === 'pending' && m.text === '/usage'));
@@ -103,7 +113,8 @@ process.stdout.write(JSON.stringify(data));
   const [, second] = await command({ type: 'follow_up', message: '/usage show' });
   assert.match(second.messages.at(-1).text, /Usage: beta\/other/);
   assert.match(second.messages.at(-1).text, /10\.0% remaining · 90\.0% used/);
-  assert.doesNotMatch(second.messages.at(-1).text, /alpha-account/);
+  assert.match(second.messages.at(-1).text, /alpha-account/);
+  assert.deepEqual([...second.messages.at(-1).text.matchAll(/^== (\w+) ==$/gm)].map(m => m[1]), ['beta', 'alpha', 'delta', 'gamma']);
   assert.equal(session._promptId, promptId);
   assert.deepEqual(session.queuedMessages.map(m => m.text), ['Future user turn']);
 
@@ -112,7 +123,7 @@ process.stdout.write(JSON.stringify(data));
   assert.match(unavailable.messages.at(-1).text, /Remaining quota unavailable: beta/);
   assert.doesNotMatch(unavailable.messages.at(-1).text, /100\.0% remaining/);
   const [, none] = await usage('session');
-  assert.deepEqual([none.provider, none.accounts, none.unavailable], ['beta', [], 'beta did not report usage limits']);
+  assert.deepEqual([none.provider, none.providers], ['beta', [{ provider: 'beta', accounts: [], unavailable: 'beta did not report usage limits' }]]);
   await writeFile(usageFile, JSON.stringify({ error: 'Provider lookup failed' }));
   const [failure, body] = await command({ type: 'steer', message: '/usage' });
   assert.equal(failure, 502);

@@ -180,14 +180,18 @@ async function importMessages(file,limit=400){
 }
 
 // Single parser for `omp usage --json`: the /usage chat snapshot and the live usage panel both render from this.
+// Result is grouped by provider, the session's provider first, then the others in OMP's order.
 function modelUsage(data,provider,model){
  if(!Array.isArray(data?.reports))throw new Error('OMP returned an invalid usage report.');
  const clean=v=>String(v??'').replace(/[\r\n\t`]/g,' ');
  const number=v=>Number.isFinite(v)?v:undefined;
  const amount=v=>v.toLocaleString('en-US',{maximumFractionDigits:2});
  const identity=(meta,fallback)=>[meta?.email||meta?.accountId||meta?.projectId||fallback,meta?.orgName||meta?.orgId,meta?.planType].filter(Boolean).map(clean).join(' · ');
- const accounts=data.reports.filter(r=>r.provider===provider).map((r,i)=>{
-  if(!Array.isArray(r.limits))throw new Error('OMP returned invalid usage limits.');
+ const without=Array.isArray(data.accountsWithoutUsage)?data.accountsWithoutUsage:[];
+ const group=name=>{
+ const accounts=data.reports.filter(r=>r.provider===name).map((r,i)=>{
+  // One malformed report must not take the other providers' limits down with it.
+  if(!Array.isArray(r.limits))return {name:identity(r.metadata,`Account ${i+1}`),notes:[],limits:[],unavailable:'invalid usage limits reported'};
   const limits=r.limits.map(limit=>{
    const a=limit.amount||{},used=number(a.used),cap=number(a.limit),left=number(a.remaining),leftFraction=number(a.remainingFraction);
    let fraction=number(a.usedFraction);
@@ -207,23 +211,29 @@ function modelUsage(data,provider,model){
   });
   return {name:identity(r.metadata,`Account ${i+1}`),fetchedAt:Number.isFinite(new Date(r.fetchedAt).getTime())?new Date(r.fetchedAt).toISOString():undefined,notes:(r.notes||[]).map(clean),limits,unavailable:limits.length?undefined:'no limits reported'};
  });
- for(const a of Array.isArray(data.accountsWithoutUsage)?data.accountsWithoutUsage:[])if(a.provider===provider)accounts.push({name:identity(a,'Account'),notes:[],limits:[],unavailable:'no usage data'});
- return {provider:clean(provider),model:clean(model),accounts,unavailable:data.reports.some(r=>r.provider===provider)?undefined:`${clean(provider)} did not report usage limits`};
+ for(const a of without)if(a.provider===name)accounts.push({name:identity(a,'Account'),notes:[],limits:[],unavailable:'no usage data'});
+ return {provider:clean(name),accounts,unavailable:accounts.length?undefined:`${clean(name)} did not report usage limits`};
+ };
+ const providers=[...new Set([provider,...data.reports.map(r=>r.provider),...without.map(a=>a.provider)].filter(p=>p&&typeof p==='string'))].map(group);
+ return {provider:clean(provider),model:clean(model),providers};
 }
 function modelUsageText(u){
- const lines=[`Usage: ${u.provider}/${u.model}`,'All reported provider accounts; limits may be shared across models.'];
- for(const a of u.accounts){
-  lines.push('',a.name);
-  if(a.fetchedAt)lines.push(`Fetched: ${a.fetchedAt}`);
-  lines.push(...a.notes);
-  if(a.unavailable)lines.push(`  Remaining quota unavailable: ${a.unavailable}.`);
-  for(const l of a.limits){
-   lines.push(`  ${l.label}${l.detail?' · '+l.detail:''}`,`    ${l.summary}`);
-   if(l.resetsAt!==undefined)lines.push(`    ${l.resetLabel}: ${new Date(l.resetsAt).toISOString()}`);
-   for(const note of l.notes)lines.push('    '+note);
+ const lines=[`Usage: ${u.provider}/${u.model}`,'All logged-in providers, the selected model\'s first; limits may be shared across models.'];
+ for(const p of u.providers){
+  lines.push('',`== ${p.provider} ==`);
+  if(p.unavailable)lines.push(`Remaining quota unavailable: ${p.unavailable}.`);
+  for(const a of p.accounts){
+   lines.push('',a.name);
+   if(a.fetchedAt)lines.push(`Fetched: ${a.fetchedAt}`);
+   lines.push(...a.notes);
+   if(a.unavailable)lines.push(`  Remaining quota unavailable: ${a.unavailable}.`);
+   for(const l of a.limits){
+    lines.push(`  ${l.label}${l.detail?' · '+l.detail:''}`,`    ${l.summary}`);
+    if(l.resetsAt!==undefined)lines.push(`    ${l.resetLabel}: ${new Date(l.resetsAt).toISOString()}`);
+    for(const note of l.notes)lines.push('    '+note);
+   }
   }
  }
- if(u.unavailable)lines.push('',`Remaining quota unavailable: ${u.unavailable}.`);
  return ['```text',...lines,'```'].join('\n');
 }
 
@@ -707,11 +717,11 @@ export async function createCompanion(options={}){
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
- // `omp usage` for the session's provider, parsed once for both the /usage chat snapshot and GET /api/usage.
+ // `omp usage` for every logged-in provider (session's first), parsed once for both the /usage chat snapshot and GET /api/usage.
  async function providerUsage(s){
   const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');
-  try{const {stdout}=await execOmp(['usage','--provider',provider,'--json'],{cwd:s.cwd,timeout:20000,maxBuffer:4*1024*1024,windowsHide:true});return modelUsage(JSON.parse(stdout),provider,model);}
-  catch(e){throw error(`Could not read ${provider} usage: ${String(e.stderr||e.message).trim()}`,502);}
+  try{const {stdout}=await execOmp(['usage','--json'],{cwd:s.cwd,timeout:20000,maxBuffer:8*1024*1024,windowsHide:true});return modelUsage(JSON.parse(stdout),provider,model);}
+  catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
   const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
