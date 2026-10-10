@@ -2389,7 +2389,7 @@
     const shown = d ? settingsView() : [];
     const changed = d ? d.settings.filter(x => x.modified).length : 0;
     $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(d.file)}" title="Copy path" aria-label="Copy path ${esc(d.file)}">${esc(d.file)}</button>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
-    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
+    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-enhance" data-setgroup="enhance">Enhance</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
       const n = shown.filter(x => x.group === g).length, m = d.settings.filter(x => x.group === g && x.modified).length;
       return `<a href="#" data-setgroup="${esc(g)}" class="${n ? '' : 'dim'}">${esc(groupLabel(g))}<span>${m ? `<i title="${m} changed">●</i>` : ''}${n}</span></a>`;
     }).join('') : '');
@@ -2399,7 +2399,7 @@
     if (!d && !S.set.plugins) { keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); }); return; }
     renderSettingsChrome();
     const groups = d ? (() => { const by = new Map(settingGroups(d).map(g => [g, []])); for (const x of settingsView()) (by.get(x.group) || by.set(x.group, []).get(x.group)).push(x); return [...by].filter(([, list]) => list.length).map(([g, list]) => `<section class="set-group" id="sg-${esc(g)}"><h2>${esc(groupLabel(g))}${g === 'internal' ? ' <small>used by OMP itself; change with care</small>' : ''}</h2>${list.map(settingRow).join('')}</section>`).join(''); })() : (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : '');
-    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
+    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + enhanceSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
   }
   function hotkeysSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean), h = hotkeys();
@@ -2412,6 +2412,26 @@
   function saveHotkey(action, value) {
     try { localStorage.setItem('omp-hotkeys', JSON.stringify({ ...hotkeys(), [action]: value })); } catch {}
     renderSettings(); toast('Saved hotkeys');
+  }
+  // ✨ Enhance: the model is OMP's `enhance` role (same entry as the Model roles row, picked with its own level);
+  // without one it follows the composer's model at the dashboard-saved reasoning level.
+  function enhanceSection() {
+    const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (q.length && !q.every(w => 'enhance prompt enhancer model reasoning thinking level'.includes(w))) return '';
+    const roles = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = roles?.value?.enhance || '', th = S.store?.enhanceThinking || 'low';
+    if (S.set.changed && !role && th === 'low') return '';
+    const r = splitSel(role), label = role ? modelLabel(r.sel, r.thinking) || role : "Composer's model";
+    const levels = S.models?.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+    return `<section class="set-group" id="sg-enhance"><h2>✨ Enhance <small>prompt enhancer</small></h2>
+      <div class="set-row ${role ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-model-name">Model${role ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Composer's model: the model of the session (or New session) you enhance in. A picked model is saved as OMP's <code>enhance</code> model role, together with its reasoning level.</div></div>
+        <div class="set-ctl">${roles ? `<button class="model-chip" data-mmkey="modelRoles" data-mmname="enhance" title="${esc(role || "Composer's model")}" aria-label="Enhance model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>${role ? `<button class="btn sm ghost" data-mmdel="modelRoles" data-mmname="enhance">Use composer's model</button>` : ''}` : '<span class="muted">Needs OMP settings</span>'}</div></div>
+      <div class="set-row ${th !== 'low' ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level${th !== 'low' ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${role ? 'Not used while an enhance model is set: that model uses the level picked with it.' : "Applied to the composer's model for enhancing only. Saved by the dashboard."}</div>${th !== 'low' ? '<div class="set-def">Default: <code>low</code></div>' : ''}</div>
+        <div class="set-ctl"><select data-enhthinking aria-labelledby="enh-think-name" ${role ? 'disabled' : ''}>${(levels.includes(th) ? levels : [th, ...levels]).map(l => `<option ${l === th ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div></div></section>`;
+  }
+  async function saveEnhanceThinking(thinking) {
+    try { await api('/enhance/settings', { thinking }); if (S.store) S.store.enhanceThinking = thinking; toast('Saved enhance reasoning level'); }
+    catch (e) { toast(e.message, 'err'); }
+    if (current().kind === 'settings') renderSettings();
   }
   function settingRow(x) {
     const id = setId(x.key), long = x.description?.length > 220, open = S.set.descOpen.has(x.key);
@@ -2448,6 +2468,7 @@
       S.set.data = placeSettings(await api(reset ? '/settings/reset' : '/settings', reset ? { key } : { key, value }));
       S.set.saving.delete(key); S.advCfg = null;
       redrawRow(key, true);
+      const es = $('#sg-enhance'); if (key === 'modelRoles' && es) es.outerHTML = enhanceSection();
       toast(reset ? `Reset ${key}` : `Saved ${key}`);
       if (/^modelRoles$|^defaultThinkingLevel$|^enabledModels$|Providers$/.test(key)) { S.models = null; modelsReq = null; ensureModels().then(() => { if (current().kind === 'settings') renderSettings(); }, () => {}); }
       if (current().kind === 'settings') renderSettingsChrome();
@@ -3003,6 +3024,7 @@
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
+    else if (e.target.matches?.('[data-enhthinking]')) saveEnhanceThinking(e.target.value);
     else if (e.target.dataset?.hotkey) {
       const v = e.target.value.split(',').map(s => s.trim()).filter(Boolean), bad = v.filter(s => !normCombo(s)), taken = v.filter(s => RESERVED_KEYS.has(normCombo(s)));
       if (bad.length) toast(`Not a usable hotkey: ${bad.join(', ')}. Use Ctrl, Alt or Meta plus a letter, digit or key name (Enter, Space, Tab, Up, Down, Esc, F1…), e.g. Alt+Q`, 'err');

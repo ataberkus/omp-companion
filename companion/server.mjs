@@ -333,11 +333,12 @@ const CLI_TOOLS={
 const cliCatalog=()=>Object.fromEntries(Object.entries(CLI_TOOLS).map(([id,t])=>[id,{title:t.title,description:t.description,actions:Object.fromEntries(Object.entries(t.actions).map(([a,x])=>[a,{label:x.label,cwd:x.cwd,confirm:x.confirm,confirmIf:x.confirmIf,command:'omp '+x.args.join(' '),fields:(x.fields||[]).map(({flag,arg,...f})=>({...f,flag}))}]))}]));
 
 // Enhance prompt: a one-shot read-only `omp -p` that rewrites a composer draft.
-// `enhance` role wins; otherwise the composer's model at low thinking so an xhigh session doesn't make every enhance slow.
-function enhanceModel(roles,selector){
+// `enhance` role (model[:thinking], set in Settings) wins; otherwise the composer's model at the Settings reasoning level
+// (default low) so an xhigh session doesn't make every enhance slow.
+function enhanceModel(roles,selector,thinking='low'){
  if(roles?.enhance)return {model:'@enhance',thinking:null,label:roles.enhance};
- if(selector)return {model:selector,thinking:'low',label:selector};
- return {model:null,thinking:null,label:roles?.default||'OMP default'};
+ if(selector)return {model:selector,thinking,label:selector};
+ return {model:null,thinking,label:roles?.default||'OMP default'};
 }
 // The draft never goes in argv (stdin only): no quoting hazards and no Windows 32K command-line limit.
 function enhanceArgs({model,thinking,overlay,system,images}){
@@ -420,6 +421,8 @@ export async function createCompanion(options={}){
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
+ // Enhance reasoning level when no `enhance` role is set (Settings page); the role carries its own level.
+ if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.
@@ -1071,7 +1074,7 @@ async function spend(){
   const images=chatImages(body);
   if([...enhanceJobs.values()].filter(j=>j.status==='running').length>=3)throw error('Wait for the running enhance to finish.',409);
   const selector=s?(s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'')):modelChoice(body).selector;
-  const pick=enhanceModel((await modelRoles()).roles,selector);
+  const pick=enhanceModel((await modelRoles()).roles,selector,store.enhanceThinking);
   const id=randomUUID(),dir=path.join(dataDir,'enhance',id);
   const files=[];
   if(images.length){await fs.mkdir(dir,{recursive:true,mode:0o700});for(const [i,img] of images.entries()){const f=path.join(dir,`image-${i+1}.${IMAGE_EXT[img.mimeType]||'png'}`);await fs.writeFile(f,Buffer.from(img.data,'base64'),{mode:0o600});files.push(f);}}
@@ -1257,6 +1260,7 @@ async function spend(){
    if(url.pathname==='/api/cli'){json(await runCli(body),202);return;}
    if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
    if(url.pathname==='/api/enhance'){json(await startEnhance(body),202);return;}
+   if(url.pathname==='/api/enhance/settings'){if(!THINKING.includes(body.thinking))throw error('Unknown reasoning level.');store.enhanceThinking=body.thinking;await persist();json({thinking:store.enhanceThinking});return;}
    if(url.pathname==='/api/enhance/stop'){const job=enhanceJobs.get(body.id);if(!job)throw error('Enhance not found.',404);await stopEnhance(job);json({status:job.status});return;}
    if(url.pathname==='/api/omp-update'){
     if(updateState.status==='running')throw error('OMP update is already running.',409);
