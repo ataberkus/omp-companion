@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -274,4 +274,78 @@ for await (const line of createInterface({ input: process.stdin })) {
   await post({ type: 'prompt', message: 'Continue' });
   await new Promise(r => setTimeout(r, 100));
   assert.equal(app.store.sessions[0].status, 'running');
+});
+
+// Header-only PNG claiming 1568×1568 pixels: ≈1,534 estimated tokens each.
+const big = (() => { const b = Buffer.alloc(33); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]).copy(b); b.write('IHDR', 12, 'ascii'); b.writeUInt32BE(1568, 16); b.writeUInt32BE(1568, 20); return { type: 'image', mimeType: 'image/png', data: b.toString('base64') }; })();
+
+test('queued follow-ups that only fit the context one at a time are sent separately; one that no longer fits stays queued', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-chat-queue-ctx-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const fake = join(dir, 'omp.mjs');
+  // Each session runs in its own folder; a "release" file there completes its current turn, after which every prompt completes at once.
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+import { existsSync, appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+const log = join(process.cwd(), 'sent.jsonl'), release = join(process.cwd(), 'release');
+let released = false;
+process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  if (c.type === 'prompt') appendFileSync(log, JSON.stringify({ message: c.message, images: c.images?.length || 0 }) + '\\n');
+  if (c.type === 'get_state' && !released && existsSync(release)) {
+    released = true;
+    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: true }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
+  }
+  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
+  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, command: c.type, success: true, data }) + '\\n');
+  if (c.type === 'prompt' && released) {
+    process.stdout.write(JSON.stringify({ type: 'agent_start' }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: false }) + '\\n');
+    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
+  }
+}`);
+  const at = new Date().toISOString();
+  // 4,000 tokens left: two big images (≈3,068) fit, four (≈6,136) don't.
+  const session = id => ({ id, projectId: id, title: id, status: 'paused', cwd: join(dir, id), model: 'OMP default', native: false, contextWindow: 5000, contextTokens: 1000, prefs: { followUpMode: 'all' }, messages: [], todos: [], createdAt: at, updatedAt: at });
+  for (const id of ['split', 'stuck']) await mkdir(join(dir, id));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: ['split', 'stuck'].map(id => ({ id, path: join(dir, id), name: id })), sessions: [session('split'), session('stuck')], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const post = async (id, body) => {
+    const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/${id}/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return [res.status, await res.json()];
+  };
+  const sent = async id => (await readFile(join(dir, id, 'sent.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  const settle = async (id, done) => {
+    await writeFile(join(dir, id, 'release'), 'go');
+    assert.equal((await post(id, { type: 'set_model', model: 'test/model' }))[0], 200);
+    for (let i = 0; i < 80 && !await done(); i++) await new Promise(r => setTimeout(r, 25));
+  };
+
+  // "Send all together": each follow-up fits on its own, both together don't, so they go out as two prompts.
+  await post('split', { type: 'prompt', message: 'Work' });
+  assert.equal((await post('split', { type: 'follow_up', message: 'First', images: [big, big] }))[1].queuedMessages.length, 1);
+  assert.equal((await post('split', { type: 'follow_up', message: 'Second', images: [big, big] }))[1].queuedMessages.length, 2);
+  const split = app.store.sessions.find(s => s.id === 'split');
+  await settle('split', async () => !split.queuedMessages.length && split.status === 'review');
+  assert.deepEqual(await sent('split'), [{ message: 'Work', images: 0 }, { message: 'First', images: 2 }, { message: 'Second', images: 2 }]);
+
+  // The context filled up while the follow-up waited: it, and the one behind it, stay queued with their images.
+  await post('stuck', { type: 'prompt', message: 'Work' });
+  await post('stuck', { type: 'follow_up', message: 'Too big now', images: [big] });
+  await post('stuck', { type: 'follow_up', message: 'Behind it' });
+  const stuck = app.store.sessions.find(s => s.id === 'stuck');
+  const queuedId = stuck.queuedMessages[0].id;
+  stuck.contextTokens = 4500;
+  await settle('stuck', async () => stuck.status !== 'running');
+  assert.deepEqual(await sent('stuck'), [{ message: 'Work', images: 0 }]);
+  assert.notEqual(stuck.status, 'running');
+  assert.deepEqual(stuck.queuedMessages.map(q => q.text), ['Too big now', 'Behind it']);
+  await access(join(dir, 'queued-images', queuedId + '.json'));
+  assert.ok(stuck.messages.some(m => m.role === 'system' && /next queued message was not sent.*Not enough context left/.test(m.text)));
+  assert.ok(!stuck.messages.some(m => m.text === 'Too big now'));
 });

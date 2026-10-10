@@ -2019,11 +2019,15 @@
           ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
         };
         // Models see at most ~1568px, so larger images are scaled down here: fewer bytes to upload, same tokens.
+        // PNGs (mostly screenshots) stay lossless so small text stays sharp; JPEG only when the PNG is still over 5 MB.
         if (file.size > 5 * 1024 * 1024 || Math.max(width, height) > 1568) {
           draw(1568);
-          blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .82));
+          const encode = (type, q) => new Promise(resolve => canvas.toBlob(resolve, type, q));
+          blob = file.type === 'image/png' ? await encode('image/png') : null;
+          mimeType = 'image/png';
+          if (!blob || blob.size > 5 * 1024 * 1024) { blob = await encode('image/jpeg', .82); mimeType = 'image/jpeg'; }
           if (!blob) throw new Error('Could not resize this image.');
-          mimeType = 'image/jpeg'; width = canvas.width; height = canvas.height;
+          width = canvas.width; height = canvas.height;
         }
         draw(1024);
         preview = canvas.toDataURL('image/jpeg', .8);

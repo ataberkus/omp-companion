@@ -897,9 +897,9 @@ export async function createCompanion(options={}){
    const message=batch.length>1?batch.map(q=>q.text).filter(Boolean).join('\n\n'):item.text;
    const preview=batch.length>1?batch.flatMap(q=>[].concat(q.imagePreview??[])):item.imagePreview;
    s.status='review';
-   // A message that alone no longer fits stays queued: the user can compact, edit or remove it.
+   // A message that alone no longer fits stays queued, holding back the ones behind it: the user can compact, edit or remove it.
    try{await command(s,{type:'prompt',message,preview:Array.isArray(preview)&&!preview.length?undefined:preview},images,item.id);}
-   catch(e){notice(s,'error',e.message);return;}
+   catch(e){notice(s,'error',`The next queued message was not sent and stays queued, with any queued after it. ${e.message}`);return;}
    if(s.status==='error'){s.messages=s.messages.filter(m=>m.id!==item.id);await persist();return;}
    if(closing)return;
    const sent=new Set(batch.map(q=>q.id));s.queuedMessages=s.queuedMessages.filter(q=>!sent.has(q.id));
