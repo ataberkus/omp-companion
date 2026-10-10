@@ -96,3 +96,27 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.deepEqual(thoughts(finished), [thinking, next]);
   assert.equal(finished.active, false, 'completion does not leave a live thought or Active badge');
 });
+
+test('background reports the reasoning level each subagent last ran with, and none when unknown', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-subagent-level-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const sessions = join(dir, 'sessions'), parent = join(sessions, 'project', 'parent.jsonl'), sub = join(sessions, 'project', 'parent');
+  await mkdir(sub, { recursive: true });
+  const at = new Date().toISOString();
+  const lines = (...f) => [{ type: 'session', id: 'x', cwd: dir, timestamp: at }, ...f].map(x => JSON.stringify(x)).join('\n') + '\n';
+  const init = model => ({ type: 'session_init', resolvedModel: model });
+  const reply = effort => ({ type: 'message', message: { role: 'assistant', provider: 'anthropic', model: 'claude-opus-5-5', content: [], ...(effort ? { requestControls: { effort: { topLevel: effort, tail: effort } } } : {}) } });
+  await writeFile(parent, lines());
+  await writeFile(join(sub, 'Auto.jsonl'), lines(init('anthropic/claude-opus-5-5:auto'), reply('high')));
+  await writeFile(join(sub, 'Suffix.jsonl'), lines(init('anthropic/claude-sonnet-5-5:medium'), reply()));
+  await writeFile(join(sub, 'Changed.jsonl'), lines(init('anthropic/claude-opus-5-5:low'), reply('low'), { type: 'thinking_level_change', thinkingLevel: 'xhigh' }));
+  await writeFile(join(sub, 'Unknown.jsonl'), lines(init('anthropic/claude-opus-5-5:auto'), reply()));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: ['-e', ''] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/background?file=${encodeURIComponent(parent)}`, { headers: { Authorization: 'Bearer ' + app.token } });
+  const levels = Object.fromEntries((await res.json()).subagents.map(x => [x.name, x.thinking]));
+  assert.deepEqual(levels, { Auto: 'high', Suffix: 'medium', Changed: 'xhigh', Unknown: '' });
+});

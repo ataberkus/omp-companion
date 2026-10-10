@@ -108,13 +108,15 @@ const toolSummary=t=>`${t.status==='running'?'':t.status==='error'?'Error · ':'
 // `!command` runs from the composer: OMP records them as bashExecution messages ({command, output, exitCode, cancelled}).
 const shellRecord=(command,r)=>{const t=toolRecord('bash',{command:String(command||'')},'You ran this command');t.user=true;if(r){t.status=r.cancelled||(typeof r.exitCode==='number'&&r.exitCode!==0)?'error':'done';t.result=clip(String(r.output||'')+(r.cancelled?'\n(cancelled)':typeof r.exitCode==='number'&&r.exitCode!==0?`\n(exit code ${r.exitCode})`:''),8000);}return t;};
 // Native OMP session files: first lines hold {type:'title'} and {type:'session',cwd,id,timestamp}; model changes can appear anywhere.
+// `reasoning` is the level the session last ran with: the spawn's ":level" suffix, a level change, or the effort sent with a request ("auto" resolves there).
 function scanModel(head,f){
  if(f.type==='model_change'&&f.model)head.model=String(f.model).replace(/:.*$/,'');
- else if(f.type==='thinking_level_change'&&f.thinkingLevel)head.thinking=f.thinkingLevel;
- else if(f.type==='message'&&f.message?.role==='assistant'&&f.message.provider&&f.message.model)head.model=`${f.message.provider}/${f.message.model}`;
+ else if(f.type==='thinking_level_change'&&f.thinkingLevel)head.thinking=head.reasoning=f.thinkingLevel;
+ else if(f.type==='session_init'){const l=String(f.resolvedModel||'').split(':').pop();if(l!=='auto'&&THINKING.includes(l))head.reasoning=l;}
+ else if(f.type==='message'&&f.message?.role==='assistant'){const m=f.message;if(m.provider&&m.model)head.model=`${m.provider}/${m.model}`;const e=m.requestControls?.effort?.topLevel;if(typeof e==='string'&&e)head.reasoning=e;}
 }
 async function readSessionHead(file){
- const fh=await fs.open(file,'r');try{const size=(await fh.stat()).size;const buf=Buffer.alloc(64*1024);const {bytesRead}=await fh.read(buf,0,buf.length,0);const head={title:'',cwd:'',id:'',createdAt:'',preview:'',model:'',thinking:''};
+ const fh=await fs.open(file,'r');try{const size=(await fh.stat()).size;const buf=Buffer.alloc(64*1024);const {bytesRead}=await fh.read(buf,0,buf.length,0);const head={title:'',cwd:'',id:'',createdAt:'',preview:'',model:'',thinking:'',reasoning:''};
   for(const line of buf.subarray(0,bytesRead).toString('utf8').split('\n').slice(0,80)){let f;try{f=JSON.parse(line);}catch{continue;}
    if(f.type==='title'&&f.title)head.title=f.title;else if(f.type==='title_change'&&f.title&&!head.title)head.title=f.title;else if(f.type==='session'){head.cwd=f.cwd||'';head.id=f.id||'';head.createdAt=f.timestamp||'';}
    else if(f.type==='message'&&f.message?.role==='user'&&!head.preview)head.preview=contentText(f.message.content).slice(0,240);
@@ -1049,13 +1051,13 @@ async function spend(){
   const subagents=[],jobs=[];
   await Promise.all(entries.filter(e=>e.isFile()).map(async e=>{const f=path.join(dir,e.name);let st;try{st=await fs.stat(f);}catch{return;}
    if(e.name.endsWith('.jsonl')){const name=e.name.slice(0,-6);let head={};try{head=await readSessionHead(f);}catch{}let result='';try{result=(await fs.readFile(path.join(dir,name+'.md'),'utf8')).slice(0,4000);}catch{}
-    subagents.push({name,file:f,size:st.size,updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.thinking||'',preview:head.preview||'',result,cost:await transcriptCost(f,st),advisor:name==='__advisor'||name.startsWith('__advisor.')});}
+    subagents.push({name,file:f,size:st.size,updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.reasoning||'',preview:head.preview||'',result,cost:await transcriptCost(f,st),advisor:name==='__advisor'||name.startsWith('__advisor.')});}
    else if(e.name.endsWith('.async.log')){jobs.push({name:e.name,file:f,size:st.size,updatedAt:st.mtime.toISOString()});}
   }));
   subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   const byName=new Map(subagents.map(x=>[x.name,x]));
   let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=!live&&Date.now()-mtime>30*60e3;
-  const tasks=scanned.map(j=>{const sub=byName.get(j.id);const status=j.status==='running'?(sub?.result?'done':quiet?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
+  const tasks=scanned.map(j=>{const sub=byName.get(j.id);const status=j.status==='running'?(sub?.result?'done':quiet?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',thinking:sub?.thinking||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
   const linked=new Set(tasks.map(t=>t.id));
   return {dir,tasks,subagents:subagents.filter(x=>!linked.has(x.name)),logs:jobs};
  }

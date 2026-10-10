@@ -1358,7 +1358,7 @@
       if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; }
       else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: firstSeen(a.id), transcript: a.sessionFile, live: a });
     }
-    for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
+    for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, thinking: x.thinking, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
     return jobs;
   }
   const since = iso => { const ms = Date.now() - new Date(iso).getTime(); return isFinite(ms) ? fmtMs(Math.max(0, Math.round(ms / 1000) * 1000)) : ''; };
@@ -1373,7 +1373,7 @@
     const output = j.output || j.summary || '';
     return `<div class="job ${esc(j.status)}" data-key="job:${esc(j.id)}">
       <div class="job-top"><span class="dot ${running ? 'running' : j.status === 'error' ? 'error' : j.status === 'stale' ? 'paused' : 'done'}"></span><b title="${esc(j.id)}">${esc(j.type === 'bash' ? (j.title || j.id) : j.id)}</b><span class="dur">${esc(time)}</span></div>
-      <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelName(j.model)) : ''}${j.cost ? ' · $' + j.cost.toFixed(j.cost < 0.01 ? 4 : 2) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
+      <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelLabel(j.model, j.thinking)) : ''}${j.cost ? ' · $' + j.cost.toFixed(j.cost < 0.01 ? 4 : 2) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
       ${desc ? `<div class="job-desc">${esc(desc.slice(0, 220))}</div>` : ''}
       ${liveLine ? `<div class="job-live">${esc(liveLine)}</div>` : ''}
       ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}" open><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
