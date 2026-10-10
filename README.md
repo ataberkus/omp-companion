@@ -79,14 +79,15 @@ Click **◔ Usage** in a session's top bar, or send `/usage` (or `/usage show`),
 
 The same dashboard in its own window, with the companion running inside the app: no console window, no browser tab. Node.js is bundled, so the installed app needs only OMP.
 
-Building needs Node.js 22+ (it is copied into the app), Rust and the MSVC C++ build tools:
+Building needs Node.js 22+ (it is copied into the app), Rust and the MSVC C++ build tools. Install the last two once, then open a new terminal so Rust is on PATH:
 
 ```bat
 winget install --id Rustlang.Rustup -e
 winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-npm install
 npm run build
 ```
+
+`npm run build` (also `npm run dist` and `npm run desktop`) first runs `scripts/check-build.mjs`: it installs the npm dependencies, including the Tauri CLI, with `npm ci` when they are missing (exactly the committed lockfile, which it leaves unchanged), and stops with the install command for anything else that is missing (Node.js 22+, Rust, the MSVC build tools) before cargo starts.
 
 Run `src-tauri/target/release/bundle/nsis/OMP Control Room_<version>_x64-setup.exe`. It installs for your user only (no admin rights) and adds **OMP Control Room** to the Start menu. The installer is unsigned, so Windows SmartScreen may show *Unknown publisher* on first run: choose **More info → Run anyway**. For development, `npm run desktop` starts the app from this checkout. After upgrading Node.js, delete `src-tauri/binaries/` to bundle the new version.
 
