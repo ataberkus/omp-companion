@@ -6,7 +6,7 @@ const MAX_REASSEMBLED=64*1024*1024;
 
 export class RpcProcess {
  constructor(command,args,cwd,onEvent,onExit){
-  this.pending=new Map();this.alive=true;this.stopping=false;this.chunk=null;
+  this.pending=new Map();this.alive=true;this.stopping=false;this.chunk=null;this.startedAt=Date.now();
   this.child=spawn(command,args,{cwd,stdio:['pipe','pipe','pipe'],shell:false,windowsHide:true});
   this.ready=new Promise((resolve,reject)=>{this.resolveReady=resolve;this.rejectReady=reject;});
   this.readyTimer=setTimeout(()=>{this.fail(new Error('OMP did not become ready within 30 seconds. Check your OMP installation.'));this.kill();},30000);

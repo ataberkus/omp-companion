@@ -120,3 +120,50 @@ test('background reports the reasoning level each subagent last ran with, and no
   const levels = Object.fromEntries((await res.json()).subagents.map(x => [x.name, x.thinking]));
   assert.deepEqual(levels, { Auto: 'high', Suffix: 'medium', Changed: 'xhigh', Unknown: '' });
 });
+
+// Shapes copied from a real OMP transcript: async `task` spawn, then `wait` snapshots keyed by task name.
+test('background marks async subagents finished when the transcript completes them or their OMP process is gone', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-subagent-jobs-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const sessions = join(dir, 'sessions'), parent = join(sessions, 'project', 'parent.jsonl');
+  await mkdir(join(sessions, 'project'), { recursive: true });
+  const at = ms => new Date(ms).toISOString();
+  const spawn = (call, name, ms) => [
+    { type: 'message', timestamp: at(ms), message: { role: 'assistant', content: [{ type: 'toolCall', id: call, name: 'task', arguments: { i: 'Authoring tasks', tasks: [{ name, task: 'Write ' + name }] } }] } },
+    { type: 'message', timestamp: at(ms + 1), message: { role: 'toolResult', toolCallId: call, toolName: 'task', details: { results: [], totalDurationMs: 1, progress: [{ index: 0, id: name, agent: 'task', status: 'pending' }], async: { state: 'running', jobId: name, type: 'task' } } } }];
+  const snapshot = (call, ms, jobs) => ({ type: 'message', timestamp: at(ms), message: { role: 'toolResult', toolCallId: call, toolName: 'wait', details: { op: 'wait', jobs: jobs.map(([id, status]) => ({ id, type: 'task', status, label: id, durationMs: 1000 })) } } });
+  const t0 = Date.now() - 3 * 3600e3;
+  // Killed: its OMP process exited before reporting back, so no completion is ever recorded.
+  const lines = [{ type: 'session', id: 'parent', cwd: dir, timestamp: at(t0) }, ...spawn('c1', 'Killed', t0),
+    ...spawn('c2', 'Finished', t0 + 60e3), snapshot('w1', t0 + 70e3, [['Finished', 'running']]), snapshot('w2', t0 + 80e3, [['Finished', 'completed']])];
+  const write = list => writeFile(parent, list.map(x => JSON.stringify(x)).join('\n') + '\n');
+  await write(lines);
+  const fake = join(dir, 'omp.mjs');
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
+out({ type: 'ready' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  out({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { sessionFile: ${JSON.stringify(parent)}, todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {} });
+}
+`);
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'p', path: dir, name: 'Project' }], sessions: [{ id: 's', projectId: 'p', title: 'Parent', status: 'paused', cwd: dir, sessionFile: parent, messages: [], todos: [], createdAt: at(t0), updatedAt: at(t0) }], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const url = `http://127.0.0.1:${app.server.address().port}/api`;
+  const request = async (path, body) => {
+    const res = await fetch(url + path, { method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + app.token, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  await request('/sessions/s/command', { type: 'prompt', message: 'cont' });
+  // The resumed OMP process spawns a new subagent that is still working.
+  await write([...lines, ...spawn('c3', 'Working', Date.now())]);
+  const bg = await request('/background?file=' + encodeURIComponent(parent));
+  assert.equal(bg.live, true);
+  const status = Object.fromEntries(bg.tasks.map(j => [j.id, j.status]));
+  assert.deepEqual(status, { Killed: 'stale', Finished: 'done', Working: 'running' });
+  assert.ok(bg.tasks.find(j => j.id === 'Finished').finishedAt, 'a finished job stops its timer');
+});
