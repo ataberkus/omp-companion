@@ -334,6 +334,10 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
   .composer-wrap .bar-tools #modelSlot{flex-wrap:nowrap;flex-shrink:0}
   .composer-wrap .bar-tools :is(.btn,.model-chip){flex-shrink:0;white-space:nowrap}
   .composer-wrap .bar-end{flex:none}
+  /* Busy state (Queue/Steer/Stop & send/Abort) would squeeze the chips to nothing: actions take their own row, chips the full width above. */
+  .composer-wrap .composer-bar:has(#buttons>:nth-child(2)){flex-wrap:wrap}
+  .composer-wrap .composer-bar:has(#buttons>:nth-child(2)) .bar-tools{flex:1 0 100%}
+  .composer-wrap .composer-bar:has(#buttons>:nth-child(2)) .bar-end{margin-left:auto}
   .home-inner{padding:28px 16px}
   .meta{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
   .meta .path{display:none}
