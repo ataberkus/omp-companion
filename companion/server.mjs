@@ -714,6 +714,9 @@ export async function createCompanion(options={}){
   if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);s._skillImages=state.skillImages===true;}
   // Native quiescence is authoritative; unrelated events must not keep an idle run working.
   if(state?.isSettled===true&&state.isCompacting!==true&&s.status==='running')settle(s,promptId,run);
+  // Likewise a streaming OMP is working whatever s.status says: a run reported aborted or failed can keep going
+  // (e.g. Stop & send's own prompt_result reporting the interrupted run), and OMP rejects prompts while it streams.
+  if(state?.isStreaming===true&&!['running','queued','done'].includes(s.status)){startWork(s);s.status='running';s.error=undefined;delete s._settled;}
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
  async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
@@ -918,6 +921,8 @@ export async function createCompanion(options={}){
    await persist();return s;
   }
   const slashCommand=prompting&&/^\/\S/.test(body.message);
+  // OMP's own state decides whether it is busy; a drifted status would otherwise send a prompt OMP rejects.
+  if(prompting&&!['running','queued'].includes(s.status)&&runners.get(s.id)?.alive){await refresh(s,runners.get(s.id));if(s.status==='running'&&body.type==='prompt'&&!slashCommand)body.type='steer';}
   if(body.type==='interrupt'){if(slashCommand)throw error('Run slash commands with Enter; Stop & send is for messages.');if(!['running','queued'].includes(s.status))body.type='prompt';}
   if(prompting&&images.length&&/^\/skill:/.test(body.message)){await start(s);if(!s._skillImages)throw error('This OMP build drops image attachments on /skill: commands. Set OMP_BIN to an updated build, or send the image in a normal message, then invoke the skill.');}
   if(prompting&&/^\/goal(?:\s|$)/.test(body.message)){
