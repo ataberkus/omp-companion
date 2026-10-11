@@ -459,6 +459,15 @@ const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in th
 export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
+// Leaves an already-current file untouched (opening it for write can fail with EPERM on Windows, e.g. under a
+// restricted token); otherwise replaces it atomically so it is never missing or half-written. Errors propagate:
+// a stale Enhance lockdown overlay must not be served.
+async function syncFile(file,content){
+ if(await fs.readFile(file,'utf8').then(c=>c===content,()=>false))return;
+ const tmp=`${file}.${process.pid}.tmp`;
+ try{await fs.writeFile(tmp,content,{mode:0o600});await fs.rename(tmp,file);}
+ catch(e){await fs.rm(tmp,{force:true}).catch(()=>{});throw e;}
+}
 export async function createCompanion(options={}){
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
  // OMP_BIN may point at the native executable or a source checkout's cli.ts.
@@ -467,8 +476,12 @@ export async function createCompanion(options={}){
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceSystem=path.join(dataDir,'enhance-system.md');
- await fs.writeFile(enhanceOverlay,ENHANCE_OVERLAY,{mode:0o600});await fs.writeFile(enhanceSystem,ENHANCE_SYSTEM,{mode:0o600});
+ await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceSystem,ENHANCE_SYSTEM);
  const stateFile=path.join(dataDir,'workspace.json');
+ // A companion killed mid-save (console closed, Task Manager) leaves its ~30 MB workspace.json.<pid>.tmp behind; no later process reuses that name.
+ // Only dead PIDs' files go: a live companion sharing this dir may be writing its own. Also the pre-PID shared workspace.json.tmp.
+ const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
+ for(const f of await fs.readdir(dataDir)){const m=/^workspace\.json\.(?:(\d+)\.)?tmp$/.exec(f);if(m&&!(m[1]&&alive(Number(m[1]))))await fs.rm(path.join(dataDir,f),{force:true}).catch(()=>{});}
  const queuedImageFile=id=>path.join(dataDir,'queued-images',id+'.json');
  let store;
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
@@ -478,10 +491,6 @@ export async function createCompanion(options={}){
  if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
  store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
- // A companion killed mid-save (console closed, Task Manager) leaves its ~30 MB workspace.json.<pid>.tmp behind; no later process reuses that name.
- // Only dead PIDs' files go: a live companion sharing this dir may be writing its own. Also the pre-PID shared workspace.json.tmp.
- const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
- for(const f of await fs.readdir(dataDir)){const m=/^workspace\.json\.(?:(\d+)\.)?tmp$/.exec(f);if(m&&!(m[1]&&alive(Number(m[1]))))await fs.rm(path.join(dataDir,f),{force:true}).catch(()=>{});}
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.

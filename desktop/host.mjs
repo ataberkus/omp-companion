@@ -89,7 +89,8 @@ async function main() {
   detectSiblingCheckout();
   // Before createCompanion: it pauses running sessions and saves workspace.json, which would clobber a live companion.
   if (await portBusy(port)) return fatal(alreadyRunning);
-  try { companion = await createCompanion({ exposeToken: false }); }
+  // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
+  try { companion = await createCompanion(); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);
