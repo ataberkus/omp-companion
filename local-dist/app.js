@@ -410,10 +410,12 @@
           <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <div class="composer-bar"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span id="commitSlot"></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
+          <div class="composer-bar"><span class="bar-tools"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span id="commitSlot"></span></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
         </div>
       </div>`;
     const input = $('#input');
+    // Mobile scrolls the chips sideways; browsers skip focus-scrolling for half-visible chips, so scroll them fully in.
+    $('.bar-tools')?.addEventListener('focusin', e => e.target.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
     input.value = drafts.get(S.view) || '';
     autosize(input);
     railObserver.disconnect(); railObserver.observe($('#scroller')); railObserver.observe($('#thread'));
