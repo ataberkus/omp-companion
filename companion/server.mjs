@@ -1197,8 +1197,9 @@ async function spend(){
  const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(path.join(os.homedir(),'.omp','stats.db'),{readOnly:true});
  try{return {rows:db.prepare("SELECT bucket AS at,provider||'/'||model AS model,TOTAL(cost_total) AS cost FROM message_rollup GROUP BY bucket,provider,model ORDER BY bucket").all()};}finally{db.close();}
 }
- // `liveSince`: spawn time of the OMP process running this session now. Async jobs die with their process, so one started
- // before it (an earlier, exited process) is not running even though its transcript never recorded an end.
+ // `liveSince`: when the jobs still running now started at the earliest. Async jobs die with the OMP process that spawned them,
+ // so a job from before it is not running even though its transcript never recorded an end. Infinity: a companion session
+ // with no OMP process has none running. Undefined (a file the companion does not run): fall back to transcript quiet time.
  async function background(file,liveSince){
   const dir=file.replace(/\.jsonl$/,'');const scanned=await scanJobs(file);let entries=[];try{entries=await fs.readdir(dir,{withFileTypes:true});}catch{}
   const subagents=[],jobs=[];
@@ -1209,8 +1210,8 @@ async function spend(){
   }));
   subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   const byName=new Map(subagents.map(x=>[x.name,x]));
-  let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=!liveSince&&Date.now()-mtime>30*60e3;
-  const tasks=scanned.map(j=>{const sub=byName.get(j.id);const gone=liveSince?Date.parse(j.startedAt)<liveSince:quiet;const status=j.status==='running'?(sub?.result?'done':gone?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',thinking:sub?.thinking||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
+  let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=liveSince===undefined&&Date.now()-mtime>30*60e3;
+  const tasks=scanned.map(j=>{const sub=byName.get(j.id);const gone=liveSince===undefined?quiet:Date.parse(j.startedAt)<liveSince;const status=j.status==='running'?(sub?.result?'done':gone?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',thinking:sub?.thinking||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
   const linked=new Set(tasks.map(t=>t.id));
   return {dir,tasks,subagents:subagents.filter(x=>!linked.has(x.name)),logs:jobs};
  }
@@ -1392,7 +1393,7 @@ async function spend(){
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
     await lock(s.id,async()=>{await start(s);await persist();});json({commands:commands.get(s.id)||[]});return;
    }
-   if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const runner=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file)).map(s=>runners.get(s.id)).find(Boolean);const live=!!runner;const bg=await background(file,runner?.startedAt);
+   if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const owned=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file));const runner=owned.map(s=>runners.get(s.id)).find(Boolean);const live=!!runner;const bg=await background(file,runner?runner.startedAt:owned.length?Infinity:undefined);
     const own=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));json({...bg,live,agents:(own?.subagentList||[]).map(a=>({...a,thinking:subagentThoughts.get(own.id+':'+a.id)?.text||''}))});return;}
    if(req.method==='GET'&&url.pathname==='/api/transcript'){
     const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}

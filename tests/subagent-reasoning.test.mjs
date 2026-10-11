@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, rm, writeFile, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -141,6 +141,8 @@ test('background marks async subagents finished when the transcript completes th
   await write(lines);
   const fake = join(dir, 'omp.mjs');
   await writeFile(fake, `import { createInterface } from 'node:readline';
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid));
 const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
 out({ type: 'ready' });
 for await (const line of createInterface({ input: process.stdin })) {
@@ -166,4 +168,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   const status = Object.fromEntries(bg.tasks.map(j => [j.id, j.status]));
   assert.deepEqual(status, { Killed: 'stale', Finished: 'done', Working: 'running' });
   assert.ok(bg.tasks.find(j => j.id === 'Finished').finishedAt, 'a finished job stops its timer');
+  // OMP exits (crash, stop): its jobs die with it, although the transcript was just written.
+  process.kill(Number(await readFile(join(dir, 'pid'), 'utf8')));
+  let stopped;
+  for (let i = 0; i < 50 && (stopped = await request('/background?file=' + encodeURIComponent(parent))).live; i++) await new Promise(r => setTimeout(r, 100));
+  assert.equal(stopped.live, false);
+  assert.deepEqual(Object.fromEntries(stopped.tasks.map(j => [j.id, j.status])), { Killed: 'stale', Finished: 'done', Working: 'stale' });
 });
