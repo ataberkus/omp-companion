@@ -478,6 +478,10 @@ export async function createCompanion(options={}){
  if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
  store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
+ // A companion killed mid-save (console closed, Task Manager) leaves its ~30 MB workspace.json.<pid>.tmp behind; no later process reuses that name.
+ // Only dead PIDs' files go: a live companion sharing this dir may be writing its own. Also the pre-PID shared workspace.json.tmp.
+ const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
+ for(const f of await fs.readdir(dataDir)){const m=/^workspace\.json\.(?:(\d+)\.)?tmp$/.exec(f);if(m&&!(m[1]&&alive(Number(m[1]))))await fs.rm(path.join(dataDir,f),{force:true}).catch(()=>{});}
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.
@@ -492,7 +496,8 @@ export async function createCompanion(options={}){
  // One write in flight plus at most one queued; the queued one serializes when it starts, so it covers every caller that joined it.
  // Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save, and a slow disk ran the heap out.
  let lastSaved,nextSave;
- const persist=()=>{if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{nextSave=undefined;const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);if(snapshot===lastSaved)return;await fs.writeFile(stateFile+'.tmp',snapshot,{mode:0o600,flush:true});await replaceFile(stateFile+'.tmp',stateFile);lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
+ // Per-process temp name: a second companion on another port sharing this data dir would otherwise rename our shared workspace.json.tmp away before we do (ENOENT).
+ const persist=()=>{if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{nextSave=undefined;const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);if(snapshot===lastSaved)return;const tmp=`${stateFile}.${process.pid}.tmp`;try{await fs.writeFile(tmp,snapshot,{mode:0o600,flush:true});await replaceFile(tmp,stateFile);}catch(e){await fs.rm(tmp,{force:true}).catch(()=>{});throw e;}lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
