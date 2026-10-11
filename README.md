@@ -3,7 +3,7 @@
 <p align="center">
   <img alt="Node.js 22+" src="https://img.shields.io/badge/node-22%2B-8b5cf6?style=flat-square&labelColor=09090b"/>
   <img alt="Runs locally on 127.0.0.1" src="https://img.shields.io/badge/runs-locally-ec4fbf?style=flat-square&labelColor=09090b"/>
-  <img alt="No build step" src="https://img.shields.io/badge/build-none-3fd0e6?style=flat-square&labelColor=09090b"/>
+  <img alt="Browser companion: no build step" src="https://img.shields.io/badge/companion%20build-none-3fd0e6?style=flat-square&labelColor=09090b"/>
 </p>
 
 **One browser tab for all your [oh-my-pi](https://github.com/can1357/oh-my-pi) sessions.** Run, watch and review OMP agents across many projects without juggling terminals.
@@ -59,6 +59,8 @@ Requires **Node.js 22+** and a working OMP install (`omp --version` works and a 
 node companion/server.mjs
 ```
 
+The browser companion has no build step and no npm dependencies: Node.js runs it straight from this folder. Only the [desktop app](#desktop-app-windows) needs a build.
+
 The dashboard opens in your browser, already connected. Press **Alt+N** (or click **New session**), pick a folder, type a prompt and press Enter. Keep the companion terminal open while you work.
 
 With **Group by project** enabled, click **+** beside a workspace's session count to open **New session** with that folder already selected.
@@ -77,24 +79,52 @@ Click **◔ Usage** in a session's top bar for the live panel. It reads `GET /ap
 
 ## Desktop app (Windows)
 
-The same dashboard in its own window, with the companion running inside the app: no console window, no browser tab. Node.js is bundled, so the installed app needs only OMP.
+The same dashboard in its own window, with the companion running inside the app: no console window, no browser tab. The app runs the same `companion/` code as `node companion/server.mjs`, through its bundled Node.js and `desktop/host.mjs`. Like the plain companion, it listens on `127.0.0.1` with a token. The installed app needs only OMP.
 
-Building needs Node.js 22+ (it is copied into the app), Rust and the MSVC C++ build tools. Install the last two once, then open a new terminal so Rust is on PATH:
+The desktop app builds on Windows only. On other systems the build stops and tells you to run `node companion/server.mjs` instead.
 
-```bat
+### Build prerequisites
+
+- **Node.js 22+.** The build copies the Node.js that runs it into the app, so the version that builds is the version that ships. Install it from [nodejs.org](https://nodejs.org) or with `winget install --id OpenJS.NodeJS.LTS -e`. After upgrading Node.js, delete `src-tauri/binaries/` to bundle the new version.
+- **Rust**, installed with rustup. Open a new terminal afterwards so `cargo` is on PATH.
+- **MSVC C++ build tools.** Rust needs their linker.
+
+Install Rust and the build tools once:
+
+```sh
 winget install --id Rustlang.Rustup -e
 winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+You don't install the Tauri CLI yourself. When `node_modules/@tauri-apps/cli` is missing, the build runs `npm ci` first. It installs exactly the committed lockfile and leaves it unchanged.
+
+### Run and build
+
+```sh
+npm run desktop
+```
+
+**`npm run desktop`** runs `tauri dev`: it starts the app from this checkout, for development.
+
+```sh
 npm run build
 ```
 
-`npm run build` (also `npm run dist` and `npm run desktop`) first runs `scripts/check-build.mjs`: it installs the npm dependencies, including the Tauri CLI, with `npm ci` when they are missing (exactly the committed lockfile, which it leaves unchanged), and stops with the install command for anything else that is missing (Node.js 22+, Rust, the MSVC build tools) before cargo starts.
+**`npm run build`** (or **`npm run dist`**, which is the same) runs `tauri build` and produces the installer.
 
-Run `src-tauri/target/release/bundle/nsis/OMP Control Room_<version>_x64-setup.exe`. It installs for your user only (no admin rights) and adds **OMP Control Room** to the Start menu. The installer is unsigned, so Windows SmartScreen may show *Unknown publisher* on first run: choose **More info → Run anyway**. For development, `npm run desktop` starts the app from this checkout. After upgrading Node.js, delete `src-tauri/binaries/` to bundle the new version.
+All three commands first run `scripts/check-build.mjs`. If Node.js 22+, Rust or the MSVC build tools are missing, it stops before cargo starts and prints the install command for each.
+
+### Install
+
+The build writes an NSIS installer to `src-tauri/target/release/bundle/nsis/OMP Control Room_<version>_x64-setup.exe`. Run it. It installs for your user only (no admin rights) and adds **OMP Control Room** to the Start menu. The installer carries Node.js plus `companion/`, `local-dist/` and the `desktop/` host scripts, so the PC needs no separate Node.js install. The installer is unsigned, so Windows SmartScreen may show *Unknown publisher* on first run: choose **More info → Run anyway**.
+
+### Using the app
 
 - **Closing the window** hides it to the tray; sessions keep working. Open it again from the tray icon (double-click or **Open**) or by launching the app again.
 - **Quit** (tray menu) stops the companion and every OMP process it started. If sessions are still working it asks first; they are saved as paused. Signing out or shutting Windows down quits without asking.
 - **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. The token changes every time the app starts, so copy a fresh link after restarting it. Allow the Windows Firewall prompt for **private networks only**.
 - **One companion at a time.** The desktop app and `node companion/server.mjs` share `~/.omp-web`, so each refuses to start while the other is running on the same port.
+- **`start.bat`** is not the desktop app. It's a double-click launcher for the browser companion: it checks that Node.js is installed, uses the sibling `oh-my-pi` checkout when it exists and Bun is on PATH (unless `OMP_BIN` is set), warns when `omp` isn't on PATH, then runs `node companion/server.mjs` and keeps the console open after it stops. Unlike the app, it opens the companion to your local network **without a token** (`OMP_WEB_HOST=0.0.0.0`, `OMP_WEB_NO_TOKEN=1`), so anyone on that network can run commands on this PC. To lock it down, set `OMP_WEB_HOST=127.0.0.1` and `OMP_WEB_NO_TOKEN=0` before running it. It counts as a companion too, so run it or the app, not both.
 - `OMP_BIN`, `OMP_WEB_PORT`, `OMP_WEB_DATA_DIR` and the other variables below still apply. `OMP_WEB_HOST` and `OMP_WEB_NO_TOKEN` are ignored: the app always starts on `127.0.0.1` with a token.
 
 ## Good to know
