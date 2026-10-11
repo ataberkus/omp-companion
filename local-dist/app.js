@@ -1668,7 +1668,8 @@
     el.id = 'usagePanel'; el.className = 'usage-panel'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Plan usage limits');
     document.body.appendChild(el); el._btn = btn;
     const r = btn.getBoundingClientRect();
-    el.style.top = r.bottom + 6 + 'px'; el.style.right = Math.max(8, innerWidth - r.right) + 'px';
+    // Right-align under the button, but never let the left edge leave the viewport (narrow screens).
+    el.style.top = r.bottom + 6 + 'px'; el.style.right = Math.max(8, Math.min(innerWidth - r.right, innerWidth - el.offsetWidth - 8)) + 'px';
     renderUsage(); usagePoll();
   }
   function closeUsage() { const el = $('#usagePanel'); if (!el) return; clearTimeout(S.usage.timer); el.remove(); }

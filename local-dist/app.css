@@ -589,7 +589,7 @@ details.raw>*:not(summary){margin-top:6px}
 .ul-row{padding:6px 0}
 .ul-line{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:0 10px}
 .ul-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ul-name small{font-weight:400;color:var(--faint)}
-.ul-meta{flex-shrink:0;margin-left:auto;color:var(--muted);font-variant-numeric:tabular-nums}.ul-meta b{font-weight:500;margin-left:4px}
+.ul-meta{min-width:0;margin-left:auto;text-align:right;overflow-wrap:anywhere;color:var(--muted);font-variant-numeric:tabular-nums}.ul-meta b{font-weight:500;margin-left:4px}
 .ul-bar{height:4px;margin-top:5px;border-radius:2px;background:var(--hover);overflow:hidden}
 .ul-bar i{display:block;height:100%;background:var(--blue);transition:width .3s}.ul-bar i.hot{background:var(--red)}
 .ul-note{color:var(--faint);font-size:12px;padding:3px 0}
