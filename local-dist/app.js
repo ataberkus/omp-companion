@@ -1363,8 +1363,8 @@
     for (const a of data.agents || []) {
       const j = jobs.find(x => x.id === a.id);
       const status = /run|pend|start|queue/i.test(a.status) ? 'running' : /fail|error|abort/i.test(a.status) ? 'error' : a.status ? 'done' : '';
-      if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; }
-      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: firstSeen(a.id), transcript: a.sessionFile, live: a });
+      if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
+      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
     }
     for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, thinking: x.thinking, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
     return jobs;

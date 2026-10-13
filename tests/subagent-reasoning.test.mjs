@@ -121,6 +121,52 @@ test('background reports the reasoning level each subagent last ran with, and no
   assert.deepEqual(levels, { Auto: 'high', Suffix: 'medium', Changed: 'xhigh', Unknown: '' });
 });
 
+test('background gives running and task-linked subagents the model and level from their own transcripts', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-subagent-live-level-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const sessions = join(dir, 'sessions'), parent = join(sessions, 'project', 'parent.jsonl'), sub = join(sessions, 'project', 'parent');
+  await mkdir(sub, { recursive: true });
+  const at = new Date().toISOString();
+  const lines = (...f) => [{ type: 'session', id: 'x', cwd: dir, timestamp: at }, ...f].map(x => JSON.stringify(x)).join('\n') + '\n';
+  const init = model => ({ type: 'session_init', resolvedModel: model });
+  const reply = effort => ({ type: 'message', message: { role: 'assistant', provider: 'anthropic', model: 'claude-opus-5-5', content: [], ...(effort ? { requestControls: { effort: { topLevel: effort, tail: effort } } } : {}) } });
+  await writeFile(parent, lines());
+  await writeFile(join(sub, 'Spawned.jsonl'), lines(init('anthropic/claude-sonnet-5-5:auto'), { type: 'message', message: { role: 'assistant', provider: 'anthropic', model: 'claude-sonnet-5-5', content: [], requestControls: { effort: { topLevel: 'low' } } } }));
+  await writeFile(join(sub, 'Scout.jsonl'), lines({ type: 'model_change', model: 'anthropic/claude-opus-5-5' }, init('anthropic/claude-opus-5-5:auto'), reply('high')));
+  await writeFile(join(sub, 'Fresh.jsonl'), lines({ type: 'model_change', model: 'anthropic/claude-opus-5-5' }, init('anthropic/claude-opus-5-5:auto')));
+  const entry = id => ({ id, agent: 'scout', status: 'running', description: 'Audit ' + id, sessionFile: join(sub, id + '.jsonl'), progress: { id, status: 'running' } });
+  const fake = join(dir, 'omp.mjs');
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
+out({ type: 'ready' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  out({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { sessionFile: ${JSON.stringify(parent)}, todoPhases: [] } : c.type === 'get_subagents' ? { subagents: ${JSON.stringify([entry('Scout'), entry('Fresh')])} } : {} });
+}
+`);
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'p', path: dir, name: 'Project' }], sessions: [{ id: 's', projectId: 'p', title: 'Parent', status: 'paused', cwd: dir, sessionFile: parent, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const url = `http://127.0.0.1:${app.server.address().port}/api`;
+  const request = async (path, body) => {
+    const res = await fetch(url + path, { method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + app.token, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  await request('/sessions/s/command', { type: 'prompt', message: 'go' });
+  // An async `task` spawn by the running OMP process that the parent transcript has not seen finish.
+  const now = new Date().toISOString();
+  await writeFile(parent, lines(
+    { type: 'message', timestamp: now, message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'task', arguments: { tasks: [{ name: 'Spawned', task: 'Write Spawned' }] } }] } },
+    { type: 'message', timestamp: now, message: { role: 'toolResult', toolCallId: 'c1', toolName: 'task', details: { results: [], progress: [{ index: 0, id: 'Spawned', agent: 'task', status: 'pending' }], async: { state: 'running', jobId: 'Spawned', type: 'task' } } } }));
+  const bg = await request('/background?file=' + encodeURIComponent(parent));
+  assert.deepEqual(bg.agents.map(a => [a.id, a.model, a.thinkingLevel]), [['Scout', 'anthropic/claude-opus-5-5', 'high'], ['Fresh', 'anthropic/claude-opus-5-5', '']]);
+  assert.deepEqual(bg.tasks.map(j => [j.id, j.status, j.model, j.thinking]), [['Spawned', 'running', 'anthropic/claude-sonnet-5-5', 'low']]);
+  assert.deepEqual(bg.subagents, [], 'linked transcripts are not listed again as finished subagents');
+});
+
 // Shapes copied from a real OMP transcript: async `task` spawn, then `wait` snapshots keyed by task name.
 test('background marks async subagents finished when the transcript completes them or their OMP process is gone', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-subagent-jobs-'));
