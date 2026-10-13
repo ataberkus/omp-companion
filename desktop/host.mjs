@@ -1,15 +1,11 @@
 // Companion host for the Tauri shell: runs the companion and talks line-delimited JSON over stdin/stdout.
 // Events: {"event":"ready","port","token"} | {"event":"fatal","message"}.
 // Requests: {"id","cmd":"busy"|"lan"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
-import * as fs from 'node:fs';
 import * as os from 'node:os';
-import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { fileURLToPath } from 'node:url';
 import { createCompanion, portBusy, startupUpdate } from '../companion/server.mjs';
 import { phoneLinks } from './links.mjs';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.OMP_WEB_PORT || 4545);
 const alreadyRunning = `The companion is already running on port ${port}, probably node companion/server.mjs or another OMP Control Room. Close it and try again.`;
 let companion, closing, lan = false;
@@ -18,15 +14,6 @@ let companion, closing, lan = false;
 const send = (msg, cb) => process.stdout.write(JSON.stringify(msg) + '\n', cb);
 // Exit in the write callback: on Windows a pipe write can still be pending when exit() runs.
 const fatal = message => send({ event: 'fatal', message }, () => process.exit(1));
-
-// A sibling oh-my-pi checkout runs from source when bun is available (development setups).
-function detectSiblingCheckout() {
-  if (process.env.OMP_BIN) return;
-  const cli = path.resolve(here, '../../oh-my-pi/packages/coding-agent/src/cli.ts');
-  const bun = process.platform === 'win32' ? 'bun.exe' : 'bun';
-  const onPath = String(process.env.PATH || '').split(path.delimiter).some(dir => dir && fs.existsSync(path.join(dir, bun)));
-  if (fs.existsSync(cli) && onPath) process.env.OMP_BIN = cli;
-}
 
 // Rebind the same server instead of restarting the companion: close() would kill every running agent.
 // The Host/Origin allowlist is recomputed from server.address() per request, so it follows the new bind.
@@ -86,7 +73,6 @@ function listen() {
 
 async function main() {
   listen();
-  detectSiblingCheckout();
   // Before createCompanion: it pauses running sessions and saves workspace.json, which would clobber a live companion.
   if (await portBusy(port)) return fatal(alreadyRunning);
   // The shell gives up on a host that is not ready within 60 s; an update cut short starts with the installed OMP.
