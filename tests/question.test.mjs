@@ -72,3 +72,61 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.ok(app.store.sessions[0].messages.some(m => m.text === 'Question cancelled'));
   assert.ok(!app.store.sessions[0].messages.some(m => m.text === 'Invalid reply reached OMP'));
 });
+
+test('ask dialogs are opted into and only well-formed answers reach OMP', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-ask-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const fake = join(dir, 'omp.mjs');
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+const emit = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
+let askDialog = false;
+emit({ type: 'ready' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  if (c.type === 'extension_ui_response') { emit({ type: 'command_output', text: 'ANSWERS ' + JSON.stringify(c.answers) }); continue; }
+  if (c.type === 'set_ask_dialog') askDialog = c.enabled === true;
+  if (c.type === 'prompt' && askDialog) emit({ type: 'extension_ui_request', id: 'ask', method: 'ask', questions: [
+    { id: 'langs', question: 'Which languages?', header: 'Lang', options: [{ label: 'Alpha', description: 'first' }, { label: 'Beta' }, { label: 'Gamma' }], multi: true },
+    { id: 'db', question: 'Database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }], recommended: 1 },
+  ] });
+  if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
+  else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
+  else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
+}
+`);
+  const now = new Date().toISOString();
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const url = `http://127.0.0.1:${app.server.address().port}/api`;
+  const request = async (path, body) => {
+    const res = await fetch(url + path, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    return [res.status, await res.json()];
+  };
+  const answer = answers => request('/sessions/session/command', { type: 'answer', id: 'ask', answers });
+  assert.equal((await request('/sessions/session/command', { type: 'prompt', message: 'Ask me' }))[0], 200);
+  let q;
+  for (let n = 0; n < 80 && !q; n++) { q = (await request('/state'))[1].sessions[0].uiRequests?.find(x => x.id === 'ask'); if (!q) await new Promise(resolve => setTimeout(resolve, 25)); }
+  assert.ok(q, 'ask dialog was not shown');
+  assert.equal(q.method, 'ask');
+  assert.deepEqual(q.questions.map(x => [x.id, x.multi, x.recommended]), [['langs', true, undefined], ['db', false, 1]]);
+  assert.equal(q.questions[0].options[0].description, 'first');
+  const langs = { id: 'langs', selectedOptions: ['Alpha', 'Gamma'] };
+  for (const bad of [
+    [langs],
+    [langs, { id: 'db', selectedOptions: [] }],
+    [langs, { id: 'db', selectedOptions: ['MySQL'] }],
+    [langs, { id: 'db', selectedOptions: ['SQLite', 'Postgres'] }],
+    [langs, { id: 'db', selectedOptions: ['SQLite'], customInput: 'Redis' }],
+    [{ id: 'langs', selectedOptions: ['Alpha', 'Alpha'] }, { id: 'db', selectedOptions: ['SQLite'] }],
+    [{ id: 'db', selectedOptions: ['SQLite'] }, langs],
+  ]) assert.equal((await answer(bad))[0], 400, JSON.stringify(bad));
+  assert.equal((await answer([{ ...langs, customInput: '  Delta ' }, { id: 'db', selectedOptions: [], customInput: 'Redis' }]))[0], 200);
+  assert.deepEqual((await request('/state'))[1].sessions[0].uiRequests, []);
+  const sent = () => app.store.sessions[0].messages.find(m => m.text?.startsWith('ANSWERS '));
+  for (let n = 0; n < 80 && !sent(); n++) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.deepEqual(JSON.parse(sent().text.slice(8)), [{ id: 'langs', selectedOptions: ['Alpha', 'Gamma'], customInput: 'Delta' }, { id: 'db', selectedOptions: [], customInput: 'Redis' }]);
+  assert.equal(app.store.sessions[0].messages.filter(m => m.text?.startsWith('ANSWERS ')).length, 1);
+});

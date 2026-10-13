@@ -1717,22 +1717,34 @@
       <div class="ul-foot">${busy ? '<span class="spinner"></span> Refreshing…' : at ? 'Updated ' + esc(new Date(at).toLocaleTimeString()) + ' · every 2 min' : ''}</div>`;
   }
 
+  // OMP's ask dialog: every question at once, checkboxes for multi-select, radios for single choice, free text for Other.
+  const askForm = q => `<form data-askform="${esc(q.id)}">${q.questions.map((x, i) => `<fieldset class="ask-q" data-qid="${esc(x.id)}">
+      <legend>${x.header ? `<span class="ask-chip">${esc(x.header)}</span>` : ''}${esc(x.question)}${x.multi ? ' <span class="muted">· choose any</span>' : ''}</legend>
+      <div class="question-options">${x.options.map((o, j) => `<label class="ask-opt"><input type="${x.multi ? 'checkbox' : 'radio'}" name="q${i}" value="${esc(o.label)}"><span>${esc(o.label)}${j === x.recommended ? ' <em class="ask-rec">Recommended</em>' : ''}</span>${o.description ? `<small>${esc(o.description)}</small>` : ''}${o.preview ? `<pre class="ask-preview">${esc(o.preview)}</pre>` : ''}</label>`).join('')}</div>
+      <input name="c${i}" class="ask-other" maxlength="20000" placeholder="Other (type your own)" aria-label="Other answer: ${esc(x.question)}"${x.multi ? '' : ' data-single'}>
+    </fieldset>`).join('')}<div class="question-actions"><button class="btn sm primary" type="submit">${q.questions.length > 1 ? 'Submit answers' : 'Submit answer'}</button></div></form>`;
+  const formKey = f => f.dataset.uiform ?? f.dataset.askform;
+
   function renderQuestions(s) {
     const el = $('#questions'), questions = s?.uiRequests || [];
     el.hidden = !questions.length;
     if (!questions.length) { el.dataset.first = ''; setIfChanged(el, ''); return; }
     const first = el.dataset.first;
-    // Answers typed into any pending question, and the focus, survive the re-render.
-    const typed = [...el.querySelectorAll('[data-uiform]')].map(f => [f.dataset.uiform, f.elements.answer.value]);
+    // Answers typed or ticked in any pending question, and the focus, survive the re-render.
+    const kept = [...el.querySelectorAll('form')].map(f => [formKey(f), [...f.elements].map(x => [x.value, x.checked])]);
     const html = questions.map(q => `<section class="question" data-question="${esc(q.id)}" aria-label="OMP question">
-      <strong>${esc(q.title)}</strong>
+      ${q.method === 'ask' ? askForm(q) : `<strong>${esc(q.title)}</strong>`}
       ${q.method === 'select' ? `<div class="question-options">${q.options.map((option, i) => { const on = q.checked?.includes(i); return `<button type="button" data-uichoice="${esc(q.id)}" data-uivalue="${esc(option)}"${on ? ' class="checked" aria-pressed="true"' : ''}><span>${on ? '☑ ' : ''}${esc(option)}</span>${q.optionDetails?.[i]?.description ? `<small>${esc(q.optionDetails[i].description)}</small>` : ''}</button>`; }).join('')}</div>` : ''}
       ${q.method === 'confirm' ? `<p>${esc(q.message)}</p><div class="question-actions"><button type="button" class="btn sm primary" data-uiconfirm="${esc(q.id)}" data-confirmed="true">Yes</button><button type="button" class="btn sm" data-uiconfirm="${esc(q.id)}" data-confirmed="false">No</button></div>` : ''}
       ${q.method === 'input' || q.method === 'editor' ? `<form data-uiform="${esc(q.id)}">${q.method === 'input' ? `<input name="answer" maxlength="20000" placeholder="${esc(q.placeholder || 'Your answer')}" aria-label="${esc(q.title)}">` : `<textarea name="answer" maxlength="20000" rows="3" aria-label="${esc(q.title)}">${esc(q.prefill || '')}</textarea>`}<div class="question-actions"><button class="btn sm primary" type="submit">Submit answer</button></div></form>` : ''}
       <button type="button" class="btn sm ghost question-cancel" data-uicancel="${esc(q.id)}">Cancel question</button>
     </section>`).join('');
     keepFocus(el, () => setIfChanged(el, html));
-    for (const [id, v] of typed) { const f = el.querySelector(`[data-uiform="${CSS.escape(id)}"]`); if (f && f.elements.answer.value !== v) f.elements.answer.value = v; }
+    for (const [key, values] of kept) {
+      const f = [...el.querySelectorAll('form')].find(x => formKey(x) === key);
+      if (!f || f.elements.length !== values.length) continue;
+      [...f.elements].forEach((x, i) => { if (x.type === 'checkbox' || x.type === 'radio') x.checked = values[i][1]; else if (x.name && x.value !== values[i][0]) x.value = values[i][0]; });
+    }
     el.dataset.first = questions[0].id;
     // Take focus for a new question, but never from a field the user is typing in.
     const a = document.activeElement, typing = a && /INPUT|TEXTAREA/.test(a.tagName) && a.value && !el.contains(a);
@@ -3158,6 +3170,8 @@
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
     else if (t.id === 'pathInput') S.home.path = t.value;
     else if (t.id === 'folderFilter') { S.home.filter = t.value; renderFolderList(); }
+    // A single-choice question takes one answer: typing Other clears the picked option.
+    else if (t.matches('.ask-other[data-single]') && t.value) t.closest('fieldset').querySelectorAll('input[type=radio]').forEach(x => { x.checked = false; });
   });
   document.addEventListener('change', e => {
     if (e.target.matches?.('[data-advset]')) { advisorAction(e.target.checked ? 'on' : 'off'); return; }
@@ -3165,6 +3179,7 @@
     if (e.target.matches?.('[data-advreviews]')) { S.advReviews = e.target.checked; try { localStorage.setItem('omp-adv-reviews', S.advReviews ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
     if (e.target.matches?.('[data-advimportant]')) { S.advImportant = e.target.checked; try { localStorage.setItem('omp-adv-important', S.advImportant ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
+    else if (e.target.matches?.('.ask-q input[type=radio]')) e.target.closest('fieldset').querySelector('.ask-other').value = '';
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
     else if (e.target.matches?.('[data-enhthinking]')) saveEnhanceThinking(e.target.value);
@@ -3203,6 +3218,11 @@
     if (e.target.dataset.launch) { saveLaunch(e.target); return; }
     if (e.target.hasAttribute('data-toolform')) { runTool(e.target); return; }
     if (e.target.hasAttribute('data-uiform')) { answerQuestion(e.target.dataset.uiform, { value: e.target.elements.answer.value }, e.target); return; }
+    if (e.target.hasAttribute('data-askform')) {
+      const answers = [...e.target.querySelectorAll('fieldset[data-qid]')].map(fs => ({ id: fs.dataset.qid, selectedOptions: [...fs.querySelectorAll('input:checked')].map(x => x.value), customInput: fs.querySelector('.ask-other').value.trim() || undefined }));
+      answerQuestion(e.target.dataset.askform, { answers }, e.target);
+      return;
+    }
     if (e.target.dataset.mmadd) { const name = e.target.querySelector('input').value.trim(); if (!/^[\w.-]{1,60}$/.test(name)) return toast('Use letters, numbers, dots, dashes or underscores', 'err'); pickMapModel(e.target.dataset.mmadd, name); return; }
     if (e.target.hasAttribute('data-plugininstall')) { const v = e.target.querySelector('input').value.trim(); if (v) savePlugin('install', v); return; }
     if (e.target.id === 'pathForm') goFolder($('#pathInput').value.trim().replace(/^"|"$/g, ''));

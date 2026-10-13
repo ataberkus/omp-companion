@@ -18,6 +18,29 @@ const finishWork=(s,at=now())=>{if(s.workStartedAt&&!s.workFinishedAt)s.workFini
 const colors=['#e8a16a','#93a9ee','#80bca4','#b59bd6'];
 const error=(message,status=400)=>Object.assign(new Error(message),{status});
 function text(value,name,max=10000){if(typeof value!=='string'||!value.trim()||value.length>max)throw error(`${name} is required (maximum ${max} characters).`);return value.trim();}
+// One `ask` dialog question from OMP; null when malformed, since replies must echo its ids and labels exactly.
+function askQuestion(x){
+ if(typeof x?.id!=='string'||!Array.isArray(x.options)||x.options.some(o=>typeof o?.label!=='string'))return null;
+ const q={id:x.id,question:String(x.question||'Question').slice(0,2000),multi:x.multi===true,options:x.options.map(o=>({label:o.label,...(o.description?{description:String(o.description).slice(0,500)}:{}),...(o.preview?{preview:String(o.preview).slice(0,4000)}:{})}))};
+ if(x.header)q.header=String(x.header).slice(0,60);
+ if(Number.isInteger(x.recommended)&&x.recommended>=0&&x.recommended<q.options.length)q.recommended=x.recommended;
+ return q;
+}
+// Mirrors OMP's ask validation, so a bad reply is a 400 here instead of a failed tool call; every question needs an answer.
+function askAnswers(q,answers){
+ if(!Array.isArray(answers)||answers.length!==q.questions.length)throw error('Answer every question.');
+ return q.questions.map((x,i)=>{
+  const a=answers[i],name=x.question.length>80?x.question.slice(0,80)+'…':x.question;
+  if(a?.id!==x.id)throw error('These answers belong to a different question.');
+  const picked=Array.isArray(a.selectedOptions)?a.selectedOptions:[],labels=x.options.map(o=>o.label);
+  if(picked.some(l=>!labels.includes(l))||new Set(picked).size!==picked.length)throw error(`Choose listed options for “${name}”.`);
+  if(a.customInput!==undefined&&(typeof a.customInput!=='string'||a.customInput.length>20000))throw error('Answer must be text under 20,000 characters.');
+  const custom=a.customInput?.trim()||'';
+  if(!picked.length&&!custom)throw error(`Answer “${name}”.`);
+  if(!x.multi&&(picked.length>1||(picked.length&&custom)))throw error(`“${name}” takes a single answer.`);
+  return {id:x.id,selectedOptions:picked,...(custom?{customInput:custom}:{})};
+ });
+}
 function contentText(content){if(typeof content==='string')return content;return Array.isArray(content)?content.filter(c=>c?.type==='text').map(c=>c.text).join('\n'):'';}
 function parseAdvisorStatus(text){
  const t=String(text||'').trim();const num=v=>v===undefined?undefined:Number(String(v).replace(/[^\d]/g,''))||0;
@@ -649,7 +672,11 @@ export async function createCompanion(options={}){
    }}
   if(f.type==='extension_ui_request'&&f.id){
    if(f.method==='cancel')s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==f.targetId);
-   else if(['select','confirm','input','editor'].includes(f.method)){
+   else if(f.method==='ask'){
+    const questions=Array.isArray(f.questions)?f.questions.map(askQuestion):[];
+    if(questions.length&&!questions.includes(null))(s.uiRequests??=[]).push({id:f.id,method:'ask',title:questions.length>1?`${questions.length} questions`:questions[0].question,questions});
+    else void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
+   }else if(['select','confirm','input','editor'].includes(f.method)){
     const q={id:f.id,method:f.method,title:String(f.title||'Question').slice(0,500)};
     if(f.method==='select'){q.options=Array.isArray(f.options)?f.options.filter(x=>typeof x==='string').slice(0,100):[];q.optionDetails=Array.isArray(f.optionDetails)?f.optionDetails.slice(0,q.options.length).map(x=>({description:String(x?.description||'').slice(0,500)})):[];q.checked=Array.isArray(f.checkedIndices)?f.checkedIndices.filter(i=>Number.isInteger(i)&&i>=0&&i<q.options.length):[];}
     if(f.method==='confirm')q.message=String(f.message||'').slice(0,2000);
@@ -700,7 +727,8 @@ export async function createCompanion(options={}){
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
    const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;void persist();}});
    runners.set(s.id,rpc);
-   try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
+   // OMP 18.10+ sends every ask question in one dialog, so multi-select choices stay visible until submitted; older builds reject the command and keep one select per toggle.
+   try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});await rpc.send({type:'set_ask_dialog',enabled:true}).catch(()=>{});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
     // Per-session toggles live in the OMP process, so a restarted runner gets them back.
     for(const [key,value] of Object.entries(s.prefs||{}))await rpc.send(PREFS[key](value)).catch(e=>notice(s,'warning',e.message));
     await refresh(s,rpc);return rpc;}catch(e){runners.delete(s.id);rpc.kill();throw e;}
@@ -766,6 +794,7 @@ export async function createCompanion(options={}){
    if(!rpc?.alive||!q)throw error('This question is no longer pending.');
    let reply={type:'extension_ui_response',id};
    if(body.cancelled===true)reply.cancelled=true;
+   else if(q.method==='ask')reply.answers=askAnswers(q,body.answers);
    else if(q.method==='confirm'){if(typeof body.confirmed!=='boolean')throw error('Choose Yes, No, or Cancel.');reply.confirmed=body.confirmed;}
    else{if(typeof body.value!=='string'||body.value.length>20000)throw error('Answer must be text under 20,000 characters.');if(q.method==='select'&&!q.options.includes(body.value))throw error('Choose one of the listed options.');reply.value=body.value;}
    await rpc.reply(reply);s.uiRequests=s.uiRequests.filter(x=>x.id!==id);return s;
