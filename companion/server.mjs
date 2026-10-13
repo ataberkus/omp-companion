@@ -482,6 +482,26 @@ const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in th
 export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
+const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
+// `omp update` checks the release channel and installs only when a newer build exists. entry: native executable or a source checkout's cli.ts.
+export async function updateOmp(entry,{cwd=os.homedir(),timeout=20*60*1000}={}){
+ const source=/\.ts$/i.test(entry),env={...process.env};
+ if(path.isAbsolute(entry)&&!source){const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';env[key]=path.dirname(entry)+path.delimiter+(env[key]||'');}
+ try{
+  const {stdout,stderr}=await exec(source?'bun':entry,[...(source?[path.resolve(entry)]:[]),'update'],{cwd,env,timeout,maxBuffer:8*1024*1024,windowsHide:true});
+  return {status:'done',output:cleanUpdateOutput(stdout,stderr)||'OMP update finished without output.'};
+ }catch(e){return {status:'error',exitCode:typeof e.code==='number'?e.code:null,output:cleanUpdateOutput(e.stdout,e.stderr,e.killed?'Update timed out.':e.message)||'OMP update failed.'};}
+}
+// Opening the companion first brings OMP up to date, before any OMP process starts. A failed or timed-out update
+// starts with the installed build. OMP_WEB_NO_UPDATE=1 skips it; a source checkout is updated with git instead.
+export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10*60*1000,log=console.log}={}){
+ if(process.env.OMP_WEB_NO_UPDATE==='1')return {status:'skipped'};
+ if(/\.ts$/i.test(entry)){log('OMP runs from a source checkout; skipping omp update.');return {status:'skipped'};}
+ log('Checking for OMP updates…');
+ const result=await updateOmp(entry,{timeout});
+ log(result.status==='done'?result.output:`OMP update failed; starting with the installed version.\n${result.output}`);
+ return result;
+}
 // Leaves an already-current file untouched (opening it for write can fail with EPERM on Windows, e.g. under a
 // restricted token); otherwise replaces it atomically so it is never missing or half-written. Errors propagate:
 // a stale Enhance lockdown overlay must not be served.
@@ -1061,15 +1081,10 @@ export async function createCompanion(options={}){
  }
  // OMP settings: `omp config list --json` has values, types and descriptions; the plain listing adds groups and enum options.
  let updateState={status:'idle'};
- const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
  async function runUpdate(startedAt){
-  const bin=ompEntry,env={...process.env};
-  if(path.isAbsolute(bin)){const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';env[key]=path.dirname(bin)+path.delimiter+(env[key]||'');}
-  try{
-   const {stdout,stderr}=await execOmp(['update'],{cwd:dataDir,env,timeout:20*60*1000,maxBuffer:8*1024*1024,windowsHide:true});
-   updateState={status:'done',startedAt,finishedAt:now(),output:cleanUpdateOutput(stdout,stderr)||'OMP update finished without output.'};
-   modelCache=undefined;configDefaults=undefined;
-  }catch(e){updateState={status:'error',startedAt,finishedAt:now(),exitCode:typeof e.code==='number'?e.code:null,output:cleanUpdateOutput(e.stdout,e.stderr,e.killed?'Update timed out.':e.message)||'OMP update failed.'};}
+  const result=await updateOmp(ompEntry,{cwd:dataDir});
+  updateState={...result,startedAt,finishedAt:now()};
+  if(result.status==='done'){modelCache=undefined;configDefaults=undefined;}
  }
  // Matched on the last key segment's suffix, so thresholdTokens or redactSecrets are not treated as secrets.
  const SECRET=/(token|secret|password|apikey|api_key|credentials?)$/i;
@@ -1513,6 +1528,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const inUse=`\nPort ${port} is already in use: the companion is probably already running at http://127.0.0.1:${port}/\nClose it, or set OMP_WEB_PORT to use another port.\n`;
  // Probe before createCompanion: it pauses running sessions and saves workspace.json, which would clobber the live companion's state.
  if(await portBusy(port)){console.error(inUse);process.exit(1);}
+ await startupUpdate();
  const app=await createCompanion();
  app.server.listen(port,host,()=>{
   // The token travels in the URL fragment, which browsers never send to the server or in Referer headers.

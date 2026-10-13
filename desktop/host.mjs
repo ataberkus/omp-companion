@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { createCompanion, portBusy } from '../companion/server.mjs';
+import { createCompanion, portBusy, startupUpdate } from '../companion/server.mjs';
 import { phoneLinks } from './links.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -89,6 +89,9 @@ async function main() {
   detectSiblingCheckout();
   // Before createCompanion: it pauses running sessions and saves workspace.json, which would clobber a live companion.
   if (await portBusy(port)) return fatal(alreadyRunning);
+  // The shell gives up on a host that is not ready within 60 s; an update cut short starts with the installed OMP.
+  // stdout carries the protocol, so update progress goes to stderr.
+  await startupUpdate({ timeout: 45000, log: m => console.error(m) });
   // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
   try { companion = await createCompanion(); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }

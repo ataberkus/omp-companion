@@ -47,6 +47,7 @@
 - **Launch options:** **⚙ Options** in the new-session composer and *Launch options…* in a session menu set OMP's startup flags: approval mode, tool and skill allowlists, extra folders (`--add-dir`), max run time, model roles (smol/slow/plan), plan-yolo, prewalk, system-prompt overrides, and switches such as no LSP, no rules or no extensions. Changing them restarts an idle session's OMP process.
 - **Live feedback:** streaming tool output, retry progress with a *Stop retrying* button, fallback-model switches, extension errors and goals.
 - **Settings UI** for every `omp config` value and for plugins, plus one-click `omp update`.
+- **OMP stays current:** on every start, `node companion/server.mjs` and the desktop app run `omp update` before opening, which installs a newer OMP release only when one exists. If it fails (offline, for example) the companion starts with the installed OMP. The desktop app waits at most 45 seconds for it; a longer download is cut short and retried on the next start. A sibling `oh-my-pi` source checkout (`OMP_BIN` ending in `.ts`) is skipped: update it with git. Set `OMP_WEB_NO_UPDATE=1` to skip the check.
 - **Tools page** (🧰 in the sidebar) for OMP's command-line tools: AI `commit` (dry run by default), `worktree`, usage `stats`, `share`, the skills registry, advanced `plugin` maintenance, `agents unpack`, background processes (`ps`), storage cleanup (`gc`, dry run unless *Apply*), `ssh` hosts, optional-feature `setup`, `tiny-models`, semantic `find` and tool `grievances`. Commands run in the background with live output and a Stop button; arguments are validated and never pass through a shell.
 - **Spend page** ($ in the sidebar): dollar cost per model for today, this month and all time, plus this month day by day. Figures come from OMP's usage stats (`~/.omp/stats.db`, synced via `omp stats` on each load) and are API list prices, so subscription/OAuth usage shows what it would have cost, not what you were billed.
 - **Isolated git worktrees** so parallel sessions don't overwrite each other's files.
@@ -178,6 +179,7 @@ In `rpc-ui`, automatic continuation follows `goal.continuationModes`'s `interact
 | `PI_CODING_AGENT_DIR` | `~/.omp/agent` | OMP agent directory (`config.yml`, `WATCHDOG.yml`) |
 | `OMP_ALLOWED_ORIGINS` | none | Extra browser origins allowed to connect (see below) |
 | `OMP_WEB_NO_OPEN` | unset | Don't open the browser on start |
+| `OMP_WEB_NO_UPDATE` | unset | `1` skips the `omp update` run on start |
 
 ### Hosted dashboard (optional)
 

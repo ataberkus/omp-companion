@@ -27,7 +27,7 @@ async function startHost(t, setup) {
   if (setup) await setup(dir, port);
   const child = spawn(process.execPath, ['desktop/host.mjs'], {
     cwd: repoRoot, stdio: 'pipe', windowsHide: true,
-    env: { ...process.env, OMP_WEB_PORT: String(port), OMP_WEB_DATA_DIR: dir, PI_CODING_AGENT_DIR: dir, OMP_SESSIONS_DIR: join(dir, 'sessions'), OMP_BIN: process.execPath },
+    env: { ...process.env, OMP_WEB_PORT: String(port), OMP_WEB_DATA_DIR: dir, PI_CODING_AGENT_DIR: dir, OMP_SESSIONS_DIR: join(dir, 'sessions'), OMP_BIN: process.execPath, OMP_WEB_NO_UPDATE: '1' },
   });
   const exited = new Promise(resolve => child.once('exit', code => resolve(code)));
   t.after(async () => {
