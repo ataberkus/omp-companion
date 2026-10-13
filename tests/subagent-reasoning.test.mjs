@@ -121,7 +121,7 @@ test('background reports the reasoning level each subagent last ran with, and no
   assert.deepEqual(levels, { Auto: 'high', Suffix: 'medium', Changed: 'xhigh', Unknown: '' });
 });
 
-test('background gives running and task-linked subagents the model and level from their own transcripts', async t => {
+test('background gives running and task-linked subagents the model, level and start time from their own transcripts', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-subagent-live-level-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
@@ -162,7 +162,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     { type: 'message', timestamp: now, message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'task', arguments: { tasks: [{ name: 'Spawned', task: 'Write Spawned' }] } }] } },
     { type: 'message', timestamp: now, message: { role: 'toolResult', toolCallId: 'c1', toolName: 'task', details: { results: [], progress: [{ index: 0, id: 'Spawned', agent: 'task', status: 'pending' }], async: { state: 'running', jobId: 'Spawned', type: 'task' } } } }));
   const bg = await request('/background?file=' + encodeURIComponent(parent));
-  assert.deepEqual(bg.agents.map(a => [a.id, a.model, a.thinkingLevel]), [['Scout', 'anthropic/claude-opus-5-5', 'high'], ['Fresh', 'anthropic/claude-opus-5-5', '']]);
+  assert.deepEqual(bg.agents.map(a => [a.id, a.model, a.thinkingLevel, a.startedAt]), [['Scout', 'anthropic/claude-opus-5-5', 'high', at], ['Fresh', 'anthropic/claude-opus-5-5', '', at]], 'start time survives a page reload');
   assert.deepEqual(bg.tasks.map(j => [j.id, j.status, j.model, j.thinking]), [['Spawned', 'running', 'anthropic/claude-sonnet-5-5', 'low']]);
   assert.deepEqual(bg.subagents, [], 'linked transcripts are not listed again as finished subagents');
 });

@@ -1353,7 +1353,7 @@
     e.loading = false; e.at = Date.now();
     update();
   }
-  // Live registry entries only carry their last progress time; a running subagent's timer counts from when we first saw it.
+  // A running subagent's timer counts from its transcript's start; one not yet written counts from when we first saw it.
   const seenAt = new Map();
   const firstSeen = id => { if (!seenAt.has(id)) { seenAt.set(id, new Date().toISOString()); trim(seenAt, 500); } return seenAt.get(id); };
   function bgJobs(data) {
@@ -1364,7 +1364,7 @@
       const j = jobs.find(x => x.id === a.id);
       const status = /run|pend|start|queue/i.test(a.status) ? 'running' : /fail|error|abort/i.test(a.status) ? 'error' : a.status ? 'done' : '';
       if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
-      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
+      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: a.startedAt || firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
     }
     for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, thinking: x.thinking, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
     return jobs;

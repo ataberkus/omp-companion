@@ -1249,17 +1249,17 @@ async function spend(){
   const subagents=[],jobs=[];
   await Promise.all(entries.filter(e=>e.isFile()).map(async e=>{const f=path.join(dir,e.name);let st;try{st=await fs.stat(f);}catch{return;}
    if(e.name.endsWith('.jsonl')){const name=e.name.slice(0,-6);let head={};try{head=await readSessionHead(f);}catch{}let result='';try{result=(await fs.readFile(path.join(dir,name+'.md'),'utf8')).slice(0,4000);}catch{}
-    subagents.push({name,file:f,size:st.size,updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.reasoning||'',preview:head.preview||'',result,cost:await transcriptCost(f,st),advisor:name==='__advisor'||name.startsWith('__advisor.')});}
+    subagents.push({name,file:f,size:st.size,startedAt:head.createdAt||'',updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.reasoning||'',preview:head.preview||'',result,cost:await transcriptCost(f,st),advisor:name==='__advisor'||name.startsWith('__advisor.')});}
    else if(e.name.endsWith('.async.log')){jobs.push({name:e.name,file:f,size:st.size,updatedAt:st.mtime.toISOString()});}
   }));
   subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   const byName=new Map(subagents.map(x=>[x.name,x]));
   let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=liveSince===undefined&&Date.now()-mtime>30*60e3;
   const tasks=scanned.map(j=>{const sub=byName.get(j.id);const gone=liveSince===undefined?quiet:Date.parse(j.startedAt)<liveSince;const status=j.status==='running'?(sub?.result?'done':gone?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',thinking:sub?.thinking||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
-  // Registry entries (running subagents) take model, level and cost from their own transcript, like task jobs.
+  // Registry entries (running subagents) take model, level, cost and start time from their own transcript, like task jobs.
   const agents=await Promise.all(registry.map(async a=>{let sub=a.sessionFile&&subagents.find(x=>samePath(x.file,a.sessionFile));
-   if(!sub&&a.sessionFile){let head={};try{head=await readSessionHead(insideSessions(a.sessionFile,['.jsonl']));}catch{}sub={model:head.model||'',thinking:head.reasoning||''};}
-   return {...a,model:sub?.model||'',thinkingLevel:sub?.thinking||'',cost:sub?.cost||0,result:sub?.result||''};}));
+   if(!sub&&a.sessionFile){let head={};try{head=await readSessionHead(insideSessions(a.sessionFile,['.jsonl']));}catch{}sub={model:head.model||'',thinking:head.reasoning||'',startedAt:head.createdAt||''};}
+   return {...a,model:sub?.model||'',thinkingLevel:sub?.thinking||'',cost:sub?.cost||0,result:sub?.result||'',startedAt:sub?.startedAt||''};}));
   const linked=new Set(tasks.map(t=>t.id)),linkedFiles=agents.map(a=>a.sessionFile).filter(Boolean);
   return {dir,tasks,agents,subagents:subagents.filter(x=>!linked.has(x.name)&&!linkedFiles.some(f=>samePath(f,x.file))),logs:jobs};
  }
