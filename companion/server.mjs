@@ -111,6 +111,69 @@ function openTerminal(dir){
  const child=spawn(cmd,args,{cwd:dir,detached:process.platform!=='win32',stdio:'ignore',windowsHide:true});
  return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not open a terminal: ${e.message}`,500)));child.once('spawn',()=>{child.unref();resolve();});});
 }
+// Git runs for the Changes working-tree view and worktree finishing: errors carry git's own stderr.
+async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
+// `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
+// so the dashboard renders it with the same diff view as edit-tool records. Paths are as git prints them (b/ side).
+const unquoteGitPath=p=>/^".*"$/.test(p)?p.slice(1,-1).replace(/\\(["\\])/g,'$1').replace(/\\t/g,'\t').replace(/\\n/g,'\n'):p;
+function gitDiffFiles(out,{budget=2*1024*1024,perFile=200*1024}={}){
+ const files=[];
+ for(const chunk of String(out||'').split(/^diff --git /m).slice(1)){
+  const lines=chunk.split('\n');let from='',to='',op='modify';const body=[];let o=0,n=0,inHunk=false,binary=false;
+  for(const l of lines.slice(1)){
+   if(!inHunk){
+    if(l.startsWith('new file mode'))op='create';else if(l.startsWith('deleted file mode'))op='delete';
+    else if(l.startsWith('--- '))from=l.slice(4);else if(l.startsWith('+++ '))to=l.slice(4);
+    else if(l.startsWith('Binary files '))binary=true;
+   }
+   const h=l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+   if(h){if(body.length)body.push('');o=+h[1];n=+h[2];inHunk=true;continue;}
+   if(!inHunk)continue;
+   if(l.startsWith(' ')){body.push(` ${o}|${l.slice(1)}`);o++;n++;}
+   else if(l.startsWith('-')){body.push(`-${o}|${l.slice(1)}`);o++;}
+   else if(l.startsWith('+')){body.push(`+${n}|${l.slice(1)}`);n++;}
+  }
+  // Git ends ---/+++ paths that contain spaces with a tab.
+  const side=to&&to!=='/dev/null'?to:from;let p=unquoteGitPath(side.replace(/\t$/,'')).replace(/^[ab]\//,'');
+  if(!p){const m=lines[0].match(/^a\/(.*) b\/(.*)$/);p=m?m[2]:lines[0];}
+  let diff=binary?'… (binary file)':body.join('\n');
+  if(diff.length>perFile)diff=diff.slice(0,perFile)+'\n… (diff truncated)';
+  if(budget<=0){files.push({path:p,op,diff:'… (diff omitted: too many changes)'});continue;}
+  budget-=diff.length;files.push({path:p,op,diff});
+ }
+ return files;
+}
+// An untracked file as an all-added diff; binary or oversized files get a note instead of their bytes.
+async function untrackedDiff(file,max=200*1024){
+ const fh=await fs.open(file,'r');try{const {size}=await fh.stat();const buf=Buffer.alloc(Math.min(size,max));await fh.read(buf,0,buf.length,0);
+  if(buf.includes(0))return '… (binary file)';
+  const lines=buf.toString('utf8').replace(/\n$/,'').split('\n');return lines.map((l,i)=>`+${i+1}|${l}`).join('\n')+(size>max?'\n… (file truncated)':'');}
+ finally{await fh.close();}
+}
+// Editors that register a URL scheme taking file/<path>:<line>; opening a URL never goes through a shell.
+const EDITORS={vscode:'vscode','vscode-insiders':'vscode-insiders',cursor:'cursor',windsurf:'windsurf'};
+const EDITOR_CHOICES=['auto',...Object.keys(EDITORS),'reveal'];
+function editorUrl(scheme,file,line){
+ const parts=file.replace(/\\/g,'/').split('/');
+ const enc=parts.map((seg,i)=>i===0&&/^[A-Za-z]:$/.test(seg)?seg:encodeURIComponent(seg)).join('/');
+ return `${scheme}://file${enc.startsWith('/')?'':'/'}${enc}${line?`:${line}`:''}`;
+}
+// Opens a URL with the OS handler (like the companion's own browser launch), or shows a file in its folder.
+function openWithOs(target,{reveal=false}={}){
+ const [cmd,args]=reveal
+  ?process.platform==='win32'?['explorer.exe',[`/select,"${target}"`]]:process.platform==='darwin'?['open',['-R',target]]:['xdg-open',[path.dirname(target)]]
+  :process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',target]]:process.platform==='darwin'?['open',[target]]:['xdg-open',[target]];
+ // Explorer wants /select,"<path>" as one verbatim argument; Windows paths cannot contain quotes.
+ // No windowsHide: rundll32 forwards its own SW_HIDE to the handler, so a cold-started editor would get a hidden window.
+ const child=spawn(cmd,args,{detached:process.platform!=='win32',stdio:'ignore',windowsVerbatimArguments:reveal&&process.platform==='win32'});
+ return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not open the editor: ${e.message}`,500)));child.once('spawn',()=>{child.unref();resolve();});});
+}
+let editorProbe;
+// `auto` picks the first editor whose command line tool is on PATH, else shows the file in its folder.
+function detectEditor(){return editorProbe??=(async()=>{for(const [id,bin] of [['vscode','code'],['cursor','cursor'],['windsurf','windsurf'],['vscode-insiders','code-insiders']]){try{await exec(process.platform==='win32'?'where':'which',[bin],{timeout:5000,windowsHide:true});return id;}catch{}}return 'reveal';})();}
+// One /btw topic as the dashboard shows it: the first question plus follow-ups, each with its (possibly streaming) answer.
+const btwTurnView=t=>({question:String(t?.question||'').slice(0,20000),answer:String(t?.answer||'').slice(-100000),status:['running','complete','cancelled','error','interrupted'].includes(t?.status)?t.status:'error',...(t?.error?{error:String(t.error).slice(0,2000)}:{}),createdAt:Number(t?.createdAt)||0});
+const btwView=r=>({id:String(r.id),...btwTurnView(r),followUps:(Array.isArray(r.followUps)?r.followUps:[]).slice(-50).map(btwTurnView)});
 // Keep only what the dashboard shows from OMP's subagent registry entries.
 const subagentView=e=>{const p=e?.progress||{};const pick=o=>Object.fromEntries(Object.entries(o||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).map(([k,v])=>[k,typeof v==='string'?v.slice(0,300):v]));
  return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(e?.status||p.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
@@ -479,7 +542,7 @@ const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in th
 - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
@@ -536,6 +599,10 @@ export async function createCompanion(options={}){
  if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
  store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
+ // Composer drafts per dashboard view ('session:<id>' or 'native:<file>'), shared by every device using this companion.
+ store.drafts=Object.fromEntries(Object.entries(store.drafts&&typeof store.drafts==='object'?store.drafts:{}).filter(([k,v])=>/^(session|native):./.test(k)&&typeof v?.text==='string'&&v.text&&typeof v.at==='number'));
+ // Where "Open in editor" opens files (Settings › Open in editor).
+ if(!EDITOR_CHOICES.includes(store.editor))store.editor='auto';
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const token=options.token||randomBytes(32).toString('hex');
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.
@@ -553,10 +620,13 @@ export async function createCompanion(options={}){
  // Per-process temp name: a second companion on another port sharing this data dir would otherwise rename our shared workspace.json.tmp away before we do (ENOENT).
  const persist=()=>{if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{nextSave=undefined;const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);if(snapshot===lastSaved)return;const tmp=`${stateFile}.${process.pid}.tmp`;try{await fs.writeFile(tmp,snapshot,{mode:0o600,flush:true});await replaceFile(tmp,stateFile);}catch(e){await fs.rm(tmp,{force:true}).catch(()=>{});throw e;}lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
+ // A session that needs the user (finished, failed, asked a question). The desktop host turns it into a Windows notification;
+ // the dashboard derives its own notifications and title badge from /api/state.
+ const attention=(s,kind,detail='')=>{if(closing||s.hidden)return;try{options.onAttention?.({id:s.id,title:s.title,kind,detail:String(detail||'').slice(0,300)});}catch(e){console.error('Attention hook failed:',e.message);}};
  const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
  const commands=new Map();
- const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}))];
+ const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},{name:'btw',description:'Ask a side question about this session; the answer stays out of the conversation',aliases:[],hint:'<question>',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage'&&c.name!=='btw').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}))];
  const commandProbes=new Set();
  async function discoverCommands(dir){
   let list;
@@ -622,9 +692,9 @@ export async function createCompanion(options={}){
    if(s.status!=='running'||s._promptId!==promptId||s._run!==run||s._settled||s._interrupt||s.uiRequests?.length)return;
    // Completion and idle polling can report the same run before a queued prompt starts.
    s._settled=true;dropSteers(s);
-   if(s._planReview||s.planMode?.reviewPending){s.status='review';finishWork(s);scheduleSave();return;}
+   if(s._planReview||s.planMode?.reviewPending){s.status='review';finishWork(s);scheduleSave();attention(s,'review','Plan ready for review');return;}
    if(s.queuedMessages?.length)await sendQueued(s);
-   else{s.status='review';activity(s,`${s.title} is ready for review`,'review');}
+   else{s.status='review';activity(s,`${s.title} is ready for review`,'review');attention(s,'review');}
    if(s.status!=='running')finishWork(s);
    scheduleSave();
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();});
@@ -632,6 +702,9 @@ export async function createCompanion(options={}){
  function event(s,f){
   // Ghost-text predictions arrive per keystroke; they are not session activity.
   if(f.type==='response'&&(f.command==='predict_word'||f.command==='predict_word_feedback'))return;
+  // /btw side questions stream outside the transcript: kept on the session for the dashboard only (not persisted).
+  if(f.type==='btw_record'&&f.record?.id){const r=btwView(f.record);s._btw=[r,...(s._btw||[]).filter(x=>x.id!==r.id)].slice(0,20);return;}
+  if(f.type==='btw_delta'){const r=s._btw?.find(x=>x.id===f.recordId);if(r&&typeof f.delta==='string'){const t=r.followUps.at(-1)||r;t.answer=(t.answer+f.delta).slice(-100000);}return;}
   // The 4 s background refresh (get_state/get_subagents) is not an update: bumping on it made every idle live session
   // dirty, so the whole workspace.json (tens of MB) was rewritten every refresh.
   if(!(f.type==='response'&&(f.command==='get_state'||f.command==='get_subagents')))s.updatedAt=now();
@@ -658,7 +731,7 @@ export async function createCompanion(options={}){
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
   if(f.type==='message_start'&&f.message?.role==='assistant'&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;void runners.get(s.id)?.send({type:'prompt',message:'/rename'}).catch(()=>{delete s._titling;});}
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
@@ -673,7 +746,7 @@ export async function createCompanion(options={}){
   // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
   if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)&&!(s._interrupt&&f.id!==s._interrupt)){
    if(f.id&&f.id===s._interrupt)delete s._interrupt;
-   if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');}
+   if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
    else if(f.status==='completed'&&f.sessionSettled===true)settle(s);
    if(f.status==='error'||f.status==='aborted')finishWork(s);
@@ -696,7 +769,7 @@ export async function createCompanion(options={}){
    if(f.method==='cancel')s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==f.targetId);
    else if(f.method==='ask'){
     const questions=Array.isArray(f.questions)?f.questions.map(askQuestion):[];
-    if(questions.length&&!questions.includes(null))(s.uiRequests??=[]).push({id:f.id,method:'ask',title:questions.length>1?`${questions.length} questions`:questions[0].question,questions});
+    if(questions.length&&!questions.includes(null)){const q={id:f.id,method:'ask',title:questions.length>1?`${questions.length} questions`:questions[0].question,questions};(s.uiRequests??=[]).push(q);attention(s,'question',q.title);}
     else void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
    }else if(['select','confirm','input','editor'].includes(f.method)){
     const q={id:f.id,method:f.method,title:String(f.title||'Question').slice(0,500)};
@@ -704,7 +777,7 @@ export async function createCompanion(options={}){
     if(f.method==='confirm')q.message=String(f.message||'').slice(0,2000);
     if(f.method==='input')q.placeholder=String(f.placeholder||'').slice(0,500);
     if(f.method==='editor')q.prefill=String(f.prefill||'').slice(0,20000);
-    (s.uiRequests??=[]).push(q);
+    (s.uiRequests??=[]).push(q);attention(s,'question',q.title);
    }else if(f.method==='notify')notice(s,f.notifyType,f.message);
    else if(f.method==='setStatus'){s._status??={};const key=String(f.statusKey||'').slice(0,80);if(f.statusText)s._status[key]=String(f.statusText).slice(0,300);else delete s._status[key];}
    else if(f.method==='setWidget'){s._widgets??={};const key=String(f.widgetKey||'').slice(0,80);if(Array.isArray(f.widgetLines)&&f.widgetLines.length)s._widgets[key]=f.widgetLines.slice(0,40).map(l=>String(l).slice(0,500));else delete s._widgets[key];}
@@ -747,7 +820,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist();}});
    runners.set(s.id,rpc);
    // OMP 18.10+ sends every ask question in one dialog, so multi-select choices stay visible until submitted; older builds reject the command and keep one select per toggle.
    try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});await rpc.send({type:'set_ask_dialog',enabled:true}).catch(()=>{});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
@@ -791,7 +864,7 @@ export async function createCompanion(options={}){
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -808,6 +881,34 @@ export async function createCompanion(options={}){
    // The first request can wait minutes while OMP's prediction daemon loads its engine.
    try{const r=await rpc.send({type:'predict_word',text:draft,cursor},155000);return {suffix:typeof r?.suffix==='string'&&r.suffix?r.suffix:null};}catch{return {suffix:null};}
   }
+  // /btw typed in the composer goes to OMP's side-question channel instead of the transcript, running or not.
+  if(['prompt','steer','follow_up','interrupt'].includes(body.type)&&typeof body.message==='string'&&/^\/btw(\s|$)/.test(body.message.trimStart())){
+   if(checkedImages?.length||body.images?.length)throw error('Side questions cannot carry images.');
+   return command(s,{type:'btw',question:body.message.trimStart().slice(4)});
+  }
+  if(body.type==='btw'){
+   const question=text(body.question,'Side question',20000),recordId=body.recordId===undefined?undefined:text(body.recordId,'Topic',200);
+   const rpc=await start(s);let r;
+   try{r=await rpc.send({type:'btw',question,...(recordId?{recordId}:{})},60000);}catch(e){throw error(e.message,/still running/.test(e.message)?409:400);}
+   // The btw_record frame normally lands first; keep it, since answer deltas may already have been added to it.
+   if(r?.record?.id&&!s._btw?.some(x=>x.id===r.record.id))s._btw=[btwView(r.record),...(s._btw||[])].slice(0,20);
+   return {record:s._btw?.find(x=>x.id===r?.record?.id)};
+  }
+  if(body.type==='btw_cancel'){const rpc=runners.get(s.id);if(!rpc?.alive)return {cancelled:false};const recordId=body.recordId===undefined?undefined:text(body.recordId,'Topic',200);const r=await rpc.send({type:'btw_cancel',...(recordId?{recordId}:{})});return {cancelled:r?.cancelled===true};}
+  if(body.type==='btw_history'){const rpc=await start(s);const r=await rpc.send({type:'get_btw_history'});s._btw=(Array.isArray(r?.records)?r.records:[]).filter(x=>x?.id).slice(0,20).map(btwView);return {records:s._btw};}
+  // Stop or steer one running subagent of this session (ids from get_subagents).
+  if(body.type==='subagent_cancel'||body.type==='subagent_steer'){
+   const id=text(body.id,'Subagent ID',200),rpc=runners.get(s.id);
+   if(!s.subagentList?.some(a=>a.id===id))throw error('This subagent is not part of this session.',404);
+   if(!rpc?.alive)throw error('OMP is no longer running.',409);
+   if(body.type==='subagent_cancel'){const r=await rpc.send({type:'cancel_subagent',subagentId:id});await refresh(s,rpc);return {cancelled:r?.cancelled===true};}
+   const message=text(body.message,'Message',20000);
+   try{await rpc.send({type:'steer_subagent',subagentId:id,message},60000);}catch(e){throw error(e.message,409);}
+   return {steered:true};
+  }
+  if(body.type==='changes_worktree')return worktreeChanges(s,body.base==='head'?'head':'start');
+  if(body.type==='worktree_status')return worktreeStatus(s);
+  if(body.type==='worktree_finish')return finishWorktree(s,body.action);
   const prompting=['prompt','steer','follow_up','interrupt'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
   if(prompting&&s._task)throw error(`Wait for OMP to finish first (${s._task.replace(/…$/,'').toLowerCase()}).`);
@@ -1194,7 +1295,9 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
   if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);await fs.mkdir(path.dirname(wt),{recursive:true});
    try{await git(p.path,['worktree','add','-b',b,wt,'HEAD']);cwd=wt;branch=b;}catch(e){isolated=false;notes.push(`Worktree isolation skipped (needs a Git repository with at least one commit). Working directly in ${p.path}.`);}}
-  const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(launch?{launch}:{}),...(draft?{draft:true}:{})};
+  // Commit the session started from: the Changes working-tree view can diff against it, so the agent's own commits show too.
+  const baseSha=await git(cwd,['rev-parse','--verify','HEAD']).catch(()=>undefined);
+  const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(baseSha?{baseSha}:{}),...(launch?{launch}:{}),...(draft?{draft:true}:{})};
   if(selector){const i=selector.indexOf('/');s.modelSelector=selector;s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking){s.thinkingChoice=thinking;s.thinking=thinking;}
   for(const n of notes)append(s,'system',n);store.sessions.unshift(s);activity(s,sessionFile?`Resumed ${title}`:`Started ${title}`,'running');
   if(prompt)await command(s,{type:'prompt',message:prompt});else await persist();return s;
@@ -1208,26 +1311,96 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const recorded=s.sessionFile?(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user'):false;
   if(recorded){delete s.draft;await persist();return {discarded:false};}
   await Promise.allSettled([...enhanceJobs.values()].filter(j=>j.sessionId===s.id).map(stopEnhance));
-  const rpc=runners.get(s.id);
-  if(rpc){const stopped=new Promise(r=>rpc.child.once('close',r));if(!rpc.stopping)rpc.kill();if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;}
+  await stopRunner(s);
   // rmdir (not rm -r) only succeeds on an empty folder, so OMP's other sessions for the same cwd are never touched.
   if(s.sessionFile){await fs.rm(s.sessionFile,{force:true}).catch(()=>{});await fs.rmdir(path.dirname(s.sessionFile)).catch(()=>{});}
   let removed=true;
   const root=store.projects.find(p=>p.id===s.projectId)?.path;
-  if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){
-   removed=false;
-   for(let i=0;i<20;i++){
-    try{await git(root,['worktree','remove','--force',s.cwd]);removed=true;break;}
-    // On Windows `remove` can drop git's record and the files yet fail on the empty folder a dying process still holds;
-    // retries then say "not a working tree". Once git no longer lists it, only the leftover folder remains.
-    catch{if(!await worktreeListed(root,s.cwd)){await git(root,['worktree','prune']).catch(()=>{});await fs.rm(s.cwd,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});removed=true;break;}await new Promise(r=>setTimeout(r,50*(i+1)));}
-   }
-   if(removed)await git(root,['branch','-D',s.branch]).catch(()=>{});
-   else console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);
-  }
-  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);store.pinned=store.pinned.filter(k=>k!=='s:'+s.id);}
+  if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){removed=await removeWorktree(s,root);if(!removed)console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);}
+  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);store.pinned=store.pinned.filter(k=>k!=='s:'+s.id);delete store.drafts['session:'+s.id];}
   else s.hidden=true;
   await persist();return {discarded:true};
+ }
+ // Removes an isolated session's worktree folder and its omp-web/ branch; false when Windows still holds the folder.
+ async function removeWorktree(s,root){
+  for(let i=0;i<20;i++){
+   try{await git(root,['worktree','remove','--force',s.cwd]);break;}
+   // On Windows `remove` can drop git's record and the files yet fail on the empty folder a dying process still holds;
+   // retries then say "not a working tree". Once git no longer lists it, only the leftover folder remains.
+   catch{if(!await worktreeListed(root,s.cwd)){await git(root,['worktree','prune']).catch(()=>{});await fs.rm(s.cwd,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});break;}if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
+  }
+  await git(root,['branch','-D',s.branch]).catch(()=>{});return true;
+ }
+ // Kills the session's OMP process and waits for it to exit, so Windows lets go of its working directory.
+ async function stopRunner(s){const rpc=runners.get(s.id);if(rpc){const stopped=new Promise(r=>rpc.child.once('close',r));if(!rpc.stopping)rpc.kill();if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;}}
+ // Changes › Working tree: the real `git diff` of the session's folder against the commit it started from (or HEAD),
+ // plus untracked files, in OMP's diff format with absolute paths.
+ async function worktreeChanges(s,which){
+  const cwd=s.cwd,q=['-c','core.quotepath=off'];
+  try{await gitRun(cwd,['rev-parse','--is-inside-work-tree'],{timeout:10000});}catch{throw error('This session’s folder is not a Git repository.',409);}
+  let base='HEAD',label='HEAD';
+  if(which==='start'&&s.baseSha){try{await gitRun(cwd,['cat-file','-e',s.baseSha+'^{commit}'],{timeout:10000});base=s.baseSha;label='session start';}catch{}}
+  // No commit yet: compare with the empty tree, which shows staged files.
+  if(base==='HEAD'&&!await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(()=>true,()=>false)){base='4b825dc642cb6eb9a060e54bf8d69288fbee4904';label='empty repository';}
+  const [diff,untracked]=await Promise.all([gitRun(cwd,[...q,'diff','--no-color','--no-ext-diff','--no-renames','--relative','--src-prefix=a/','--dst-prefix=b/','-U3',base,'--']),gitRun(cwd,[...q,'ls-files','--others','--exclude-standard','-z'])]);
+  const files=gitDiffFiles(diff),extra=untracked.split('\0').filter(Boolean);let budget=2*1024*1024;
+  for(const rel of extra.slice(0,200)){const d=budget>0?await untrackedDiff(path.join(cwd,rel)).catch(e=>`… (${e.code==='EISDIR'?'folder':'unreadable'})`):'… (diff omitted: too many changes)';budget-=d.length;files.push({path:rel,op:'create',diff:d});}
+  return {cwd,base:label==='HEAD'?'HEAD':base.slice(0,12),baseLabel:label,untrackedOmitted:Math.max(0,extra.length-200),files:files.map(f=>({...f,path:path.join(cwd,f.path)}))};
+ }
+ const worktreeRoot=s=>{const root=store.projects.find(p=>p.id===s.projectId)?.path;if(!s.isolated||!root||!s.branch?.startsWith('omp-web/'))throw error('Only sessions in their own worktree can be finished this way.',409);return root;};
+ // What finishing an isolated session would do: the branch checked out in the project folder is the merge target.
+ async function worktreeStatus(s){
+  const root=worktreeRoot(s),lines=o=>o.split('\n').filter(Boolean),here=await exists(s.cwd);
+  const [base,rootDirty,remotes,dirty,upstream]=await Promise.all([gitRun(root,['branch','--show-current'],{timeout:10000}).then(o=>o.trim()),gitRun(root,['status','--porcelain','--untracked-files=no'],{timeout:15000}).then(o=>lines(o).length),gitRun(root,['remote'],{timeout:10000}).then(lines),
+   here?gitRun(s.cwd,['status','--porcelain'],{timeout:15000}).then(o=>lines(o).length):null,here?gitRun(s.cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],{timeout:10000}).then(o=>o.trim(),()=>''):'']);
+  let ahead=0,behind=0,commits=[];
+  if(base){[behind,ahead]=(await gitRun(root,['rev-list','--left-right','--count',`${base}...${s.branch}`],{timeout:15000})).trim().split(/\s+/).map(Number);commits=lines(await gitRun(root,['log','--format=%h %s','-n','20',`${base}..${s.branch}`],{timeout:15000}));}
+  return {root,cwd:s.cwd,exists:here,branch:s.branch,base,ahead,behind,commits,dirty,rootDirty,remote:remotes.includes('origin')?'origin':remotes[0]||'',upstream};
+ }
+ // Merge (merge commit or fast-forward) / squash into the project's branch, rebase onto it, push it, or delete worktree and branch.
+ // A failed merge or rebase is undone so neither folder is left mid-conflict.
+ async function finishWorktree(s,action){
+  if(!['merge','squash','rebase','push','delete'].includes(action))throw error('Choose merge, squash, rebase, push or delete.');
+  if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');
+  const st=await worktreeStatus(s),{root,branch,base}=st;
+  if(['merge','squash','rebase'].includes(action)&&!base)throw error(`${root} is not on a branch (detached HEAD). Check out the branch to merge into first.`,409);
+  if(action==='merge'||action==='squash'){
+   if(!st.ahead)throw error(`${branch} has no commits that ${base} lacks. Commit the work in the worktree first.`,409);
+   if(st.rootDirty)throw error(`${root} has uncommitted changes. Commit or stash them before merging.`,409);
+   try{if(action==='merge')await gitRun(root,['merge','--no-edit',branch]);else{await gitRun(root,['merge','--squash',branch]);await gitRun(root,['commit','-m',`${s.title}\n\nSquashed from ${branch}.`]);}}
+   catch(e){await gitRun(root,action==='merge'?['merge','--abort']:['reset','--merge']).catch(()=>{});throw error(`Merge failed and was undone: ${e.message}`,409);}
+   activity(s,`Merged ${branch} into ${base}${action==='squash'?' (squashed)':''}`,'done');
+  }
+  if(action==='rebase'){
+   if(!st.exists)throw error('The worktree folder no longer exists.',409);
+   if(st.dirty)throw error('The worktree has uncommitted changes. Commit them before rebasing.',409);
+   try{await gitRun(s.cwd,['rebase',base]);}catch(e){await gitRun(s.cwd,['rebase','--abort']).catch(()=>{});throw error(`Rebase failed and was undone: ${e.message}`,409);}
+   activity(s,`Rebased ${branch} onto ${base}`,'update');
+  }
+  if(action==='push'){
+   if(!st.remote)throw error('This repository has no remote to push to.',409);
+   await gitRun(st.exists?s.cwd:root,['push','-u',st.remote,branch],{timeout:120000,env:{GIT_TERMINAL_PROMPT:'0'}});
+   activity(s,`Pushed ${branch} to ${st.remote}`,'update');
+  }
+  if(action==='delete'){
+   await stopRunner(s);
+   if(!await removeWorktree(s,root))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
+   // The session's folder is gone, so it leaves the panel; its OMP transcript stays in history.
+   s.hidden=true;s.status='done';s.worktreeRemoved=now();delete store.drafts['session:'+s.id];
+   activity(s,`Deleted worktree and branch ${branch}`,'done');await persist();return {action,deleted:true};
+  }
+  await persist();return {action,...await worktreeStatus(s)};
+ }
+ // Files edited (edit/write tool records) by two active sessions that share a folder rather than separate worktrees.
+ // Set as _overlaps on both sessions before each /api/state reply.
+ function markOverlaps(){
+  const key=p=>process.platform==='win32'?p.toLowerCase():p;
+  const active=store.sessions.filter(s=>!s.hidden&&!s.isolated&&['running','queued','review'].includes(s.status)).map(s=>{const files=new Map();for(const m of s.messages||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}return {s,files};});
+  for(const s of store.sessions)delete s._overlaps;
+  for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++){
+   const a=active[i],b=active[j],shared=[...a.files.keys()].filter(k=>b.files.has(k)).map(k=>a.files.get(k));if(!shared.length)continue;
+   (a.s._overlaps??=[]).push({id:b.s.id,title:b.s.title,files:shared.slice(0,20),count:shared.length});(b.s._overlaps??=[]).push({id:a.s.id,title:a.s.title,files:shared.slice(0,20),count:shared.length});
+  }
  }
  // Unknown (git failed) counts as still listed, so the worktree is retried rather than abandoned.
  async function worktreeListed(root,dir){try{return (await git(root,['worktree','list','--porcelain'])).split(/\r?\n/).some(l=>l.startsWith('worktree ')&&samePath(l.slice(9),dir));}catch{return true;}}
@@ -1404,7 +1577,10 @@ async function spend(){
     if(url.pathname==='/')file=path.join(root,'app.html');
     let data,hash;try{({data,hash}=await staticFile(file));}catch{throw error('Dashboard files not found. Build with npm run build:local or use the prebuilt companion download.',404);}
     const ext=path.extname(file);
-    if(ext==='.html'){const v={};for(const n of ['app.css','app.js'])v[n]=(await staticFile(path.join(root,n)).catch(()=>null))?.hash;let html=data.toString('utf8').replace(/(href|src)="\/(app\.(?:css|js))"/g,(m,a,n)=>v[n]?`${a}="/${n}?v=${v[n]}"`:m);if(exposeToken)html=html.replace('</head>',`<meta name="omp-token" content="${token}"/>\n</head>`);data=Buffer.from(html);hash=digest(data);}
+    if(ext==='.html'){const v={};for(const n of ['app.css','app.js'])v[n]=(await staticFile(path.join(root,n)).catch(()=>null))?.hash;let html=data.toString('utf8').replace(/(href|src)="\/(app\.(?:css|js))"/g,(m,a,n)=>v[n]?`${a}="/${n}?v=${v[n]}"`:m);if(exposeToken)html=html.replace('</head>',`<meta name="omp-token" content="${token}"/>\n</head>`);
+     // The desktop app shows native notifications for this machine, so pages opened here skip the browser's own.
+     if(options.desktop&&['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress))html=html.replace('</head>','<meta name="omp-desktop" content="1"/>\n</head>');
+     data=Buffer.from(html);hash=digest(data);}
     const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.zip':'application/zip'};
     const headers={'Content-Type':mime[ext]||'application/octet-stream','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':csp,'Cache-Control':ext!=='.html'&&url.searchParams.get('v')===hash?'public, max-age=31536000, immutable':'no-cache',ETag:`"${hash}"`};
     if(req.headers['if-none-match']===headers.ETag){res.writeHead(304,headers);res.end();return;}
@@ -1413,12 +1589,16 @@ async function spend(){
    const provided=Buffer.from(req.headers.authorization||'');const expected=Buffer.from('Bearer '+token);
    if(provided.length!==expected.length||!timingSafeEqual(provided,expected))throw error('Invalid connection token.',401);
    if(req.method==='GET'&&url.pathname==='/api/state'){
-    if(!url.searchParams.has('session')){json(store);return;}
-    // ?session=<id> (the dashboard's polls): messages only for that session, no activity log; ETag so unchanged polls send nothing.
-    const id=url.searchParams.get('session'),body=JSON.stringify({...store,activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined})}),tag=`"${digest(body)}"`;
+    markOverlaps();
+    // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
+    const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
+    if(!url.searchParams.has('session')){json({...store,drafts});return;}
+    // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
+    const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
    }
+   if(req.method==='GET'&&url.pathname==='/api/draft'){const d=store.drafts[url.searchParams.get('key')];json({text:d?.text??'',at:d?.at??null});return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions'){json({dir:ompSessionsDir,sessions:await listNativeSessions()});return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions/preview'){const file=sessionFileParam(url.searchParams.get('file'));let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}json({...head,file,contextTokens:await lastContext(file).catch(()=>undefined),messages:await importMessages(file,150)});return;}
    if(req.method==='GET'&&url.pathname==='/api/settings'){try{json(await listSettings());}catch(e){throw error(`Could not read OMP settings: ${e.message}`,502);}return;}
@@ -1479,6 +1659,26 @@ async function spend(){
    // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
    if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist();json({provider,account});return;}
    if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
+   // Composer drafts (debounced from every device); an empty text clears the view's draft.
+   if(url.pathname==='/api/draft'){
+    const key=typeof body.key==='string'&&/^(session|native):./.test(body.key)&&body.key.length<=4200?body.key:null;if(!key)throw error('Invalid draft key.');
+    if(typeof body.text!=='string'||body.text.length>200000)throw error('Draft must be text under 200,000 characters.');
+    if(body.text)store.drafts[key]={text:body.text,at:Date.now()};else delete store.drafts[key];
+    // Oldest drafts go first past 200, so an abandoned pile cannot grow workspace.json without bound.
+    const keys=Object.keys(store.drafts);if(keys.length>200)for(const k of keys.sort((a,b)=>store.drafts[a].at-store.drafts[b].at).slice(0,keys.length-200))delete store.drafts[k];
+    scheduleSave();json({key,at:store.drafts[key]?.at??null});return;
+   }
+   if(url.pathname==='/api/editor'){if(!EDITOR_CHOICES.includes(body.editor))throw error('Unknown editor.');store.editor=body.editor;await persist();json({editor:store.editor});return;}
+   // Open in editor: a file from a diff or tool call, relative paths resolved against the session folder.
+   if(url.pathname==='/api/open-file'){
+    let file=text(body.path,'File path',4000);const line=Number.isInteger(body.line)&&body.line>0?body.line:undefined;
+    if(!path.isAbsolute(file)){if(typeof body.cwd!=='string'||!path.isAbsolute(body.cwd))throw error('Use an absolute file path.');file=path.resolve(body.cwd,file);}
+    let stat;try{file=await fs.realpath(file);stat=await fs.stat(file);}catch{throw error('File does not exist on this machine.',404);}
+    if(!stat.isFile())throw error('Path must be a file.');
+    const editor=store.editor==='auto'?await detectEditor():store.editor;
+    await (options.openExternal||openWithOs)(editor==='reveal'?file:editorUrl(EDITORS[editor],file,line),{reveal:editor==='reveal'});
+    json({path:file,editor});return;
+   }
    if(url.pathname==='/api/enhance/stop'){const job=enhanceJobs.get(body.id);if(!job)throw error('Enhance not found.',404);await stopEnhance(job);json({status:job.status});return;}
    if(url.pathname==='/api/omp-update'){
     if(updateState.status==='running')throw error('OMP update is already running.',409);
@@ -1523,7 +1723,9 @@ async function spend(){
     const set=new Set(store[field]);if(on){set.add(key);store[other]=store[other].filter(k=>k!==key);}else set.delete(key);store[field]=[...set];await persist();json({archived:store.archived,pinned:store.pinned});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
-   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(['answer','predict_word','predict_word_feedback'].includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
+   // Answers, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
+   const unlocked=['answer','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status'];
+   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });

@@ -266,7 +266,7 @@
     const out = panel.map(s => {
       const p = projectOf(s);
       const model = sessionModel(s);
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
     });
     const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
@@ -345,7 +345,7 @@
     const html = groups.map(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return `<div class="group-head"><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>` + (shut ? [] : arr).map(it => `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
-        <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
+        <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.overlap?.length ? ` · <span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
         ${workTime(it)}
       </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`).join(''); }).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
     setIfChanged(list, html); // rebuilding every poll would reset hover, focus and scroll
@@ -396,7 +396,7 @@
       const pv = pf && S.previews.get(pf);
       if (pv) { S.previews.delete(pf); if (!pv.error) S.previews.set(pf, pv); }
       trim(S.previews, 20); trim(S.subs, 30); trim(S.bg, 30); trim(S.advTx, 60); trim(groupOpen, 2000); trim(rowOpen, 2000);
-      build(c);
+      build(c); void pullDraft(); checkAttention();
       // /state carries messages only for the viewed session: fetch the new one now instead of on the next poll.
       if (S.store && stateSession() && !S.store.sessions.find(x => x.id === stateSession())?.messages) refresh();
     }
@@ -414,6 +414,7 @@
       <div class="chat-plan" id="chatPlan" hidden></div>
       <div class="body"><div class="scroller" id="scroller"><div class="thread" id="thread"></div></div><nav class="prompt-rail" id="promptRail" aria-label="Your prompts (Alt+↑/↓)"></nav><aside class="tasks" id="tasks" hidden></aside></div>
       <div class="composer-wrap">
+        <section class="btw" id="btw" aria-label="Side question" hidden><div class="btw-head" id="btwHead"></div><div class="btw-body" id="btwBody" aria-live="polite"></div><div id="btwForm"></div></section>
         <div class="extras" id="extras" hidden></div>
         <div class="questions" id="questions" aria-live="polite" hidden></div>
         <div class="queued-messages" id="queued" hidden></div>
@@ -440,7 +441,38 @@
     loadBg(bgFile(), true);
     setTimeout(() => { if ($('#questions')?.hidden) input.focus(); }, 0);
   }
-  const drafts = new Map();
+  // Composer drafts per view, saved to the companion (debounced) so they survive reloads and show up on other devices.
+  // draftSynced: view → { text, at } last agreed with the server. A remote change replaces the composer only while it still
+  // shows that text; an edit made here since then is saved over the remote one instead.
+  const draftSynced = new Map(), draftTimers = new Map();
+  const draftKey = view => /^(session|native):./.test(view) ? view : '';
+  function saveDraft(view) {
+    if (!draftKey(view) || !S.token) return;
+    clearTimeout(draftTimers.get(view));
+    draftTimers.set(view, setTimeout(() => {
+      draftTimers.delete(view);
+      const text = Map.prototype.get.call(drafts, view) || '';
+      if ((draftSynced.get(view)?.text ?? '') === text) return;
+      api('/draft', { key: view, text }).then(r => draftSynced.set(view, { text, at: r.at })).catch(() => {});
+    }, 700));
+  }
+  async function pullDraft() {
+    const view = S.view;
+    if (!draftKey(view) || draftTimers.has(view) || !S.store) return;
+    const at = S.store.drafts?.[view] ?? null, known = draftSynced.get(view);
+    if (known ? known.at === at : !at) return;
+    let remote = { text: '', at: null };
+    if (at) try { remote = await api('/draft?key=' + encodeURIComponent(view)); } catch { return; }
+    if (S.view !== view || draftTimers.has(view)) return;
+    const local = Map.prototype.get.call(drafts, view) || '';
+    draftSynced.set(view, { text: remote.text, at: remote.at });
+    if (local !== (known?.text ?? '')) { if (local !== remote.text) saveDraft(view); return; }
+    if (remote.text) Map.prototype.set.call(drafts, view, remote.text); else Map.prototype.delete.call(drafts, view);
+    const input = $('#input');
+    if (input && input.value !== remote.text && !S.enhance.has(view)) { input.value = remote.text; autosize(input); updateComposer(); }
+  }
+  class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
+  const drafts = new Drafts();
   const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'; };
 
   const previewLoading = new Set();
@@ -470,6 +502,7 @@
       if (!s.messages) { S.lastSig = ''; $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Loading…</div>'; }
       else { loadAdvisorTx(s.sessionFile || ''); renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt, retry: s._retry, task: s._task }); }
       renderExtras(s);
+      renderBtw(s);
       showNotices(s);
       renderQuestions(s);
       renderQueue(s);
@@ -486,6 +519,7 @@
       else if (pv.error) $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(pv.error)}</div></div>`;
       else { loadAdvisorTx(c.file); renderThread(withAdvisor(pv.messages, c.file), 'history', c.file); }
       renderExtras(null);
+      renderBtw(null);
       renderQuestions(null);
       renderQueue(null);
       renderComposer(null, n || pv);
@@ -684,6 +718,7 @@
           ${idle ? '<button data-act="compact">Compact context…</button>' : ''}
           <button data-act="tree">Session tree…</button>
           <button data-act="lastReply">Copy last reply</button>
+          <button data-act="btwOpen">Ask a side question (/btw)…</button>
           <button data-act="cycleModel">Next model (OMP cycle)</button>
           <button data-act="cycleThinking">Next thinking level</button>
           ${idle ? `<button data-act="launch">Launch options…${launchCount(s.launch) ? ` <small>${launchCount(s.launch)} set</small>` : ''}</button>` : ''}
@@ -693,6 +728,7 @@
           <button data-act="stats">Session stats</button>
           ${s.sessionFile ? '<button data-act="share">Share session…</button>' : ''}
           <button data-act="commit">Commit changes in this folder…</button>
+          ${s.isolated && s.branch?.startsWith('omp-web/') ? '<button data-act="worktree">Finish worktree (merge, push, delete)…</button>' : ''}
           <div class="menu-sep"></div>
           ${pref('fast', s.fast?.enabled, 'Fast mode')}
           ${pref('autoCompaction', s.autoCompaction !== false, 'Auto-compact when context is full')}
@@ -882,6 +918,8 @@
           continue;
         }
         if (v && typeof v === 'object') { out.push(codeBox(k, JSON.stringify(v, null, 2), 'json')); continue; }
+        // File paths open in the editor; "src/x.ts:40-60" (read's range syntax) opens at line 40.
+        if (typeof v === 'string' && /^(path|file_path|file|filePath)$/.test(k) && v && !/^[a-z][\w+.-]+:\/\//i.test(v)) { const m = v.match(/(?<=[^\\/]):([^\\/]*)$/), p = m && !/^[a-z]$/i.test(v.slice(0, m.index)) ? v.slice(0, m.index) : v; small.push(`<span><i>${esc(k)}</i> ${openLink(p, p === v ? '' : +(m[1].match(/\d+/)?.[0] || 0) || '', esc(v))}</span>`); continue; }
         small.push(`<span><i>${esc(k)}</i> ${esc(String(v))}</span>`);
       }
       if (small.length) out.unshift(`<div class="kv">${small.join('')}</div>`);
@@ -1148,40 +1186,50 @@
     }
     return on ? out + '</mark>' : out;
   }
-  function diffTable(parsed, lang, mode) {
-    const rows = [];
+  // review (Changes page of a panel session): line cells carry data-ln="o:<old>"/"n:<new>" for comments, and each line is
+  // followed by its comment rows and, when open, the comment form.
+  function diffTable(parsed, lang, mode, review) {
+    const rows = [], cols = mode === 'split' ? 4 : 3;
+    const ln = (side, n) => review && n ? ` data-ln="${side}:${n}"` : '';
+    const notes = (...at) => { if (!review) return; for (const [side, n] of at) if (n) rows.push(review.rows(side, n, cols)); };
     parsed.hunks.forEach((h, hi) => {
-      if (h.note) { rows.push(`<tr class="d-gap"><td colspan="${mode === 'split' ? 4 : 3}">${esc(h.note)}</td></tr>`); return; }
+      if (h.note) { rows.push(`<tr class="d-gap"><td colspan="${cols}">${esc(h.note)}</td></tr>`); return; }
       if (hi > 0 || (h.lines[0] && (h.lines[0].o || h.lines[0].n) > 1)) {
         const f = h.lines[0];
-        rows.push(`<tr class="d-gap"><td colspan="${mode === 'split' ? 4 : 3}">⋯ ${f ? `line ${f.o ?? f.n}` : ''}</td></tr>`);
+        rows.push(`<tr class="d-gap"><td colspan="${cols}">⋯ ${f ? `line ${f.o ?? f.n}` : ''}</td></tr>`);
       }
       for (const b of blocks(h.lines)) {
         if (b.ctx) {
-          const c = codeLine(b.ctx.text, lang);
+          const c = codeLine(b.ctx.text, lang), x = ln('n', b.ctx.n);
           rows.push(mode === 'split'
-            ? `<tr><td class="ln">${b.ctx.o}</td><td class="cd">${c}</td><td class="ln">${b.ctx.n}</td><td class="cd">${c}</td></tr>`
-            : `<tr><td class="ln">${b.ctx.o}</td><td class="ln">${b.ctx.n}</td><td class="cd">${c}</td></tr>`);
+            ? `<tr><td class="ln"${x}>${b.ctx.o}</td><td class="cd"${x}>${c}</td><td class="ln"${x}>${b.ctx.n}</td><td class="cd"${x}>${c}</td></tr>`
+            : `<tr><td class="ln"${x}>${b.ctx.o}</td><td class="ln"${x}>${b.ctx.n}</td><td class="cd"${x}>${c}</td></tr>`);
+          notes(['n', b.ctx.n]);
           continue;
         }
         const marks = b.del.map((d, i) => b.add[i] ? wordMarks(d.text, b.add[i].text) : null);
         if (mode === 'split') {
           for (let i = 0; i < Math.max(b.del.length, b.add.length); i++) {
-            const d = b.del[i], a = b.add[i], m = marks[i];
-            rows.push(`<tr>${d ? `<td class="ln del">${d.o}</td><td class="cd del">${codeLine(d.text, lang, m?.[0])}</td>` : '<td class="ln none"></td><td class="cd none"></td>'}${a ? `<td class="ln add">${a.n}</td><td class="cd add">${codeLine(a.text, lang, m?.[1])}</td>` : '<td class="ln none"></td><td class="cd none"></td>'}</tr>`);
+            const d = b.del[i], a = b.add[i], m = marks[i], xd = ln('o', d?.o), xa = ln('n', a?.n);
+            rows.push(`<tr>${d ? `<td class="ln del"${xd}>${d.o}</td><td class="cd del"${xd}>${codeLine(d.text, lang, m?.[0])}</td>` : '<td class="ln none"></td><td class="cd none"></td>'}${a ? `<td class="ln add"${xa}>${a.n}</td><td class="cd add"${xa}>${codeLine(a.text, lang, m?.[1])}</td>` : '<td class="ln none"></td><td class="cd none"></td>'}</tr>`);
+            notes(['o', d?.o], ['n', a?.n]);
           }
         } else {
-          b.del.forEach((d, i) => rows.push(`<tr><td class="ln del">${d.o}</td><td class="ln del"></td><td class="cd del">${codeLine(d.text, lang, marks[i]?.[0])}</td></tr>`));
-          b.add.forEach((a, i) => rows.push(`<tr><td class="ln add"></td><td class="ln add">${a.n}</td><td class="cd add">${codeLine(a.text, lang, marks[i]?.[1])}</td></tr>`));
+          b.del.forEach((d, i) => { const x = ln('o', d.o); rows.push(`<tr><td class="ln del"${x}>${d.o}</td><td class="ln del"${x}></td><td class="cd del"${x}>${codeLine(d.text, lang, marks[i]?.[0])}</td></tr>`); notes(['o', d.o]); });
+          b.add.forEach((a, i) => { const x = ln('n', a.n); rows.push(`<tr><td class="ln add"${x}></td><td class="ln add"${x}>${a.n}</td><td class="cd add"${x}>${codeLine(a.text, lang, marks[i]?.[1])}</td></tr>`); notes(['n', a.n]); });
         }
       }
     });
-    return `<div class="diff-scroll"><table class="diff ${mode}" aria-label="${mode === 'split' ? 'Side-by-side' : 'Unified'} diff: old line, new line, code">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
+    return `<div class="diff-scroll"><table class="diff ${mode}${review ? ' commentable' : ''}" aria-label="${mode === 'split' ? 'Side-by-side' : 'Unified'} diff: old line, new line, code${review ? '. Click a line to comment on it' : ''}">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
   }
   // Split panes need room: decide from the thread's width (the chat column is ~860px, the Changes page is wide), not the window's.
   const diffMode = () => S.diffMode || (($('#thread')?.clientWidth || innerWidth) > 1000 ? 'split' : 'unified');
   const fdCache = new Map();
-  const fileDiff = (f, opts = {}) => memo(fdCache, [diffMode(), f.op, f.path, opts.meta || '', f.diff].join('\u0000'), () => fileDiffRaw(f, opts), 400);
+  const fileDiff = (f, opts = {}) => memo(fdCache, [diffMode(), f.op, f.path, opts.meta || '', opts.edit ?? '', opts.reviewSig || '', f.diff].join('\u0000'), () => fileDiffRaw(f, opts), 400);
+  // First changed line of a diff, where Open in editor puts the cursor.
+  const firstChange = diff => { for (const h of parseDiff(diff).hunks) for (const l of h.lines) if (l.t !== 'ctx') return l.n ?? l.o; return ''; };
+  // A file path that opens in the editor on the companion's computer (Settings › Notifications & editor).
+  const openLink = (path, line, label, cls = '') => `<button type="button" class="btn-reset open-file ${cls}" data-open-file="${esc(path)}"${line ? ` data-line="${line}"` : ''} title="Open ${esc(path)} in editor">${label}</button>`;
   function fileDiffRaw(f, opts = {}) {
     const parsed = parseDiff(f.diff);
     const lang = extLang(f.path);
@@ -1189,15 +1237,15 @@
     // A brand-new file has nothing on the left, so split view would be half empty.
     const mode = created ? 'unified' : diffMode();
     const name = f.path ? shortPath(f.path) : 'file';
-    return `<div class="filediff">
+    return `<div class="filediff"${opts.edit !== undefined ? ` data-cedit="${esc(opts.edit)}"` : ''}>
       <div class="fd-head"><span class="fd-op ${created ? 'add' : f.op === 'delete' ? 'del' : ''}">${created ? (f.op === 'write' ? 'W' : 'A') : f.op === 'delete' ? 'D' : 'M'}</span>
-        <span class="fd-path" title="${esc(f.path)}">${esc(name)}</span>
+        ${f.path && f.op !== 'delete' ? openLink(f.path, firstChange(f.diff), esc(name), 'fd-path') : `<span class="fd-path" title="${esc(f.path)}">${esc(name)}</span>`}
         <span class="fd-stat"><span class="plus">+${parsed.adds}</span> <span class="minus">−${parsed.dels}</span></span>
         ${opts.meta || ''}
         ${created ? '' : `<span class="seg" role="group" aria-label="Diff layout"><button class="${mode === 'unified' ? 'on' : ''}" aria-pressed="${mode === 'unified'}" data-diffmode="unified" title="Inline">Unified</button><button class="${mode === 'split' ? 'on' : ''}" aria-pressed="${mode === 'split'}" data-diffmode="split" title="Side by side">Split</button></span>`}
         ${f.path ? `<button class="btn sm ghost" data-copy-text="${esc(f.path)}" title="Copy path" aria-label="Copy path">⧉</button>` : ''}
       </div>
-      ${parsed.hunks.length ? diffTable(parsed, lang, mode) : `<pre class="fd-raw">${esc(f.diff)}</pre>`}
+      ${parsed.hunks.length ? diffTable(parsed, lang, mode, opts.review) : `<pre class="fd-raw">${esc(f.diff)}</pre>`}
     </div>`;
   }
   const diffStat = files => files.reduce((s, f) => { const p = parseDiff(f.diff); s.adds += p.adds; s.dels += p.dels; return s; }, { adds: 0, dels: 0 });
@@ -1212,31 +1260,102 @@
     }
     return byFile;
   }
+  // Two sources: the agent's edit/write tool records (Edits, default) and the real `git diff` of the session folder (Working tree).
+  // "Viewed" folds a file until its diff changes again; comments on diff lines go back to the session as one message.
+  const loadLS = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v && typeof v === 'object' ? v : d; } catch { return d; } };
+  const saveLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  const trimObj = (o, max) => { const k = Object.keys(o); for (const x of k.slice(0, Math.max(0, k.length - max))) delete o[x]; };
+  S.changesMode = loadLS('omp-changes', {}).mode === 'tree' ? 'tree' : 'edits';
+  S.wt = new Map(); S.noteEdit = null; S.reviewVer = 0;
+  const viewedAll = loadLS('omp-viewed', {}), notesAll = loadLS('omp-review-notes', {});
+  const hashStr = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (Math.imul(h, 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); };
+  const fileSig = list => list.length + '.' + hashStr(list.map(f => f.diff || '').join('\n'));
+  // Path as the agent sees it: relative to the session folder when inside it.
+  const relTo = (p, cwd) => { const n = x => String(x || '').replace(/\\/g, '/').replace(/\/+$/, ''); const a = n(p), b = n(cwd); return b && a.toLowerCase().startsWith(b.toLowerCase() + '/') ? a.slice(b.length + 1) : a; };
+  // One message, one line per comment: "path:line: note". Removed lines carry their old line number.
+  const reviewMessage = (notes, cwd) => [...notes].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line).map(n => `${relTo(n.path, cwd)}:${n.line}: ${n.side === 'o' ? '(removed line) ' : ''}${n.text.trim().replace(/\n/g, '\n  ')}`).join('\n');
+  async function loadWorktree(id, force) {
+    const s = S.store?.sessions.find(x => x.id === id), e = S.wt.get(id) || { base: 'start' };
+    // While the session works the folder changes under us: reload at most every 5 s; idle, only when asked.
+    if (e.loading || (!force && e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt))) return;
+    e.loading = true; S.wt.set(id, e);
+    try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'changes_worktree', base: e.base }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
+    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
+  }
+  function noteRows(parent, path, edit) {
+    const list = (notesAll[parent] || []).filter(n => n.path === path && n.edit === edit), ed = S.noteEdit;
+    const open = ed && ed.parent === parent && ed.path === path && ed.edit === edit ? ed : null;
+    return {
+      sig: list.map(n => n.id + n.text).join('\u0001') + (open ? `|${open.side}${open.line}${open.id || ''}` : ''),
+      rows: (side, line, cols) => list.filter(n => n.side === side && n.line === line).map(n => open?.id === n.id ? '' : `<tr class="d-note"><td colspan="${cols}"><div class="note"><span class="note-who">Comment · line ${line}${side === 'o' ? ' (removed)' : ''}</span><div class="note-text">${esc(n.text)}</div><span class="note-acts"><button class="btn sm ghost" data-note-edit="${esc(n.id)}">Edit</button><button class="btn sm ghost" data-note-del="${esc(n.id)}">Delete</button></span></div></td></tr>`).join('')
+        + (open && open.side === side && open.line === line ? `<tr class="d-note"><td colspan="${cols}"><form class="note-form" data-noteform><textarea name="note" rows="3" maxlength="20000" aria-label="Comment on line ${line}" placeholder="Comment on line ${line}${side === 'o' ? ' (removed)' : ''}">${esc(open.text || '')}</textarea><div class="question-actions"><button class="btn sm primary" type="submit">${open.id ? 'Save comment' : 'Add comment'}</button><button class="btn sm ghost" type="button" data-note-cancel>Cancel</button></div></form></td></tr>` : ''),
+    };
+  }
   function renderChanges(c) {
     const src = c.parent.startsWith('s:') ? S.store?.sessions.find(x => x.id === c.parent.slice(2)) : null;
     const file = c.parent.startsWith('f:') ? c.parent.slice(2) : '';
     const pv = file ? S.previews.get(file) : null;
     if (file && !pv) loadPreview(file);
-    const waiting = (src && !src.messages) || (file && !pv);
+    const tree = !!src && S.changesMode === 'tree', wt = src ? S.wt.get(src.id) : null;
+    if (tree) loadWorktree(src.id);
+    const waiting = tree ? !wt?.data && !wt?.error : (src && !src.messages) || (file && !pv);
     const messages = src ? src.messages || [] : pv?.messages || [];
     const title = src?.title || S.native.find(n => n.file === file)?.title || pv?.title || 'Session';
     const back = src ? '#/s/' + src.id : '#/f/' + encodeURIComponent(file);
-    const byFile = collectChanges(messages);
+    const byFile = tree ? new Map((wt?.data?.files || []).map(f => [f.path, [f]])) : collectChanges(messages);
     const all = [...byFile.values()].flat();
     const tot = diffStat(all);
+    const notes = src ? notesAll[c.parent] || [] : [];
+    const mode = tree ? 'tree' : 'edits', vmap = viewedAll[c.parent + '|' + mode] || {};
+    const err = tree ? wt?.error : pv?.error;
     setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ changes</span></div>
-        <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'} · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}</div></div>
-      <div class="actions"><span class="seg" role="group" aria-label="Diff layout"><button class="${diffMode() === 'unified' ? 'on' : ''}" aria-pressed="${diffMode() === 'unified'}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" aria-pressed="${diffMode() === 'split'}" data-diffmode="split">Split</button></span></div>`);
-    const sig = ['changes', c.parent, diffMode(), waiting ? 'wait' : pv?.error || '', all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
+        <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'}${tree ? '' : ` · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}`}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}${tree && wt?.data ? `<span title="${esc(wt.data.cwd)}">git diff vs ${esc(wt.data.baseLabel === 'session start' ? `session start (${wt.data.base.slice(0, 8)})` : wt.data.baseLabel)}${wt.data.untrackedOmitted ? ` · ${wt.data.untrackedOmitted} more untracked files not shown` : ''}</span>` : ''}</div></div>
+      <div class="actions">${notes.length ? `<button class="btn sm primary" data-act="requestChanges" title="Send every comment to the session as one message">Request changes <small>${notes.length}</small></button>` : ''}${src ? `<span class="seg" role="group" aria-label="Changes source"><button class="${tree ? '' : 'on'}" aria-pressed="${!tree}" data-chmode="edits" title="Edits the agent made with its edit and write tools">Edits</button><button class="${tree ? 'on' : ''}" aria-pressed="${tree}" data-chmode="tree" title="git diff of the session folder, including untracked files">Working tree</button></span>` : ''}${tree ? `<select data-wtbase aria-label="Compare with"><option value="start" ${wt?.base !== 'head' ? 'selected' : ''}>vs session start</option><option value="head" ${wt?.base === 'head' ? 'selected' : ''}>vs HEAD</option></select><button class="btn sm ghost" data-act="wtReload" aria-label="Reload working tree diff" title="Run git diff again">${wt?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>` : ''}<span class="seg" role="group" aria-label="Diff layout"><button class="${diffMode() === 'unified' ? 'on' : ''}" aria-pressed="${diffMode() === 'unified'}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" aria-pressed="${diffMode() === 'split'}" data-diffmode="split">Split</button></span></div>`);
+    const sig = ['changes', c.parent, mode, diffMode(), waiting ? 'wait' : err || '', S.reviewVer, tree ? wt?.at : all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
     if (sig === S.lastSig) return;
-    if (waiting) { S.lastSig = sig; $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading session…</div>'; return; }
-    if (pv?.error) { S.lastSig = sig; $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(pv.error)}</div></div>`; return; }
-    if (!byFile.size) { S.lastSig = sig; $('#thread').innerHTML = '<div class="history-note">No file edits recorded in this session yet.</div>'; return; }
-    const files = [...byFile];
-    swapHtml($('#thread'), `<div class="changes-index">${files.map(([p, list], i) => { const st = diffStat(list); return `<a href="#" data-jump="fd-${i}"><span class="fd-path">${esc(shortPath(p))}</span><span class="muted">${list.length > 1 ? list.length + ' edits' : ''}</span><span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></a>`; }).join('')}</div>`
-      + files.map(([p, list], i) => `<section class="change-file" id="fd-${i}">${list.map((f, j) => fileDiff(f, { meta: list.length > 1 ? `<span class="muted fd-when">edit ${j + 1}/${list.length} · ${esc(clock(f.at))}</span>` : `<span class="muted fd-when">${esc(clock(f.at))}</span>` })).join('')}</section>`).join(''));
+    // A comment being typed must not be wiped by a poll; the page catches up once it is saved or cancelled.
+    if (S.noteEdit && $('#thread')?.querySelector?.('[data-noteform]') && S.lastSig.startsWith(['changes', c.parent, mode, diffMode()].join('|'))) return;
+    if (waiting) { S.lastSig = sig; $('#thread').innerHTML = `<div class="working"><span class="spinner"></span> ${tree ? 'Running git diff…' : 'Reading session…'}</div>`; return; }
+    if (err) { S.lastSig = sig; $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(err)}</div></div>`; return; }
+    if (!byFile.size) { S.lastSig = sig; $('#thread').innerHTML = `<div class="history-note">${tree ? 'No differences in the working tree.' : 'No file edits recorded in this session yet.'}</div>`; return; }
+    const files = [...byFile].map(([p, list]) => { const fs = fileSig(list); return { p, list, fs, viewed: vmap[p] === fs, n: notes.filter(x => x.path === p).length }; });
+    swapHtml($('#thread'), `<div class="changes-index">${files.map(({ p, list, viewed, n }, i) => { const st = diffStat(list); return `<a href="#" data-jump="fd-${i}" class="${viewed ? 'viewed' : ''}"><span class="fd-path">${viewed ? '<span aria-label="Viewed">✓</span> ' : ''}${esc(shortPath(p))}</span><span class="muted">${n ? `${n} ${n === 1 ? 'comment' : 'comments'} · ` : ''}${list.length > 1 ? list.length + ' edits' : ''}</span><span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></a>`; }).join('')}</div>`
+      + files.map(({ p, list, fs, viewed, n }, i) => { const st = diffStat(list), del = list.at(-1).op === 'delete';
+        return `<section class="change-file${viewed ? ' viewed' : ''}" id="fd-${i}" data-cpath="${esc(p)}"><div class="cf-head"><label class="cf-viewed"><input type="checkbox" data-viewed="${esc(fs)}" ${viewed ? 'checked' : ''}> Viewed</label>${del ? `<span class="fd-path" title="${esc(p)}">${esc(shortPath(p))}</span>` : openLink(p, firstChange(list.at(-1).diff), esc(shortPath(p)), 'fd-path')}${n ? `<span class="pill">${n} ${n === 1 ? 'comment' : 'comments'}</span>` : ''}<span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></div>`
+          + (viewed ? '' : list.map((f, j) => { const edit = tree ? 'wt' : String(j), review = src ? noteRows(c.parent, p, edit) : null;
+            return fileDiff(f, { edit, review, reviewSig: review?.sig, meta: tree ? '' : list.length > 1 ? `<span class="muted fd-when">edit ${j + 1}/${list.length} · ${esc(clock(f.at))}</span>` : `<span class="muted fd-when">${esc(clock(f.at))}</span>` }); }).join('')) + '</section>'; }).join(''));
     S.lastSig = sig;
+    $('#thread')?.querySelector?.('[data-noteform] textarea')?.focus();
+  }
+  function setViewed(parent, path, sig, on) {
+    const k = parent + '|' + (S.changesMode === 'tree' && parent.startsWith('s:') ? 'tree' : 'edits'), m = viewedAll[k] ||= {};
+    if (on) m[path] = sig; else delete m[path];
+    delete viewedAll[k]; viewedAll[k] = m; trimObj(viewedAll, 200); saveLS('omp-viewed', viewedAll);
+    S.reviewVer++; S.lastSig = ''; update();
+  }
+  function saveNote(form) {
+    const ed = S.noteEdit, text = form.elements.note.value.trim();
+    if (!ed) return;
+    const list = notesAll[ed.parent] ||= [];
+    if (ed.id) { const n = list.find(x => x.id === ed.id); if (n && text) n.text = text; else if (n) list.splice(list.indexOf(n), 1); }
+    else if (text) list.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), path: ed.path, edit: ed.edit, side: ed.side, line: ed.line, text });
+    if (!list.length) delete notesAll[ed.parent];
+    trimObj(notesAll, 100); saveLS('omp-review-notes', notesAll);
+    S.noteEdit = null; S.reviewVer++; S.lastSig = ''; update();
+  }
+  async function requestChanges(parent) {
+    const s = S.store?.sessions.find(x => 's:' + x.id === parent), notes = notesAll[parent] || [];
+    if (!s || !notes.length || S.busy) return;
+    const live = ['running', 'queued'].includes(s.status);
+    S.busy = true;
+    try {
+      await api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: live ? 'steer' : 'prompt', message: reviewMessage(notes, s.cwd) });
+      delete notesAll[parent]; saveLS('omp-review-notes', notesAll); S.noteEdit = null; S.reviewVer++;
+      toast(`Sent ${notes.length} ${notes.length === 1 ? 'comment' : 'comments'}${live ? ' as a steer' : ''}`);
+      location.hash = '#/s/' + s.id; await refresh();
+    } catch (e) { toast(e.message, 'err'); }
+    finally { S.busy = false; S.lastSig = ''; update(); }
   }
 
   // ---------- background tasks & plan (side panel) ----------
@@ -1398,6 +1517,7 @@
       <div class="job-sub">${esc(kind)}${j.model ? ' · ' + esc(modelLabel(j.model, j.thinking)) : ''}${j.cost ? ' · $' + j.cost.toFixed(j.cost < 0.01 ? 4 : 2) : ''}${j.status === 'stale' ? ' · no longer tracked' : j.status === 'cancelled' ? ' · cancelled' : j.status === 'error' ? ' · failed' : ''}</div>
       ${desc ? `<div class="job-desc" title="${esc(desc.slice(0, 600))}">${esc(desc.slice(0, 220))}</div>` : ''}
       ${liveLine ? `<div class="job-live" title="${esc(liveLine)}">${esc(liveLine)}</div>` : ''}
+      ${running && j.type !== 'bash' && j.live?.id && current().kind === 'session' ? `<div class="job-acts"><button class="btn sm ghost" data-substeer="${esc(j.live.id)}" aria-label="Steer subagent ${esc(j.id)}">Steer…</button><button class="btn sm ghost danger" data-substop="${esc(j.live.id)}" aria-label="Stop subagent ${esc(j.id)}">Stop</button></div>` : ''}
       ${running && j.live?.thinking ? `<details class="job-out job-thought" data-key="job-thought:${esc(j.id)}"><summary>Reasoning</summary><pre>${esc(j.live.thinking)}</pre></details>` : ''}
       ${j.command ? `<pre class="job-cmd">${esc(j.command.slice(0, 600))}${j.command.length > 600 ? `\n… ${j.command.length - 600} more characters` : ''}</pre>` : ''}
       ${output && !running ? `<details class="job-out"><summary>Output</summary><pre>${esc(output.slice(0, 6000))}${output.length > 6000 ? `\n… showing the first 6000 of ${output.length} characters${j.transcript ? '. Open the subagent for the full transcript.' : ''}` : ''}</pre></details>` : ''}
@@ -1468,7 +1588,7 @@
     const tail = result ? `<div class="sub-result"><div class="side-label">Result</div><div class="md">${md(result)}</div></div>` : '';
     renderThread(d.messages || [], active ? 'running' : 'history', file, { head: `<div class="history-note">Read-only transcript of ${advisor ? 'an advisor reviewing' : 'a subagent started by'} ${parent ? `<a href="${esc(parent.hash)}">${esc(parent.title)}</a>` : 'its parent session'}.</div>`, tail, extra: result.length, speaker: advisor ? 'Advisor' : 'OMP' });
     const line = $('#statusLine');
-    setIfChanged(line, `<span class="grow">${advisor ? 'Advisors review the parent session. Manage them from the parent chat.' : 'Subagents run inside their parent session. To steer one, message the parent session.'}</span>${parent ? `<a class="btn sm" href="${esc(parent.hash)}">Back to parent</a>` : ''}`);
+    setIfChanged(line, `<span class="grow">${advisor ? 'Advisors review the parent session. Manage them from the parent chat.' : 'Subagents run inside their parent session. Stop or steer a running one from the parent’s Activity panel.'}</span>${parent ? `<a class="btn sm" href="${esc(parent.hash)}">Back to parent</a>` : ''}`);
   }
   function openSub(file) {
     const c = current();
@@ -1900,6 +2020,8 @@
     for (const [key, lines] of Object.entries(s?._widgets || {})) parts.push(`<pre class="extra-widget" title="${esc(key)}">${esc(plain(lines.join('\n')))}</pre>`);
     const status = Object.entries(s?._status || {});
     if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
+    // Another active session in the same folder (no worktree) edited the same files: one may overwrite the other.
+    for (const o of s?._overlaps || []) parts.push(`<div class="extra-overlap" role="status"><span aria-hidden="true">⚠</span><span class="grow">Also edited by <a href="#/s/${esc(o.id)}">${esc(o.title)}</a>, which works in the same folder without its own worktree: ${o.files.map(f => openLink(f, '', esc(shortPath(f)))).join(', ')}${o.count > o.files.length ? ` and ${o.count - o.files.length} more` : ''}.</span></div>`);
     el.hidden = !parts.length;
     setIfChanged(el, parts.join(''));
   }
@@ -1910,6 +2032,105 @@
     if (seen === undefined) return;
     const from = list.findIndex(n => n.id === seen) + 1;
     for (const n of list.slice(from)) toast(n.text, n.level === 'info' ? '' : 'err');
+  }
+
+  // ---------- /btw side questions ----------
+  // OMP answers them from the session's context in a separate turn; nothing is added to the conversation.
+  // Per session: open, topic (record id; '' = a new question), history list shown, busy while asking.
+  S.btw = new Map();
+  const btwState = id => S.btw.get(id) || S.btw.set(id, { open: false, topic: '', history: false, busy: false, loading: false }).get(id);
+  const btwLatest = r => r.followUps?.at(-1) || r;
+  function renderBtw(s) {
+    const el = $('#btw');
+    if (!el) return;
+    const st = s ? S.btw.get(s.id) : null;
+    el.hidden = !st?.open;
+    if (el.hidden) return;
+    const recs = s._btw || [], rec = st.topic ? recs.find(r => r.id === st.topic) : null, running = !!rec && btwLatest(rec).status === 'running';
+    setIfChanged($('#btwHead'), `<b>Side question</b><span class="muted grow">Answered from this session’s context; not added to the conversation.</span><button class="btn sm ghost${st.history ? ' on' : ''}" data-act="btwHistory" aria-pressed="${st.history}">History</button>${rec || st.history ? '<button class="btn sm ghost" data-act="btwNew">New question</button>' : ''}<button class="btn sm ghost" data-act="btwClose" aria-label="Close side questions">✕</button>`);
+    const turn = t => `<div class="btw-turn"><div class="btw-q">${esc(t.question)}</div><div class="btw-a md">${t.answer ? md(t.answer) : t.status === 'running' ? '<span class="spinner"></span> Thinking…' : ''}${t.status === 'error' ? `<div class="err">${esc(t.error || 'The side question failed.')}</div>` : t.status === 'cancelled' || t.status === 'interrupted' ? `<div class="muted">${t.status === 'cancelled' ? 'Cancelled' : 'Interrupted'}</div>` : ''}</div></div>`;
+    setIfChanged($('#btwBody'), st.history ? (st.loading ? '<div class="working"><span class="spinner"></span> Loading…</div>' : recs.length ? `<div class="btw-list">${recs.map(r => `<button class="btw-topic" data-btwtopic="${esc(r.id)}"><span>${esc(r.question)}</span><small class="muted">${r.followUps.length ? `${r.followUps.length + 1} questions · ` : ''}${esc(agoText(new Date(r.createdAt).toISOString()))}</small></button>`).join('')}</div>` : '<div class="muted">No side questions in this session yet.</div>')
+      : rec ? [rec, ...rec.followUps].map(turn).join('') : '');
+    setIfChanged($('#btwForm'), st.history ? '' : `<form class="btw-form" data-btwform><input name="q" autocomplete="off" maxlength="20000" aria-label="${rec ? 'Follow-up question' : 'Side question'}" placeholder="${rec ? 'Ask a follow-up…' : 'Ask about this session without interrupting it…'}" ${running || st.busy ? 'disabled' : ''}>${running ? '<button class="btn sm ghost" type="button" data-act="btwCancel">Cancel</button>' : `<button class="btn sm primary" type="submit" ${st.busy ? 'disabled' : ''}>Ask</button>`}</form>`);
+    const body = $('#btwBody');
+    if (running && body) body.scrollTop = body.scrollHeight;
+  }
+  async function askBtw(id, question, recordId) {
+    const st = btwState(id);
+    Object.assign(st, { open: true, history: false, busy: true }); update();
+    try {
+      const r = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'btw', question, ...(recordId ? { recordId } : {}) }, { timeout: 70000 });
+      if (r.record?.id) st.topic = r.record.id;
+      await refresh(); return true;
+    } catch (e) { toast(e.message, 'err'); return false; }
+    finally { st.busy = false; update(); }
+  }
+  async function btwHistory(id) {
+    const st = btwState(id);
+    st.history = !st.history;
+    if (st.history) { st.loading = true; update(); try { await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'btw_history' }, { timeout: 60000 }); await refresh(); } catch (e) { toast(e.message, 'err'); } st.loading = false; }
+    update();
+  }
+  // ---------- subagents: stop / steer one from the Activity panel ----------
+  async function stopSubagent(id) {
+    if (!confirm(`Stop subagent ${id}? What it did so far stays in its transcript.`)) return;
+    try { const r = await sessionApi({ type: 'subagent_cancel', id }); toast(r.cancelled ? 'Subagent stopped' : 'That subagent had already finished'); }
+    catch (e) { toast(e.message, 'err'); }
+    loadBg(bgFile(), true);
+  }
+  const openSubSteer = id => modal('Steer subagent', `<form data-substeer-form="${esc(id)}"><p class="muted">Sent to subagent <code>${esc(id)}</code> at its next step. The parent session keeps running.</p><textarea name="message" rows="3" maxlength="20000" required placeholder="What should it do differently?"></textarea><div class="question-actions"><button class="btn sm primary" type="submit">Steer</button></div></form>`);
+  // ---------- open files in the editor (on the companion's computer) ----------
+  function openFile(path, line) {
+    const c = current(), sid = c.kind === 'session' ? c.id : c.kind === 'changes' && c.parent.startsWith('s:') ? c.parent.slice(2) : '';
+    // Relative paths in tool calls are relative to the session's folder.
+    const cwd = sid ? S.store?.sessions.find(x => x.id === sid)?.cwd : c.kind === 'native' ? S.native.find(x => x.file === c.file)?.cwd : c.kind === 'sub' ? S.subs.get(c.file)?.data?.cwd : c.kind === 'changes' ? S.native.find(x => x.file === c.parent.slice(2))?.cwd : '';
+    api('/open-file', { path, ...(line ? { line } : {}), ...(cwd ? { cwd } : {}) }).then(r => toast(r.editor === 'reveal' ? `Showing ${baseName(r.path)} in its folder` : `Opened ${baseName(r.path)}${line ? ':' + line : ''}`), e => toast(e.message, 'err'));
+  }
+  // ---------- finish an isolated session's worktree ----------
+  function wtBody(s, st) {
+    const off = (ok, why) => ok ? '' : ` disabled title="${esc(why)}"`, base = esc(st.base || 'its branch'), n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    return `<div class="wt-finish" data-wtsession="${esc(s.id)}">
+      <dl class="wt-facts"><dt>Branch</dt><dd><code>${esc(st.branch)}</code>${st.upstream ? ` → <code>${esc(st.upstream)}</code>` : ''}</dd>
+        <dt>Merges into</dt><dd>${st.base ? `<code>${esc(st.base)}</code>, checked out in ${esc(st.root)}` : `<span class="err">${esc(st.root)} is not on a branch</span>`}</dd>
+        <dt>Commits</dt><dd>${st.ahead} ahead, ${st.behind} behind</dd>
+        <dt>Worktree</dt><dd>${!st.exists ? 'folder already removed' : st.dirty ? `${n(st.dirty, 'uncommitted change', 'uncommitted changes')}, not part of the branch yet` : 'clean'}</dd></dl>
+      ${st.commits.length ? `<ul class="wt-commits">${st.commits.map(c => { const i = c.indexOf(' '); return `<li><code>${esc(c.slice(0, i))}</code> ${esc(c.slice(i + 1))}</li>`; }).join('')}</ul>` : ''}
+      ${st.rootDirty ? `<p class="muted">${esc(st.root)} has ${n(st.rootDirty, 'uncommitted change', 'uncommitted changes')}; commit or stash them before merging.</p>` : ''}
+      <div class="wt-acts">
+        ${st.dirty ? '<button class="btn sm" data-wtact="commit">Commit worktree changes…</button>' : ''}
+        <button class="btn sm primary" data-wtact="merge"${off(st.base && st.ahead && !st.rootDirty, 'Needs commits on the branch and a clean project folder')}>Merge into ${base}</button>
+        <button class="btn sm" data-wtact="squash"${off(st.base && st.ahead && !st.rootDirty, 'Needs commits on the branch and a clean project folder')}>Squash-merge into ${base}</button>
+        <button class="btn sm" data-wtact="rebase"${off(st.base && st.exists && !st.dirty, 'Needs a clean worktree')}>Rebase onto ${base}</button>
+        <button class="btn sm" data-wtact="push"${off(st.remote, 'This repository has no remote')}>Push to ${esc(st.remote || 'remote')}</button>
+        <button class="btn sm danger" data-wtact="delete">Delete worktree and branch</button>
+      </div></div>`;
+  }
+  async function openWorktree() {
+    const s = S.store?.sessions.find(x => x.id === current().id);
+    if (!s) return;
+    let st;
+    try { st = await sessionApi({ type: 'worktree_status' }); } catch (e) { return toast(e.message, 'err'); }
+    modal('Finish worktree', wtBody(s, st));
+    const box = $('#modal')?.querySelector('[data-wtsession]'); if (box) box._st = st;
+  }
+  async function worktreeAct(btn) {
+    const box = btn.closest('[data-wtsession]'), st = box._st, action = btn.dataset.wtact, s = S.store?.sessions.find(x => x.id === box.dataset.wtsession);
+    if (!s || !st) return;
+    if (action === 'commit') { closeModal(); openTool('commit', 'run', { dryRun: true }, s.cwd); return; }
+    if (action === 'delete' && !confirm(`Delete the worktree folder and branch ${st.branch}?${st.ahead ? `\n\n${st.ahead} ${st.ahead === 1 ? 'commit is' : 'commits are'} not in ${st.base || 'the project branch'} and will be lost unless pushed.` : ''}${st.dirty ? `\n\n${st.dirty} uncommitted ${st.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`)) return;
+    box.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      const r = await api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_finish', action }, { timeout: 150000 });
+      if (r.deleted) { closeModal(); toast(`Deleted the worktree and ${st.branch}`); await refresh(); location.hash = '#/new'; return; }
+      toast({ merge: `Merged ${st.branch} into ${st.base}`, squash: `Squash-merged ${st.branch} into ${st.base}`, rebase: `Rebased onto ${st.base}`, push: `Pushed ${st.branch}` }[action]);
+      const body = box.closest('.modal-body');
+      if (body) { body.innerHTML = wtBody(s, r); body.querySelector('[data-wtsession]')._st = r; body.querySelector('button:not([disabled])')?.focus(); }
+      refresh();
+    } catch (e) {
+      toast(e.message, 'err');
+      const body = box.closest('.modal-body');
+      if (body) { body.innerHTML = wtBody(s, st); body.querySelector('[data-wtsession]')._st = st; }
+    }
   }
 
   // ---------- dialogs ----------
@@ -2192,6 +2413,16 @@
     const attachment = retry ? [] : attached();
     if ((!text && !attachment.length) || S.busy || S.enhance.has(S.view)) return;
     const sendView = S.view;
+    // "/btw question" opens the side-question panel instead of joining the conversation.
+    if (!retry && /^\/btw(\s|$)/i.test(text)) {
+      if (c.kind !== 'session') return toast('Continue this session first, then ask a side question.', 'err');
+      if (attachment.length) return toast('Side questions cannot include images.', 'err');
+      const q = text.slice(4).trim();
+      input.value = ''; drafts.delete(S.view); autosize(input);
+      if (!q) { Object.assign(btwState(c.id), { open: true, history: false, topic: '' }); update(); $('#btwForm input')?.focus(); return; }
+      if (!await askBtw(c.id, q)) { drafts.set(sendView, text); if (S.view === sendView) { input.value = text; autosize(input); } }
+      return;
+    }
     // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
     if (c.kind === 'session' && !retry && !attachment.length && /^!\S/.test(text)) {
       input.value = ''; drafts.delete(S.view); autosize(input);
@@ -2540,17 +2771,17 @@
     const shown = d ? settingsView() : [];
     const changed = d ? d.settings.filter(x => x.modified).length : 0;
     $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(d.file)}" title="Copy path" aria-label="Copy path ${esc(d.file)}">${esc(d.file)}</button>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
-    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-enhance" data-setgroup="enhance">Enhance</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
+    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-dashboard" data-setgroup="dashboard">Notifications &amp; editor</a><a href="#sg-enhance" data-setgroup="enhance">Enhance</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
       const n = shown.filter(x => x.group === g).length, m = d.settings.filter(x => x.group === g && x.modified).length;
       return `<a href="#" data-setgroup="${esc(g)}" class="${n ? '' : 'dim'}">${esc(groupLabel(g))}<span>${m ? `<i title="${m} changed">●</i>` : ''}${n}</span></a>`;
     }).join('') : '');
   }
   function renderSettings() {
     const d = S.set.data;
-    if (!d && !S.set.plugins) { keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); }); return; }
+    if (!d && !S.set.plugins) { keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + dashboardSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); }); return; }
     renderSettingsChrome();
     const groups = d ? (() => { const by = new Map(settingGroups(d).map(g => [g, []])); for (const x of settingsView()) (by.get(x.group) || by.set(x.group, []).get(x.group)).push(x); return [...by].filter(([, list]) => list.length).map(([g, list]) => `<section class="set-group" id="sg-${esc(g)}"><h2>${esc(groupLabel(g))}${g === 'internal' ? ' <small>used by OMP itself; change with care</small>' : ''}</h2>${list.map(settingRow).join('')}</section>`).join(''); })() : (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : '');
-    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + enhanceSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
+    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + dashboardSection() + enhanceSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
   }
   function hotkeysSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean), h = hotkeys();
@@ -2581,6 +2812,26 @@
         <div class="set-ctl">${roles ? `<button class="model-chip" data-mmkey="modelRoles" data-mmname="enhance" title="${esc(role || "Composer's model")}" aria-label="Enhance model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>${role ? `<button class="btn sm ghost" data-mmdel="modelRoles" data-mmname="enhance">Use composer's model</button>` : ''}` : '<span class="muted">Needs OMP settings</span>'}</div></div>
       <div class="set-row ${mod ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level${mod ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${role ? `Saved with the <code>enhance</code> model role${lv ? '' : '. None set: OMP\'s default level applies, which may be slow. Pick one'}.` : "Applied to the composer's model for enhancing only. Saved by the dashboard."}</div>${mod ? '<div class="set-def">Default: <code>low</code></div>' : ''}</div>
         <div class="set-ctl"><select data-enhthinking aria-labelledby="enh-think-name">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === lv ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div></section>`;
+  }
+  // Notifications (this browser's permission) and the editor "Open in editor" uses (saved by the companion).
+  const EDITOR_LABELS = [['auto', 'Automatic (first found: VS Code, Cursor, Windsurf)'], ['vscode', 'VS Code'], ['vscode-insiders', 'VS Code Insiders'], ['cursor', 'Cursor'], ['windsurf', 'Windsurf'], ['reveal', 'Show in folder']];
+  function dashboardSection() {
+    const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (q.length && !q.every(w => 'notifications desktop alerts title badge open in editor vscode cursor windsurf folder'.includes(w))) return '';
+    const ed = S.store?.editor || 'auto';
+    if (S.set.changed && ed === 'auto') return '';
+    const perm = isDesktop ? 'desktop' : typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
+    const state = { desktop: 'The desktop app shows Windows notifications while its window is in the background.', unsupported: 'This browser has no notifications here (plain-HTTP LAN pages are not allowed to show them).', granted: 'On: this browser notifies you while the tab is in the background or shows another session.', denied: 'Blocked in this browser’s site settings. Allow notifications for this page there to turn them on.', default: 'Off: allow them to be told when a session finishes, fails or asks a question.' }[perm];
+    return `<section class="set-group" id="sg-dashboard"><h2>Notifications &amp; editor <small>dashboard</small></h2>
+      <div class="set-row"><div class="set-info"><div class="set-name" id="dash-notify-name">Notifications</div><div class="set-desc">${esc(state)} The tab title always counts sessions waiting for you, e.g. <code>(2) OMP Control Room</code>.</div></div>
+        <div class="set-ctl">${perm === 'default' ? '<button class="btn sm" data-act="notifyEnable" aria-describedby="dash-notify-name">Allow notifications</button>' : `<span class="muted">${perm === 'granted' ? 'On' : perm === 'desktop' ? 'Desktop app' : perm === 'denied' ? 'Blocked' : 'Unavailable'}</span>`}</div></div>
+      <div class="set-row ${ed !== 'auto' ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="dash-editor-name">Open in editor${ed !== 'auto' ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Where file links in diffs and tool calls open, on the computer running the companion. Editors open through their <code>vscode://</code>-style links; Show in folder selects the file in the file manager.</div>${ed !== 'auto' ? '<div class="set-def">Default: <code>Automatic</code></div>' : ''}</div>
+        <div class="set-ctl"><select data-editor aria-labelledby="dash-editor-name">${EDITOR_LABELS.map(([v, t]) => `<option value="${v}" ${v === ed ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div></section>`;
+  }
+  async function saveEditor(editor) {
+    try { await api('/editor', { editor }); if (S.store) S.store.editor = editor; toast('Saved editor'); }
+    catch (e) { toast(e.message, 'err'); }
+    if (current().kind === 'settings') renderSettings();
   }
   async function saveEnhanceThinking(thinking) {
     const x = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = x?.value?.enhance;
@@ -2835,6 +3086,7 @@
     }
     renderList();
     update();
+    checkAttention(); void pullDraft();
     if (current().kind === 'home') renderHomeRecent();
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
@@ -2842,11 +3094,52 @@
     try {
       if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
     } catch (e) { console.error('Refresh failed:', e); } finally { // a render that throws must not end polling for good
-      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued');
+      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running'));
       // Back off while the companion is unreachable instead of hammering it every second.
       setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
     }
   }
+  // ---------- attention: notifications + title badge ----------
+  // A session needs you when it settles for review, fails, or asks a question. It counts in the title badge until you open
+  // it in a visible, focused tab. The desktop app shows native notifications itself (meta omp-desktop), so pages there skip these.
+  const isDesktop = !!document.querySelector('meta[name="omp-desktop"]');
+  const attn = { prev: null, unseen: new Map(), asked: false };
+  const ATTN_VERB = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
+  // A run that started and ended between two polls never shows as running here; its new workFinishedAt still marks it.
+  const attnKind = (s, p) => {
+    if ((s.uiRequests?.length || 0) > p.q) return 'question';
+    const ended = p.st === 'running' || p.st === 'queued' || (!!s.workFinishedAt && s.workFinishedAt !== p.fin);
+    return s.status === 'error' && (p.st !== 'error' || ended) ? 'error' : s.status === 'review' && ended ? 'review' : '';
+  };
+  function checkAttention() {
+    if (!S.store) return;
+    const list = S.store.sessions.filter(s => !s.hidden), c = current();
+    const looking = !document.hidden && (document.hasFocus?.() ?? true);
+    const viewing = looking ? (c.kind === 'session' ? c.id : c.kind === 'changes' && c.parent.startsWith('s:') ? c.parent.slice(2) : '') : '';
+    if (attn.prev) for (const s of list) {
+      const p = attn.prev.get(s.id), kind = p && attnKind(s, p);
+      if (kind && s.id !== viewing) { attn.unseen.set(s.id, kind); notifyAttention(s, kind); }
+    }
+    attn.prev = new Map(list.map(s => [s.id, { st: s.status, q: s.uiRequests?.length || 0, fin: s.workFinishedAt }]));
+    // Seen, or no longer waiting: back at work without a question, completed, or gone.
+    for (const id of [...attn.unseen.keys()]) { const s = list.find(x => x.id === id); if (!s || id === viewing || s.status === 'done' || (s.status === 'running' && !s.uiRequests?.length)) attn.unseen.delete(id); }
+    const title = (attn.unseen.size ? `(${attn.unseen.size}) ` : '') + 'OMP Control Room';
+    if (document.title !== title) document.title = title;
+  }
+  function notifyAttention(s, kind) {
+    if (isDesktop || typeof Notification === 'undefined') return;
+    if (Notification.permission === 'default' && !attn.asked && !document.hidden) { attn.asked = true; toast(`${s.title} ${ATTN_VERB[kind]}. Get a notification next time?`, '', { label: 'Allow notifications', run: askNotify }); return; }
+    if (Notification.permission !== 'granted') return;
+    const detail = kind === 'question' ? s.uiRequests?.at(-1)?.title : kind === 'error' ? s.error : '';
+    // Mobile Chrome only allows notifications from a service worker and throws here; the title badge still counts it.
+    try { const n = new Notification(`${s.title} ${ATTN_VERB[kind]}`, { body: detail || 'OMP Control Room', tag: 'omp-' + s.id, icon: '/favicon.svg?v=2' }); n.onclick = () => { window.focus(); location.hash = '#/s/' + s.id; n.close(); }; } catch {}
+  }
+  // Must run from a click: browsers ignore permission requests made without a user gesture.
+  function askNotify() {
+    if (typeof Notification === 'undefined') return;
+    Promise.resolve(Notification.requestPermission()).then(p => { toast(p === 'granted' ? 'Notifications on' : 'Notifications are blocked for this page', p === 'granted' ? '' : 'err'); if (current().kind === 'settings') renderSettings(); }).catch(() => {});
+  }
+  window.addEventListener('focus', checkAttention);
   // Hidden tabs (and the desktop app in the tray) poll every 8 s; catch up at once when shown again.
   document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); usagePoll(); });
 
@@ -2905,6 +3198,33 @@
     const planToggle = t.closest('[data-plan-toggle]'), planReview = t.closest('[data-plan-review]');
     if (planToggle) { togglePlan(planToggle.dataset.planToggle); return; }
     if (planReview) { openPlanReview(planReview.dataset.planReview); return; }
+    const of = t.closest('[data-open-file]');
+    if (of) { e.preventDefault(); e.stopPropagation(); openFile(of.dataset.openFile, +of.dataset.line || 0); return; }
+    const sst = t.closest('[data-substop]'), sse = t.closest('[data-substeer]');
+    if (sst) { e.preventDefault(); stopSubagent(sst.dataset.substop); return; }
+    if (sse) { e.preventDefault(); openSubSteer(sse.dataset.substeer); return; }
+    const wa = t.closest('[data-wtact]');
+    if (wa) { worktreeAct(wa); return; }
+    const bt = t.closest('[data-btwtopic]');
+    if (bt) { const st = btwState(current().id); st.topic = bt.dataset.btwtopic; st.history = false; update(); return; }
+    // Changes view: Edits / Working tree, and comments on diff lines.
+    const chm = t.closest('[data-chmode]');
+    if (chm) { S.changesMode = chm.dataset.chmode === 'tree' ? 'tree' : 'edits'; saveLS('omp-changes', { mode: S.changesMode }); S.noteEdit = null; S.lastSig = ''; update(); return; }
+    const ne = t.closest('[data-note-edit]'), nd = t.closest('[data-note-del]');
+    if (ne || nd) {
+      const parent = current().parent, list = notesAll[parent] || [], n = list.find(x => x.id === (ne || nd).dataset[ne ? 'noteEdit' : 'noteDel']);
+      if (!n) return;
+      if (ne) S.noteEdit = { ...n, parent };
+      else { list.splice(list.indexOf(n), 1); if (!list.length) delete notesAll[parent]; saveLS('omp-review-notes', notesAll); }
+      S.reviewVer++; S.lastSig = ''; update(); return;
+    }
+    if (t.closest('[data-note-cancel]')) { S.noteEdit = null; S.lastSig = ''; update(); return; }
+    const ln = t.closest('.commentable td[data-ln]'), cf = ln?.closest('[data-cpath]'), fd = ln?.closest('[data-cedit]'), cc = current();
+    if (ln && cf && fd && cc.kind === 'changes' && cc.parent.startsWith('s:') && !String(window.getSelection?.() || '')) {
+      const [side, line] = ln.dataset.ln.split(':');
+      S.noteEdit = { parent: cc.parent, path: cf.dataset.cpath, edit: fd.dataset.cedit, side, line: +line, text: '' };
+      S.lastSig = ''; update(); return;
+    }
     if (t.closest('#picker')) {
       const fav = t.closest('[data-fav]');
       if (fav) { toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top; return; }
@@ -3066,6 +3386,15 @@
     }
     else if (act === 'usage') { $('#usagePanel') ? closeUsage() : openUsage(a); }
     else if (act === 'usageChat') { closeUsage(); toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }, { timeout: 70000 }); }
+    else if (act === 'notifyEnable') askNotify();
+    else if (act === 'requestChanges') requestChanges(c.parent);
+    else if (act === 'wtReload' && c.kind === 'changes') loadWorktree(c.parent.slice(2), true);
+    else if (act === 'worktree') { closeMenu(a.closest('.menu')); openWorktree(); }
+    else if (act === 'btwOpen') { closeMenu(a.closest('.menu')); Object.assign(btwState(c.id), { open: true, history: false }); update(); $('#btwForm input')?.focus(); }
+    else if (act === 'btwClose') { btwState(c.id).open = false; update(); $('#input')?.focus(); }
+    else if (act === 'btwNew') { Object.assign(btwState(c.id), { topic: '', history: false }); update(); $('#btwForm input')?.focus(); }
+    else if (act === 'btwHistory') btwHistory(c.id);
+    else if (act === 'btwCancel') { const st = btwState(c.id); sessionApi({ type: 'btw_cancel', ...(st.topic ? { recordId: st.topic } : {}) }).then(refresh, err => toast(err.message, 'err')); }
     else if (act === 'commitRelated' && !S.busy) {
       const s = S.store?.sessions.find(x => x.id === c.id);
       const queue = s?.status === 'running' || s?.status === 'queued';
@@ -3162,6 +3491,13 @@
     if (img) { e.preventDefault(); e.stopPropagation(); openLightbox(img.src, img.alt); }
   }, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#lightbox')) { e.stopPropagation(); closeLightbox(); } }, true);
+  // Review comment box: Ctrl/⌘+Enter saves, Escape discards.
+  document.addEventListener('keydown', e => {
+    const f = e.target.closest?.('[data-noteform]');
+    if (!f) return;
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveNote(f); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); S.noteEdit = null; S.lastSig = ''; update(); }
+  }, true);
   document.addEventListener('toggle', e => {
     const d = e.target;
     const remember = (map, key) => { if (!key) return; if (d.open === (d.dataset.def === '1')) map.delete(key); else map.set(key, d.open); };
@@ -3199,6 +3535,9 @@
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.set) settingInput(e.target);
     else if (e.target.matches?.('[data-enhthinking]')) saveEnhanceThinking(e.target.value);
+    else if (e.target.matches?.('[data-editor]')) saveEditor(e.target.value);
+    else if (e.target.matches?.('[data-viewed]')) { const sec = e.target.closest('[data-cpath]'); if (sec) setViewed(current().parent, sec.dataset.cpath, e.target.dataset.viewed, e.target.checked); }
+    else if (e.target.matches?.('[data-wtbase]')) { const id = current().parent.slice(2), w = S.wt.get(id) || {}; w.base = e.target.value === 'head' ? 'head' : 'start'; w.data = null; w.error = ''; S.wt.set(id, w); S.lastSig = ''; loadWorktree(id, true); }
     else if (e.target.dataset?.hotkey) {
       const v = e.target.value.split(',').map(s => s.trim()).filter(Boolean), bad = v.filter(s => !normCombo(s)), taken = v.filter(s => RESERVED_KEYS.has(normCombo(s)));
       if (bad.length) toast(`Not a usable hotkey: ${bad.join(', ')}. Use Ctrl, Alt or Meta plus a letter, digit or key name (Enter, Space, Tab, Up, Down, Esc, F1…), e.g. Alt+Q`, 'err');
@@ -3223,6 +3562,16 @@
   });
   document.addEventListener('submit', e => {
     e.preventDefault();
+    const f0 = e.target;
+    if (f0.hasAttribute('data-noteform')) { saveNote(f0); return; }
+    if (f0.hasAttribute('data-btwform')) { const q = f0.elements.q.value.trim(), c = current(); if (q && c.kind === 'session') askBtw(c.id, q, btwState(c.id).topic || undefined).then(ok => { const i = $('#btwForm input'); if (i) { i.value = ok ? '' : q; if (!ok) i.focus(); } }); return; }
+    if (f0.hasAttribute('data-substeer-form')) {
+      const message = f0.elements.message.value.trim(), btn = f0.querySelector('[type=submit]');
+      if (!message) return;
+      btn.disabled = true;
+      sessionApi({ type: 'subagent_steer', id: f0.dataset.substeerForm, message }).then(() => { closeModal(); toast('Sent to the subagent'); loadBg(bgFile(), true); }, err => { btn.disabled = false; toast(err.message, 'err'); });
+      return;
+    }
     if (e.target.hasAttribute('data-compact') || e.target.hasAttribute('data-handoff')) {
       const f = e.target, instructions = f.elements.instructions.value.trim(), compact = f.hasAttribute('data-compact');
       const lock = on => f.querySelectorAll('button,textarea').forEach(x => { x.disabled = on; });

@@ -1,5 +1,5 @@
 // Companion host for the Tauri shell: runs the companion and talks line-delimited JSON over stdin/stdout.
-// Events: {"event":"ready","port","token"} | {"event":"fatal","message"}.
+// Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something).
 // Requests: {"id","cmd":"busy"|"lan"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 import * as os from 'node:os';
 import * as readline from 'node:readline';
@@ -79,7 +79,10 @@ async function main() {
   // stdout carries the protocol, so update progress goes to stderr.
   await startupUpdate({ timeout: 45000, log: m => console.error(m) });
   // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
-  try { companion = await createCompanion(); }
+  // Attention events become Windows notifications in the shell; it skips them while the main window has focus.
+  const verbs = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
+  const onAttention = a => send({ event: 'attention', title: `${a.title} ${verbs[a.kind] || 'needs you'}`.slice(0, 200), body: a.detail || 'Open OMP Control Room to continue.' });
+  try { companion = await createCompanion({ desktop: true, onAttention }); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);

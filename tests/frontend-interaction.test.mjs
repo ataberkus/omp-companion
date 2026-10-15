@@ -27,6 +27,7 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     'pickerQ', 'pickerProvs', 'pickerThink', 'pickerList', 'setList', 'setMeta', 'setNav', 'updateStatus', 'home']) elements.set(id, node(id));
   elements.get('input').tagName = 'TEXTAREA';
   extras.set('[data-act="ompUpdate"]', node());
+  for (const s of ['.composer-wrap', '.composer']) extras.set(s, node());
   Object.assign(document, {
     hidden: false, body: node('body'),
     getElementById: id => elements.get(id) || null,
@@ -223,4 +224,77 @@ test('hotkeys match the physical key, accept key names, and refuse the dashboard
   await save('Ctrl+Space');
   assert.equal(JSON.parse(d.storage.get('omp-hotkeys')).follow_up, 'Ctrl+Space');
   assert.deepEqual(await queued(' ', { ctrlKey: true, code: 'Space' }), ['follow_up']);
+});
+
+// Changes view of session a: one edit of /p/src/a.js (line 2 replaced).
+const edited = (extra = {}, diff = ' 1|x\n-2|y\n+2|Y') => idle('a', { status: 'review', messages: [{ id: 't1', role: 'tool', text: 'edit', at: new Date().toISOString(), tool: { name: 'edit', status: 'done', files: [{ path: '/p/src/a.js', op: 'modify', diff }] } }], ...extra });
+const diffLine = (d, ln, edit = '0') => d.target({ '.commentable td[data-ln]': d.node('', { dataset: { ln }, closest: s => ({ '[data-cpath]': d.node('', { dataset: { cpath: '/p/src/a.js' } }), '[data-cedit]': d.node('', { dataset: { cedit: edit } }) })[s] ?? null }) });
+const noteForm = (d, text) => d.node('', { hasAttribute: k => k === 'data-noteform', elements: { note: { value: text } } });
+
+test('comments on diff lines go back to the session as one "path:line: note" message, as a steer while it works', async () => {
+  for (const [status, type] of [['review', 'prompt'], ['running', 'steer']]) {
+    const d = await boot({ hash: '#/changes/s:a', sessions: [edited({ status })] });
+    await d.fire('click', { target: diffLine(d, 'n:2') });
+    await d.fire('submit', { target: noteForm(d, 'rename this') });
+    await d.fire('click', { target: diffLine(d, 'o:2') });
+    await d.fire('submit', { target: noteForm(d, 'keep y') });
+    await d.fire('click', { target: diffLine(d, 'n:1') });
+    await d.fire('submit', { target: noteForm(d, '   ') });
+    for (const note of ['rename this', 'keep y']) assert.match(d.elements.get('thread').innerHTML, new RegExp(`class="note-text">${note}<`));
+    assert.match(d.elements.get('topbar').innerHTML, /Request changes <small>2<\/small>/, 'a blank comment is not kept');
+    await d.fire('click', { target: d.act('requestChanges') });
+    assert.deepEqual(d.commands().filter(c => c.type === type).map(c => [c.session, c.message]), [['a', 'src/a.js:2: rename this\nsrc/a.js:2: (removed line) keep y']]);
+    assert.equal(d.location.hash, '#/s/a');
+    assert.deepEqual(JSON.parse(d.storage.get('omp-review-notes')), {}, 'sent comments are cleared');
+  }
+});
+
+test('a file marked Viewed folds until its diff changes again', async () => {
+  const sessions = [edited()];
+  const d = await boot({ hash: '#/changes/s:a', sessions });
+  const sig = d.elements.get('thread').innerHTML.match(/data-viewed="([^"]+)"/)[1];
+  const box = d.node('', { checked: true, dataset: { viewed: sig }, matches: s => s === '[data-viewed]', closest: s => s === '[data-cpath]' ? d.node('', { dataset: { cpath: '/p/src/a.js' } }) : null });
+  await d.fire('change', { target: box });
+  let html = d.elements.get('thread').innerHTML;
+  assert.match(html, /class="change-file viewed"/);
+  assert.doesNotMatch(html, /class="diff/, 'the diff is folded away');
+  assert.match(html, /data-viewed="[^"]+" checked/);
+
+  sessions[0] = edited({ updatedAt: new Date(Date.now() + 1000).toISOString() }, ' 1|x\n-2|y\n+2|Z');
+  await d.fire('visibilitychange', {});
+  html = d.elements.get('thread').innerHTML;
+  assert.doesNotMatch(html, /change-file viewed/, 'a new edit unfolds it');
+  assert.match(html, /class="diff/);
+});
+
+test('the tab title counts sessions that finished, failed or asked while you were elsewhere', async () => {
+  const sessions = [idle('a'), idle('b', { status: 'running' }), idle('c', { status: 'running' })];
+  const d = await boot({ sessions });
+  assert.equal(d.document.title, 'OMP Control Room');
+  sessions[1] = { ...sessions[1], status: 'review' };
+  sessions[2] = { ...sessions[2], uiRequests: [{ id: 'q', method: 'confirm', title: 'Proceed?' }] };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.document.title, '(2) OMP Control Room');
+  await d.go('#/s/b');
+  assert.equal(d.document.title, '(1) OMP Control Room', 'opening a session counts as seen');
+  sessions[2] = { ...sessions[2], uiRequests: [] };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.document.title, 'OMP Control Room', 'an answered question is no longer waiting');
+  sessions[0] = { ...sessions[0], status: 'review', workFinishedAt: new Date().toISOString() };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.document.title, '(1) OMP Control Room', 'a run that started and ended between polls still counts');
+});
+
+test('composer drafts follow the companion: a remote draft fills an untouched composer and a sent one clears it', async () => {
+  const state = { drafts: { 'session:a': 5 } }, texts = { 'session:a': { text: 'from my phone', at: 5 } };
+  const d = await boot({ routes: { '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }), '/draft': (_, url) => texts[new URLSearchParams(url.split('?')[1]).get('key')] } });
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, 'from my phone');
+  texts['session:a'] = { text: 'edited on the laptop', at: 9 }; state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, 'edited on the laptop');
+  state.drafts = {};
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, '', 'sent from another device');
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft') && c.body).length, 0, 'pulling never writes back');
 });

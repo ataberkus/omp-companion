@@ -5,7 +5,7 @@ mod host;
 
 use host::Host;
 use parking_lot::Mutex;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -76,7 +76,27 @@ fn boot(app: AppHandle) {
             app.exit(1);
         }
     };
-    let started = paths(&app).and_then(|(node, script)| host::spawn(&node, &script, on_exit));
+    // Sessions that finished, failed or ask a question; the dashboard shows them itself when the window is in front.
+    let on_event = {
+        let app = app.clone();
+        move |msg: Value| {
+            if msg["event"].as_str() != Some("attention") {
+                return;
+            }
+            let title = msg["title"].as_str().unwrap_or(TITLE).to_owned();
+            let body = msg["body"].as_str().unwrap_or_default().to_owned();
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let in_front = handle.get_webview_window("main").is_some_and(|w| {
+                    w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+                });
+                if !in_front {
+                    let _ = handle.notification().builder().title(title).body(body).show();
+                }
+            });
+        }
+    };
+    let started = paths(&app).and_then(|(node, script)| host::spawn(&node, &script, on_event, on_exit));
     let (host, ready) = match started {
         Ok(started) => started,
         Err(e) => {
@@ -159,6 +179,10 @@ fn create_main(app: &AppHandle) {
         .visible(false)
         .on_navigation(nav_guard(app.clone(), shell.port))
         .on_new_window(new_window_handler(app.clone(), shell.port))
+        // The dashboard badges document.title with sessions that need attention; the taskbar shows it.
+        .on_document_title_changed(|window, title| {
+            let _ = window.set_title(&title);
+        })
         .on_page_load(move |window, payload| {
             if payload.event() == PageLoadEvent::Finished && !shown.swap(true, Ordering::SeqCst) {
                 let _ = window.show();

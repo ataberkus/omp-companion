@@ -212,10 +212,10 @@ test('diffs: line-number jumps get a gap row, CR rows survive, word marks keep e
   await flush();
   const html = app.thread();
   assert.match(html, /class="d-gap"><td colspan="\d">⋯ line 15</);
-  const b = html.slice(html.indexOf('title="b.js"'), html.indexOf('title="c.js"'));
+  const b = html.slice(html.indexOf('data-open-file="b.js"'), html.indexOf('data-open-file="c.js"'));
   assert.match(b, /class="minus">−1</, 'the CR row still counts as a removal');
   assert.doesNotMatch(b, /d-gap/);
-  const c = html.slice(html.indexOf('title="c.js"'));
+  const c = html.slice(html.indexOf('data-open-file="c.js"'));
   assert.doesNotMatch(c, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, 'no lone surrogate halves');
   assert.match(c, /<span class="tok-s">&quot;hello <mark>there<\/mark>&quot;<\/span>/, 'the changed string stays coloured');
 });
