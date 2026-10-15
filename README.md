@@ -73,7 +73,7 @@ The browser companion has no build step and no npm dependencies: Node.js runs it
 
 The dashboard opens in your browser, already connected. Press **Alt+N** (or click **New session**), pick a folder, type a prompt and press Enter. Keep the companion terminal open while you work.
 
-With **Group by project** enabled, click **+** beside a workspace's session count to open **New session** with that folder already selected.
+With **Group by project** enabled, click **+** beside a workspace's session count to open **New session** with that folder already selected. Project groups keep a fixed order regardless of activity; drag a project heading above or below another to reorder them (saved in the browser). New projects are added at the top.
 
 Type `/` in the composer to browse commands and skills. Use ↑/↓ to select, Tab or Enter to complete a partial name, and Esc to dismiss; clicking an option also completes it. On **New session**, the catalog follows the selected folder, including its local skills and commands, without creating a saved session.
 

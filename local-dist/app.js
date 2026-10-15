@@ -170,7 +170,7 @@
   // ---------- state & api ----------
   const KEY = 'omp-web-token';
   const S = {
-    token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time',
+    token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
@@ -306,8 +306,30 @@
   }
 
   // ---------- sidebar ----------
+  // Project-group order, persisted as group keys (`cwd || label`). Matched case/slash-insensitively like the grouping.
+  const loadGroupOrder = () => { try { const a = JSON.parse(localStorage.getItem('omp-group-order') || '[]'); return Array.isArray(a) ? a.filter(k => typeof k === 'string') : []; } catch { return []; } };
+  const saveGroupOrder = order => { try { localStorage.setItem('omp-group-order', JSON.stringify(order)); } catch {} };
+  // Rank (normalized key -> index) for `keys`; keys not saved yet go on top, in the order given, and are persisted.
+  function groupOrder(keys) {
+    const saved = loadGroupOrder(), known = new Set(saved.map(norm)), fresh = [];
+    for (const k of keys) if (!known.has(norm(k))) { known.add(norm(k)); fresh.push(k); }
+    const order = [...fresh, ...saved], rank = new Map();
+    if (fresh.length) saveGroupOrder(order);
+    order.forEach(k => rank.has(norm(k)) || rank.set(norm(k), rank.size));
+    return rank;
+  }
+  // Move group `key` in front of group `beforeKey` (null: to the end).
+  function moveGroup(key, beforeKey) {
+    const order = loadGroupOrder().filter(k => norm(k) !== norm(key));
+    const i = beforeKey == null ? -1 : order.findIndex(k => norm(k) === norm(beforeKey));
+    order.splice(i < 0 ? order.length : i, 0, key);
+    saveGroupOrder(order);
+    renderList();
+  }
+
   function renderList() {
     const list = $('#list');
+    if (S.groupDrag) return; // a header drag in progress: moving rows under the pointer would break it; dragend re-renders
     if (!S.store) { setKeyed(list, []); return; }
     const q = S.search.trim().toLowerCase();
     let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
@@ -325,10 +347,10 @@
       const by = new Map();
       for (const it of all) { const k = norm(it.cwd); (by.get(k) || by.set(k, []).get(k)).push(it); }
       for (const arr of by.values()) groups.push([arr[0].folder, arr.sort((a, b) => b.pinned - a.pinned), arr[0].cwd]); // stable: pinned first, order otherwise kept
-      const top = g => Math.max(...g[1].map(i => +new Date(i.at)));
-      // A just-settled session gets a fresh `at`; it must not lift its folder above one that is still working.
-      const busy = g => g[1].some(i => !i.needsReview && (i.status === 'running' || i.status === 'queued')) ? 0 : 1;
-      groups.sort((a, b) => busy(a) - busy(b) || top(b) - top(a));
+      // Folder order is the user's (dragged headers, `omp-group-order`), never activity: a header must not jump when a
+      // session in it updates. Folders seen for the first time go on top once, then keep their place like the others.
+      const rank = groupOrder(groups.map(g => g[2] || g[0]));
+      groups.sort((a, b) => rank.get(norm(a[2] || a[0])) - rank.get(norm(b[2] || b[0])));
     } else {
       add('Pinned', pinned);
       add('Working now', working);
@@ -342,7 +364,7 @@
     const sel = selKey();
     let collapsed;
     try { collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { collapsed = new Set(); }
-    const parts = groups.flatMap(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return [['g:' + gk, `<div class="group-head"><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>`], ...(shut ? [] : arr).map(it => ['r:' + it.key, `<div class="item-row">
+    const parts = groups.flatMap(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return [['g:' + gk, `<div class="group-head"${S.groupBy === 'project' ? ' draggable="true"' : ''}><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>`], ...(shut ? [] : arr).map(it => ['r:' + it.key, `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.overlap?.length ? ` · <span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
@@ -3359,7 +3381,10 @@
     const ns = t.closest('[data-new-session]');
     if (ns) { newSession(ns.dataset.newSession); return; }
     const gl = t.closest('[data-group]');
-    if (gl) { let c; try { c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { c = new Set(); } c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); try { localStorage.setItem('omp-collapsed', JSON.stringify([...c])); } catch {} renderList(); return; }
+    if (gl) {
+      if (Date.now() - S.groupDragEnd < 400) return; // the click that may trail a header drag is not a collapse
+      let c; try { c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { c = new Set(); } c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); try { localStorage.setItem('omp-collapsed', JSON.stringify([...c])); } catch {} renderList(); return;
+    }
     const ar = t.closest('[data-archive]');
     if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const pn = t.closest('[data-pin]');
@@ -3579,6 +3604,48 @@
     if (e.clipboardData?.getData('text/plain')) return;
     const files = [...(e.clipboardData?.items || [])].filter(item => item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
     if (files.length) { e.preventDefault(); files.forEach(attachImage); }
+  });
+  // Project headers reorder by drag. Their own data type keeps them apart from file drops (hasFiles) and other drags.
+  // S.groupDrag: dragged group key while dragging (sidebar renders are held), '' once dropped, null when idle.
+  const GROUP_DRAG = 'application/x-omp-group';
+  const isGroupDrag = e => !!S.groupDrag && [...(e.dataTransfer?.types || [])].includes(GROUP_DRAG);
+  const clearDropMark = () => document.querySelectorAll('#list .drop-before, #list.drop-end').forEach(n => n.classList.remove('drop-before', 'drop-end'));
+  // The header a drop lands in front of: the hovered header in its upper half, else the next header; null is the end.
+  function groupDropTarget(e) {
+    let n = e.target.closest?.('#list > *');
+    if (n?.classList.contains('group-head')) { const r = n.getBoundingClientRect(); if (e.clientY < r.top + r.height / 2) return n; }
+    for (n = n?.nextElementSibling; n && !n.classList.contains('group-head'); n = n.nextElementSibling);
+    return n || null;
+  }
+  document.addEventListener('dragstart', e => {
+    const head = e.target.closest?.('#list .group-head[draggable="true"]');
+    if (!head || !e.dataTransfer) return;
+    S.groupDrag = head.querySelector('[data-group]').dataset.group;
+    e.dataTransfer.setData(GROUP_DRAG, S.groupDrag);
+    e.dataTransfer.effectAllowed = 'move';
+    head.classList.add('dragging');
+  });
+  document.addEventListener('dragover', e => {
+    if (!isGroupDrag(e) || !e.target.closest?.('#list')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const head = groupDropTarget(e);
+    clearDropMark();
+    (head || $('#list')).classList.add(head ? 'drop-before' : 'drop-end');
+  });
+  document.addEventListener('drop', e => {
+    if (!isGroupDrag(e)) return;
+    e.preventDefault();
+    const key = S.groupDrag, inList = e.target.closest?.('#list'), head = inList && groupDropTarget(e);
+    clearDropMark(); document.querySelector('#list .dragging')?.classList.remove('dragging'); // the header element survives the re-render
+    S.groupDrag = '';
+    if (inList) moveGroup(key, head ? head.querySelector('[data-group]').dataset.group : null);
+  });
+  document.addEventListener('dragend', () => {
+    if (S.groupDrag == null) return;
+    clearDropMark(); document.querySelector('#list .dragging')?.classList.remove('dragging');
+    S.groupDrag = null; S.groupDragEnd = Date.now();
+    renderList(); // applies polls held back during the drag
   });
   // Dropped images attach to the composer; no file drop may navigate away from the dashboard.
   const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');

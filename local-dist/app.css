@@ -666,6 +666,9 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 .btn.primary:disabled{opacity:1;background:var(--hover);border-color:var(--border);color:var(--faint);box-shadow:none;filter:none}
 .group-head{display:flex;align-items:center;gap:4px;padding:12px 8px 0}
+.group-head.dragging{opacity:.4}
+.group-head.drop-before{box-shadow:inset 0 2px 0 var(--accent)}
+#list.drop-end{box-shadow:inset 0 -2px 0 var(--accent)}
 .group-label{display:flex;align-items:center;gap:6px;flex:1;min-width:0;padding:0;border:0;background:none;text-align:left;cursor:pointer}
 .group-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn.group-new{flex:none;width:24px;height:24px;padding:0;font-size:18px;line-height:1}
