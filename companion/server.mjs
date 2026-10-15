@@ -530,6 +530,8 @@ export async function createCompanion(options={}){
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
+ // Sidebar keys the user pinned to the top; a key is never both pinned and archived.
+ store.pinned=Array.isArray(store.pinned)?store.pinned.filter(k=>typeof k==='string'&&!store.archived.includes(k)):[];
  // Enhance reasoning level when no `enhance` role is set (Settings page); the role carries its own level.
  if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
@@ -1223,7 +1225,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
    if(removed)await git(root,['branch','-D',s.branch]).catch(()=>{});
    else console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);
   }
-  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);}
+  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);store.pinned=store.pinned.filter(k=>k!=='s:'+s.id);}
   else s.hidden=true;
   await persist();return {discarded:true};
  }
@@ -1497,7 +1499,7 @@ async function spend(){
     const file=sessionFileParam(body.file);const images=chatImages(body);const message=typeof body.message==='string'?body.message.trim().slice(0,200000):'';
     const submitted=!!message||body.images!==undefined;
     const existing=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));
-    store.archived=store.archived.filter(k=>k!=='f:'+file&&k!=='f:'+body.file);
+    const gone=k=>k!=='f:'+file&&k!=='f:'+body.file;store.archived=store.archived.filter(gone);store.pinned=store.pinned.filter(gone);
     if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(),existing));return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
@@ -1510,12 +1512,15 @@ async function spend(){
     if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
     json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,preview:body.preview},images)):s,201);return;
    }
-   if(url.pathname==='/api/archive'){
+   if(url.pathname==='/api/archive'||url.pathname==='/api/pin'){
+    const field=url.pathname==='/api/pin'?'pinned':'archived',other=field==='pinned'?'archived':'pinned',on=body[field]!==false;
     const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
-    if(key.startsWith('s:')){const s=store.sessions.find(s=>s.id===key.slice(2));if(!s)throw error('Session not found.',404);if(body.archived!==false&&['running','queued'].includes(s.status))throw error('Stop the session before archiving it.');
+    if(key.startsWith('s:')){const s=store.sessions.find(s=>s.id===key.slice(2));if(!s)throw error('Session not found.',404);
+     if(field==='archived'&&on&&['running','queued'].includes(s.status))throw error('Stop the session before archiving it.');
      // Archiving a session that is ready for review completes it and stops its OMP process.
-     if(body.archived!==false&&s.status==='review'){await lock(s.id,()=>command(s,{type:'complete'}));runners.get(s.id)?.kill();}}
-    const set=new Set(store.archived);if(body.archived===false)set.delete(key);else set.add(key);store.archived=[...set];await persist();json({archived:store.archived});return;
+     if(field==='archived'&&on&&s.status==='review'){await lock(s.id,()=>command(s,{type:'complete'}));runners.get(s.id)?.kill();}}
+    // Pinning and archiving exclude each other: setting one clears the other.
+    const set=new Set(store[field]);if(on){set.add(key);store[other]=store[other].filter(k=>k!==key);}else set.delete(key);store[field]=[...set];await persist();json({archived:store.archived,pinned:store.pinned});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(['answer','predict_word','predict_word_feedback'].includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}

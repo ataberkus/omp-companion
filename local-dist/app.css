@@ -69,10 +69,12 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .item .work-time{grid-column:2/4;font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
 .item.history .t{color:oklch(.86 .005 280)}
 .item-row{position:relative}
-.item-row .arch{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:26px;height:26px;border:0;border-radius:7px;background:var(--hover);color:var(--muted);cursor:pointer;opacity:0;pointer-events:none;transition:opacity .12s}
-.item-row:hover .arch,.item-row:focus-within .arch{opacity:1;pointer-events:auto}
-.item-row .arch:hover{color:var(--fg);background:var(--active)}
-@media (hover:none){.item-row .arch{opacity:1;pointer-events:auto}.item-row .item{padding-right:38px}}
+.item-row .row-acts{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;gap:2px;pointer-events:none}
+.item-row .row-acts button{display:grid;place-items:center;width:26px;height:26px;border:0;border-radius:7px;background:var(--hover);color:var(--muted);cursor:pointer;opacity:0;pointer-events:none;transition:opacity .12s}
+.item-row:hover .row-acts button,.item-row:focus-within .row-acts button{opacity:1;pointer-events:auto}
+.item-row .row-acts button:hover{color:var(--fg);background:var(--active)}
+.item-row .pin.on{color:var(--accent)}
+@media (hover:none){.item-row .row-acts button{opacity:1;pointer-events:auto}.item-row .item{padding-right:66px}}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--faint)}
 .dot.queued{background:var(--accent);animation:pulse 1.4s infinite}
 .dot.running{background:conic-gradient(oklch(.7 .24 340),oklch(.62 .21 295),oklch(.81 .14 200),oklch(.7 .24 340));animation:spin 1.1s linear infinite}

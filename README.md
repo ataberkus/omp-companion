@@ -27,6 +27,7 @@
 ## Features
 
 - **Every session in one sidebar**, including ones you started in a terminal, grouped by *Working now*, *Needs your review*, *Today* and older, or by project (▤); click a group's heading to collapse it. Search it (`/`), filter by *All*, *Active*, *In panel* or *Archived*, archive and restore sessions, and open one in a new tab (middle-click or right-click).
+  - **Pin** sessions (pin button on a row) to keep them in a *Pinned* group above *Working now*, or first within their project when grouped by project. Pins persist across restarts; archiving a pinned session unpins it.
 - **New session screen** (**Alt+N**): pick a recent folder, paste a path or browse subfolders with a filter, then type the first prompt. *Pick up where you left off* lists your latest sessions. Sessions from OMP history can be added to the panel without sending a message.
 - **Continuous work timers:** the sidebar shows **Running** elapsed time, then the frozen **Last run** duration, using hours, minutes and seconds for long runs (e.g. `1h 5m 19s`). Steering, queued continuations, question prompts, retries and background waits stay in the same interval; hover for exact start/end times.
 - **Readable conversations:** Markdown, tables and code blocks with copy. Tool calls and thinking fold into one activity summary.

@@ -252,6 +252,7 @@
   const modelName = sel => { if (!sel) return ''; const m = modelInfo(sel); return m ? m.name : sel.slice(sel.indexOf('/') + 1); };
   const modelLabel = (sel, thinking) => sel ? modelName(sel) + (thinking && thinking !== 'off' ? ' · ' + thinking : '') : '';
   const archivedKeys = () => new Set(S.store?.archived || []);
+  const pinnedKeys = () => new Set(S.store?.pinned || []);
   // Sort position moves only when a session settles (done / needs review), never on tool-call activity (updatedAt).
   const rank = new Map();
   const settleAt = s => {
@@ -272,8 +273,8 @@
       if (n.managedId && ids.has(n.managedId)) continue;
       out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: base(n.cwd), cwd: n.cwd, status: 'history', updatedAt: n.updatedAt, at: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
     }
-    const arch = archivedKeys();
-    for (const it of out) it.archived = arch.has(it.key);
+    const arch = archivedKeys(), pins = pinnedKeys();
+    for (const it of out) { it.archived = arch.has(it.key); it.pinned = pins.has(it.key); }
     const live = it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
     return out.sort((a, b) => live(a) - live(b) || new Date(b.at) - new Date(a.at));
   }
@@ -315,18 +316,21 @@
     all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.needsReview || it.status === 'running' || it.status === 'queued');
     const groups = [];
     const add = (label, arr) => arr.length && groups.push([label, arr]);
-    const working = all.filter(it => !it.needsReview && (it.status === 'running' || it.status === 'queued'));
-    const review = all.filter(it => it.needsReview || it.status === 'review' || it.status === 'error');
-    const rest = all.filter(it => !working.includes(it) && !review.includes(it));
+    // Pinned sessions get their own group on top and are left out of the status/date groups.
+    const pinned = all.filter(it => it.pinned), unpinned = all.filter(it => !it.pinned);
+    const working = unpinned.filter(it => !it.needsReview && (it.status === 'running' || it.status === 'queued'));
+    const review = unpinned.filter(it => it.needsReview || it.status === 'review' || it.status === 'error');
+    const rest = unpinned.filter(it => !working.includes(it) && !review.includes(it));
     if (S.groupBy === 'project') {
       const by = new Map();
       for (const it of all) { const k = norm(it.cwd); (by.get(k) || by.set(k, []).get(k)).push(it); }
-      for (const arr of by.values()) groups.push([arr[0].folder, arr, arr[0].cwd]);
+      for (const arr of by.values()) groups.push([arr[0].folder, arr.sort((a, b) => b.pinned - a.pinned), arr[0].cwd]); // stable: pinned first, order otherwise kept
       const top = g => Math.max(...g[1].map(i => +new Date(i.at)));
       // A just-settled session gets a fresh `at`; it must not lift its folder above one that is still working.
       const busy = g => g[1].some(i => !i.needsReview && (i.status === 'running' || i.status === 'queued')) ? 0 : 1;
       groups.sort((a, b) => busy(a) - busy(b) || top(b) - top(a));
     } else {
+      add('Pinned', pinned);
       add('Working now', working);
       add('Needs your review', review);
       const day = 86400000, startToday = new Date().setHours(0, 0, 0, 0);
@@ -343,7 +347,7 @@
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
         ${workTime(it)}
-      </button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</div>`).join(''); }).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
+      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`).join(''); }).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
     setIfChanged(list, html); // rebuilding every poll would reset hover, focus and scroll
     document.querySelectorAll('#filters [data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === S.filter)));
     $('#groupBy')?.setAttribute('aria-pressed', String(S.groupBy === 'project'));
@@ -354,16 +358,26 @@
 
   const ICON_ARCHIVE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>';
   const ICON_RESTORE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
-  async function setArchived(key, archived, undoable = true) {
-    const prev = S.store.archived || [];
-    S.store.archived = archived ? [...new Set([...prev, key])] : prev.filter(k => k !== key);
+  const ICON_PIN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v7"/></svg>';
+  const ICON_UNPIN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v7"/><path d="M3 3l18 18"/></svg>';
+  // Archived and pinned exclude each other (the server clears one when the other is set). Undo restores the
+  // previous mark: re-setting the other one when it was on, otherwise reverting this one.
+  const MARKS = { archived: { path: '/archive', other: 'pinned', msg: on => on ? 'Session archived' : 'Session restored' }, pinned: { path: '/pin', other: 'archived', msg: on => on ? 'Session pinned' : 'Session unpinned' } };
+  async function setMark(field, key, on, undoable) {
+    const { path, other, msg } = MARKS[field];
+    const prev = { archived: S.store.archived || [], pinned: S.store.pinned || [] };
+    S.store[field] = on ? [...new Set([...prev[field], key])] : prev[field].filter(k => k !== key);
+    if (on) S.store[other] = prev[other].filter(k => k !== key);
     renderList(); if (current().kind === 'home') renderHome();
     try {
-      S.store.archived = (await api('/archive', { key, archived })).archived;
+      const r = await api(path, { key, [field]: on });
+      S.store.archived = r.archived; S.store.pinned = r.pinned;
       renderList();
-      if (undoable) toast(archived ? 'Session archived' : 'Session restored', '', { label: 'Undo', run: () => setArchived(key, !archived, false) });
-    } catch (e) { S.store.archived = prev; renderList(); toast(e.message, 'err'); }
+      if (undoable) toast(msg(on), '', { label: 'Undo', run: () => on && prev[other].includes(key) ? setMark(other, key, true, false) : setMark(field, key, !on, false) });
+    } catch (e) { Object.assign(S.store, prev); renderList(); toast(e.message, 'err'); }
   }
+  const setArchived = (key, archived, undoable = true) => setMark('archived', key, archived, undoable);
+  const setPinned = (key, pinned, undoable = true) => setMark('pinned', key, pinned, undoable);
 
   // ---------- views ----------
   const main = () => $('#main');
@@ -3000,6 +3014,8 @@
     if (gl) { let c; try { c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { c = new Set(); } c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); try { localStorage.setItem('omp-collapsed', JSON.stringify([...c])); } catch {} renderList(); return; }
     const ar = t.closest('[data-archive]');
     if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
+    const pn = t.closest('[data-pin]');
+    if (pn) { e.preventDefault(); setPinned(pn.dataset.pin, !pn.dataset.unpin); return; }
     const nt = t.closest('[data-newtab]');
     if (nt) { closeCtx(); openItemTab(nt.dataset.newtab); return; }
     closeCtx();
@@ -3105,7 +3121,7 @@
   });
   document.addEventListener('auxclick', e => {
     const item = e.button === 1 && e.target.closest('.item[data-key]');
-    if (item && !e.target.closest('[data-archive]')) { e.preventDefault(); openItemTab(item.dataset.key); }
+    if (item && !e.target.closest('[data-archive],[data-pin]')) { e.preventDefault(); openItemTab(item.dataset.key); }
   });
   document.addEventListener('contextmenu', e => {
     closeCtx();
