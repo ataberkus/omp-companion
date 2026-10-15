@@ -2677,25 +2677,31 @@
   }
 
   // ---------- spend ----------
-  S.spend = { rows: null, error: '' };
+  S.spend = { rows: null, error: '', syncing: false, syncError: '' };
+  let spendPoll;
   function buildSpend() {
     main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><h1>Spend</h1><div class="meta"><span>Dollar cost per model, from OMP's usage stats across every session.</span></div></div>
       <div class="actions"><button class="btn sm ghost" data-act="spendReload" title="Sync OMP usage stats again" aria-label="Reload spend">↻ <span class="lbl">Reload</span></button></div></div>
       <div class="settings"><div class="set-main" id="spend"></div></div>`;
-    loadSpend();
+    renderSpend(); loadSpend();
   }
-  async function loadSpend() {
-    S.spend = { rows: null, error: '' }; renderSpend();
-    try { S.spend.rows = (await api('/spend', undefined, { timeout: 130000 })).rows; } catch (e) { S.spend.error = e.message; }
-    if (current().kind === 'spend') renderSpend();
+  // `sync` starts an `omp stats` ingest on the companion; while it runs, poll the DB without starting another one.
+  async function loadSpend(sync = true) {
+    clearTimeout(spendPoll);
+    try { const d = await api('/spend' + (sync ? '?sync=1' : '')); Object.assign(S.spend, { rows: d.rows, error: '', syncing: d.syncing, syncError: d.syncError || '' }); }
+    catch (e) { Object.assign(S.spend, { error: e.message, syncing: false }); }
+    if (current().kind !== 'spend') return;
+    renderSpend();
+    if (S.spend.syncing) spendPoll = setTimeout(() => { if (current().kind === 'spend') loadSpend(false); }, 3000);
   }
   const usd = n => '$' + n.toFixed(n > 0 && n < 1 ? 4 : 2);
   function renderSpend() {
     const el = $('#spend');
     if (!el) return;
-    const { rows, error } = S.spend;
-    if (!rows) { el.innerHTML = error ? `<div class="msg system err" style="margin-top:16px"><div class="bubble">${esc(error)}</div></div>` : '<div class="working" style="margin-top:16px"><span class="spinner"></span> Syncing OMP usage stats…</div>'; return; }
+    const { rows, error, syncing, syncError } = S.spend;
+    const note = error || syncError ? `<div class="msg system err" style="margin-top:16px"><div class="bubble">${esc(error || `OMP usage stats did not sync: ${syncError}`)}</div></div>` : syncing ? `<div class="working" style="margin-top:16px"><span class="spinner"></span> Syncing new sessions into OMP's usage stats…${rows ? ' Figures update when it finishes.' : ''}</div>` : '';
+    if (!rows) { el.innerHTML = note || '<div class="working" style="margin-top:16px"><span class="spinner"></span> Loading OMP usage stats…</div>'; return; }
     // ponytail: OMP rolls up per UTC hour, so a half-hour timezone shifts 30 min of spend across midnight.
     const day = t => new Date(t).toLocaleDateString('sv'); // local YYYY-MM-DD
     const today = day(Date.now()), month = today.slice(0, 7);
@@ -2708,7 +2714,7 @@
     const byCost = (a, b) => b[1] - a[1];
     const sorted = [...models].filter(([, v]) => v.all > 0).sort((a, b) => b[1].month - a[1].month || b[1].all - a[1].all);
     const monthName = new Date().toLocaleDateString('en', { month: 'long', year: 'numeric' });
-    el.innerHTML = `<div class="spend-cards">${[['Today', total.today], [monthName, total.month], ['All time', total.all]].map(([k, v]) => `<div><span>${esc(k)}</span><b>${usd(v)}</b></div>`).join('')}</div>
+    el.innerHTML = `${note}<div class="spend-cards">${[['Today', total.today], [monthName, total.month], ['All time', total.all]].map(([k, v]) => `<div><span>${esc(k)}</span><b>${usd(v)}</b></div>`).join('')}</div>
       <section class="set-group"><h2>By model</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Today</th><th class="num">This month</th><th class="num">All time</th></tr></thead><tbody>
         ${sorted.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
       </tbody></table></div></div></section>

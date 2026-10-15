@@ -1410,11 +1410,24 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
 // Keyed by path so a growing transcript replaces its entry instead of adding one per poll.
 const costCache=new Map();
 async function transcriptCost(f,st){const hit=costCache.get(f);if(hit?.m===st.mtimeMs&&hit.s===st.size)return hit.c;let c=0;try{for(const l of (await fs.readFile(f,'utf8')).split('\n')){if(!l.includes('"cost"'))continue;try{c+=JSON.parse(l).message?.usage?.cost?.total||0;}catch{}}}catch{}costCache.set(f,{m:st.mtimeMs,s:st.size,c});return c;}
-// Spend per model from OMP's own stats DB (hourly rollups); `omp stats` runs first because it is what ingests new transcripts.
-async function spend(){
- await execOmp(['stats','--summary'],{timeout:120000,maxBuffer:16*1024*1024,windowsHide:true});
- const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(path.join(os.homedir(),'.omp','stats.db'),{readOnly:true});
- try{return {rows:db.prepare("SELECT bucket AS at,provider||'/'||model AS model,TOTAL(cost_total) AS cost FROM message_rollup GROUP BY bucket,provider,model ORDER BY bucket").all()};}finally{db.close();}
+// `omp stats` is what ingests new transcripts into ~/.omp/stats.db. After heavy use it reparses every grown session file and
+// can take minutes, so it runs in the background (one at a time) and /api/spend answers from whatever the DB already holds.
+const statsSync={running:null,error:''};
+function syncStats(){
+ statsSync.running??=execOmp(['stats','--summary'],{timeout:30*60000,maxBuffer:16*1024*1024,windowsHide:true})
+  .then(()=>{statsSync.error='';},e=>{statsSync.error=(e.killed?'omp stats ran for 30 minutes and was stopped.':String(e.stderr||e.message).trim()).slice(0,500)||'omp stats failed.';})
+  .finally(()=>{statsSync.running=null;});
+}
+// Spend per model from OMP's hourly rollups; `sync` starts an ingest unless one is already running.
+async function spend(sync){
+ if(sync)syncStats();
+ const file=path.join(os.homedir(),'.omp','stats.db');
+ let rows=[];
+ if(await fs.access(file).then(()=>true,()=>false)){
+  const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(file,{readOnly:true});
+  try{rows=db.prepare("SELECT bucket AS at,provider||'/'||model AS model,TOTAL(cost_total) AS cost FROM message_rollup GROUP BY bucket,provider,model ORDER BY bucket").all();}finally{db.close();}
+ }
+ return {rows,syncing:!!statsSync.running,syncError:statsSync.error};
 }
  // `liveSince`: when the jobs still running now started at the earliest. Async jobs die with the OMP process that spawned them,
  // so a job from before it is not running even though its transcript never recorded an end. Infinity: a companion session
@@ -1609,7 +1622,7 @@ async function spend(){
    if(req.method==='GET'&&url.pathname==='/api/enhance'){const job=enhanceJobs.get(url.searchParams.get('id'));if(!job)throw error('Enhance not found.',404);
     if(job.status!=='running')enhanceJobs.delete(job.id);
     json({id:job.id,status:job.status,step:job.step,model:job.model,...(job.status==='done'?{text:job.text}:{}),...(job.error?{error:job.error}:{})});return;}
-   if(req.method==='GET'&&url.pathname==='/api/spend'){try{json(await spend());}catch(e){throw error(`Could not read OMP usage stats: ${String(e.stderr||e.message).trim()}`,502);}return;}
+   if(req.method==='GET'&&url.pathname==='/api/spend'){try{json(await spend(url.searchParams.get('sync')==='1'));}catch(e){throw error(`Could not read OMP usage stats: ${String(e.stderr||e.message).trim()}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/models'){try{json(await listModels());}catch(e){throw error(`Could not list OMP models: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/usage'){
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
