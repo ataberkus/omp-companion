@@ -3524,6 +3524,19 @@
   addEventListener('resize', closeCtx);
   document.addEventListener('scroll', closeCtx, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ctxMenu')) { const item = $('#ctxMenu')._item; closeCtx(); if (item?.isConnected) item.focus(); } });
+  // On-screen keyboards shrink only the visual viewport: iOS keeps 100dvh at full height and scrolls the whole page up to
+  // reveal the focused field, then often leaves that offset behind when the keyboard closes, stranding the composer
+  // mid-screen under a black gap. The app scrolls inside its own panes, so once the visible area is full height again the
+  // page belongs at 0. Keyboard up (short) or pinch-zoomed (scale > 1): the page offset is intentional, leave it alone.
+  const vv = window.visualViewport;
+  if (vv) {
+    const unscrollPage = () => {
+      if (vv.scale > 1.01 || document.documentElement.clientHeight - vv.height > 1) return;
+      if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+    };
+    vv.addEventListener('resize', unscrollPage);
+    addEventListener('scroll', unscrollPage); // only the page's own scroll reaches window: pane scrolls don't bubble
+  }
   // Click any chat, queued or not-yet-sent image to see it full size.
   function openLightbox(src, alt) {
     if (!safeImg(src)) return;
