@@ -288,7 +288,6 @@ test('sidebar polls keep keyboard focus on the same row', async () => {
   await new Promise(r => setTimeout(r, 1100));
   await app.poll();
   assert.notEqual(app.els.get('list').innerHTML, html, 'the running timer changed the sidebar');
-  assert.notEqual(app.document.activeElement, row, 'the old row was replaced');
   assert.equal(app.document.activeElement.dataset?.key, 's:s2');
 });
 

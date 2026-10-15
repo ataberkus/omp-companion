@@ -308,7 +308,7 @@
   // ---------- sidebar ----------
   function renderList() {
     const list = $('#list');
-    if (!S.store) { setIfChanged(list, ''); return; }
+    if (!S.store) { setKeyed(list, []); return; }
     const q = S.search.trim().toLowerCase();
     let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
     if (S.filter === 'active') all = all.filter(it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status));
@@ -342,13 +342,14 @@
     const sel = selKey();
     let collapsed;
     try { collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { collapsed = new Set(); }
-    const html = groups.map(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return `<div class="group-head"><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>` + (shut ? [] : arr).map(it => `<div class="item-row">
+    const parts = groups.flatMap(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return [['g:' + gk, `<div class="group-head"><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>`], ...(shut ? [] : arr).map(it => ['r:' + it.key, `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.overlap?.length ? ` · <span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
         ${workTime(it)}
-      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`).join(''); }).join('') || `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`;
-    setIfChanged(list, html); // rebuilding every poll would reset hover, focus and scroll
+      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`])]; });
+    if (!parts.length) parts.push(['empty', `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`]);
+    setKeyed(list, parts); // only rows whose markup changed are rebuilt: hover, focus, scroll and running animations survive polls
     document.querySelectorAll('#filters [data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === S.filter)));
     $('#groupBy')?.setAttribute('aria-pressed', String(S.groupBy === 'project'));
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
@@ -770,6 +771,27 @@
     swapHtml(el, html); el._html = html;
     const menu = open && el.querySelector('.menu');
     if (menu) { menu.classList.add('open'); menu.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'true'); }
+  }
+  // A container rendered as [key, html] parts, one element each. Unchanged parts keep their element (polls must not
+  // recreate rows: that drops hover and restarts animations), changed parts are rebuilt, moved ones moved. A container
+  // that does not hold one child per part rendered last (first or empty render, or changed elsewhere) is rewritten whole.
+  function setKeyed(el, parts) {
+    const prev = el._parts, kids = el.children;
+    el._parts = parts;
+    if (!prev?.length || kids?.length !== prev.length) { swapHtml(el, parts.map(p => p[1]).join('')); return; }
+    const old = new Map(prev.map(([k, h], i) => [k, { h, n: kids[i] }]));
+    keepFocus(el, () => {
+      let next = el.firstElementChild;
+      for (const [k, h] of parts) {
+        const o = old.get(k);
+        let n = o?.n;
+        old.delete(k);
+        if (n && o.h !== h) { if (n === next) next = n.nextElementSibling; n.remove(); n = null; }
+        if (!n) { const t = document.createElement('template'); t.innerHTML = h; n = t.content.firstElementChild; }
+        if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
+      }
+      for (const { n } of old.values()) n.remove();
+    });
   }
   // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
   // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
@@ -3059,7 +3081,7 @@
   // ---------- connect ----------
   function renderConnect() {
     S.view = 'connect';
-    setIfChanged($('#list'), ''); // not innerHTML: a stale _html cache would skip the redraw after reconnecting
+    setKeyed($('#list'), []); // not innerHTML: setKeyed's record of the rendered rows must stay true for the next renderList
     main().innerHTML = `<div class="center"><form class="card" id="connectForm">
       <h2>Connect to your companion</h2>
       <p>Open the link printed by <code>node companion/server.mjs</code>, or paste its connection token here.</p>
