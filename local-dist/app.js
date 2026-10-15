@@ -2046,7 +2046,7 @@
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     input.readOnly = !!enhancing;
     const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
-    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Commit related changes</button><button class="btn sm ghost" data-act="commit" type="button" title="Commit changes in this folder…" ${S.busy ? 'disabled' : ''}>Commit</button>` : '');
+    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Commit related changes</button>` : '');
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
