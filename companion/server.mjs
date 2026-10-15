@@ -1462,6 +1462,8 @@ async function spend(sync){
   if(!!body.session===!!body.path)throw error('Choose a session or a folder to enhance in.');
   const s=body.session?store.sessions.find(x=>x.id===body.session):null;
   if(body.session&&!s)throw error('Session not found.',404);
+  // Node reports a missing cwd as `spawn omp ENOENT`, which reads like OMP itself is missing.
+  if(s&&(!s.cwd||!await exists(s.cwd)))throw error(`The session's working directory no longer exists: ${s.cwd||'unknown'}`);
   const cwd=s?s.cwd:await resolveDir(body.path);
   const images=chatImages(body);
   if([...enhanceJobs.values()].filter(j=>j.status==='running').length>=3)throw error('Wait for the running enhance to finish.',409);

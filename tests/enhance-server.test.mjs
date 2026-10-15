@@ -59,7 +59,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   send({ type: 'response', id: c.id, success: true, command: c.type, data });
 }`;
 
-async function boot(t, { config = '', omp = {} } = {}) {
+async function boot(t, { config = '', omp = {}, session = {} } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-enhance-'));
   const state = { app: null, base: '' };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
@@ -71,7 +71,7 @@ async function boot(t, { config = '', omp = {} } = {}) {
   await writeFile(enh, FAKE_ENHANCER(dir));
   await writeFile(fakeOmp, FAKE_OMP(dir, omp));
   const now = new Date().toISOString();
-  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: 'm1', role: 'user', text: 'earlier question', at: now }], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: 'm1', role: 'user', text: 'earlier question', at: now }], todos: [], createdAt: now, updatedAt: now, ...session }], activity: [] }));
   const start = async () => {
     state.app = await createCompanion({ dataDir: dir, ompSessionsDir: dir, ompCommand: process.execPath, ompArgs: [fakeOmp], enhancePrefix: [enh] });
     state.app.server.listen(0, '127.0.0.1');
@@ -176,6 +176,14 @@ test('requests need exactly one target and a real session', async t => {
   assert.equal((await call('/enhance', { text: 'x', session: 'session', path: dir })).status, 400);
   assert.equal((await call('/enhance', { text: 'x', session: 'nope' })).status, 404);
   assert.equal((await call('/enhance', { text: '   ', session: 'session' })).status, 400);
+});
+
+test('a session whose working directory is gone is refused up front, not reported as `spawn ENOENT`', async t => {
+  const gone = join(tmpdir(), 'omp-enhance-gone-' + process.pid);
+  const { call } = await boot(t, { session: { status: 'done', cwd: gone } });
+  const r = await call('/enhance', { session: 'session', text: 'x' });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, `The session's working directory no longer exists: ${gone}`);
 });
 
 test('stop cancels, cap is 3, close cleans up', async t => {
