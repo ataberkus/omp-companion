@@ -233,6 +233,19 @@
     $('#toasts').appendChild(el);
     setTimeout(() => el.remove(), kind === 'err' ? 6000 : 3500);
   }
+  // start.bat starts the companion again on the same port and token; wait until a new process (new instance id) answers.
+  async function restartCompanion() {
+    const before = S.store?.instance;
+    try { await api('/restart', {}, { timeout: 60000 }); } catch (e) { toast(e.message, 'err'); return; }
+    toast('Restarting the companion…');
+    for (const end = Date.now() + 120000; Date.now() < end;) {
+      await new Promise(r => setTimeout(r, 1000));
+      let st;
+      try { st = await api('/state?session=', undefined, { timeout: 3000 }); } catch (e) { if (e.auth) return; continue; }
+      if (st?.instance && st.instance !== before) { S.lastSig = ''; await refresh(); toast('The companion restarted. Paused sessions continue when you send a message.'); return; }
+    }
+    toast('The companion did not come back within 2 minutes. Check the start.bat window on that computer.', 'err');
+  }
   function copy(text, label = 'Copied') {
     const done = ok => ok ? toast(label) : toast('Could not copy', 'err');
     if (navigator.clipboard) { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); return; }
@@ -770,6 +783,7 @@
           <div class="menu-sep"></div>
           <button data-act="login">Log in to a provider…</button>
           <button data-act="accounts">Choose provider accounts…</button>
+          ${S.store?.canRestart ? '<button data-act="restartCompanion">Restart companion…</button>' : ''}
           <button class="danger" data-act="shutdownPc">Shut down PC…</button>
           ${idle ? '<button class="danger" data-act="hide">Remove from panel</button>' : ''}
         </div></div>
@@ -3491,6 +3505,7 @@
     else if (act === 'terminal') { closeMenu(a.closest('.menu')); api('/terminal', { path: a.dataset.path }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err')); }
     // Turns off the computer running the companion, not the device showing the panel; sessions are paused and saved first.
     else if (act === 'shutdownPc') { closeMenu(a.closest('.menu')); if (confirm('Shut down the computer running the companion?\n\nRunning sessions are paused and saved first; continue them after the PC is back on. Unsaved work in other programs on that computer may be lost.')) api('/shutdown', {}, { timeout: 60000 }).then(() => toast('Shutting down the PC…'), e => toast(e.message, 'err')); }
+    else if (act === 'restartCompanion') { closeMenu(a.closest('.menu')); if (confirm('Restart the companion?\n\nRunning sessions are paused and saved first; continue them once it is back. The PC keeps running.')) restartCompanion(); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
     else if (act === 'spendReload') loadSpend();

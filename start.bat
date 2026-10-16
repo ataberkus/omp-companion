@@ -1,5 +1,7 @@
 @echo off
 rem Starts the OMP companion and opens the control room in your browser.
+rem Variables set here (OMP_WEB_HOST, OMP_WEB_RESTART_EXIT) stay in this script, not in the console that ran it.
+setlocal
 cd /d "%~dp0"
 where node >nul 2>nul || (echo Node.js was not found. Install it from https://nodejs.org and try again. & pause & exit /b 1)
 if defined OMP_BIN echo Using OMP: %OMP_BIN%
@@ -10,7 +12,11 @@ rem or to this PC's Tailscale address (100.x.y.z) to accept only tailnet devices
 if not defined OMP_WEB_HOST set OMP_WEB_HOST=0.0.0.0
 if not "%OMP_WEB_NO_TOKEN%"=="1" if not defined OMP_WEB_PASSWORD echo OMP_WEB_PASSWORD is not set: other devices need the connection token printed below.
 title OMP companion
+rem Restart companion (dashboard menu) stops the companion with exit code 75; the loop starts it again on the same port.
+set OMP_WEB_RESTART_EXIT=75
+:run
 node companion\server.mjs %*
+if "%ERRORLEVEL%"=="75" (echo. & echo Restarting the companion... & goto run)
 echo.
 echo The companion stopped.
 pause

@@ -122,6 +122,13 @@ function shutdownHost(){
  const child=spawn(cmd,args,{stdio:['ignore','ignore','pipe'],windowsHide:true});let stderr='';child.stderr.on('data',d=>{stderr+=d;});
  return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not shut down this PC: ${e.message}`,500)));child.once('close',code=>code===0?resolve():reject(error(`Could not shut down this PC: ${stderr.trim().slice(-500)||`${cmd} exited with code ${code}.`}`,500)));});
 }
+// The note a restarting companion leaves for the next one (start.bat's loop): fresh for maxAgeMs, with its random token, if any.
+// Anything else (missing, stale, malformed) means a normal start.
+function restartHandoff(text,nowMs,maxAgeMs=2*60*1000){
+ let v;try{v=JSON.parse(text);}catch{return null;}
+ if(!v||typeof v!=='object'||!Number.isFinite(v.at)||v.at>nowMs||nowMs-v.at>maxAgeMs)return null;
+ return typeof v.token==='string'&&/^[0-9a-f]{64}$/.test(v.token)?{token:v.token}:{};
+}
 // Git runs for the Changes working-tree view and worktree finishing: errors carry git's own stderr.
 async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
 // `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
@@ -553,7 +560,7 @@ const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in th
 - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl,shutdownCommand};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
@@ -627,6 +634,8 @@ export async function createCompanion(options={}){
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let pausing=0;let saveChain=Promise.resolve();
+ // A new id per process: a dashboard that asked for a restart knows the new companion answers once this changes.
+ const instance=randomUUID(),canRestart=typeof options.restart==='function';
  // Only the current thought is live; completed messages remain in OMP's transcript.
  const subagentThoughts=new Map();
  // Windows: antivirus/indexers briefly lock workspace.json, making rename fail with EPERM/EACCES/EBUSY; retry like graceful-fs.
@@ -1625,9 +1634,9 @@ async function spend(sync){
     markOverlaps();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
-    if(!url.searchParams.has('session')){json({...store,drafts});return;}
+    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart});return;}
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
-    const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
+    const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,instance,canRestart,activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
    }
@@ -1695,6 +1704,12 @@ async function spend(sync){
    // Pauses and saves sessions first, like a quit: the OS may kill this process before any signal handler runs.
    // If the OS refuses, the panel keeps working and the paused sessions can be continued.
    if(url.pathname==='/api/shutdown'){await pauseSessions();await (options.shutdownHost||shutdownHost)();json({ok:true});return;}
+   // options.restart (start.bat's loop, see the entry point below) prepares the relaunch and returns the step that stops
+   // this process; it runs once the reply is sent. Sessions are paused and saved first, as on quit.
+   if(url.pathname==='/api/restart'){
+    if(!options.restart)throw error('Restart works when the companion runs from start.bat, which starts it again. Stop it and start it yourself.',409);
+    await pauseSessions();const relaunch=await options.restart();json({ok:true});if(relaunch)res.once('finish',()=>void relaunch());return;
+   }
    // Composer drafts (debounced from every device); an empty text clears the view's draft.
    if(url.pathname==='/api/draft'){
     const key=typeof body.key==='string'&&/^(session|native):./.test(body.key)&&body.key.length<=4200?body.key:null;if(!key)throw error('Invalid draft key.');
@@ -1777,8 +1792,23 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const inUse=`\nPort ${port} is already in use: the companion is probably already running at http://127.0.0.1:${port}/\nClose it, or set OMP_WEB_PORT to use another port.\n`;
  // Probe before createCompanion: it pauses running sessions and saves workspace.json, which would clobber the live companion's state.
  if(await portBusy(port)){console.error(inUse);process.exit(1);}
- await startupUpdate();
- const app=await createCompanion();
+ // start.bat sets OMP_WEB_RESTART_EXIT and starts the companion again when it exits with that code (Restart companion).
+ const restartExit=Number(process.env.OMP_WEB_RESTART_EXIT)||0;
+ const handoffFile=path.join(process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web'),'restart.json');
+ let handoff=null;
+ if(restartExit){handoff=restartHandoff(await fs.readFile(handoffFile,'utf8').catch(()=>''),Date.now());await fs.rm(handoffFile,{force:true});}
+ // A restart skips the OMP update check (Settings has one-click omp update) and keeps the token, so open panels reconnect.
+ if(!handoff)await startupUpdate();
+ const app=await createCompanion({
+  ...(handoff?.token&&!process.env.OMP_WEB_PASSWORD?{token:handoff.token}:{}),
+  ...(restartExit?{restart:async()=>{
+   // A password is the token, so only a random per-launch token is handed over; it never outlives the restart.
+   await fs.mkdir(path.dirname(handoffFile),{recursive:true,mode:0o700});
+   await fs.writeFile(handoffFile,JSON.stringify({at:Date.now(),...(app.password?{}:{token:app.token})}),{mode:0o600});
+   // Exit with the restart code even if close() fails, so start.bat still starts the companion again.
+   return async()=>{try{await app.close();}finally{process.exit(restartExit);}};
+  }}:{}),
+ });
  app.server.listen(port,host,()=>{
   // The token travels in the URL fragment, which browsers never send to the server or in Referer headers. A password is never printed.
   const frag=process.env.OMP_WEB_NO_TOKEN==='1'||app.password?'':`#token=${app.token}`;
@@ -1787,7 +1817,8 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   const extra=String(process.env.OMP_WEB_PUBLIC_HOSTS||'').split(',').map(h=>h.trim().toLowerCase()).filter(Boolean).map(h=>`http://${h}:${port}/${frag}`);
   const auth=app.password?'Password required (OMP_WEB_PASSWORD).\n':frag?`Connection token: ${app.token}\n`:'No token required: anyone who can reach this port has full control.\n';
   console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${extra.map(l=>`Host: ${l}\n`).join('')}${auth}\nYour provider credentials remain in OMP. Keep this process running.\n`);
-  if(!process.env.OMP_WEB_NO_OPEN){const [cmd,args]=process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',link]]:process.platform==='darwin'?['open',[link]]:['xdg-open',[link]];execFile(cmd,args,{windowsHide:true},()=>{});}
+  // After a restart the dashboard that asked for it reconnects by itself, so no second browser tab.
+  if(!process.env.OMP_WEB_NO_OPEN&&!handoff){const [cmd,args]=process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',link]]:process.platform==='darwin'?['open',[link]]:['xdg-open',[link]];execFile(cmd,args,{windowsHide:true},()=>{});}
  });
  app.server.on('error',e=>{console.error(e.code==='EADDRINUSE'?inUse:`\nThe companion could not start: ${e.message}\n`);process.exit(1);});
  for(const signal of ['SIGINT','SIGTERM'])process.on(signal,async()=>{await app.close();process.exit(0);});
