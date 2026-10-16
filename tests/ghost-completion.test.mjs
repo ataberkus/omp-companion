@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 
 // Boots app.js against a stub DOM; predict_word answers come from `answer(text)`, resolved when the test says so.
-async function composer() {
+// `touch` makes `(hover: none)` match, as on a phone.
+async function composer({ touch = false } = {}) {
   const session = { id: 'session', title: 'Chat', cwd: '/project', status: 'review', messages: [], queuedMessages: [], updatedAt: new Date().toISOString() };
   const listeners = new Map(), sent = [], waiting = [], timers = [];
   const node = id => ({ id, tagName: 'TEXTAREA', innerHTML: '', value: '', hidden: false, style: {}, dataset: {}, children: [], scrollHeight: 20, scrollTop: 0, clientHeight: 20, clientWidth: 600, selectionStart: 0, selectionEnd: 0, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, addEventListener() {}, setAttribute() {}, removeAttribute() {}, querySelector: () => null, querySelectorAll: () => [], focus() {}, matches: () => false, closest: () => null, appendChild() {}, remove() {}, scrollTo() {} });
@@ -22,6 +23,7 @@ async function composer() {
     location: { hash: '#/s/session', pathname: '/' }, URLSearchParams, AbortSignal,
     localStorage: { getItem: () => null, setItem() {} }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout: (fn, ms) => { if (ms === 120) timers.push(fn); }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} },
+    matchMedia: query => ({ matches: touch && query === '(hover: none)' }),
     fetch: async (url, opts) => {
       if (url === '/api/sessions/session/command') {
         const body = JSON.parse(opts.body); sent.push(body);
@@ -92,4 +94,23 @@ test('typing the whole suggestion out counts as accepted; backspace and Esc send
   assert.equal(await c.key('Escape'), true);
   assert.equal(c.shown(), null);
   assert.deepEqual(feedback(), [['the docu', 'ment', true]]);
+});
+
+test('on touch devices a space accepts the suggestion and keeps the space; on desktop it rejects', async () => {
+  const feedback = c => c.sent.filter(b => b.type === 'predict_word_feedback').map(b => [b.text, b.suggestion, b.accepted]);
+  const phone = await composer({ touch: true });
+  await phone.type('refactor the compon');
+  await phone.answer('refactor the compon', 'ents');
+  await phone.type('refactor the compon ');
+  assert.equal(phone.input.value, 'refactor the components ');
+  assert.equal(phone.input.selectionStart, phone.input.value.length);
+  assert.equal(phone.shown(), null);
+  assert.deepEqual(feedback(phone), [['refactor the compon', 'ents', true]]);
+
+  const desk = await composer();
+  await desk.type('refactor the compon');
+  await desk.answer('refactor the compon', 'ents');
+  await desk.type('refactor the compon ');
+  assert.equal(desk.input.value, 'refactor the compon ');
+  assert.deepEqual(feedback(desk), [['refactor the compon', 'ents', false]]);
 });

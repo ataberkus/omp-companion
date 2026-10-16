@@ -576,6 +576,14 @@
     const prev = ghost, typed = prev && prev.view === S.view && input.value.startsWith(prev.text) ? input.value.slice(prev.text.length) : null;
     // Typing the suggestion's own letters just shortens it.
     if (typed && prev.suffix.length > typed.length && prev.suffix.startsWith(typed)) { ghost = { ...prev, text: input.value, suffix: prev.suffix.slice(typed.length) }; renderGhost(); return; }
+    // Touch keyboards have no Tab: a space typed over a live suggestion accepts it and keeps the space.
+    if (typed === ' ' && input.selectionStart === input.value.length && input.selectionEnd === input.value.length && matchMedia('(hover: none)').matches) {
+      ghost = null; ghostSeq++; clearTimeout(ghostTimer);
+      input.value = prev.text + prev.suffix + ' '; input.selectionStart = input.selectionEnd = input.value.length;
+      drafts.set(S.view, input.value); autosize(input);
+      ghostFeedback(prev, true); updateComposer(); renderGhost();
+      return;
+    }
     // Feedback only for what the user did with it: typed it out (accepted) or typed past it (rejected). Backspace, clears and view switches say nothing.
     if (typed) ghostFeedback(prev, typed.startsWith(prev.suffix));
     ghost = null; renderGhost(); clearTimeout(ghostTimer);
