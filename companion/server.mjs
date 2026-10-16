@@ -111,6 +111,17 @@ function openTerminal(dir){
  const child=spawn(cmd,args,{cwd:dir,detached:process.platform!=='win32',stdio:'ignore',windowsHide:true});
  return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not open a terminal: ${e.message}`,500)));child.once('spawn',()=>{child.unref();resolve();});});
 }
+// Turns off the computer running the companion (a phone using the panel shuts down the computer, not the phone).
+// Fixed argv, no shell. macOS asks System Events, which needs no sudo; Linux asks systemd/logind, which applies its polkit policy.
+function shutdownCommand(platform=process.platform){
+ return platform==='win32'?['shutdown',['/s','/t','0']]:platform==='darwin'?['osascript',['-e','tell application "System Events" to shut down']]:['systemctl',['poweroff']];
+}
+// Resolves once the OS accepted the request: the command exits 0 (e.g. Windows says 1190 when a shutdown is already scheduled).
+function shutdownHost(){
+ const [cmd,args]=shutdownCommand();
+ const child=spawn(cmd,args,{stdio:['ignore','ignore','pipe'],windowsHide:true});let stderr='';child.stderr.on('data',d=>{stderr+=d;});
+ return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not shut down this PC: ${e.message}`,500)));child.once('close',code=>code===0?resolve():reject(error(`Could not shut down this PC: ${stderr.trim().slice(-500)||`${cmd} exited with code ${code}.`}`,500)));});
+}
 // Git runs for the Changes working-tree view and worktree finishing: errors carry git's own stderr.
 async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
 // `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
@@ -542,7 +553,7 @@ const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in th
 - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl,shutdownCommand};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
@@ -609,7 +620,7 @@ export async function createCompanion(options={}){
  const exposeToken=options.exposeToken??process.env.OMP_WEB_NO_TOKEN==='1';
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
- const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let saveChain=Promise.resolve();
+ const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let pausing=0;let saveChain=Promise.resolve();
  // Only the current thought is live; completed messages remain in OMP's transcript.
  const subagentThoughts=new Map();
  // Windows: antivirus/indexers briefly lock workspace.json, making rename fail with EPERM/EACCES/EBUSY; retry like graceful-fs.
@@ -820,7 +831,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist();}});
    runners.set(s.id,rpc);
    // OMP 18.10+ sends every ask question in one dialog, so multi-select choices stay visible until submitted; older builds reject the command and keep one select per toggle.
    try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});await rpc.send({type:'set_ask_dialog',enabled:true}).catch(()=>{});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
@@ -1674,6 +1685,9 @@ async function spend(sync){
    // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
    if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist();json({provider,account});return;}
    if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
+   // Pauses and saves sessions first, like a quit: the OS may kill this process before any signal handler runs.
+   // If the OS refuses, the panel keeps working and the paused sessions can be continued.
+   if(url.pathname==='/api/shutdown'){await pauseSessions();await (options.shutdownHost||shutdownHost)();json({ok:true});return;}
    // Composer drafts (debounced from every device); an empty text clears the view's draft.
    if(url.pathname==='/api/draft'){
     const key=typeof body.key==='string'&&/^(session|native):./.test(body.key)&&body.key.length<=4200?body.key:null;if(!key)throw error('Invalid draft key.');
@@ -1744,7 +1758,9 @@ async function spend(sync){
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const stops=[...runners.values(),...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await new Promise(r=>{server.close(r);server.closeAllConnections();});await Promise.all(stops);await enhanceStops;};
+ // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
+ const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  await persist();return {server,store,token,close,flush:()=>saveChain};

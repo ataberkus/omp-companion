@@ -770,6 +770,7 @@
           <div class="menu-sep"></div>
           <button data-act="login">Log in to a provider…</button>
           <button data-act="accounts">Choose provider accounts…</button>
+          <button class="danger" data-act="shutdownPc">Shut down PC…</button>
           ${idle ? '<button class="danger" data-act="hide">Remove from panel</button>' : ''}
         </div></div>
       </div>`;
@@ -3488,6 +3489,8 @@
     else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} closeMenu(a.closest('.menu')); S.lastSig = ''; $('#topbar')._html = ''; update(); }
     // Opens on the computer running the companion (cmd on Windows), also when the panel is used from a phone.
     else if (act === 'terminal') { closeMenu(a.closest('.menu')); api('/terminal', { path: a.dataset.path }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err')); }
+    // Turns off the computer running the companion, not the device showing the panel; sessions are paused and saved first.
+    else if (act === 'shutdownPc') { closeMenu(a.closest('.menu')); if (confirm('Shut down the computer running the companion?\n\nRunning sessions are paused and saved first; continue them after the PC is back on. Unsaved work in other programs on that computer may be lost.')) api('/shutdown', {}, { timeout: 60000 }).then(() => toast('Shutting down the PC…'), e => toast(e.message, 'err')); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
     else if (act === 'spendReload') loadSpend();
