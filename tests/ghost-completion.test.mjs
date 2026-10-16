@@ -105,6 +105,7 @@ test('on touch devices a space accepts the suggestion and keeps the space; on de
   assert.equal(phone.input.value, 'refactor the components ');
   assert.equal(phone.input.selectionStart, phone.input.value.length);
   assert.equal(phone.shown(), null);
+  await phone.type('refactor the components n');
   assert.deepEqual(feedback(phone), [['refactor the compon', 'ents', true]]);
 
   const desk = await composer();
@@ -113,4 +114,23 @@ test('on touch devices a space accepts the suggestion and keeps the space; on de
   await desk.type('refactor the compon ');
   assert.equal(desk.input.value, 'refactor the compon ');
   assert.deepEqual(feedback(desk), [['refactor the compon', 'ents', false]]);
+});
+
+test('on touch devices a backspace right after a space-accept restores the typed word and rejects the suggestion', async () => {
+  const c = await composer({ touch: true });
+  const feedback = () => c.sent.filter(b => b.type === 'predict_word_feedback').map(b => [b.text, b.suggestion, b.accepted]);
+  await c.type('refactor the compon');
+  await c.answer('refactor the compon', 'ents');
+  await c.type('refactor the compone');
+  await c.type('refactor the compone ');
+  assert.equal(c.input.value, 'refactor the components ');
+  assert.deepEqual(feedback(), []);
+  await c.type('refactor the components');
+  assert.equal(c.input.value, 'refactor the compone');
+  assert.equal(c.input.selectionStart, c.input.value.length);
+  assert.deepEqual(feedback(), [['refactor the compon', 'ents', false]]);
+  await c.type('refactor the compone ');
+  assert.equal(c.input.value, 'refactor the compone ');
+  assert.equal(c.shown(), null);
+  assert.deepEqual(feedback(), [['refactor the compon', 'ents', false]]);
 });

@@ -424,7 +424,7 @@
     const view = c.kind + ':' + (c.id || c.file || c.parent || '');
     if (view !== S.view) {
       const prev = S.view;
-      S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null;
+      S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null; keepSpaceAccept();
       leaveDraft(prev, c);
       // Per-file caches only matter for recently viewed sessions; keep them bounded. The viewed preview moves to the newest end
       // first so the trim can't evict it, and a cached failure is dropped so it is fetched again.
@@ -571,9 +571,16 @@
 
   // ---------- ghost-text word completion (OMP predict_word, engine from spelling.autocomplete) ----------
   // ghost: { id, view, text, suffix, fb }; fb is the draft/suggestion as first shown, which OMP's feedback expects.
-  let ghost = null, ghostTimer, ghostSeq = 0;
+  // spaceAccept: { view, g, value } after a space took a suggestion on touch. The next keystroke decides: backspace takes
+  // it back (rejected), anything else, a send or a view switch keeps it (accepted). One feedback per suggestion either way.
+  let ghost = null, ghostTimer, ghostSeq = 0, spaceAccept = null;
   const ghostLive = input => !!ghost && !!input && ghost.view === S.view && input.value === ghost.text && input.selectionStart === input.value.length && input.selectionEnd === input.value.length && !S.slash;
   const ghostFeedback = (g, accepted) => api(`/sessions/${g.id}/command`, { type: 'predict_word_feedback', ...g.fb, accepted }).catch(() => {});
+  function keepSpaceAccept() { if (spaceAccept) ghostFeedback(spaceAccept.g, true); spaceAccept = null; }
+  function setDraft(input, value) {
+    input.value = value; input.selectionStart = input.selectionEnd = value.length;
+    drafts.set(S.view, value); autosize(input); updateComposer();
+  }
   function renderGhost() {
     const input = $('#input'), el = $('#ghost');
     if (!el) return;
@@ -586,15 +593,21 @@
   // The composer flex-shrinks the textarea (images, toolbar wrap, window resize); the ghost must keep its box.
   const ghostObserver = new ResizeObserver(() => { if (ghost) renderGhost(); });
   function predictWord(input) {
+    const atEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
+    const undo = spaceAccept; spaceAccept = null;
+    if (undo && undo.view === S.view && atEnd && input.value === undo.value.slice(0, -1)) {
+      ghost = null; ghostSeq++; clearTimeout(ghostTimer);
+      ghostFeedback(undo.g, false); setDraft(input, undo.g.text); renderGhost();
+      return;
+    }
+    if (undo) ghostFeedback(undo.g, true);
     const prev = ghost, typed = prev && prev.view === S.view && input.value.startsWith(prev.text) ? input.value.slice(prev.text.length) : null;
     // Typing the suggestion's own letters just shortens it.
     if (typed && prev.suffix.length > typed.length && prev.suffix.startsWith(typed)) { ghost = { ...prev, text: input.value, suffix: prev.suffix.slice(typed.length) }; renderGhost(); return; }
     // Touch keyboards have no Tab: a space typed over a live suggestion accepts it and keeps the space.
-    if (typed === ' ' && input.selectionStart === input.value.length && input.selectionEnd === input.value.length && matchMedia('(hover: none)').matches) {
+    if (typed === ' ' && atEnd && matchMedia('(hover: none)').matches) {
       ghost = null; ghostSeq++; clearTimeout(ghostTimer);
-      input.value = prev.text + prev.suffix + ' '; input.selectionStart = input.selectionEnd = input.value.length;
-      drafts.set(S.view, input.value); autosize(input);
-      ghostFeedback(prev, true); updateComposer(); renderGhost();
+      setDraft(input, prev.text + prev.suffix + ' '); spaceAccept = { view: S.view, g: prev, value: input.value }; renderGhost();
       return;
     }
     // Feedback only for what the user did with it: typed it out (accepted) or typed past it (rejected). Backspace, clears and view switches say nothing.
@@ -2483,6 +2496,7 @@
     const retry = retryText != null, text = retry ? retryText : input?.value.trim();
     const attachment = retry ? [] : attached();
     if ((!text && !attachment.length) || S.busy || S.enhance.has(S.view)) return;
+    keepSpaceAccept();
     const sendView = S.view;
     // "/btw question" opens the side-question panel instead of joining the conversation.
     if (!retry && /^\/btw(\s|$)/i.test(text)) {
