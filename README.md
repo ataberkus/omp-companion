@@ -133,9 +133,9 @@ The build writes an NSIS installer to `src-tauri/target/release/bundle/nsis/OMP 
 
 - **Closing the window** hides it to the tray; sessions keep working. Open it again from the tray icon (double-click or **Open**) or by launching the app again.
 - **Quit** (tray menu) stops the companion and every OMP process it started. If sessions are still working it asks first; they are saved as paused. Signing out or shutting Windows down quits without asking.
-- **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required unless `OMP_WEB_NO_TOKEN=1`: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. The token changes every time the app starts, so copy a fresh link after restarting it. Allow the Windows Firewall prompt for **private networks only**.
+- **Allow phones on my network** (tray menu, off at every launch) makes the app reachable from your local network. The connection token stays required unless `OMP_WEB_NO_TOKEN=1`: use **Copy phone link** and pick the adapter your phone shares (usually `192.168.x.x`), then open the link on the phone. The token changes every time the app starts, so copy a fresh link after restarting it. With `OMP_WEB_PASSWORD` set, the copied link carries no token and the phone asks for the password instead. Allow the Windows Firewall prompt for **private networks only**.
 - **One companion at a time.** The desktop app and `node companion/server.mjs` share `~/.omp-web`, so each refuses to start while the other is running on the same port.
-- **`start.bat`** is not the desktop app. It's a double-click launcher for the browser companion: it checks that Node.js is installed, warns when `omp` isn't on PATH (unless `OMP_BIN` is set), then runs `node companion/server.mjs` and keeps the console open after it stops. Unlike the app, it opens the companion to your local network **without a token** (`OMP_WEB_HOST=0.0.0.0`, `OMP_WEB_NO_TOKEN=1`), so anyone on that network can run commands on this PC. To lock it down, set `OMP_WEB_HOST=127.0.0.1` and `OMP_WEB_NO_TOKEN=0` before running it. It counts as a companion too, so run it or the app, not both.
+- **`start.bat`** is not the desktop app. It's a double-click launcher for the browser companion: it checks that Node.js is installed, warns when `omp` isn't on PATH (unless `OMP_BIN` is set), then runs `node companion/server.mjs` and keeps the console open after it stops. Unlike the app, it opens the companion to every network adapter (`OMP_WEB_HOST=0.0.0.0`) unless `OMP_WEB_HOST` is already set, including your local network and, if Tailscale runs, your tailnet. Other devices must log in: with the password in `OMP_WEB_PASSWORD` if you set it, otherwise with the random token the console prints on each launch, unless you turned the login off with `OMP_WEB_NO_TOKEN=1`. To keep it on this PC only, set `OMP_WEB_HOST=127.0.0.1` before running it; to accept only your tailnet, see [Tailscale only, no login](#tailscale-only-no-login-optional). It counts as a companion too, so run it or the app, not both.
 - `OMP_BIN`, `OMP_WEB_PORT`, `OMP_WEB_DATA_DIR`, `OMP_WEB_NO_TOKEN` and the other variables below still apply. `OMP_WEB_NO_TOKEN=1` drops the token prompt, so once the tray toggle is on **anyone on your network can run commands on this PC**. `npm run desktop` (a debug build) sets it by default; set `OMP_WEB_NO_TOKEN=0` to keep the token there. `OMP_WEB_HOST` is ignored: the app always starts on `127.0.0.1` and only the tray toggle opens it to the network.
 
 ## Good to know
@@ -154,7 +154,7 @@ The build writes an NSIS installer to `src-tauri/target/release/bundle/nsis/OMP 
 - **Worktrees:** tick **Isolated git worktree** when starting a session in a Git repo. You get an `omp-web/<id>` branch off HEAD. Uncommitted changes and dependencies are not copied. Worktrees are never merged or deleted automatically.
 - **Not in the panel:** importing from Claude Code or Codex (`--from-claude`, `--from-codex`) needs OMP's terminal picker, and `--profile` sessions live in a separate store the panel does not list. Use the terminal for those, and for the interactive `omp stats` dashboard server and skill publishing.
 - **Where data lives:** `~/.omp-web/` holds `workspace.json`, managed sessions and worktrees. Sessions started normally also appear in OMP's own store, so `omp --resume` works.
-- **Security:** `node companion/server.mjs` listens only on `127.0.0.1` unless you set `OMP_WEB_HOST` (see [Phone or tablet on your network](#phone-or-tablet-on-your-network)). It uses a random per-launch token and checks Host and Origin. Anyone with the token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. Unless `OMP_WEB_NO_TOKEN=1`, the token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. Sessions opened in a new tab share the token through the tab's session storage.
+- **Security:** `node companion/server.mjs` listens only on `127.0.0.1` unless you set `OMP_WEB_HOST` (see [Phone or tablet on your network](#phone-or-tablet-on-your-network)). Every API request needs the connection token: the password from `OMP_WEB_PASSWORD` if set, otherwise a random per-launch token. The companion also checks Host and Origin: only `127.0.0.1`, `localhost`, this PC's adapter addresses (when bound to `0.0.0.0`) and names listed in `OMP_WEB_PUBLIC_HOSTS` are accepted, so DNS-rebinding pages are refused. Anyone with the password or token can run shell commands in a session's folder (`!command`, the same as OMP's own `!` prefix), and OMP keeps its usual tools and permissions. The companion speaks plain HTTP, so never expose its port to the internet (no router port forwarding); reach it from outside through Tailscale, which encrypts the traffic (see [Away from home with Tailscale](#away-from-home-with-tailscale)). A random token is printed in the companion's console and passed to your browser when it opens the dashboard; on a shared machine, set `OMP_WEB_NO_OPEN=1` and paste the link yourself. A password from `OMP_WEB_PASSWORD` is never printed, put in a link or served in the page (it also overrides `OMP_WEB_NO_TOKEN=1`). Sessions opened in a new tab share the token through the tab's session storage.
 
 ### Native plan mode
 
@@ -180,8 +180,10 @@ In `rpc-ui`, automatic continuation follows `goal.continuationModes`'s `interact
 | --- | --- | --- |
 | `OMP_BIN` | `omp` | OMP executable, or a prepared checkout's `cli.ts` (requires Bun) |
 | `OMP_WEB_PORT` | `4545` | Companion port |
-| `OMP_WEB_HOST` | `127.0.0.1` | Bind address; `0.0.0.0` opens it to your local network (see below) |
-| `OMP_WEB_NO_TOKEN` | unset | `1` serves the token inside the page, so no device is asked for it |
+| `OMP_WEB_HOST` | `127.0.0.1` | Bind address; `0.0.0.0` opens it to your local network (see below), a single address such as this PC's Tailscale `100.x.y.z` accepts only connections to that address |
+| `OMP_WEB_PASSWORD` | unset | Password every device must enter (replaces the random per-launch token). Printable ASCII, no leading or trailing spaces. Never printed or served in the page; overrides `OMP_WEB_NO_TOKEN` |
+| `OMP_WEB_PUBLIC_HOSTS` | none | Comma-separated host names accepted in the Host and Origin headers, matched exactly, e.g. a Tailscale MagicDNS name `my-pc.tailnet-1234.ts.net` |
+| `OMP_WEB_NO_TOKEN` | unset | `1` serves the token inside the page, so no device is asked for it. Ignored when `OMP_WEB_PASSWORD` is set |
 | `OMP_WEB_DATA_DIR` | `~/.omp-web` | Panel state, sessions and worktrees |
 | `OMP_SESSIONS_DIR` | `<agent dir>/sessions` | OMP's native session store |
 | `PI_CODING_AGENT_DIR` | `~/.omp/agent` | OMP agent directory (`config.yml`, `WATCHDOG.yml`) |
@@ -203,14 +205,47 @@ Your browser may block HTTPS-to-localhost requests. If it does, use the local da
 
 In the desktop app, use the tray's **Allow phones on my network** and **Copy phone link** (see [Desktop app](#desktop-app-windows)); the token stays required.
 
-Without the app, start the companion on every network adapter:
+Without the app, start the companion on every network adapter with a password (`start.bat` binds to `0.0.0.0` already):
 
 ```bat
 set OMP_WEB_HOST=0.0.0.0
+set OMP_WEB_PASSWORD=choose-a-long-password
 node companion/server.mjs
 ```
 
-The console prints a `LAN:` address per adapter (usually the `192.168.x.x` one); open it on a phone on the same Wi-Fi. Allow Node.js through Windows Firewall for private networks when prompted. Adding `set OMP_WEB_NO_TOKEN=1` skips the token prompt, but then **anyone on that network can open the address and run commands on this PC**; use it only on networks you trust.
+The console prints a `LAN:` address per adapter (usually the `192.168.x.x` one); open it on a phone on the same Wi-Fi and enter the password. Without `OMP_WEB_PASSWORD`, the `LAN:` links carry a random token that changes every launch. Allow Node.js through Windows Firewall for private networks when prompted. Adding `set OMP_WEB_NO_TOKEN=1` (without a password) skips the login, but then **anyone on that network can open the address and run commands on this PC**; use it only on networks you trust.
+
+To keep the password across launches, store it in your user environment once (`setx OMP_WEB_PASSWORD "…"` in a new console, or *Edit environment variables for your account*) instead of in `start.bat` or any file in this repo.
+
+### Away from home with Tailscale
+
+Use [Tailscale](https://tailscale.com) to reach the companion over mobile data or another Wi-Fi. It connects your devices over an encrypted WireGuard network (a *tailnet*), so nothing is opened on your router and the plain-HTTP traffic never crosses the internet unencrypted. Don't forward the companion port on your router instead.
+
+1. On this PC: install Tailscale (`winget install --id Tailscale.Tailscale -e`), sign in, and note its addresses with `tailscale ip -4` (a `100.x.y.z` address) and `tailscale status --json` (`Self.DNSName`, e.g. `my-pc.tailnet-1234.ts.net`).
+2. On the phone: install the Tailscale app and sign in to the **same** tailnet (same account or invited user). Leave the VPN toggle on.
+3. Start the companion with `OMP_WEB_HOST=0.0.0.0` and `OMP_WEB_PASSWORD` set (`start.bat` does the first). The `100.x.y.z` address is one of this PC's adapters, so it is accepted without further settings. To use the MagicDNS name, also set `OMP_WEB_PUBLIC_HOSTS=my-pc.tailnet-1234.ts.net`.
+4. Allow the port from the tailnet only, in an administrator console: `netsh advfirewall firewall add rule name="OMP companion (Tailscale)" dir=in action=allow protocol=TCP localport=4545 remoteip=100.64.0.0/10`.
+5. On the phone open `http://100.x.y.z:4545/` (or `http://my-pc.tailnet-1234.ts.net:4545/`) and enter the password.
+
+#### Tailscale only, no login (optional)
+
+If you'd rather have the dashboard open straight away on your tailnet devices, bind the companion to this PC's Tailscale address and turn the login off. Store the settings once in your user environment, in a normal console (`OMP_WEB_PASSWORD` must go, because it overrides `OMP_WEB_NO_TOKEN`):
+
+```bat
+reg delete HKCU\Environment /v OMP_WEB_PASSWORD /f
+setx OMP_WEB_NO_TOKEN 1
+setx OMP_WEB_HOST 100.x.y.z
+```
+
+Close the companion's console, then start `start.bat` from Explorer or a **new** console (open consoles keep the old variables). The console prints `Open: http://100.x.y.z:4545/` and `No token required: anyone who can reach this port has full control.`
+
+- Only the Tailscale address answers: `http://127.0.0.1:4545` on the PC itself stops working, so open `http://100.x.y.z:4545/` there too. The MagicDNS name works when it is listed in `OMP_WEB_PUBLIC_HOSTS`.
+- Tailscale must be connected on the PC when the companion starts; otherwise it stops with *could not start*.
+- Because the companion listens on the Tailscale address only, your home LAN can't reach it, even when Windows has a broad *Node.js JavaScript Runtime* allow rule for private networks.
+- **Anyone on your tailnet can open the address and run commands on this PC**, with no password. Remove devices you don't use from the tailnet and don't share this PC with other users.
+- `OMP_WEB_NO_TOKEN=1` now applies to the desktop app too: its **Allow phones on my network** toggle would then open it to your local network without a token.
+
+To go back, run `reg delete HKCU\Environment /v OMP_WEB_NO_TOKEN /f`, `reg delete HKCU\Environment /v OMP_WEB_HOST /f` and `setx OMP_WEB_PASSWORD "…"`, then restart the companion from a new console.
 
 ## Development
 

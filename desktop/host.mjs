@@ -42,7 +42,7 @@ const shutdown = () => (closing ??= companion ? companion.close() : Promise.reso
 const commands = {
   busy: () => ({ busy: companion.store.sessions.filter(s => s.status === 'running' || s.status === 'queued').length }),
   lan: msg => setLan(Boolean(msg.on)),
-  links: () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.token) }),
+  links: () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.password ? '' : companion.token) }),
 };
 
 async function handle(line) {

@@ -209,10 +209,10 @@
     if (res.status === 304) { await res.text().catch(() => {}); return null; }
     const data = await res.json().catch(() => ({}));
     if (res.status === 401) {
-      if (token !== S.token) throw Object.assign(new Error('That token was not accepted. Check it and try again.'), { auth: true });
+      if (token !== S.token) throw Object.assign(new Error('That password or token was not accepted. Check it and try again.'), { auth: true });
       // No-token mode: the page's embedded token goes stale when the companion restarts; a reload carries the new one.
       if (metaToken && token === metaToken) { location.reload(); throw Object.assign(new Error('Reconnecting to the restarted companion…'), { auth: true }); }
-      setToken(''); throw Object.assign(new Error('The connection token is no longer valid. Open the link printed by the companion.'), { auth: true });
+      setToken(''); throw Object.assign(new Error('The password or connection token is no longer valid. Enter it again, or open the link printed by the companion.'), { auth: true });
     }
     if (!res.ok) throw new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`);
     if (etag) etag.tag = res.headers?.get?.('ETag') || '';
@@ -3125,8 +3125,8 @@
     setKeyed($('#list'), []); // not innerHTML: setKeyed's record of the rendered rows must stay true for the next renderList
     main().innerHTML = `<div class="center"><form class="card" id="connectForm">
       <h2>Connect to your companion</h2>
-      <p>Open the link printed by <code>node companion/server.mjs</code>, or paste its connection token here.</p>
-      <input id="tokenInput" type="password" placeholder="Connection token" autocomplete="off" autofocus>
+      <p>Enter the password set with <code>OMP_WEB_PASSWORD</code>, or the connection token printed by <code>node companion/server.mjs</code>. Opening the printed link also works.</p>
+      <input id="tokenInput" type="password" placeholder="Password or connection token" aria-label="Password or connection token" autocomplete="current-password" autofocus>
       <button class="btn primary">Connect</button>
     </form></div>`;
   }

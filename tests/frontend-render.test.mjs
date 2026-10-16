@@ -80,7 +80,7 @@ test('Connect probes a pasted token without adopting it; a wrong one keeps the f
   const mainHtml = app.els.get('main').innerHTML;
   submit('wrong');
   await flush();
-  assert.ok(app.toasts.includes('That token was not accepted. Check it and try again.'), app.toasts.join('|'));
+  assert.ok(app.toasts.includes('That password or token was not accepted. Check it and try again.'), app.toasts.join('|'));
   assert.equal(app.els.get('tokenInput').value, 'wrong');
   assert.equal(app.els.get('main').innerHTML, mainHtml, 'the connect form is not re-rendered');
   const n = app.calls.length;

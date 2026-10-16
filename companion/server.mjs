@@ -586,6 +586,15 @@ async function syncFile(file,content){
  catch(e){await fs.rm(tmp,{force:true}).catch(()=>{});throw e;}
 }
 export async function createCompanion(options={}){
+ // OMP_WEB_PASSWORD: a password you choose becomes the connection token, so the same Bearer check enforces it. It is never served in the page.
+ const password=options.password??process.env.OMP_WEB_PASSWORD??'';
+ if(password&&!/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(password))throw new Error('OMP_WEB_PASSWORD must be printable ASCII without leading or trailing spaces (browsers cannot send other characters in the Authorization header).');
+ const token=options.token||password||randomBytes(32).toString('hex');
+ // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control. A password turns it off.
+ const exposeToken=!password&&(options.exposeToken??process.env.OMP_WEB_NO_TOKEN==='1');
+ // OMP_WEB_PUBLIC_HOSTS: extra host names (a Tailscale MagicDNS name, say) accepted in Host and Origin by exact match on the port.
+ const publicHosts=(options.publicHosts||String(process.env.OMP_WEB_PUBLIC_HOSTS||'').split(',')).map(h=>h.trim().toLowerCase()).filter(Boolean);
+ for(const h of publicHosts)if(!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(h))throw new Error(`OMP_WEB_PUBLIC_HOSTS: "${h}" is not a host name (give names like pc.tailnet.ts.net, without scheme or port).`);
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
  // OMP_BIN may point at the native executable or a source checkout's cli.ts.
  const ompEntry=options.ompCommand||process.env.OMP_BIN||'omp',ompSource=/\.ts$/i.test(ompEntry);
@@ -615,9 +624,6 @@ export async function createCompanion(options={}){
  // Where "Open in editor" opens files (Settings › Open in editor).
  if(!EDITOR_CHOICES.includes(store.editor))store.editor='auto';
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
- const token=options.token||randomBytes(32).toString('hex');
- // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control.
- const exposeToken=options.exposeToken??process.env.OMP_WEB_NO_TOKEN==='1';
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let pausing=0;let saveChain=Promise.resolve();
@@ -1587,10 +1593,11 @@ async function spend(sync){
  const json=(value,status=200)=>send(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'},JSON.stringify(value));
   try{
    // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's LAN addresses, still rejecting DNS-rebinding names.
-   const a=server.address(),port=a?.port,names=new Set(['127.0.0.1','localhost']);
+   // OMP_WEB_PUBLIC_HOSTS names are matched exactly too, so any other name (DNS rebinding) is still refused.
+   const a=server.address(),port=a?.port,names=new Set(['127.0.0.1','localhost',...publicHosts]);
    if(a&&['0.0.0.0','::'].includes(a.address)){for(const list of Object.values(os.networkInterfaces()))for(const n of list||[])names.add(n.family==='IPv6'?`[${n.address}]`:n.address);}else if(a?.address)names.add(a.family==='IPv6'?`[${a.address}]`:a.address);
    const hosts=new Set([...names].map(n=>`${n}:${port}`));
-   if(!hosts.has(req.headers.host))throw error('Invalid Host header.',403);
+   if(!hosts.has(String(req.headers.host||'').toLowerCase()))throw error('Invalid Host header.',403);
    const origin=req.headers.origin;const own=new Set([...hosts].map(h=>'http://'+h));
    if(origin&&!own.has(origin)&&!allowedOrigins.has(origin))throw error('Origin not allowed. Open the local dashboard or set OMP_ALLOWED_ORIGINS to the exact hosted origin.',403);
    if(origin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');res.setHeader('Access-Control-Allow-Private-Network','true');}
@@ -1613,7 +1620,7 @@ async function spend(sync){
     res.writeHead(200,headers);res.end(data);return;
    }
    const provided=Buffer.from(req.headers.authorization||'');const expected=Buffer.from('Bearer '+token);
-   if(provided.length!==expected.length||!timingSafeEqual(provided,expected))throw error('Invalid connection token.',401);
+   if(provided.length!==expected.length||!timingSafeEqual(provided,expected))throw error(password?'Wrong password.':'Invalid connection token.',401);
    if(req.method==='GET'&&url.pathname==='/api/state'){
     markOverlaps();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
@@ -1763,7 +1770,7 @@ async function spend(sync){
  const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
- await persist();return {server,store,token,close,flush:()=>saveChain};
+ await persist();return {server,store,token,password:Boolean(password),close,flush:()=>saveChain};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';
@@ -1773,11 +1780,13 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  await startupUpdate();
  const app=await createCompanion();
  app.server.listen(port,host,()=>{
-  // The token travels in the URL fragment, which browsers never send to the server or in Referer headers.
-  const frag=process.env.OMP_WEB_NO_TOKEN==='1'?'':`#token=${app.token}`;
+  // The token travels in the URL fragment, which browsers never send to the server or in Referer headers. A password is never printed.
+  const frag=process.env.OMP_WEB_NO_TOKEN==='1'||app.password?'':`#token=${app.token}`;
   const link=`http://${wild?'127.0.0.1':host}:${port}/${frag}`;
   const lan=wild?Object.values(os.networkInterfaces()).flat().filter(n=>n.family==='IPv4'&&!n.internal).map(n=>`http://${n.address}:${port}/${frag}`):[];
-  console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${frag?`Connection token: ${app.token}\n`:'No token required: anyone who can reach this port has full control.\n'}\nYour provider credentials remain in OMP. Keep this process running.\n`);
+  const extra=String(process.env.OMP_WEB_PUBLIC_HOSTS||'').split(',').map(h=>h.trim().toLowerCase()).filter(Boolean).map(h=>`http://${h}:${port}/${frag}`);
+  const auth=app.password?'Password required (OMP_WEB_PASSWORD).\n':frag?`Connection token: ${app.token}\n`:'No token required: anyone who can reach this port has full control.\n';
+  console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${extra.map(l=>`Host: ${l}\n`).join('')}${auth}\nYour provider credentials remain in OMP. Keep this process running.\n`);
   if(!process.env.OMP_WEB_NO_OPEN){const [cmd,args]=process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',link]]:process.platform==='darwin'?['open',[link]]:['xdg-open',[link]];execFile(cmd,args,{windowsHide:true},()=>{});}
  });
  app.server.on('error',e=>{console.error(e.code==='EADDRINUSE'?inUse:`\nThe companion could not start: ${e.message}\n`);process.exit(1);});
