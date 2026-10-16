@@ -835,6 +835,8 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 /* sessions editing the same files */
 .extra-overlap{display:flex;align-items:flex-start;gap:8px;padding:8px 12px;border:1px solid color-mix(in oklch,var(--amber) 35%,transparent);border-radius:10px;background:color-mix(in oklch,var(--amber) 9%,transparent);font-size:13px;color:var(--fg)}
 .extra-overlap .grow{flex:1;overflow-wrap:anywhere}.extra-overlap>span:first-child{color:var(--amber)}
+.ov-toggle{display:none}
+@media (max-width:820px){.extra-overlap{align-items:center;gap:6px;padding:4px 6px 4px 10px;font-size:12px;line-height:1.4}.extra-overlap .grow{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.extra-overlap .ov-why,.extra-overlap .ov-files{display:none}.extra-overlap.open{align-items:flex-start}.extra-overlap.open .grow{white-space:normal}.extra-overlap.open .ov-files{display:block;margin-top:2px}.ov-toggle{display:block;flex-shrink:0;padding:4px 6px;border:0;border-radius:6px;background:none;color:var(--amber);font:inherit;white-space:nowrap;cursor:pointer}.ov-toggle:focus-visible{outline:2px solid var(--accent)}}
 .item .overlap{color:var(--amber)}
 /* Changes: viewed files and review comments */
 .cf-head{display:flex;align-items:center;gap:10px;min-width:0;font-size:12.5px}

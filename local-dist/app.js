@@ -2073,7 +2073,11 @@
     const status = Object.entries(s?._status || {});
     if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
     // Another active session in the same folder (no worktree) edited the same files: one may overwrite the other.
-    for (const o of s?._overlaps || []) parts.push(`<div class="extra-overlap" role="status"><span aria-hidden="true">⚠</span><span class="grow">Also edited by <a href="#/s/${esc(o.id)}">${esc(o.title)}</a>, which works in the same folder without its own worktree: ${o.files.map(f => openLink(f, '', esc(shortPath(f)))).join(', ')}${o.count > o.files.length ? ` and ${o.count - o.files.length} more` : ''}.</span></div>`);
+    // Phones show one line (who + a file-count toggle); the explanation and paths appear only when expanded.
+    for (const o of s?._overlaps || []) {
+      const open = S.overlapOpen?.has(o.id), n = Math.max(o.count, o.files.length);
+      parts.push(`<div class="extra-overlap${open ? ' open' : ''}" role="status"><span aria-hidden="true">⚠</span><span class="grow">Also edited by <a href="#/s/${esc(o.id)}">${esc(o.title)}</a><span class="ov-why">, which works in the same folder without its own worktree:</span> <span class="ov-files">${o.files.map(f => openLink(f, '', esc(shortPath(f)))).join(', ')}${o.count > o.files.length ? ` and ${o.count - o.files.length} more` : ''}.</span></span><button class="ov-toggle" data-act="toggleOverlap" data-id="${esc(o.id)}" aria-expanded="${!!open}">${n} file${n === 1 ? '' : 's'} ${open ? '▴' : '▾'}</button></div>`);
+    }
     el.hidden = !parts.length;
     setIfChanged(el, parts.join(''));
   }
@@ -3467,6 +3471,7 @@
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
+    else if (act === 'toggleOverlap') { const o = S.overlapOpen ||= new Set(); o.delete(a.dataset.id) || o.add(a.dataset.id); update(); }
     else if (['rename', 'branch', 'handoff', 'export', 'stats', 'login', 'accounts'].includes(act)) {
       closeMenu(a.closest('.menu'));
       if (act === 'rename') { const s = S.store.sessions.find(x => x.id === c.id); const name = prompt('Session name', s?.title || ''); if (name?.trim() && name.trim() !== s?.title) sessionAction({ type: 'rename', name: name.trim() }); }
