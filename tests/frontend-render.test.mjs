@@ -291,6 +291,22 @@ test('sidebar polls keep keyboard focus on the same row', async () => {
   assert.equal(app.document.activeElement.dataset?.key, 's:s2');
 });
 
+test('the auto-shutdown banner counts exactly the working sessions the Active filter lists', async () => {
+  const sessions = [
+    session('run', [], { status: 'running' }),
+    session('left', [], { queuedMessages: [{ id: 'q', text: 'Commit and push', at: at() }] }), // waits for the next message
+    session('compact', [], { _task: 'Compacting context…' }), // archived, but its compaction holds the shutdown
+    session('done', [], { status: 'review' }),
+  ];
+  const app = boot({ elements: { autoShutdown: document => document.createElement('autoShutdown') }, respond: stateOf({ ...store(sessions), archived: ['s:compact'], autoShutdown: { on: true, since: at(), firing: false, error: null } }) });
+  await flush();
+  app.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-filter]' ? { dataset: { filter: 'active' } } : null } });
+  const rows = [...app.els.get('list').innerHTML.matchAll(/data-key="s:([^"]+)"[\s\S]*?class="m">([^<]*)/g)].map(([, id, meta]) => [id, meta.split(' · ')[1]]);
+  assert.match(app.els.get('autoShutdown').innerHTML, / · 2 sessions working</);
+  assert.deepEqual(rows.filter(([id]) => id !== 'done'), [['run', 'Working'], ['compact', 'Compacting context…']]);
+  assert.ok(rows.some(([id]) => id === 'done'), 'sessions to review stay Active without counting as work');
+});
+
 test('server: /api/state?session= sends messages only for that session and answers unchanged polls with 304', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'omp-state-'));
   const msgs = n => Array.from({ length: n }, (_, i) => reply('m' + i, 'text ' + i));

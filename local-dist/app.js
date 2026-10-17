@@ -259,6 +259,9 @@
 
   // ---------- data model ----------
   const panelSessions = () => (S.store?.sessions || []).filter(s => !s.hidden);
+  // Work that holds "Shut down PC when all work is done" (the companion's workPending): a turn, or a compaction, handoff
+  // or shell command in progress. Queued messages of a stopped session wait for the user's next message, so they don't.
+  const isWorking = s => s.status === 'running' || s.status === 'queued' || !!s._task || !!s._bash;
   const projectOf = s => S.store?.projects.find(p => p.id === s.projectId);
   const sessionModel = s => s.modelSelector || (s.provider && s.model && s.model !== 'OMP default' ? s.provider + '/' + s.model : '');
   const modelInfo = sel => S.models?.models.find(m => m.selector === sel);
@@ -279,7 +282,7 @@
     const out = panel.map(s => {
       const p = projectOf(s);
       const model = sessionModel(s);
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, working: isWorking(s), task: s._task || (s._bash ? 'Running a shell command' : ''), needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
     });
     const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
@@ -288,7 +291,7 @@
     }
     const arch = archivedKeys(), pins = pinnedKeys();
     for (const it of out) { it.archived = arch.has(it.key); it.pinned = pins.has(it.key); }
-    const live = it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
+    const live = it => it.needsReview || it.working || ['review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
     return out.sort((a, b) => live(a) - live(b) || new Date(b.at) - new Date(a.at));
   }
   function current() {
@@ -346,15 +349,15 @@
     if (!S.store) { setKeyed(list, []); return; }
     const q = S.search.trim().toLowerCase();
     let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
-    if (S.filter === 'active') all = all.filter(it => it.needsReview || ['running', 'queued', 'review', 'error'].includes(it.status));
+    if (S.filter === 'active') all = all.filter(it => it.needsReview || it.working || ['review', 'error'].includes(it.status));
     if (S.filter === 'panel') all = all.filter(it => it.panel);
-    all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.needsReview || it.status === 'running' || it.status === 'queued');
+    all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.needsReview || it.working);
     const groups = [];
     const add = (label, arr) => arr.length && groups.push([label, arr]);
     // Pinned sessions get their own group on top and are left out of the status/date groups.
     const pinned = all.filter(it => it.pinned), unpinned = all.filter(it => !it.pinned);
-    const working = unpinned.filter(it => !it.needsReview && (it.status === 'running' || it.status === 'queued'));
-    const review = unpinned.filter(it => it.needsReview || it.status === 'review' || it.status === 'error');
+    const working = unpinned.filter(it => !it.needsReview && it.working);
+    const review = unpinned.filter(it => !working.includes(it) && (it.needsReview || it.status === 'review' || it.status === 'error'));
     const rest = unpinned.filter(it => !working.includes(it) && !review.includes(it));
     if (S.groupBy === 'project') {
       const by = new Map();
@@ -380,7 +383,7 @@
     const parts = groups.flatMap(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return [['g:' + gk, `<div class="group-head"${S.groupBy === 'project' ? ' draggable="true"' : ''}><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>`], ...(shut ? [] : arr).map(it => ['r:' + it.key, `<div class="item-row">
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
-        <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : STATUS[it.status] || it.status) : ''}${it.overlap?.length ? ` · <span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
+        <span></span><span class="m">${esc(it.folder)}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : it.task || STATUS[it.status] || it.status) : ''}${it.overlap?.length ? ` · <span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
         ${workTime(it)}
       </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`])]; });
     if (!parts.length) parts.push(['empty', `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`]);
@@ -825,7 +828,7 @@
   // Polls fail silently; phone users never see the sidebar dot, so say it in the view's meta line.
   const offlinePill = () => S.online === false ? '<span class="pill error">Offline — retrying</span>' : '';
   // "Shut down PC when all work is done" while armed: in the view's meta line (phones) and the sidebar; clicking cancels it.
-  const workLeft = () => (S.store?.sessions || []).filter(s => s.status === 'running' || s.status === 'queued' || s.queuedMessages?.length || s._task || s._bash).length;
+  const workLeft = () => (S.store?.sessions || []).filter(isWorking).length;
   function autoShutdownPill() {
     const a = S.store?.autoShutdown;
     if (a?.firing) return '<span class="pill error">Shutting down the PC…</span>';
@@ -838,7 +841,7 @@
     if (a?.error && a.error.at !== autoShutdownSeen) { autoShutdownSeen = a.error.at; try { localStorage.setItem('omp-auto-shutdown-error', a.error.at); } catch {} toast(a.error.message, 'err'); }
     if (!el) return;
     setIfChanged(el, a?.firing ? '<span>Shutting down the PC…</span>'
-      : a?.on ? `<span title="Waits until no session is running or queued and no queued message is left">PC shuts down when all work is done${n ? ` · ${n} ${n === 1 ? 'session' : 'sessions'} working` : ''}</span><button type="button" class="link" data-act="autoShutdownOff">Cancel</button>` : '');
+      : a?.on ? `<span title="Waits until no session is running or queued and no compaction, handoff or shell command is in progress. Queued messages of a stopped session wait for your next message and don't hold it.">PC shuts down when all work is done${n ? ` · ${n} ${n === 1 ? 'session' : 'sessions'} working` : ''}</span><button type="button" class="link" data-act="autoShutdownOff">Cancel</button>` : '');
     el.hidden = !a?.on && !a?.firing;
   }
   function setIfChanged(el, html) {
@@ -3543,7 +3546,7 @@
     else if (act === 'autoShutdown' || act === 'autoShutdownOff') {
       closeMenu(a.closest('.menu'));
       const on = act === 'autoShutdown' && !S.store?.autoShutdown?.on;
-      if (!on || confirm('Shut down the computer running the companion when all work is done?\n\nThe companion waits until no session is running or queued and no queued message is left, then pauses and saves sessions and shuts down. If nothing is working now, it shuts down right away. Unsaved work in other programs on that computer may be lost.'))
+      if (!on || confirm('Shut down the computer running the companion when all work is done?\n\nThe companion waits until no session is running or queued and no compaction, handoff or shell command is in progress, then pauses and saves sessions and shuts down. Queued messages of a stopped session stay queued for later. If nothing is working now, it shuts down right away. Unsaved work in other programs on that computer may be lost.'))
         api('/shutdown/auto', { on }).then(r => { if (S.store) S.store.autoShutdown = r; S.stateTag = ''; renderAutoShutdown(); update(); toast(!on ? 'Automatic shutdown canceled.' : r.firing ? 'Nothing is working: shutting down the PC…' : 'The PC shuts down when all work is done.'); }, e => toast(e.message, 'err'));
     }
     else if (act === 'restartCompanion') { closeMenu(a.closest('.menu')); if (confirm('Restart the companion?\n\nRunning sessions are paused and saved first; continue them once it is back. The PC keeps running.')) restartCompanion(); }

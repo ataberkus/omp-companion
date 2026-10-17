@@ -1821,8 +1821,10 @@ async function spend(sync){
  // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
  const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
- // Work left: a running or queued turn, a queued follow-up not yet sent, or a compaction/handoff/shell command in progress.
- const workPending=()=>store.sessions.some(s=>['running','queued'].includes(s.status)||s.queuedMessages?.length||s._task||s._bash);
+ // Work left: a running or queued turn, or a compaction/handoff/shell command in progress. Queued messages of a running
+ // session are covered by its status (and by the session lock while settle() dispatches them); those of a stopped session
+ // only go out with the user's next message, so they must not hold the shutdown forever. The panel's isWorking matches.
+ const workPending=()=>store.sessions.some(s=>['running','queued'].includes(s.status)||s._task||s._bash);
  // Runs after every settled turn and every background refresh (which catches stops, failures and exits). A held lock or a
  // starting runner means a prompt is mid-flight, so it waits for the next check. Fires at most once per arming.
  function checkAutoShutdown(){

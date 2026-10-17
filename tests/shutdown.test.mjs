@@ -123,6 +123,22 @@ test('Shut down PC when all work is done waits for running turns and queued mess
   assert.equal(calls, 1, 'background refreshes do not shut down again');
 });
 
+// A stopped session's queued message only goes out with the user's next message there, so it must not hold the
+// shutdown forever; it stays queued and is saved for later.
+test('a stopped session with a queued message does not hold the automatic shutdown', async t => {
+  let saved;
+  const { store, call, until } = await autoCompanion(t, ['a', 'b'], async () => { saved = structuredClone(store.sessions.find(s => s.id === 'a').queuedMessages); });
+  const a = store.sessions.find(s => s.id === 'a'), b = store.sessions.find(s => s.id === 'b');
+  a.queuedMessages = [{ id: 'q1', text: 'Commit and push', at: new Date().toISOString() }];
+  b._bash = 'tool-bash-1';
+  assert.equal((await call('/shutdown/auto', { on: true }))[0], 200);
+  await new Promise(r => setTimeout(r, 4500));
+  assert.equal(saved, undefined, 'a shell command in progress holds the shutdown');
+  delete b._bash;
+  await until(() => saved, 'the shutdown command');
+  assert.deepEqual(saved.map(q => q.text), ['Commit and push'], 'the queued message stays queued');
+});
+
 test('a canceled automatic shutdown never runs; a refused one is reported and the panel keeps working', async t => {
   let calls = 0, outcome;
   const { store, call, finishTurn, until } = await autoCompanion(t, ['a'], async () => { calls++; if (outcome) throw outcome; });
