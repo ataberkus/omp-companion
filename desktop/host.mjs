@@ -1,9 +1,10 @@
 // Companion host for the Tauri shell: runs the companion and talks line-delimited JSON over stdin/stdout.
-// Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something).
-// Requests: {"id","cmd":"busy"|"lan"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
+// Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something)
+//   | {"event":"screen","address"} (a device started viewing and controlling this PC; address null when it stopped).
+// Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 import * as os from 'node:os';
 import * as readline from 'node:readline';
-import { createCompanion, portBusy, startupUpdate } from '../companion/server.mjs';
+import { createCompanion, portBusy, startupUpdate, tailscaleSelf } from '../companion/server.mjs';
 import { phoneLinks } from './links.mjs';
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
@@ -17,9 +18,11 @@ const fatal = message => send({ event: 'fatal', message }, () => process.exit(1)
 
 // Rebind the same server instead of restarting the companion: close() would kill every running agent.
 // The Host/Origin allowlist is recomputed from server.address() per request, so it follows the new bind.
+// The screen viewer goes first: its WebSocket would keep server.close() waiting, and a device that lost access must not keep watching.
 function bind(host) {
   const server = companion.server;
   return new Promise((resolve, reject) => {
+    companion.closeScreen();
     server.closeAllConnections();
     server.close(() => {
       server.once('error', reject);
@@ -42,7 +45,8 @@ const shutdown = () => (closing ??= companion ? companion.close() : Promise.reso
 const commands = {
   busy: () => ({ busy: companion.store.sessions.filter(s => s.status === 'running' || s.status === 'queued').length }),
   lan: msg => setLan(Boolean(msg.on)),
-  links: () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.password ? '' : companion.token) }),
+  screen: msg => ({ screen: companion.setScreen(Boolean(msg.on)) }),
+  links: async () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.password ? '' : companion.token, await tailscaleSelf()) }),
 };
 
 async function handle(line) {
@@ -82,7 +86,9 @@ async function main() {
   // Attention events become Windows notifications in the shell; it skips them while the main window has focus.
   const verbs = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
   const onAttention = a => send({ event: 'attention', title: `${a.title} ${verbs[a.kind] || 'needs you'}`.slice(0, 200), body: a.detail || 'Open OMP Control Room to continue.' });
-  try { companion = await createCompanion({ desktop: true, onAttention }); }
+  // Screen sharing starts off at every launch, like network access; only the tray turns it on (OMP_WEB_SCREEN doesn't apply here).
+  const onScreen = v => send({ event: 'screen', address: v?.address ?? null });
+  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen }); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);

@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { createServer, STATUS_CODES } from 'node:http';
 import { connect } from 'node:net';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs/promises';
@@ -559,8 +559,279 @@ const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in th
 - Include acceptance criteria or a verification step only when the draft implies one.
 - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
+// Screen sharing (Windows): one helper process per viewer, Windows PowerShell compiling this C# with Add-Type (no install,
+// no npm dependency). It captures one monitor (with the cursor), scales it to the viewer's width, and writes only the changed
+// rectangle as a JPEG, one per frame credit the companion grants, so a slow link gets fewer frames instead of a growing queue.
+// stdout: [u32 LE length][type][payload]; type 1 = u16 LE x,y,w,h,frameWidth,frameHeight + JPEG, type 2 = JSON text.
+// stdin: one command per line (see screenCommands); EOF releases every key and button it holds down, then exits.
+const SCREEN_HELPER=String.raw`using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+public static class OmpScreenHelper {
+  [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Explicit)] struct UNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+  [StructLayout(LayoutKind.Sequential)] struct INPUT { public uint type; public UNION u; }
+  [StructLayout(LayoutKind.Sequential)] struct POINT { public int x, y; }
+  [StructLayout(LayoutKind.Sequential)] struct CURSORINFO { public int size, flags; public IntPtr cursor; public POINT pos; }
+  [StructLayout(LayoutKind.Sequential)] struct ICONINFO { public bool icon; public int hotX, hotY; public IntPtr mask, color; }
+  [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+  [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] static extern uint SendInput(uint count, INPUT[] inputs, int size);
+  [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO info);
+  [DllImport("user32.dll")] static extern bool GetIconInfo(IntPtr icon, out ICONINFO info);
+  [DllImport("user32.dll")] static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr icon, int w, int h, int step, IntPtr brush, int flags);
+  [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint type);
+  [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+  [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+
+  static readonly object gate = new object();
+  static Stream output;
+  static int credits, monitor = -1, primary, maxWidth = 1280, quality = 60;
+  static bool full = true, quit;
+  static Rectangle[] screens;
+  static readonly HashSet<int> keysDown = new HashSet<int>();
+  static readonly bool[] buttonsDown = new bool[3];
+  static readonly uint[] buttonFlags = { 2, 0x20, 8 };
+
+  public static void Run() {
+    // Physical pixels on scaled displays, for capture bounds, cursor position and input coordinates alike.
+    try { if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) SetProcessDPIAware(); } catch (EntryPointNotFoundException) { SetProcessDPIAware(); }
+    output = Console.OpenStandardOutput();
+    LoadScreens();
+    new Thread(ReadCommands) { IsBackground = true }.Start();
+    CaptureLoop();
+  }
+
+  static void LoadScreens() {
+    var all = Screen.AllScreens;
+    lock (gate) {
+      screens = new Rectangle[all.Length];
+      for (int i = 0; i < all.Length; i++) { screens[i] = all[i].Bounds; if (all[i].Primary) primary = i; }
+      if (monitor < 0 || monitor >= screens.Length) monitor = primary;
+    }
+  }
+
+  static void EmitMonitors() {
+    var list = new StringBuilder("{\"t\":\"monitors\",\"list\":[");
+    lock (gate) {
+      for (int i = 0; i < screens.Length; i++) list.AppendFormat("{0}{{\"w\":{1},\"h\":{2},\"primary\":{3}}}", i > 0 ? "," : "", screens[i].Width, screens[i].Height, i == primary ? "true" : "false");
+      list.AppendFormat("],\"current\":{0}}}", monitor);
+    }
+    Emit(2, null, Encoding.UTF8.GetBytes(list.ToString()));
+  }
+
+  static void Emit(byte type, byte[] head, byte[] body) { Emit(type, head, body, body.Length); }
+  static void Emit(byte type, byte[] head, byte[] body, int length) {
+    int total = 1 + (head == null ? 0 : head.Length) + length;
+    lock (output) {
+      output.Write(BitConverter.GetBytes(total), 0, 4);
+      output.WriteByte(type);
+      if (head != null) output.Write(head, 0, head.Length);
+      output.Write(body, 0, length);
+      output.Flush();
+    }
+  }
+
+  static void Status(string text) {
+    Emit(2, null, Encoding.UTF8.GetBytes("{\"t\":\"status\",\"text\":\"" + text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", " ").Replace("\n", " ") + "\"}"));
+  }
+
+  static void CaptureLoop() {
+    Bitmap raw = null, scaled = null; int[] prev = null, cur = null; string lastError = null;
+    var jpeg = Array.Find(ImageCodecInfo.GetImageEncoders(), c => c.FormatID == ImageFormat.Jpeg.Guid);
+    var timer = Stopwatch.StartNew(); long lastFrame = -1000; int idle = 0;
+    while (true) {
+      Rectangle b; int mw, q; bool reset;
+      lock (gate) {
+        while (credits <= 0 && !quit) Monitor.Wait(gate);
+        if (quit) return;
+        b = screens[monitor]; mw = maxWidth; q = quality; reset = full; full = false;
+      }
+      // At most ~30 frames a second; an unchanged screen is checked less often the longer it stays still.
+      long wait = Math.Max(33 - (timer.ElapsedMilliseconds - lastFrame), idle);
+      if (wait > 0) Thread.Sleep((int)wait);
+      int sw = Math.Min(b.Width, mw), sh = Math.Max(1, (int)Math.Round((double)b.Height * sw / b.Width));
+      if (raw == null || raw.Width != b.Width || raw.Height != b.Height) { if (scaled != null && scaled != raw) scaled.Dispose(); if (raw != null) raw.Dispose(); raw = new Bitmap(b.Width, b.Height, PixelFormat.Format32bppRgb); scaled = null; reset = true; }
+      if (sw == b.Width) { if (scaled != null && scaled != raw) scaled.Dispose(); scaled = raw; }
+      else if (scaled == null || scaled == raw || scaled.Width != sw || scaled.Height != sh) { if (scaled != null && scaled != raw) scaled.Dispose(); scaled = new Bitmap(sw, sh, PixelFormat.Format32bppRgb); reset = true; }
+      try {
+        using (var g = Graphics.FromImage(raw)) { g.CopyFromScreen(b.X, b.Y, 0, 0, b.Size, CopyPixelOperation.SourceCopy); DrawCursor(g, b); }
+        if (lastError != null) Status("");
+        lastError = null;
+      } catch (Exception e) {
+        if (lastError != e.Message) Status("This PC's screen can't be captured right now (" + e.Message + "). Windows hides the sign-in screen and administrator prompts from other apps.");
+        lastError = e.Message; lock (gate) full = true; Thread.Sleep(500); continue;
+      }
+      if (scaled != raw) using (var g = Graphics.FromImage(scaled)) { g.InterpolationMode = InterpolationMode.HighQualityBilinear; g.PixelOffsetMode = PixelOffsetMode.HighSpeed; g.CompositingQuality = CompositingQuality.HighSpeed; g.DrawImage(raw, new Rectangle(0, 0, sw, sh)); }
+      int n = sw * sh;
+      if (cur == null || cur.Length != n) { cur = new int[n]; prev = new int[n]; reset = true; }
+      var data = scaled.LockBits(new Rectangle(0, 0, sw, sh), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+      try { for (int y = 0; y < sh; y++) Marshal.Copy(data.Scan0 + y * data.Stride, cur, y * sw, sw); } finally { scaled.UnlockBits(data); }
+      int x0 = 0, y0 = 0, x1 = sw, y1 = sh;
+      if (!reset) {
+        x0 = sw; y0 = sh; x1 = 0; y1 = 0;
+        for (int y = 0; y < sh; y++) {
+          int row = y * sw, l = 0, r = sw - 1;
+          while (l < sw && cur[row + l] == prev[row + l]) l++;
+          if (l == sw) continue;
+          while (cur[row + r] == prev[row + r]) r--;
+          if (y < y0) y0 = y;
+          y1 = y + 1;
+          if (l < x0) x0 = l;
+          if (r + 1 > x1) x1 = r + 1;
+        }
+        if (x1 == 0) { idle = Math.Min(100, idle + 10); continue; }
+        // JPEG works in 16-pixel blocks: aligned patches leave no seams next to unchanged areas.
+        x0 &= ~15; y0 &= ~15; x1 = Math.Min(sw, (x1 + 15) & ~15); y1 = Math.Min(sh, (y1 + 15) & ~15);
+      }
+      idle = 0;
+      var swap = prev; prev = cur; cur = swap;
+      var rect = new Rectangle(x0, y0, x1 - x0, y1 - y0);
+      var ms = new MemoryStream();
+      using (var part = scaled.Clone(rect, PixelFormat.Format24bppRgb)) {
+        var ps = new EncoderParameters(1); ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)q);
+        part.Save(ms, jpeg, ps);
+      }
+      var head = new byte[12];
+      ushort[] fields = { (ushort)x0, (ushort)y0, (ushort)rect.Width, (ushort)rect.Height, (ushort)sw, (ushort)sh };
+      for (int i = 0; i < 6; i++) BitConverter.GetBytes(fields[i]).CopyTo(head, i * 2);
+      lock (gate) credits--;
+      Emit(1, head, ms.GetBuffer(), (int)ms.Length);
+      lastFrame = timer.ElapsedMilliseconds;
+    }
+  }
+
+  static void DrawCursor(Graphics g, Rectangle b) {
+    var ci = new CURSORINFO(); ci.size = Marshal.SizeOf(typeof(CURSORINFO));
+    if (!GetCursorInfo(ref ci) || (ci.flags & 1) == 0) return;
+    ICONINFO ii; if (!GetIconInfo(ci.cursor, out ii)) return;
+    if (ii.mask != IntPtr.Zero) DeleteObject(ii.mask);
+    if (ii.color != IntPtr.Zero) DeleteObject(ii.color);
+    int x = ci.pos.x - b.X - ii.hotX, y = ci.pos.y - b.Y - ii.hotY;
+    if (x >= b.Width || y >= b.Height || x < -128 || y < -128) return;
+    IntPtr hdc = g.GetHdc();
+    try { DrawIconEx(hdc, x, y, ci.cursor, 0, 0, 0, IntPtr.Zero, 3); } finally { g.ReleaseHdc(hdc); }
+  }
+
+  static void Send(INPUT input) { SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT))); }
+  static void Mouse(uint flags, uint data, int dx, int dy) {
+    var i = new INPUT(); i.type = 0; i.u.mi.flags = flags; i.u.mi.data = data; i.u.mi.dx = dx; i.u.mi.dy = dy; Send(i);
+  }
+  static void Key(int vk, bool ext, bool down) {
+    var i = new INPUT(); i.type = 1; i.u.ki.vk = (ushort)vk; i.u.ki.scan = (ushort)MapVirtualKey((uint)vk, 0);
+    i.u.ki.flags = (ext ? 1u : 0u) | (down ? 0u : 2u); Send(i);
+    lock (keysDown) { if (down) keysDown.Add(vk | (ext ? 0x10000 : 0)); else keysDown.Remove(vk | (ext ? 0x10000 : 0)); }
+  }
+  static void Unicode(ushort c) {
+    var i = new INPUT(); i.type = 1; i.u.ki.scan = c; i.u.ki.flags = 4; Send(i);
+    i.u.ki.flags = 6; Send(i);
+  }
+
+  // x and y are 0..65535 across the shared monitor; SendInput wants 0..65535 across the whole virtual desktop.
+  static void MoveTo(int nx, int ny) {
+    Rectangle b; lock (gate) b = screens[monitor];
+    int px = b.X + (int)Math.Round((double)nx * (b.Width - 1) / 65535), py = b.Y + (int)Math.Round((double)ny * (b.Height - 1) / 65535);
+    int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77), vw = Math.Max(2, GetSystemMetrics(78)), vh = Math.Max(2, GetSystemMetrics(79));
+    Mouse(0x8001 | 0x4000, 0, (int)Math.Round((px - vx) * 65535.0 / (vw - 1)), (int)Math.Round((py - vy) * 65535.0 / (vh - 1)));
+  }
+
+  static void ReleaseAll() {
+    for (int i = 0; i < 3; i++) if (buttonsDown[i]) { buttonsDown[i] = false; Mouse(buttonFlags[i] << 1, 0, 0, 0); }
+    int[] keys; lock (keysDown) { keys = new int[keysDown.Count]; keysDown.CopyTo(keys); }
+    foreach (var k in keys) Key(k & 0xffff, (k & 0x10000) != 0, false);
+  }
+
+  static void ReadCommands() {
+    var input = new StreamReader(Console.OpenStandardInput(), Encoding.ASCII);
+    string line;
+    while ((line = input.ReadLine()) != null && line != "q") {
+      var a = line.Split(' ');
+      try {
+        switch (a[0]) {
+          case "m": MoveTo(int.Parse(a[1]), int.Parse(a[2])); break;
+          case "b": { int i = int.Parse(a[1]); bool down = a[2] == "1"; if (buttonsDown[i] == down) break; buttonsDown[i] = down; Mouse(down ? buttonFlags[i] : buttonFlags[i] << 1, 0, 0, 0); break; }
+          case "w": { int dy = int.Parse(a[1]), dx = int.Parse(a[2]); if (dy != 0) Mouse(0x800, unchecked((uint)dy), 0, 0); if (dx != 0) Mouse(0x1000, unchecked((uint)dx), 0, 0); break; }
+          case "k": Key(int.Parse(a[1]), a[2] == "1", a[3] == "1"); break;
+          case "t": for (int i = 1; i < a.Length; i++) Unicode(Convert.ToUInt16(a[i], 16)); break;
+          case "x": ReleaseAll(); break;
+          case "f": lock (gate) { credits = Math.Min(4, credits + int.Parse(a[1])); Monitor.PulseAll(gate); } break;
+          case "r": lock (gate) { full = true; Monitor.PulseAll(gate); } break;
+          case "c":
+            LoadScreens();
+            lock (gate) { int m = int.Parse(a[1]); monitor = m < 0 || m >= screens.Length ? primary : m; maxWidth = int.Parse(a[2]); quality = int.Parse(a[3]); full = true; Monitor.PulseAll(gate); }
+            EmitMonitors(); break;
+        }
+      } catch (Exception e) { Status("Screen helper: " + e.Message); }
+    }
+    ReleaseAll();
+    lock (gate) { quit = true; Monitor.PulseAll(gate); }
+  }
+}
+`;
+// KeyboardEvent.code → Windows virtual-key code; 0x100 marks keys sent with the extended flag. A Map, so no viewer-sent
+// name can reach Object.prototype. Codes are physical key positions: this PC's keyboard layout decides the character.
+const SCREEN_KEYS=new Map(Object.entries({Backspace:8,Tab:9,Enter:13,NumpadEnter:0x10d,ShiftLeft:0xa0,ShiftRight:0xa1,ControlLeft:0xa2,ControlRight:0x1a3,AltLeft:0xa4,AltRight:0x1a5,MetaLeft:0x15b,MetaRight:0x15c,ContextMenu:0x15d,
+ Pause:0x13,CapsLock:0x14,Escape:0x1b,Space:0x20,PageUp:0x121,PageDown:0x122,End:0x123,Home:0x124,ArrowLeft:0x125,ArrowUp:0x126,ArrowRight:0x127,ArrowDown:0x128,PrintScreen:0x12c,Insert:0x12d,Delete:0x12e,NumLock:0x190,ScrollLock:0x91,
+ Semicolon:0xba,Equal:0xbb,Comma:0xbc,Minus:0xbd,Period:0xbe,Slash:0xbf,Backquote:0xc0,BracketLeft:0xdb,Backslash:0xdc,BracketRight:0xdd,Quote:0xde,IntlBackslash:0xe2,
+ NumpadMultiply:0x6a,NumpadAdd:0x6b,NumpadSubtract:0x6d,NumpadDecimal:0x6e,NumpadDivide:0x16f,AudioVolumeMute:0x1ad,AudioVolumeDown:0x1ae,AudioVolumeUp:0x1af,MediaTrackNext:0x1b0,MediaTrackPrevious:0x1b1,MediaStop:0x1b2,MediaPlayPause:0x1b3}));
+for(let i=0;i<26;i++)SCREEN_KEYS.set('Key'+String.fromCharCode(65+i),65+i);
+for(let i=0;i<10;i++){SCREEN_KEYS.set('Digit'+i,48+i);SCREEN_KEYS.set('Numpad'+i,0x60+i);}
+for(let i=1;i<=24;i++)SCREEN_KEYS.set('F'+i,0x6f+i);
+// One viewer message as helper command lines; '' for anything malformed. Pointer positions are 0..1 across the shared monitor.
+function screenCommands(m){
+ if(!m||typeof m!=='object')return '';
+ const num=(v,lo,hi)=>typeof v==='number'&&Number.isFinite(v)?Math.round(Math.min(hi,Math.max(lo,v))):null;
+ const at=()=>{const x=num(typeof m.x==='number'?m.x*65535:NaN,0,65535),y=num(typeof m.y==='number'?m.y*65535:NaN,0,65535);return x===null||y===null?null:`m ${x} ${y}\n`;};
+ const key=(code,down)=>{const k=SCREEN_KEYS.get(code);return k===undefined?'':`k ${k&0xff} ${k>>8} ${down?1:0}\n`;};
+ switch(m.t){
+  case 'ack':return 'f 1\n';
+  case 'refresh':return 'r\n';
+  case 'release':return 'x\n';
+  case 'move':return at()||'';
+  case 'button':{if(![0,1,2].includes(m.b)||typeof m.down!=='boolean')return '';const move=m.x===undefined&&m.y===undefined?'':at();return move===null?'':move+`b ${m.b} ${m.down?1:0}\n`;}
+  case 'wheel':{const dy=num(m.dy??0,-2400,2400),dx=num(m.dx??0,-2400,2400);return dy===null||dx===null||!dy&&!dx?'':`w ${dy} ${dx}\n`;}
+  case 'key':return typeof m.code==='string'&&typeof m.down==='boolean'?key(m.code,m.down):'';
+  // Typed text goes as Unicode characters, independent of this PC's layout; line breaks and tabs press Enter and Tab.
+  case 'text':{
+   if(typeof m.text!=='string'||m.text.length>2000)return '';
+   let out='',run=[];const flush=()=>{for(let i=0;i<run.length;i+=64)out+='t '+run.slice(i,i+64).join(' ')+'\n';run=[];};
+   for(const ch of m.text.replace(/\r\n?/g,'\n')){
+    if(ch==='\n'||ch==='\t'){flush();const c=ch==='\n'?'Enter':'Tab';out+=key(c,true)+key(c,false);}
+    else if(ch>=' '&&ch!=='\x7f')for(let i=0;i<ch.length;i++)run.push(ch.charCodeAt(i).toString(16));
+   }
+   flush();return out;
+  }
+  case 'config':{const mon=num(m.monitor??-1,-1,63),w=num(m.width??1280,320,7680),q=num(m.quality??60,10,95);return mon===null||w===null||q===null?'':`c ${mon} ${w} ${q}\n`;}
+ }
+ return '';
+}
+// Tailscale's address ranges: IPv4 100.64.0.0/10 (CGNAT) and IPv6 fd7a:115c:a1e0::/48.
+export const tailnetAddress=a=>/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+$/.test(a)||/^fd7a:115c:a1e0:/i.test(a);
+// This PC's MagicDNS name and tailnet addresses from `tailscale status --json`, or null (not installed, not running, logged out).
+export async function tailscaleSelf(){
+ const bins=process.platform==='win32'?['tailscale',path.join(process.env.ProgramFiles||'C:\\Program Files','Tailscale','tailscale.exe')]:process.platform==='darwin'?['tailscale','/Applications/Tailscale.app/Contents/MacOS/Tailscale']:['tailscale'];
+ for(const bin of bins){
+  let out;try{out=(await exec(bin,['status','--json','--peers=false'],{timeout:5000,maxBuffer:4*1024*1024,windowsHide:true})).stdout;}catch(e){if(e.code==='ENOENT')continue;return null;}
+  try{
+   const s=JSON.parse(out);if(s.BackendState!=='Running')return null;
+   const name=String(s.Self?.DNSName||'').replace(/\.$/,'').toLowerCase(),ips=(s.Self?.TailscaleIPs||[]).filter(ip=>typeof ip==='string'&&tailnetAddress(ip));
+   return {name:/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(name)?name:'',ips};
+  }catch{return null;}
+ }
+ return null;
+}
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
@@ -1624,22 +1895,113 @@ async function spend(sync){
  const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();},4000);refreshTimer.unref();
  // Fill the account cache shortly after startup, so the first Choose provider accounts… opens instantly.
  const accountTimer=setTimeout(()=>refreshAccounts().catch(()=>{}),1000);accountTimer.unref();
- const staticFiles=new Map();const csp="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+ // The page's own host as a ws: source too: older Safari doesn't count ws: under 'self' (the Screen page's WebSocket).
+ const staticFiles=new Map();const csp=host=>`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self' ws://${host}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
  const digest=data=>createHash('sha1').update(data).digest('base64url').slice(0,12);
  const staticFile=async file=>{const st=await fs.stat(file);let c=staticFiles.get(file);if(c?.mtime!==st.mtimeMs||c.size!==st.size){const data=await fs.readFile(file);c={mtime:st.mtimeMs,size:st.size,data,hash:digest(data)};staticFiles.set(file,c);}return c;};
+ // This PC's Tailscale name and addresses, looked up at most once a minute; options.tailscale replaces the lookup (tests).
+ let tsCache=null,tsAt=0,tsPending;
+ const tailscale=()=>Date.now()-tsAt<60000?Promise.resolve(tsCache):tsPending??=(options.tailscale||tailscaleSelf)().catch(()=>null).then(v=>{tsCache=v;tsAt=Date.now();tsPending=undefined;return v;});
+ // Host/Origin gate for API requests and the screen WebSocket (CORS doesn't cover WebSockets, so its Origin check matters most).
+ // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's adapter addresses, still rejecting DNS-rebinding names.
+ // OMP_WEB_PUBLIC_HOSTS names are matched exactly too, so any other name (DNS rebinding) is still refused. So is this PC's own
+ // MagicDNS name while the companion listens on its tailnet address: only the tailnet resolves it, to this PC.
+ async function checkOrigin(req){
+  const a=server.address(),port=a?.port,wild=a&&['0.0.0.0','::'].includes(a.address),names=new Set(['127.0.0.1','localhost',...publicHosts]);
+  if(wild){for(const list of Object.values(os.networkInterfaces()))for(const n of list||[])names.add(n.family==='IPv6'?`[${n.address}]`:n.address);}else if(a?.address)names.add(a.family==='IPv6'?`[${a.address}]`:a.address);
+  const host=String(req.headers.host||'').toLowerCase(),origin=req.headers.origin;
+  const allowed=()=>{const hosts=new Set([...names].map(n=>`${n}:${port}`));return {host:hosts.has(host),origin:!origin||allowedOrigins.has(origin)||hosts.has(origin.replace(/^http:\/\//,''))&&origin.startsWith('http://')};};
+  let ok=allowed();
+  // The MagicDNS name is only looked up when nothing else matched, so requests to 127.0.0.1 or a LAN address never wait for it.
+  if(!(ok.host&&ok.origin)&&a&&(wild||tailnetAddress(a.address))){const ts=await tailscale();if(ts?.name&&(wild||ts.ips.includes(a.address))){names.add(ts.name);ok=allowed();}}
+  if(!ok.host)throw error('Invalid Host header.',403);
+  if(!ok.origin)throw error('Origin not allowed. Open the local dashboard or set OMP_ALLOWED_ORIGINS to the exact hosted origin.',403);
+  return {origin,host};
+ }
+ // ---------- screen sharing ----------
+ // Off unless turned on: OMP_WEB_SCREEN=1, or the desktop app's tray item (setScreen). Seeing and controlling the PC takes the
+ // same token and Host/Origin checks as the API: POST /api/screen/ticket (token) returns a 30-second, single-use ticket bound to
+ // the caller's address, which opens the WebSocket at /api/screen/ws (browsers can't put an Authorization header on one).
+ // One viewer at a time: a new one replaces the previous, so two devices never fight over the mouse.
+ const screenSupported=Boolean(options.screenCommand)||process.platform==='win32';
+ let screenOn=screenSupported&&Boolean(options.screen??process.env.OMP_WEB_SCREEN==='1'),viewer=null;
+ const screenTickets=new Map();
+ const screenOff=()=>error(options.desktop?'Screen sharing is off. Turn on "Allow screen sharing and control" in the OMP Control Room tray menu on this PC.':'Screen sharing is off. Start the companion with OMP_WEB_SCREEN=1 on this PC to allow it.',409);
+ const peer=a=>String(a||'').replace(/^::ffff:/,'');
+ const wsSend=(socket,op,data)=>{
+  if(socket.destroyed||!socket.writable)return;const n=data.length,h=Buffer.alloc(n<126?2:n<65536?4:10);h[0]=0x80|op;
+  if(n<126)h[1]=n;else if(n<65536){h[1]=126;h.writeUInt16BE(n,2);}else{h[1]=127;h.writeBigUInt64BE(BigInt(n),2);}
+  socket.cork();socket.write(h);socket.write(data);socket.uncork();
+ };
+ const wsClose=(socket,code,reason)=>{const r=Buffer.from(String(reason)).subarray(0,123),p=Buffer.alloc(2+r.length);p.writeUInt16BE(code);r.copy(p,2);wsSend(socket,8,p);socket.end();setTimeout(()=>socket.destroy(),2000).unref();};
+ // notify=false: a takeover, where onScreen reports the new viewer right after (no "nobody is viewing" in between).
+ function dropViewer(code=1000,reason='',notify=true){
+  const v=viewer;if(!v)return;viewer=null;clearInterval(v.ping);
+  if(!v.socket.destroyed)wsClose(v.socket,code,reason);
+  const h=v.helper;if(h&&h.exitCode===null){h.stdin.end('x\nq\n');const t=setTimeout(()=>h.kill(),3000);t.unref();h.once('exit',()=>clearTimeout(t));}
+  if(notify)try{options.onScreen?.(null);}catch(e){console.error('Screen hook failed:',e.message);}
+ }
+ // Commands wait in `queue` until the helper exists; frame credits start with the viewer's first config, so no frame is captured at the wrong size.
+ const toHelper=(v,s)=>{if(!s)return;if(v.helper)v.helper.stdin.write(s);else v.queue+=s;};
+ function startHelper(v){
+  const [cmd,args]=options.screenCommand||[path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-Command','Add-Type -TypeDefinition ([IO.File]::ReadAllText($env:OMP_SCREEN_SOURCE)) -ReferencedAssemblies System.Drawing,System.Windows.Forms; [OmpScreenHelper]::Run()']];
+  const source=path.join(dataDir,'screen-helper.cs');
+  return (options.screenCommand?Promise.resolve():syncFile(source,SCREEN_HELPER)).then(()=>{
+   if(viewer!==v)return;
+   const h=v.helper=spawn(cmd,args,{stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,OMP_SCREEN_SOURCE:source}});
+   let out=Buffer.alloc(0),err='';
+   h.stdin.on('error',()=>{});h.stderr.on('data',d=>{err=(err+d).slice(-2000);});
+   h.stdout.on('data',d=>{
+    out=out.length?Buffer.concat([out,d]):d;
+    while(out.length>=4){
+     const n=out.readUInt32LE(0);if(n>64*1024*1024){h.kill();return;}if(out.length<4+n)break;
+     const msg=out.subarray(4,4+n);out=out.subarray(4+n);
+     if(viewer===v)msg[0]===1?wsSend(v.socket,2,msg):wsSend(v.socket,1,msg.subarray(1));
+    }
+   });
+   h.on('error',e=>{err=e.message;});
+   h.on('close',code=>{if(viewer===v)dropViewer(1011,`Screen capture stopped (${err.trim().split('\n').pop()||`exit code ${code}`}).`);});
+   h.stdin.write(v.queue);v.queue='';
+  });
+ }
+ function startViewer(socket,head,address){
+  if(viewer)dropViewer(4001,'Another device is now viewing this PC.',false);
+  const v={socket,address:peer(address),since:now(),lastSeen:Date.now(),buf:Buffer.from(head),queue:'',started:false};
+  viewer=v;socket.setNoDelay(true);
+  socket.on('close',()=>{if(viewer===v)dropViewer();});
+  socket.on('data',d=>{v.lastSeen=Date.now();v.buf=v.buf.length?Buffer.concat([v.buf,d]):d;readViewer(v);});
+  // Browsers answer pings by themselves: a viewer that stops answering (phone asleep, network gone) frees the PC after 45 s.
+  v.ping=setInterval(()=>{if(Date.now()-v.lastSeen>45000)dropViewer(1001,'The viewer stopped answering.');else wsSend(socket,9,Buffer.alloc(0));},15000);v.ping.unref();
+  try{options.onScreen?.({address:v.address});}catch(e){console.error('Screen hook failed:',e.message);}
+  startHelper(v).catch(e=>{if(viewer===v)dropViewer(1011,`Screen capture could not start: ${e.message}`);});
+  readViewer(v);
+ }
+ // Client frames are masked; only small, unfragmented text messages are accepted (input events and acks).
+ function readViewer(v){
+  while(viewer===v&&v.buf.length>=2){
+   const b=v.buf,op=b[0]&15;let n=b[1]&127,off=2;
+   if(!(b[0]&0x80)||!(b[1]&0x80)||n===127)return dropViewer(1002,'Unsupported WebSocket frame.');
+   if(n===126){if(b.length<4)return;n=b.readUInt16BE(2);off=4;}
+   if(n>65536)return dropViewer(1009,'Message too large.');
+   if(b.length<off+4+n)return;
+   const mask=b.subarray(off,off+4),data=Buffer.from(b.subarray(off+4,off+4+n));for(let i=0;i<n;i++)data[i]^=mask[i&3];
+   v.buf=b.subarray(off+4+n);
+   if(op===8)return dropViewer();
+   if(op===9){wsSend(v.socket,10,data);continue;}
+   if(op!==1)continue;
+   let m;try{m=JSON.parse(data.toString('utf8'));}catch{continue;}
+   toHelper(v,screenCommands(m));
+   if(m?.t==='config'&&!v.started){v.started=true;toHelper(v,'f 2\n');}
+  }
+ }
+ // The desktop app's tray turns screen sharing on and off at runtime; turning it off ends a running view at once.
+ const setScreen=on=>{screenOn=screenSupported&&Boolean(on);if(!screenOn){screenTickets.clear();dropViewer(4002,'Screen sharing was turned off on this PC.');}return screenOn;};
  const server=createServer(async(req,res)=>{
  // Big JSON (the viewed session's messages, transcripts, settings) goes out gzipped when the client accepts it; zlib runs off the event loop.
  const send=(status,headers,body)=>{if(body.length<1024||!/\bgzip\b/.test(req.headers['accept-encoding']||'')){res.writeHead(status,headers);res.end(body);return;}gzip(body,{level:1},(e,z)=>{if(res.headersSent)return;res.writeHead(status,e?headers:{...headers,'Content-Encoding':'gzip'});res.end(e?body:z);});};
  const json=(value,status=200)=>send(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'},JSON.stringify(value));
   try{
-   // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's LAN addresses, still rejecting DNS-rebinding names.
-   // OMP_WEB_PUBLIC_HOSTS names are matched exactly too, so any other name (DNS rebinding) is still refused.
-   const a=server.address(),port=a?.port,names=new Set(['127.0.0.1','localhost',...publicHosts]);
-   if(a&&['0.0.0.0','::'].includes(a.address)){for(const list of Object.values(os.networkInterfaces()))for(const n of list||[])names.add(n.family==='IPv6'?`[${n.address}]`:n.address);}else if(a?.address)names.add(a.family==='IPv6'?`[${a.address}]`:a.address);
-   const hosts=new Set([...names].map(n=>`${n}:${port}`));
-   if(!hosts.has(String(req.headers.host||'').toLowerCase()))throw error('Invalid Host header.',403);
-   const origin=req.headers.origin;const own=new Set([...hosts].map(h=>'http://'+h));
-   if(origin&&!own.has(origin)&&!allowedOrigins.has(origin))throw error('Origin not allowed. Open the local dashboard or set OMP_ALLOWED_ORIGINS to the exact hosted origin.',403);
+   const {origin,host}=await checkOrigin(req),port=server.address()?.port;
    if(origin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');res.setHeader('Access-Control-Allow-Private-Network','true');}
    if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
    const url=new URL(req.url,`http://127.0.0.1:${port}`);
@@ -1655,7 +2017,7 @@ async function spend(sync){
      if(options.desktop&&['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress))html=html.replace('</head>','<meta name="omp-desktop" content="1"/>\n</head>');
      data=Buffer.from(html);hash=digest(data);}
     const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.zip':'application/zip'};
-    const headers={'Content-Type':mime[ext]||'application/octet-stream','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':csp,'Cache-Control':ext!=='.html'&&url.searchParams.get('v')===hash?'public, max-age=31536000, immutable':'no-cache',ETag:`"${hash}"`};
+    const headers={'Content-Type':mime[ext]||'application/octet-stream','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':csp(host),'Cache-Control':ext!=='.html'&&url.searchParams.get('v')===hash?'public, max-age=31536000, immutable':'no-cache',ETag:`"${hash}"`};
     if(req.headers['if-none-match']===headers.ETag){res.writeHead(304,headers);res.end();return;}
     res.writeHead(200,headers);res.end(data);return;
    }
@@ -1708,6 +2070,7 @@ async function spend(sync){
    }
    if(req.method==='GET'&&url.pathname==='/api/log'){const file=insideSessions(url.searchParams.get('file'),['.log']);const fh=await fs.open(file,'r').catch(()=>{throw error('Log not found.',404);});try{const {size}=await fh.stat();const n=Math.min(size,128*1024);const buf=Buffer.alloc(n);await fh.read(buf,0,n,size-n);json({file,size,text:buf.toString('utf8')});}finally{await fh.close();}return;}
    if(req.method==='GET'&&url.pathname==='/api/browse'){json(await browse(url.searchParams.get('path')||''));return;}
+   if(req.method==='GET'&&url.pathname==='/api/screen'){json({supported:screenSupported,enabled:screenOn,desktop:Boolean(options.desktop),viewer:viewer&&{address:viewer.address,since:viewer.since}});return;}
    if(req.method!=='POST')throw error('Route not found.',404);
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);
    const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||url.pathname==='/api/enhance'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
@@ -1732,6 +2095,13 @@ async function spend(sync){
    // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
    if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist();json({provider,account});return;}
    if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
+   if(url.pathname==='/api/screen/ticket'){
+    if(!screenSupported)throw error('Screen sharing works when the companion runs on Windows.',409);
+    if(!screenOn)throw screenOff();
+    for(const [k,t] of screenTickets)if(t.expires<Date.now())screenTickets.delete(k);
+    if(screenTickets.size>=20)throw error('Too many screen requests. Try again in a minute.',429);
+    const ticket=randomBytes(32).toString('hex');screenTickets.set(ticket,{expires:Date.now()+30000,address:req.socket.remoteAddress});json({ticket});return;
+   }
    // Pauses and saves sessions first, like a quit: the OS may kill this process before any signal handler runs.
    // If the OS refuses, the panel keeps working and the paused sessions can be continued.
    if(url.pathname==='/api/shutdown'){await shutdownPc();json({ok:true});return;}
@@ -1818,6 +2188,23 @@ async function spend(sync){
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  });
+ // The screen WebSocket: same Host/Origin gate as every request, then a ticket that only the token could buy (POST /api/screen/ticket).
+ server.on('upgrade',async(req,socket,head)=>{
+  socket.on('error',()=>{});
+  try{
+   await checkOrigin(req);
+   const url=new URL(req.url,'http://localhost');
+   if(url.pathname!=='/api/screen/ws')throw error('Route not found.',404);
+   if(closing)throw error('The companion is closing.',503);
+   if(!screenOn)throw screenOff();
+   const id=url.searchParams.get('ticket')||'',t=screenTickets.get(id);screenTickets.delete(id);
+   if(!t||t.expires<Date.now()||t.address!==req.socket.remoteAddress)throw error('Screen ticket missing or expired. Open the Screen page again.',401);
+   const key=String(req.headers['sec-websocket-key']||'');
+   if(String(req.headers.upgrade).toLowerCase()!=='websocket'||req.headers['sec-websocket-version']!=='13'||!/^[A-Za-z0-9+/]{22}==$/.test(key))throw error('WebSocket handshake required.',400);
+   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')}\r\n\r\n`);
+   startViewer(socket,head,req.socket.remoteAddress);
+  }catch(e){const status=e.status||500;socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n${e.message}`);}
+ });
  // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
  const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
@@ -1832,10 +2219,12 @@ async function spend(sync){
   autoShutdown.firing=true;
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
+ // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
- await persist();return {server,store,token,password:Boolean(password),close,flush:()=>saveChain};
+// closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
+await persist();return {server,store,token,password:Boolean(password),close,flush:()=>saveChain,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';
@@ -1858,15 +2247,21 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
    // Exit with the restart code even if close() fails, so start.bat still starts the companion again.
    return async()=>{try{await app.close();}finally{process.exit(restartExit);}};
   }}:{}),
+  // Remote control should never be silent on the PC itself.
+  onScreen:v=>console.log(v?`Screen: ${v.address} is now viewing and controlling this PC.`:'Screen: the viewer disconnected.'),
  });
- app.server.listen(port,host,()=>{
+ app.server.listen(port,host,async()=>{
   // The token travels in the URL fragment, which browsers never send to the server or in Referer headers. A password is never printed.
   const frag=process.env.OMP_WEB_NO_TOKEN==='1'||app.password?'':`#token=${app.token}`;
   const link=`http://${wild?'127.0.0.1':host}:${port}/${frag}`;
   const lan=wild?Object.values(os.networkInterfaces()).flat().filter(n=>n.family==='IPv4'&&!n.internal).map(n=>`http://${n.address}:${port}/${frag}`):[];
   const extra=String(process.env.OMP_WEB_PUBLIC_HOSTS||'').split(',').map(h=>h.trim().toLowerCase()).filter(Boolean).map(h=>`http://${h}:${port}/${frag}`);
+  // This PC's MagicDNS name works without OMP_WEB_PUBLIC_HOSTS while the companion listens on its tailnet address.
+  const ts=wild||tailnetAddress(host)?await tailscaleSelf():null;
+  const tailnet=ts?.name&&(wild||ts.ips.includes(host))?[`http://${ts.name}:${port}/${frag}`]:[];
   const auth=app.password?'Password required (OMP_WEB_PASSWORD).\n':frag?`Connection token: ${app.token}\n`:'No token required: anyone who can reach this port has full control.\n';
-  console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${extra.map(l=>`Host: ${l}\n`).join('')}${auth}\nYour provider credentials remain in OMP. Keep this process running.\n`);
+  const screen=process.env.OMP_WEB_SCREEN!=='1'?'':process.platform==='win32'?'Screen sharing is on (OMP_WEB_SCREEN=1): the password or token also lets a device see and control this PC.\n':'OMP_WEB_SCREEN is ignored: screen sharing works on Windows only.\n';
+  console.log(`\nOMP Control Room\n\nOpen: ${link}\n${lan.map(l=>`LAN:  ${l}\n`).join('')}${tailnet.map(l=>`Tailscale: ${l}\n`).join('')}${extra.map(l=>`Host: ${l}\n`).join('')}${auth}${screen}\nYour provider credentials remain in OMP. Keep this process running.\n`);
   // After a restart the dashboard that asked for it reconnects by itself, so no second browser tab.
   if(!process.env.OMP_WEB_NO_OPEN&&!handoff){const [cmd,args]=process.platform==='win32'?['rundll32',['url.dll,FileProtocolHandler',link]]:process.platform==='darwin'?['open',[link]]:['xdg-open',[link]];execFile(cmd,args,{windowsHide:true},()=>{});}
  });

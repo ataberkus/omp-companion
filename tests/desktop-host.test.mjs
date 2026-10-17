@@ -21,13 +21,13 @@ async function freePort() {
   return port;
 }
 
-async function startHost(t, setup) {
+async function startHost(t, setup, env = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-desktop-host-'));
   const port = await freePort();
   if (setup) await setup(dir, port);
   const child = spawn(process.execPath, ['desktop/host.mjs'], {
     cwd: repoRoot, stdio: 'pipe', windowsHide: true,
-    env: { ...process.env, OMP_WEB_PORT: String(port), OMP_WEB_DATA_DIR: dir, PI_CODING_AGENT_DIR: dir, OMP_SESSIONS_DIR: join(dir, 'sessions'), OMP_BIN: process.execPath, OMP_WEB_NO_UPDATE: '1' },
+    env: { ...process.env, OMP_WEB_PORT: String(port), OMP_WEB_DATA_DIR: dir, PI_CODING_AGENT_DIR: dir, OMP_SESSIONS_DIR: join(dir, 'sessions'), OMP_BIN: process.execPath, OMP_WEB_NO_UPDATE: '1', ...env },
   });
   const exited = new Promise(resolve => child.once('exit', code => resolve(code)));
   t.after(async () => {
@@ -65,6 +65,37 @@ test('host reports ready, serves the dashboard, answers busy/lan/links and quits
   assert.deepEqual(unknown, { id: 5, ok: false, error: 'Unknown command: nope' });
   assert.deepEqual(await request({ cmd: 'quit' }), { id: 6, ok: true });
   assert.equal(await exited, 0);
+});
+
+// Like network access, screen sharing starts off at every launch: OMP_WEB_SCREEN is for the plain companion, the tray decides here.
+test('host starts with screen sharing off and turns it on and off on request', async t => {
+  const { port, next, request } = await startHost(t, null, { OMP_WEB_SCREEN: '1' });
+  const { token } = await next();
+  const state = async () => (await (await fetch(`http://127.0.0.1:${port}/api/screen`, { headers: { Authorization: `Bearer ${token}` } })).json()).enabled;
+  assert.equal(await state(), false);
+  const on = process.platform === 'win32';
+  assert.equal((await request({ cmd: 'screen', on: true })).screen, on);
+  assert.equal(await state(), on);
+  assert.equal((await request({ cmd: 'screen', on: false })).screen, false);
+  assert.equal(await state(), false);
+});
+
+// An open screen WebSocket would keep server.close() waiting forever, so the LAN toggle would hang with a viewer connected.
+test('the LAN toggle rebinds with a screen viewer connected and sends the viewer away to reconnect', { skip: process.platform !== 'win32' && 'screen sharing is Windows only' }, async t => {
+  const { port, child, next, request } = await startHost(t);
+  const { token } = await next();
+  assert.equal((await request({ cmd: 'screen', on: true })).screen, true);
+  const { ticket } = await (await fetch(`http://127.0.0.1:${port}/api/screen/ticket`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' })).json();
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/screen/ws?ticket=${ticket}`);
+  await once(ws, 'open');
+  assert.deepEqual(await next(), { event: 'screen', address: '127.0.0.1' });
+  const closed = once(ws, 'close');
+  // The viewer-gone event comes before the reply, so read both lines in order instead of through request().
+  child.stdin.write(JSON.stringify({ id: 99, cmd: 'lan', on: true }) + '\n');
+  assert.deepEqual(await next(), { event: 'screen', address: null });
+  assert.deepEqual(await next(), { id: 99, ok: true, lan: true });
+  assert.equal((await closed)[0].code, 1001);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
 });
 
 test('a busy port is refused before workspace.json is touched', async t => {

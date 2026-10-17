@@ -221,7 +221,7 @@
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; }
+    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -304,6 +304,7 @@
     if (h === '/settings') return { kind: 'settings' };
     if (h === '/tools') return { kind: 'tools' };
     if (h === '/spend') return { kind: 'spend' };
+    if (h === '/screen') return { kind: 'screen' };
     return { kind: 'home' };
   }
   const selKey = () => { const c = current(); return c.kind === 'session' ? 's:' + c.id : c.kind === 'native' ? 'f:' + c.file : ''; };
@@ -429,6 +430,7 @@
       const prev = S.view;
       S.view = view; S.lastSig = ''; S.sideCounts = null; S.slash = null; keepSpaceAccept();
       leaveDraft(prev, c);
+      if (prev === 'screen:') leaveScreen();
       // Per-file caches only matter for recently viewed sessions; keep them bounded. The viewed preview moves to the newest end
       // first so the trim can't evict it, and a cached failure is dropped so it is fetched again.
       const pf = c.kind === 'native' ? c.file : c.kind === 'changes' && c.parent.startsWith('f:') ? c.parent.slice(2) : '';
@@ -448,6 +450,7 @@
     if (c.kind === 'settings') return buildSettings();
     if (c.kind === 'tools') return buildTools();
     if (c.kind === 'spend') return buildSpend();
+    if (c.kind === 'screen') return buildScreen();
     main().innerHTML = `
       <div class="topbar" id="topbar"></div>
       <div class="chat-plan" id="chatPlan" hidden></div>
@@ -526,7 +529,7 @@
 
   function update() {
     const c = current();
-    if (!S.token || c.kind === 'home' || c.kind === 'settings' || c.kind === 'tools' || c.kind === 'spend') return;
+    if (!S.token || c.kind === 'home' || c.kind === 'settings' || c.kind === 'tools' || c.kind === 'spend' || c.kind === 'screen') return;
     if (c.kind === 'sub') { loadSub(c.file); renderSub(c.file); return; }
     if (c.kind === 'changes') { if (S.store) renderChanges(c); return; }
     if (!S.store) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Loading…</div>'; return; }
@@ -2809,6 +2812,441 @@
       </tbody></table></div></div></section>`;
   }
 
+  // ---------- screen ----------
+  // The screen of the PC running the companion, live, with mouse, keyboard and touch sent back to it. Windows only, and off until
+  // allowed on the PC itself (tray item or OMP_WEB_SCREEN=1). Frames arrive over a WebSocket as JPEG patches of the area that
+  // changed; each drawn frame is acked and the PC sends the next only then, so a slow link gets fewer frames instead of a backlog.
+  // The socket opens with a single-use ticket bought with the token: browsers can't send the Authorization header on a WebSocket.
+  const SCREEN_QUALITY = { auto: 'Auto quality', sharp: 'Sharp', fast: 'Fast' };
+  const SCREEN_MODS = { ctrl: ['ControlLeft', 'Ctrl'], alt: ['AltLeft', 'Alt'], shift: ['ShiftLeft', 'Shift'], win: ['MetaLeft', 'Win'] };
+  // Keys a soft keyboard sends as keydown instead of text; everything else arrives through the hidden field's input events.
+  const SCREEN_NAMED = new Set(['Enter', 'Backspace', 'Tab', 'Escape', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ...Array.from({ length: 12 }, (_, i) => 'F' + (i + 1))]);
+  const SCREEN_TYPE = '\u00a0'; // the hidden field always holds this, so Backspace on an "empty" soft keyboard still has something to delete
+  S.screen = { info: null, error: '', state: 'idle', note: '', monitors: [], current: -1, mods: new Set(), held: new Set(), scale: 1, left: 0, top: 0, w: 0, h: 0, drawn: false, retries: 0, fps: 0, kbps: 0, frames: 0, bytes: 0, unacked: 0, scroll: false, sentWidth: 0, quality: 'auto', monitor: -1, viewOnly: false };
+  try { const p = JSON.parse(localStorage.getItem('omp-screen') || '{}'); if (Object.hasOwn(SCREEN_QUALITY, p.quality)) S.screen.quality = p.quality; if (Number.isInteger(p.monitor)) S.screen.monitor = p.monitor; S.screen.viewOnly = p.viewOnly === true; } catch {}
+  const saveScreenPrefs = () => { try { localStorage.setItem('omp-screen', JSON.stringify({ quality: S.screen.quality, monitor: S.screen.monitor, viewOnly: S.screen.viewOnly })); } catch {} };
+  let screenWs = null, screenRetry, screenInfoPoll, screenStats, screenResize, screenDraw = Promise.resolve(), screenMove = null, screenWheel = { dx: 0, dy: 0, queued: false }, screenTypePrev = SCREEN_TYPE;
+  const screenInput = () => S.screen.state === 'live' && !S.screen.viewOnly;
+  // Input is dropped in view-only mode; acks, config and refresh keep the picture coming.
+  function screenSend(m) {
+    if (screenWs?.readyState !== 1 || (S.screen.viewOnly && !['ack', 'config', 'refresh'].includes(m.t))) return;
+    screenWs.send(JSON.stringify(m));
+  }
+  function buildScreen() {
+    main().innerHTML = `<div class="topbar"><button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
+      <div class="title-block"><h1>Screen</h1><div class="meta" id="screenMeta"></div></div><div class="actions" id="screenActs"></div></div>
+      <div class="screen-view" id="screenView">
+        <div class="screen-bar" id="screenBar" hidden></div>
+        <div class="screen-stage" id="screenStage"><canvas id="screenCanvas" tabindex="0" hidden aria-label="The PC's screen. Click it to control the mouse; keys pressed here go to the PC."></canvas>
+          <div class="screen-note" id="screenNote" role="status" hidden></div><div class="screen-msg" id="screenMsg"></div></div>
+        <textarea id="screenType" class="screen-type" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Type on the PC"></textarea>
+      </div>`;
+    wireScreen();
+    renderScreen();
+    loadScreenInfo();
+  }
+  // `connect`: connect as soon as it's allowed (opening the page is the intent); false only reports why it isn't.
+  async function loadScreenInfo(connect = true) {
+    clearTimeout(screenInfoPoll);
+    try { S.screen.info = await api('/screen'); }
+    catch (e) { S.screen.error = e.message; }
+    if (current().kind !== 'screen') return;
+    const info = S.screen.info;
+    if (info?.enabled && connect && S.screen.state === 'idle') return screenConnect();
+    // Off: check again every few seconds, so turning it on at the PC connects the phone without a tap.
+    if (info?.supported && !info.enabled) screenInfoPoll = setTimeout(() => { if (current().kind === 'screen' && !document.hidden) loadScreenInfo(); }, 4000);
+    renderScreen();
+  }
+  async function screenConnect() {
+    const sc = S.screen;
+    screenDisconnect();
+    Object.assign(sc, { state: 'connecting', error: '', note: '', code: 0, w: 0, h: 0, drawn: false, scale: 1, unacked: 0, frames: 0, bytes: 0, fps: 0, kbps: 0 });
+    renderScreen();
+    let ticket;
+    try { ({ ticket } = await api('/screen/ticket', {})); }
+    catch (e) {
+      if (current().kind !== 'screen' || sc.state !== 'connecting') return;
+      Object.assign(sc, { state: 'error', error: e.message });
+      return loadScreenInfo(false);
+    }
+    if (current().kind !== 'screen' || sc.state !== 'connecting') return;
+    const ws = screenWs = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/screen/ws?ticket=${encodeURIComponent(ticket)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      if (screenWs !== ws) return;
+      sc.state = 'live'; sc.retries = 0;
+      screenConfig();
+      screenStats = setInterval(screenTick, 1000);
+      renderScreen();
+      $('#screenCanvas')?.focus({ preventScroll: true });
+    };
+    ws.onmessage = e => { if (screenWs === ws) screenMessage(e); };
+    ws.onclose = e => {
+      if (screenWs !== ws) return;
+      screenWs = null; clearInterval(screenStats); sc.held.clear();
+      const off = e.code === 4002, taken = e.code === 4001;
+      sc.code = e.code;
+      Object.assign(sc, { state: off ? 'idle' : 'error', error: off ? '' : e.reason || (sc.drawn ? 'The connection to the PC was lost.' : 'Could not connect to the PC\'s screen.') });
+      // Dropped links (Wi-Fi hop, the companion changing its network access) retry a few times; another device taking over,
+      // a capture failure (1011) or sharing being turned off don't.
+      if (!off && !taken && e.code !== 1011 && sc.retries < 5 && current().kind === 'screen' && !document.hidden) {
+        sc.retries++;
+        screenRetry = setTimeout(() => { if (current().kind === 'screen' && sc.state === 'error') screenConnect(); }, 1500 * sc.retries);
+      }
+      if (off) return loadScreenInfo(false);
+      renderScreen();
+    };
+  }
+  function screenDisconnect() {
+    clearTimeout(screenRetry); clearInterval(screenStats);
+    const ws = screenWs; screenWs = null;
+    ws?.close(1000); // the companion releases held keys and buttons when the viewer goes
+    S.screen.held.clear(); S.screen.state = 'idle';
+  }
+  function leaveScreen() {
+    if (!S.screen) return;
+    screenDisconnect(); clearTimeout(screenInfoPoll); clearTimeout(screenResize);
+    if (document.fullscreenElement?.id === 'screenView') document.exitFullscreen?.().catch(() => {});
+  }
+  // Auto sizes the picture to this display's pixels (the PC never sends more than its own resolution).
+  function screenConfig() {
+    const sc = S.screen, stage = $('#screenStage');
+    const width = sc.quality === 'sharp' ? 7680 : sc.quality === 'fast' ? 960 : Math.max(640, Math.min(1920, Math.round((stage?.clientWidth || 1280) * (devicePixelRatio || 1))));
+    sc.sentWidth = width;
+    screenSend({ t: 'config', monitor: sc.monitor, width, quality: sc.quality === 'sharp' ? 80 : sc.quality === 'fast' ? 40 : 60 });
+  }
+  const screenImage = blob => typeof createImageBitmap === 'function' ? createImageBitmap(blob) : new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(blob);
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('bad frame')); };
+    img.src = url;
+  });
+  // Binary frame: [1][u16 LE x, y, w, h, frameWidth, frameHeight][JPEG of that patch]. Text: monitors list or a status line.
+  // Patches decode in order on one chain; a hidden tab stops acking, so the PC stops sending until it's visible again.
+  function screenMessage(e) {
+    const sc = S.screen;
+    if (typeof e.data === 'string') {
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.t === 'monitors' && Array.isArray(m.list)) { sc.monitors = m.list; sc.current = m.current; renderScreenBar(); }
+      else if (m.t === 'status') { sc.note = String(m.text || ''); renderScreen(); }
+      return;
+    }
+    if (!(e.data instanceof ArrayBuffer) || e.data.byteLength < 14) return;
+    const d = new DataView(e.data);
+    if (d.getUint8(0) !== 1) return;
+    const [x, y, , , fw, fh] = [0, 1, 2, 3, 4, 5].map(i => d.getUint16(1 + i * 2, true));
+    const blob = new Blob([new Uint8Array(e.data, 13)], { type: 'image/jpeg' });
+    sc.frames++; sc.bytes += e.data.byteLength;
+    screenDraw = screenDraw.then(() => screenImage(blob)).then(img => {
+      const c = $('#screenCanvas');
+      if (!c) return;
+      if (c.width !== fw || c.height !== fh || sc.w !== fw) { c.width = fw; c.height = fh; sc.w = fw; sc.h = fh; layoutScreen(); }
+      c.getContext('2d').drawImage(img, x, y);
+      img.close?.();
+      if (!sc.drawn) { sc.drawn = true; renderScreen(); }
+    }).catch(() => {}).then(() => { if (document.hidden) sc.unacked++; else screenSend({ t: 'ack' }); });
+  }
+  function screenTick() {
+    const sc = S.screen;
+    sc.fps = sc.frames; sc.kbps = Math.round(sc.bytes / 1024); sc.frames = sc.bytes = 0;
+    renderScreenMeta();
+  }
+  // Fit the picture in the stage, then apply pinch zoom (scale) and pan (left/top); panning stops at the picture's edges.
+  function layoutScreen() {
+    const sc = S.screen, stage = $('#screenStage'), c = $('#screenCanvas');
+    if (!stage || !c || !sc.w) return;
+    const W = stage.clientWidth, H = stage.clientHeight, fit = Math.min(W / sc.w, H / sc.h), w = sc.w * fit * sc.scale, h = sc.h * fit * sc.scale;
+    const place = (v, size, view) => size <= view ? (view - size) / 2 : Math.min(0, Math.max(view - size, v));
+    sc.left = place(sc.left, w, W); sc.top = place(sc.top, h, H);
+    c.style.cssText = `width:${w}px;height:${h}px;left:${sc.left}px;top:${sc.top}px`;
+  }
+  function zoomScreen(factor, px, py) {
+    const sc = S.screen, was = sc.scale > 1.01, s = Math.min(8, Math.max(1, sc.scale * factor)), k = s / sc.scale;
+    sc.left = px - (px - sc.left) * k; sc.top = py - (py - sc.top) * k; sc.scale = s;
+    layoutScreen();
+    if (was !== s > 1.01) renderScreenBar();
+  }
+  // Pointer position as 0..1 across the picture; the companion maps it onto the shared display.
+  function screenPos(e) {
+    const r = $('#screenCanvas').getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+  }
+  // Sticky Ctrl/Alt/Shift/Win from the toolbar wrap the next key, click or typed character, then clear.
+  function screenWithMods(fn, extra = []) {
+    const codes = [...new Set([...extra, ...S.screen.mods])].map(m => SCREEN_MODS[m][0]);
+    for (const code of codes) screenSend({ t: 'key', code, down: true });
+    fn();
+    for (const code of codes.reverse()) screenSend({ t: 'key', code, down: false });
+    if (S.screen.mods.size) { S.screen.mods.clear(); renderScreenBar(); }
+  }
+  const screenTap = (code, extra) => screenWithMods(() => { screenSend({ t: 'key', code, down: true }); screenSend({ t: 'key', code, down: false }); }, extra);
+  const screenClick = (b, p) => screenWithMods(() => { screenSend({ t: 'button', b, down: true, ...p }); screenSend({ t: 'button', b, down: false, ...p }); });
+  const charCode = ch => /^[a-z]$/i.test(ch) ? 'Key' + ch.toUpperCase() : /^\d$/.test(ch) ? 'Digit' + ch : ch === ' ' ? 'Space' : '';
+  function flushScreenMove() { if (screenMove) { screenSend({ t: 'move', ...screenMove }); screenMove = null; } }
+  function queueScreenMove(p) { const queued = screenMove; screenMove = p; if (!queued) requestAnimationFrame(flushScreenMove); }
+  // Wheel units: 120 is one notch. Positive dy scrolls up, positive dx scrolls right (Windows' convention).
+  function queueScreenWheel(dx, dy) {
+    screenWheel.dx += dx; screenWheel.dy += dy;
+    if (screenWheel.queued) return;
+    screenWheel.queued = true;
+    requestAnimationFrame(() => {
+      const dx = Math.trunc(screenWheel.dx), dy = Math.trunc(screenWheel.dy);
+      screenWheel = { dx: screenWheel.dx - dx, dy: screenWheel.dy - dy, queued: false };
+      if (dx || dy) screenSend({ t: 'wheel', dx, dy });
+    });
+  }
+  function releaseScreenKeys() { if (S.screen.held.size) { S.screen.held.clear(); screenSend({ t: 'release' }); } }
+  // Soft keyboards: diff the hidden field against what it held before, sending the deleted count as Backspace and the rest as
+  // text. Composing keyboards (Android) rewrite the current word in place, so the field resets only once composition ends.
+  function resetScreenType(t) { t.value = SCREEN_TYPE; screenTypePrev = SCREEN_TYPE; try { t.setSelectionRange(1, 1); } catch {} }
+  function screenTyped(t, composing) {
+    const v = t.value, prev = screenTypePrev;
+    let i = 0;
+    while (i < v.length && i < prev.length && v[i] === prev[i]) i++;
+    const back = prev.length - i, add = v.slice(i);
+    if (screenInput()) {
+      for (let k = 0; k < back; k++) screenTap('Backspace');
+      // With a sticky modifier, a single letter is a shortcut (Ctrl+C), not text.
+      const code = add && S.screen.mods.size && [...add].length === 1 ? charCode(add.toLowerCase()) : '';
+      if (code) screenTap(code);
+      else if (add) screenSend({ t: 'text', text: add });
+    }
+    if (composing) screenTypePrev = v; else resetScreenType(t);
+  }
+  function wireScreen() {
+    const stage = $('#screenStage'), c = $('#screenCanvas'), bar = $('#screenBar'), type = $('#screenType');
+    // Mouse and pen: exact pointer, buttons, wheel. Only on the picture itself; the letterbox around it does nothing.
+    stage.addEventListener('contextmenu', e => e.preventDefault());
+    stage.addEventListener('pointerdown', e => {
+      // Connect/Reconnect over the picture are buttons, not the PC: WebKit drops the click of a cancelled touch pointerdown.
+      if (e.target.closest('#screenMsg')) return;
+      if (e.pointerType === 'touch') return touchDown(e);
+      if (e.target !== c) return;
+      c.focus({ preventScroll: true });
+      if (!screenInput() || e.button > 2) return;
+      e.preventDefault(); c.setPointerCapture(e.pointerId);
+      screenMove = null;
+      screenSend({ t: 'button', b: e.button, down: true, ...screenPos(e) });
+    });
+    stage.addEventListener('pointermove', e => {
+      if (e.pointerType === 'touch') return touchMove(e);
+      if (screenInput() && (e.target === c || c.hasPointerCapture(e.pointerId))) queueScreenMove(screenPos(e));
+    });
+    stage.addEventListener('pointerup', e => {
+      if (e.pointerType === 'touch') return touchUp(e, false);
+      if (!screenInput() || e.button > 2 || !c.hasPointerCapture(e.pointerId)) return;
+      screenMove = null;
+      screenSend({ t: 'button', b: e.button, down: false, ...screenPos(e) });
+    });
+    stage.addEventListener('pointercancel', e => { if (e.pointerType === 'touch') touchUp(e, true); else if (screenInput()) screenSend({ t: 'release' }); });
+    stage.addEventListener('wheel', e => {
+      e.preventDefault();
+      if (!screenInput()) return;
+      const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 360 : 1.2;
+      queueScreenWheel(e.deltaX * k, -e.deltaY * k);
+    }, { passive: false });
+    // Safari pinch-zooms and rubber-bands the whole page despite touch-action:none; cancelling touchmove and Safari's gesture
+    // events keeps those on the picture. touchstart stays uncancelled: WebKit would drop the click of buttons over the picture.
+    stage.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+    for (const ev of ['gesturestart', 'gesturechange']) stage.addEventListener(ev, e => e.preventDefault());
+    // Physical keyboard: every key by its position (KeyboardEvent.code), so the PC's own layout decides the character.
+    // Stopping propagation keeps the dashboard's shortcuts out while the picture has focus.
+    c.addEventListener('keydown', e => {
+      if (!screenInput() || !e.code || e.isComposing) return;
+      e.preventDefault(); e.stopPropagation();
+      S.screen.held.add(e.code);
+      screenSend({ t: 'key', code: e.code, down: true });
+    });
+    c.addEventListener('keyup', e => {
+      if (!screenInput() || !e.code) return;
+      e.preventDefault(); e.stopPropagation();
+      S.screen.held.delete(e.code);
+      screenSend({ t: 'key', code: e.code, down: false });
+    });
+    c.addEventListener('blur', releaseScreenKeys);
+
+    // Touch: tap = click, long press = right click, drag = drag (or scroll with "Scroll" on), two fingers = scroll at normal
+    // size, pinch = zoom, two-finger drag while zoomed = pan. A gesture's kind is fixed once it starts moving.
+    const touches = new Map();
+    let g = null;
+    const pair = () => {
+      const [a, b] = [...touches.values()], r = stage.getBoundingClientRect();
+      return { x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top, d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) };
+    };
+    function touchDown(e) {
+      e.preventDefault();
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 1) {
+        const p = screenPos(e);
+        g = { kind: 'tap', x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, p };
+        if (screenInput()) g.timer = setTimeout(() => { if (g?.kind !== 'tap') return; g.kind = 'done'; navigator.vibrate?.(15); screenClick(2, p); }, 550);
+      } else if (touches.size === 2 && g) {
+        clearTimeout(g.timer);
+        if (g.kind === 'drag') { screenMove = null; screenSend({ t: 'button', b: 0, down: false }); }
+        const p = pair();
+        g = { kind: 'two', start: p, last: p, mode: '' };
+      }
+    }
+    function touchMove(e) {
+      const t = touches.get(e.pointerId);
+      if (!t || !g) return;
+      t.x = e.clientX; t.y = e.clientY;
+      if (g.kind === 'two') {
+        if (touches.size < 2) return;
+        const p = pair(), l = g.last, sc = S.screen;
+        if (!g.mode) {
+          if (Math.abs(p.d - g.start.d) > 24) g.mode = 'zoom';
+          else if (Math.hypot(p.x - g.start.x, p.y - g.start.y) > 10) g.mode = sc.scale > 1.01 ? 'pan' : 'scroll';
+          else return;
+        }
+        if (g.mode === 'zoom') { sc.left += p.x - l.x; sc.top += p.y - l.y; zoomScreen(p.d / l.d, p.x, p.y); }
+        else if (g.mode === 'pan') { sc.left += p.x - l.x; sc.top += p.y - l.y; layoutScreen(); }
+        else if (screenInput()) queueScreenWheel(-(p.x - l.x) * 4, (p.y - l.y) * 4); // content follows the fingers; ~30px is a notch
+        g.last = p;
+        return;
+      }
+      if (touches.size !== 1) return;
+      if (g.kind === 'tap') {
+        if (Math.hypot(e.clientX - g.x, e.clientY - g.y) < 10) return;
+        clearTimeout(g.timer);
+        // View only: one finger pans the zoomed picture instead.
+        g.kind = !screenInput() ? 'pan' : S.screen.scroll ? 'scroll' : 'drag';
+        if (g.kind === 'drag') screenSend({ t: 'button', b: 0, down: true, ...g.p });
+      }
+      if (g.kind === 'drag') queueScreenMove(screenPos(e));
+      else if (g.kind === 'scroll') queueScreenWheel(-(e.clientX - g.lx) * 4, (e.clientY - g.ly) * 4);
+      else if (g.kind === 'pan') { S.screen.left += e.clientX - g.lx; S.screen.top += e.clientY - g.ly; layoutScreen(); }
+      g.lx = e.clientX; g.ly = e.clientY;
+    }
+    function touchUp(e, cancelled) {
+      touches.delete(e.pointerId);
+      if (!g) return;
+      clearTimeout(g.timer);
+      if (g.kind === 'tap' && !cancelled && screenInput()) screenClick(0, g.p);
+      else if (g.kind === 'drag') { screenMove = null; screenSend({ t: 'button', b: 0, down: false, ...screenPos(e) }); }
+      // The fingers left after a two-finger gesture do nothing until all are lifted.
+      g = touches.size ? { kind: 'done' } : null;
+    }
+
+    // Toolbar buttons keep focus where it is, so the soft keyboard stays open while tapping Ctrl, arrows, Esc… Only mousedown
+    // (taps send one too): WebKit drops the click of a tap whose pointerdown was cancelled.
+    bar.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+    bar.addEventListener('click', e => {
+      const b = e.target.closest('[data-skey]');
+      if (!b) return;
+      const k = b.dataset.skey, sc = S.screen;
+      if (k === 'viewOnly') { releaseScreenKeys(); sc.viewOnly = !sc.viewOnly; sc.mods.clear(); saveScreenPrefs(); renderScreenBar(); renderScreenMeta(); }
+      else if (k === 'fit') { sc.scale = 1; layoutScreen(); renderScreenBar(); }
+      else if (k === 'keyboard') { type.focus({ preventScroll: true }); resetScreenType(type); }
+      else if (k === 'scroll') { sc.scroll = !sc.scroll; renderScreenBar(); }
+      // Tapping a held modifier again presses it on its own (Win opens Start).
+      else if (k.startsWith('mod:')) { const m = k.slice(4); if (sc.mods.delete(m)) screenTap(SCREEN_MODS[m][0]); else sc.mods.add(m); renderScreenBar(); }
+      else if (k.startsWith('key:')) screenTap(k.slice(4));
+    });
+    bar.addEventListener('change', e => {
+      const s = e.target.closest('[data-sset]');
+      if (!s) return;
+      if (s.dataset.sset === 'monitor') S.screen.monitor = Number(s.value);
+      else if (Object.hasOwn(SCREEN_QUALITY, s.value)) S.screen.quality = s.value;
+      saveScreenPrefs(); screenConfig();
+    });
+
+    type.addEventListener('keydown', e => {
+      if (e.isComposing || e.keyCode === 229 || !screenInput()) return;
+      const combo = (e.ctrlKey || e.altKey || e.metaKey) && e.key.length === 1;
+      if (!SCREEN_NAMED.has(e.key) && !combo) return;
+      const code = e.code || (SCREEN_NAMED.has(e.key) ? e.key : charCode(e.key.toLowerCase()));
+      if (!code) return;
+      e.preventDefault(); e.stopPropagation();
+      screenTap(code, [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'win'].filter(Boolean));
+    });
+    type.addEventListener('input', e => screenTyped(type, e.isComposing));
+    type.addEventListener('compositionend', () => screenTyped(type, false));
+
+    // Re-fit on rotation or window resize; Auto quality asks for a new size when the stage changed a lot.
+    new ResizeObserver(() => {
+      layoutScreen();
+      clearTimeout(screenResize);
+      screenResize = setTimeout(() => {
+        const sc = S.screen, stage = $('#screenStage');
+        if (sc.state !== 'live' || sc.quality !== 'auto' || !stage) return;
+        const want = Math.max(640, Math.min(1920, Math.round(stage.clientWidth * (devicePixelRatio || 1))));
+        if (Math.abs(want - sc.sentWidth) / sc.sentWidth > 0.25) screenConfig();
+      }, 500);
+    }).observe(stage);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || current().kind !== 'screen' || !S.token) return;
+    const sc = S.screen;
+    for (; sc.unacked > 0; sc.unacked--) screenSend({ t: 'ack' });
+    // Not after another device took over (4001) or capture failed (1011): coming back to this tab must not grab it back.
+    if (sc.state === 'error' && sc.code !== 4001 && sc.code !== 1011) { sc.retries = 0; screenConnect(); }
+    else if (sc.info && !sc.info.enabled) loadScreenInfo();
+  });
+  // On-screen keyboards cover the bottom of the page without resizing it (iOS, and Android Chrome by default). The view gives
+  // up the covered strip, so the toolbar and the whole picture stay above the keyboard; the hidden field sits at the top of
+  // the view, so focusing it gives the browser no reason to scroll the page.
+  function fitScreenView() {
+    const view = $('#screenView'), vv = window.visualViewport;
+    if (!view || !vv) return;
+    const cover = vv.scale > 1.01 ? 0 : Math.round(document.documentElement.clientHeight - vv.height - vv.offsetTop);
+    view.style.paddingBottom = cover > 1 ? cover + 'px' : '';
+    if (cover > 1 && (scrollX || scrollY)) scrollTo(0, 0);
+  }
+  window.visualViewport?.addEventListener('resize', fitScreenView);
+  window.visualViewport?.addEventListener('scroll', fitScreenView);
+  function renderScreenMeta() {
+    const sc = S.screen, el = $('#screenMeta');
+    if (!el) return;
+    const rate = sc.kbps >= 1024 ? (sc.kbps / 1024).toFixed(1) + ' MB/s' : sc.kbps + ' KB/s';
+    el.innerHTML = sc.state === 'live'
+      ? `<span class="pill running">${sc.viewOnly ? 'Viewing' : 'Live'}</span>${sc.w ? `<span class="screen-res">${sc.w}×${sc.h}</span>` : ''}<span>${sc.fps} fps · ${rate}</span>`
+      : '<span>See and control the PC running the companion.</span>';
+  }
+  function renderScreenBar() {
+    const sc = S.screen, bar = $('#screenBar');
+    if (!bar || sc.state !== 'live') return;
+    const touch = matchMedia('(pointer: coarse)').matches, off = sc.viewOnly ? ' disabled' : '';
+    const tog = (k, label, on, title, dis = '') => `<button class="btn sm ${on ? 'on' : 'ghost'}" data-skey="${k}" aria-pressed="${on}" title="${esc(title)}"${dis}>${label}</button>`;
+    const key = (code, label, title) => `<button class="btn sm ghost" data-skey="key:${code}" title="${esc(title || label)}"${off}>${label}</button>`;
+    const mons = sc.monitors.length > 1 ? `<select data-sset="monitor" aria-label="Display">${sc.monitors.map((m, i) => `<option value="${i}"${i === sc.current ? ' selected' : ''}>Display ${i + 1}${m.primary ? ' (main)' : ''} · ${m.w}×${m.h}</option>`).join('')}</select>` : '';
+    bar.innerHTML = `${mons}<select data-sset="quality" aria-label="Picture quality">${Object.entries(SCREEN_QUALITY).map(([k, v]) => `<option value="${k}"${k === sc.quality ? ' selected' : ''}>${v}</option>`).join('')}</select>
+      ${tog('viewOnly', 'View only', sc.viewOnly, 'Watch without sending mouse or keyboard input')}${sc.scale > 1.01 ? '<button class="btn sm ghost" data-skey="fit" title="Zoom back out to fit">Fit</button>' : ''}
+      ${touch ? tog('keyboard', '⌨', false, 'Open the keyboard', off) + tog('scroll', '↕ Scroll', sc.scroll, 'One-finger drag scrolls instead of dragging', off) : ''}<span class="screen-sep"></span>
+      ${Object.entries(SCREEN_MODS).map(([k, [, label]]) => tog('mod:' + k, label, sc.mods.has(k), `${label} for the next key, click or tap; tap again to press ${label} alone`, off)).join('')}
+      ${key('Escape', 'Esc')}${key('Tab', 'Tab')}${key('ArrowLeft', '←', 'Left')}${key('ArrowUp', '↑', 'Up')}${key('ArrowDown', '↓', 'Down')}${key('ArrowRight', '→', 'Right')}${key('Enter', '⏎', 'Enter')}${key('Backspace', '⌫', 'Backspace')}${key('Delete', 'Del', 'Delete')}`;
+  }
+  function screenMsgHtml() {
+    const sc = S.screen, info = sc.info, spin = t => `<div class="working"><span class="spinner"></span> ${esc(t)}</div>`;
+    if (sc.state === 'live') return sc.drawn ? '' : spin('Waiting for the first picture…');
+    if (sc.state === 'connecting') return spin('Connecting to the PC\'s screen…');
+    if (!info) return sc.error ? `<p>${esc(sc.error)}</p><button class="btn sm" data-act="screenCheck">Try again</button>` : spin('Loading…');
+    if (!info.supported) return '<p>Screen sharing needs the companion to run on Windows.</p>';
+    if (!info.enabled) return `<h2>Screen sharing is off</h2><p>${info.desktop
+      ? 'On the PC, open the OMP Control Room tray menu and turn on <b>Allow screen sharing and control</b>.'
+      : 'Start the companion on the PC with <code>OMP_WEB_SCREEN=1</code> set, for example <code>setx OMP_WEB_SCREEN 1</code>, then run <code>start.bat</code> again from a new console.'}</p>
+      <p class="muted">It can only be turned on at the PC. Then anyone with this dashboard's password or connection token can see its screen and use its mouse and keyboard.</p>
+      <button class="btn sm" data-act="screenCheck">Check again</button>`;
+    if (sc.state === 'error') return `<p>${esc(sc.error)}</p><button class="btn sm primary" data-act="screenStart">Reconnect</button>`;
+    return '<button class="btn primary" data-act="screenStart">Connect</button>';
+  }
+  function renderScreen() {
+    if (!$('#screenMeta')) return;
+    const sc = S.screen, live = sc.state === 'live';
+    renderScreenMeta();
+    $('#screenActs').innerHTML = (live && document.fullscreenEnabled ? '<button class="btn sm ghost" data-act="screenFull" title="Full screen" aria-label="Full screen">⛶</button>' : '')
+      + (live || sc.state === 'connecting' ? '<button class="btn sm" data-act="screenStop">Disconnect</button>' : '');
+    const bar = $('#screenBar');
+    bar.hidden = !live;
+    renderScreenBar();
+    const msg = screenMsgHtml(), m = $('#screenMsg');
+    m.hidden = !msg; m.innerHTML = msg;
+    const note = $('#screenNote');
+    note.hidden = !(live && sc.note); note.textContent = sc.note;
+    $('#screenStage').classList.toggle('off', !live);
+    $('#screenCanvas').hidden = !sc.w;
+  }
+
   // ---------- OMP settings ----------
   const GROUPS =[['model', 'Models'], ['interaction', 'Interaction & approvals'], ['context', 'Context & compaction'], ['tools', 'Tools'], ['tasks', 'Tasks & subagents'], ['appearance', 'Appearance'], ['shell', 'Shell'], ['files', 'Files'], ['memory', 'Memory'], ['providers', 'Providers'], ['other', 'Other'], ['internal', 'Advanced']];
   const groupLabel = g => (GROUPS.find(x => x[0] === g) || [g, g[0].toUpperCase() + g.slice(1)])[1];
@@ -3266,7 +3704,8 @@
   function setNav(open, moveFocus) {
     $('#app').classList.toggle('nav-open', open);
     const m = main();
-    if (m) m.inert = open && innerWidth <= 820;
+    // Drawer layouts (narrow, or landscape phones on Screen) cover the page: keep it out of reach while open.
+    if (m) m.inert = open && getComputedStyle($('#sidebar')).position === 'fixed';
     document.querySelectorAll('[data-act="nav"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
     if (moveFocus) (open ? $('#newBtn') : m?.querySelector('[data-act="nav"]'))?.focus();
   }
@@ -3553,6 +3992,10 @@
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
     else if (act === 'spendReload') loadSpend();
+    else if (act === 'screenStart') { S.screen.retries = 0; screenConnect(); }
+    else if (act === 'screenStop') { screenDisconnect(); renderScreen(); }
+    else if (act === 'screenCheck') { S.screen.error = ''; loadScreenInfo(); }
+    else if (act === 'screenFull') $('#screenView')?.requestFullscreen?.().catch(() => {});
     else if (act === 'advMenu') { $('#advMenu') ? closeThinkMenu() : openAdvMenu(a); }
     else if (act === 'thinkMenu') { $('#thinkMenu') ? closeThinkMenu() : openThinkMenu(a); }
     else if (act === 'nativeAdv') { S.nativeAdv.set(c.file, !(S.nativeAdv.get(c.file) ?? S.advCfg?.enabled)); update(); }

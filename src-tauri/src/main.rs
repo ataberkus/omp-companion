@@ -28,6 +28,9 @@ struct Shell {
     port: u16,
     token: String,
     lan: Mutex<bool>,
+    screen: Mutex<bool>,
+    // Address of the device viewing and controlling this PC, shown in the tray while it is connected.
+    viewer: Mutex<Option<String>>,
     links: Mutex<Vec<(String, String)>>,
     quitting: AtomicBool,
     host_closed: AtomicBool,
@@ -77,23 +80,39 @@ fn boot(app: AppHandle) {
         }
     };
     // Sessions that finished, failed or ask a question; the dashboard shows them itself when the window is in front.
+    // Screen viewers always notify: someone controlling this PC must never go unnoticed by the person sitting at it.
     let on_event = {
         let app = app.clone();
-        move |msg: Value| {
-            if msg["event"].as_str() != Some("attention") {
-                return;
-            }
-            let title = msg["title"].as_str().unwrap_or(TITLE).to_owned();
-            let body = msg["body"].as_str().unwrap_or_default().to_owned();
-            let handle = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                let in_front = handle.get_webview_window("main").is_some_and(|w| {
-                    w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+        move |msg: Value| match msg["event"].as_str() {
+            Some("attention") => {
+                let title = msg["title"].as_str().unwrap_or(TITLE).to_owned();
+                let body = msg["body"].as_str().unwrap_or_default().to_owned();
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    let in_front = handle.get_webview_window("main").is_some_and(|w| {
+                        w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+                    });
+                    if !in_front {
+                        let _ = handle.notification().builder().title(title).body(body).show();
+                    }
                 });
-                if !in_front {
-                    let _ = handle.notification().builder().title(title).body(body).show();
+            }
+            Some("screen") => {
+                let Some(shell) = app.try_state::<Shell>() else { return };
+                let viewer = msg["address"].as_str().map(str::to_owned);
+                // Turning sharing off in the tray also ends the view; the person who clicked it needs no toast for that.
+                let body = match &viewer {
+                    Some(address) => Some(format!("{address} is now viewing and controlling this PC. Turn off screen sharing in the tray to stop it.")),
+                    None if *shell.screen.lock() => Some("Nobody is viewing this PC's screen anymore.".to_owned()),
+                    None => None,
+                };
+                *shell.viewer.lock() = viewer;
+                if let Some(body) = body {
+                    let _ = app.notification().builder().title(TITLE).body(body).show();
                 }
-            });
+                refresh_menu(&app);
+            }
+            _ => {}
         }
     };
     let started = paths(&app).and_then(|(node, script)| host::spawn(&node, &script, on_event, on_exit));
@@ -111,6 +130,8 @@ fn boot(app: AppHandle) {
         port: ready.port,
         token: ready.token,
         lan: Mutex::new(false),
+        screen: Mutex::new(false),
+        viewer: Mutex::new(None),
         links: Mutex::new(links),
         quitting: AtomicBool::new(false),
         host_closed: AtomicBool::new(false),
@@ -208,9 +229,14 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-fn build_menu(app: &AppHandle, lan: bool, links: &[(String, String)]) -> tauri::Result<Menu<Wry>> {
+fn build_menu(app: &AppHandle, lan: bool, screen: bool, viewer: Option<&str>, links: &[(String, String)]) -> tauri::Result<Menu<Wry>> {
     let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)?;
     let lan_item = CheckMenuItem::with_id(app, "lan", "Allow phones on my network", true, lan, None::<&str>)?;
+    let screen_label = match viewer {
+        Some(address) => format!("Allow screen sharing and control ({address} is viewing)"),
+        None => "Allow screen sharing and control".to_owned(),
+    };
+    let screen_item = CheckMenuItem::with_id(app, "screen", screen_label, true, screen, None::<&str>)?;
     let link_items: Vec<MenuItem<Wry>> = if links.is_empty() {
         vec![MenuItem::new(app, "No network address found", false, None::<&str>)?]
     } else {
@@ -224,17 +250,24 @@ fn build_menu(app: &AppHandle, lan: bool, links: &[(String, String)]) -> tauri::
     let copy = Submenu::with_items(app, "Copy phone link", lan, &link_refs)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    Menu::with_items(app, &[&open, &lan_item, &copy, &separator, &quit])
+    Menu::with_items(app, &[&open, &lan_item, &copy, &screen_item, &separator, &quit])
 }
 
 fn refresh_menu(app: &AppHandle) {
     let shell = app.state::<Shell>();
     let lan = *shell.lan.lock();
+    let screen = *shell.screen.lock();
+    let viewer = shell.viewer.lock().clone();
     let links = shell.links.lock().clone();
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let (Some(tray), Ok(menu)) = (handle.tray_by_id("main"), build_menu(&handle, lan, &links)) {
+        if let (Some(tray), Ok(menu)) = (handle.tray_by_id("main"), build_menu(&handle, lan, screen, viewer.as_deref(), &links)) {
             let _ = tray.set_menu(Some(menu));
+            let tooltip = match &viewer {
+                Some(address) => format!("{TITLE} — {address} is viewing this PC"),
+                None => TITLE.to_owned(),
+            };
+            let _ = tray.set_tooltip(Some(tooltip));
         }
     });
 }
@@ -257,6 +290,28 @@ fn toggle_lan(app: &AppHandle) {
     refresh_menu(app);
 }
 
+// Off at every launch, like network access. Turning it off ends a running view at once.
+fn toggle_screen(app: &AppHandle) {
+    let shell = app.state::<Shell>();
+    let on = !*shell.screen.lock();
+    // Off goes into effect here, before the request: the host reports the dropped viewer ahead of its reply.
+    if !on {
+        *shell.screen.lock() = false;
+    }
+    match shell.host.request(json!({ "cmd": "screen", "on": on }), Duration::from_secs(15)) {
+        Ok(reply) => *shell.screen.lock() = reply["screen"].as_bool().unwrap_or(false),
+        Err(e) => {
+            *shell.screen.lock() = false;
+            app.dialog()
+                .message(format!("Could not change screen sharing\n\n{e}"))
+                .title(TITLE)
+                .kind(MessageDialogKind::Error)
+                .show(|_| {});
+        }
+    }
+    refresh_menu(app);
+}
+
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     let id = event.id().as_ref().to_owned();
     if id == "open" {
@@ -266,6 +321,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     let app = app.clone();
     thread::spawn(move || match id.as_str() {
         "lan" => toggle_lan(&app),
+        "screen" => toggle_screen(&app),
         "quit" => quit(&app, true),
         _ => {
             let Some(i) = id.strip_prefix("link:").and_then(|i| i.parse::<usize>().ok()) else { return };
@@ -279,7 +335,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
 
 fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let shell = app.state::<Shell>();
-    let menu = build_menu(app, *shell.lan.lock(), &shell.links.lock())?;
+    let menu = build_menu(app, *shell.lan.lock(), *shell.screen.lock(), shell.viewer.lock().as_deref(), &shell.links.lock())?;
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip(TITLE)
