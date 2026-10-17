@@ -2147,10 +2147,13 @@ async function spend(sync){
     const dir=await resolveDir(body.path);const images=chatImages(body);const raw=typeof body.prompt==='string'?body.prompt.trim().slice(0,200000):'';const p=await ensureProject(dir);
     const title=(typeof body.title==='string'&&body.title.trim().slice(0,120))||raw.split('\n')[0].slice(0,70)||`New session · ${p.name}`;
     const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);
+    if(body.autoApprove!==undefined&&typeof body.autoApprove!=='boolean')throw error('Auto-approve must be true or false.');
     const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking,launch,draft:body.draft===true});
     // A title cut from the prompt is a placeholder: OMP's RPC mode never auto-titles, so /rename asks it to (see event()).
     if(!(typeof body.title==='string'&&body.title.trim())&&!launch?.noTitle)s.autoTitle=true;
     if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
+    // Before the first prompt, so approval prompts from the first turn are already answered.
+    if(body.autoApprove===true)await lock(s.id,()=>command(s,{type:'auto_approve',enabled:true}));
     if(body.fast===true)await lock(s.id,()=>command(s,{type:'pref',key:'fast',value:true})).catch(e=>notice(s,'warning',e.message));
     json(images.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,preview:body.preview},images)):s,201);return;
    }

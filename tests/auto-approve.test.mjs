@@ -86,3 +86,50 @@ for await (const line of createInterface({ input: process.stdin })) {
     { type: 'extension_ui_response', id: 'tool2', value: 'Approve' },
   ]);
 });
+
+// The New session form's Auto-approve checkbox: the session starts with it on, so the first turn's approval is answered.
+test('quick-start with autoApprove answers approval prompts from the first turn', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-auto-start-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const fake = join(dir, 'omp.mjs');
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
+emit({ type: 'ready' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  if (c.type === 'extension_ui_response') { emit({ type: 'command_output', text: 'reply ' + JSON.stringify(c) }); continue; }
+  if (c.type === 'prompt') emit({ type: 'extension_ui_request', id: 'tool', method: 'select', title: 'Allow tool: bash\\nCommand: npm test', options: ['Approve', 'Deny'] });
+  if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
+  else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
+  else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
+}
+`);
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const start = async body => {
+    const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/quick-start`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ path: dir, ...body }) });
+    return [res.status, await res.json()];
+  };
+
+  assert.equal((await start({ prompt: 'Run the tests', autoApprove: 'yes' }))[0], 400);
+  assert.equal(app.store.sessions.length, 0, 'an invalid flag creates no session');
+
+  const [status, created] = await start({ prompt: 'Run the tests', autoApprove: true });
+  assert.equal(status, 201);
+  assert.equal(created.autoApprove, true);
+  const session = app.store.sessions.find(s => s.id === created.id);
+  for (let n = 0; n < 200 && !session.messages.some(m => m.text.startsWith('reply ')); n++) await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(session.messages.filter(m => m.text.startsWith('reply ')).map(m => JSON.parse(m.text.slice(6))), [{ type: 'extension_ui_response', id: 'tool', value: 'Approve' }]);
+  assert.deepEqual(session.uiRequests || [], []);
+  assert.ok(session.messages.some(m => m.text === 'Auto-approved: Allow tool: bash\nCommand: npm test'));
+
+  // Unchecked: the session starts without auto-approve and the same prompt waits for the user.
+  const [, manual] = await start({ prompt: 'Run the tests', autoApprove: false });
+  assert.equal(manual.autoApprove, undefined);
+  const other = app.store.sessions.find(s => s.id === manual.id);
+  for (let n = 0; n < 200 && !other.uiRequests?.length; n++) await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(other.uiRequests.map(q => q.id), ['tool']);
+});

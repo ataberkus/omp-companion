@@ -690,7 +690,7 @@
   }
   // Enhance on New session: create the session in the picked folder as a draft (no prompt yet), start its OMP,
   // carry the draft and images over, and enhance there. Leaving it unsent discards it (leaveDraft).
-  const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
+  const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
     const l = S.home.listing, draft = S.home.prompt;
     if (!l || S.busy || enhanceBlocked(draft)) return;
@@ -3553,7 +3553,7 @@
             ${modelChip(h.model, h.thinking, defaultLabel())}${fastChip(h.model, h.fast)}
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
             <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…"><span aria-hidden="true">⚙</span> Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
-            <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
+            <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label><label class="check" title="Auto-approve: answer OMP's tool-approval and computer-control prompts with Approve from the first turn. Questions and provider safety checks still ask you."><input type="checkbox" id="homeAutoApprove" ${h.autoApprove ? 'checked' : ''}> Auto-approve</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <span id="homeEnhance">${enhanceButton(S.view, h.prompt)}</span>
             <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
           </div>
@@ -4105,6 +4105,7 @@
     else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
+    else if (t.id === 'homeAutoApprove') S.home.autoApprove = t.checked;
     else if (t.id === 'pathInput') S.home.path = t.value;
     else if (t.id === 'folderFilter') { S.home.filter = t.value; renderFolderList(); }
     // A single-choice question takes one answer: typing Other clears the picked option.
