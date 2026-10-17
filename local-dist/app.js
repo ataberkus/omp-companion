@@ -755,7 +755,7 @@
       s.status === 'running' && s.tps ? `<span title="Output speed">${s.tps.toFixed(0)} tok/s</span>` : '',
       s.fast?.active ? '<span class="pill" title="Fast mode is active">⚡ Fast</span>' : '',
       s.goal?.objective ? `<span class="goal" title="${esc(`Goal (${s.goal.status}): ${s.goal.objective}`)}">🎯 ${esc(s.goal.objective.slice(0, 60))}</span>` : '',
-      offlinePill(),
+      offlinePill(), autoShutdownPill(),
     ].join('');
     const btn = [changesButton(s.messages || [], 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Live provider quota for the selected model" aria-label="Usage" aria-haspopup="dialog">◔ <span class="lbl">Usage</span></button>`];
     if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort" aria-label="Stop">■ <span class="lbl">Stop</span></button>`);
@@ -798,6 +798,7 @@
           <button data-act="accounts">Choose provider accounts…</button>
           ${S.store?.canRestart ? '<button data-act="restartCompanion">Restart companion…</button>' : ''}
           <button class="danger" data-act="shutdownPc">Shut down PC…</button>
+          <button class="danger" data-act="autoShutdown" aria-pressed="${!!S.store?.autoShutdown?.on}"><span class="check" aria-hidden="true">${S.store?.autoShutdown?.on ? '✓' : ''}</span>Shut down PC when all work is done</button>
           ${idle ? '<button class="danger" data-act="hide">Remove from panel</button>' : ''}
         </div></div>
       </div>`;
@@ -807,7 +808,7 @@
     const title = n?.title || pv?.title || 'OMP session';
     const cwd = n?.cwd || pv?.cwd || '';
     const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
-      <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(agoText(n.updatedAt))}</span>` : ''}${offlinePill()}`)}</div>
+      <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(agoText(n.updatedAt))}</span>` : ''}${offlinePill()}${autoShutdownPill()}`)}</div>
       <div class="actions">${changesButton(pv?.messages || [], 'f:' + file)}${sideButton()}
         <button class="btn sm" data-act="newHere" aria-label="New session here">＋ <span class="lbl">New here</span></button>
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
@@ -823,6 +824,23 @@
   }
   // Polls fail silently; phone users never see the sidebar dot, so say it in the view's meta line.
   const offlinePill = () => S.online === false ? '<span class="pill error">Offline — retrying</span>' : '';
+  // "Shut down PC when all work is done" while armed: in the view's meta line (phones) and the sidebar; clicking cancels it.
+  const workLeft = () => (S.store?.sessions || []).filter(s => s.status === 'running' || s.status === 'queued' || s.queuedMessages?.length || s._task || s._bash).length;
+  function autoShutdownPill() {
+    const a = S.store?.autoShutdown;
+    if (a?.firing) return '<span class="pill error">Shutting down the PC…</span>';
+    return a?.on ? `<button type="button" class="btn-reset pill queued" data-act="autoShutdownOff" title="Cancel the automatic shutdown">PC shuts down when work is done ✕</button>` : '';
+  }
+  let autoShutdownSeen = null; try { autoShutdownSeen = localStorage.getItem('omp-auto-shutdown-error'); } catch {}
+  function renderAutoShutdown() {
+    const a = S.store?.autoShutdown, el = $('#autoShutdown'), n = workLeft();
+    // A refused automatic shutdown is reported once per browser, like the toast of a refused Shut down PC.
+    if (a?.error && a.error.at !== autoShutdownSeen) { autoShutdownSeen = a.error.at; try { localStorage.setItem('omp-auto-shutdown-error', a.error.at); } catch {} toast(a.error.message, 'err'); }
+    if (!el) return;
+    setIfChanged(el, a?.firing ? '<span>Shutting down the PC…</span>'
+      : a?.on ? `<span title="Waits until no session is running or queued and no queued message is left">PC shuts down when all work is done${n ? ` · ${n} ${n === 1 ? 'session' : 'sessions'} working` : ''}</span><button type="button" class="link" data-act="autoShutdownOff">Cancel</button>` : '');
+    el.hidden = !a?.on && !a?.firing;
+  }
   function setIfChanged(el, html) {
     if (el._html === html) return;
     const open = el.querySelector('.menu.open');
@@ -1658,7 +1676,7 @@
     const active = !advisor && d && (d.active ?? Date.now() - new Date(d.updatedAt).getTime() < 120000);
     setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><div class="crumb">${parent ? `<a href="${esc(parent.hash)}">← ${esc(parent.title)}</a>` : '<a href="#/new">← Home</a>'} <span>/ ${advisor ? 'advisor' : 'subagent'}</span></div>
-        <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(agoText(d.updatedAt))}</span>` : ''}${offlinePill()}`)}</div>
+        <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(agoText(d.updatedAt))}</span>` : ''}${offlinePill()}${autoShutdownPill()}`)}</div>
       <div class="actions"><div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
         <button data-copy-text="${esc(file)}">Copy transcript path</button>
         <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button></div></div></div>`);
@@ -3177,7 +3195,7 @@
       S.nativeAt = Date.now();
       try { S.native = (await api('/omp-sessions')).sessions; } catch {}
     }
-    renderList();
+    renderList(); renderAutoShutdown();
     update();
     checkAttention(); void pullDraft();
     if (current().kind === 'home') renderHomeRecent();
@@ -3521,6 +3539,13 @@
     else if (act === 'terminal') { closeMenu(a.closest('.menu')); api('/terminal', { path: a.dataset.path }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err')); }
     // Turns off the computer running the companion, not the device showing the panel; sessions are paused and saved first.
     else if (act === 'shutdownPc') { closeMenu(a.closest('.menu')); if (confirm('Shut down the computer running the companion?\n\nRunning sessions are paused and saved first; continue them after the PC is back on. Unsaved work in other programs on that computer may be lost.')) api('/shutdown', {}, { timeout: 60000 }).then(() => toast('Shutting down the PC…'), e => toast(e.message, 'err')); }
+    // Armed on the companion, so it holds when this tab closes; the shutdown itself is the Shut down PC flow above.
+    else if (act === 'autoShutdown' || act === 'autoShutdownOff') {
+      closeMenu(a.closest('.menu'));
+      const on = act === 'autoShutdown' && !S.store?.autoShutdown?.on;
+      if (!on || confirm('Shut down the computer running the companion when all work is done?\n\nThe companion waits until no session is running or queued and no queued message is left, then pauses and saves sessions and shuts down. If nothing is working now, it shuts down right away. Unsaved work in other programs on that computer may be lost.'))
+        api('/shutdown/auto', { on }).then(r => { if (S.store) S.store.autoShutdown = r; S.stateTag = ''; renderAutoShutdown(); update(); toast(!on ? 'Automatic shutdown canceled.' : r.firing ? 'Nothing is working: shutting down the PC…' : 'The PC shuts down when all work is done.'); }, e => toast(e.message, 'err'));
+    }
     else if (act === 'restartCompanion') { closeMenu(a.closest('.menu')); if (confirm('Restart the companion?\n\nRunning sessions are paused and saved first; continue them once it is back. The PC keeps running.')) restartCompanion(); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }

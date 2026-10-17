@@ -634,6 +634,10 @@ export async function createCompanion(options={}){
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let pausing=0;let saveChain=Promise.resolve();
+ // "Shut down PC when all work is done" (⋯ menu). Process-local, never saved: a restarted companion does not turn the PC off by itself.
+ // firing: the /api/shutdown steps are running; error: the OS refused the last automatic attempt (shown by the panel).
+ const autoShutdown={on:false,since:null,firing:false,error:null};
+ const autoShutdownView=()=>({on:autoShutdown.on,since:autoShutdown.since,firing:autoShutdown.firing,error:autoShutdown.error});
  // A new id per process: a dashboard that asked for a restart knows the new companion answers once this changes.
  const instance=randomUUID(),canRestart=typeof options.restart==='function';
  // Only the current thought is live; completed messages remain in OMP's transcript.
@@ -723,7 +727,7 @@ export async function createCompanion(options={}){
    else{s.status='review';activity(s,`${s.title} is ready for review`,'review');attention(s,'review');}
    if(s.status!=='running')finishWork(s);
    scheduleSave();
-  }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();});
+  }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();}).finally(checkAutoShutdown);
  }
  function event(s,f){
   // Ghost-text predictions arrive per keystroke; they are not session activity.
@@ -1617,7 +1621,7 @@ async function spend(sync){
  }
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
  let refreshBusy=false;
- const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}},4000);refreshTimer.unref();
+ const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();},4000);refreshTimer.unref();
  // Fill the account cache shortly after startup, so the first Choose provider accounts… opens instantly.
  const accountTimer=setTimeout(()=>refreshAccounts().catch(()=>{}),1000);accountTimer.unref();
  const staticFiles=new Map();const csp="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -1661,9 +1665,9 @@ async function spend(sync){
     markOverlaps();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
-    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart});return;}
+    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView()});return;}
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
-    const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,instance,canRestart,activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
+    const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
    }
@@ -1730,7 +1734,14 @@ async function spend(sync){
    if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
    // Pauses and saves sessions first, like a quit: the OS may kill this process before any signal handler runs.
    // If the OS refuses, the panel keeps working and the paused sessions can be continued.
-   if(url.pathname==='/api/shutdown'){await pauseSessions();await (options.shutdownHost||shutdownHost)();json({ok:true});return;}
+   if(url.pathname==='/api/shutdown'){await shutdownPc();json({ok:true});return;}
+   // Arms or cancels "Shut down PC when all work is done"; arming while nothing is working shuts down right away.
+   if(url.pathname==='/api/shutdown/auto'){
+    if(typeof body.on!=='boolean')throw error('Choose on or off.');
+    if(autoShutdown.firing&&!body.on)throw error('The PC is already shutting down.',409);
+    if(body.on&&!autoShutdown.on)Object.assign(autoShutdown,{on:true,since:now(),error:null});else if(!body.on)Object.assign(autoShutdown,{on:false,since:null});
+    checkAutoShutdown();json(autoShutdownView());return;
+   }
    // options.restart (start.bat's loop, see the entry point below) prepares the relaunch and returns the step that stops
    // this process; it runs once the reply is sent. Sessions are paused and saved first, as on quit.
    if(url.pathname==='/api/restart'){
@@ -1809,6 +1820,16 @@ async function spend(sync){
  });
  // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
  const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
+ const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
+ // Work left: a running or queued turn, a queued follow-up not yet sent, or a compaction/handoff/shell command in progress.
+ const workPending=()=>store.sessions.some(s=>['running','queued'].includes(s.status)||s.queuedMessages?.length||s._task||s._bash);
+ // Runs after every settled turn and every background refresh (which catches stops, failures and exits). A held lock or a
+ // starting runner means a prompt is mid-flight, so it waits for the next check. Fires at most once per arming.
+ function checkAutoShutdown(){
+  if(!autoShutdown.on||autoShutdown.firing||closing||pausing||locks.size||launches.size||workPending())return;
+  autoShutdown.firing=true;
+  void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
+ }
  const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));

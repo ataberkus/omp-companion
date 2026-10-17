@@ -10,7 +10,8 @@
     "prebuild": "node scripts/check-build.mjs",
     "build": "tauri build",
     "predist": "node scripts/check-build.mjs",
-    "dist": "tauri build"
+    "dist": "tauri build",
+    "test": "node --test \"tests/*.test.mjs\""
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1"

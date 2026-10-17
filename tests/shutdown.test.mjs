@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
@@ -53,4 +53,94 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal(code, 200, 'the companion keeps serving after a refused shutdown');
   assert.equal(state.sessions.find(s => s.id === 'run').status, 'paused');
   assert.equal((await call('/commands?session=run'))[0], 200, 'a paused session can start again');
+});
+
+// "Shut down PC when all work is done": each session's fake OMP runs in its own folder and announces a settled turn
+// whenever the signal file there changes.
+async function autoCompanion(t, sessions, shutdownHost) {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-auto-shutdown-'));
+  const app = { app: null };
+  t.after(async () => { if (app.app) await app.app.close(); await rm(dir, { recursive: true, force: true }); });
+  const fake = join(dir, 'omp.mjs');
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+import { readFileSync } from 'node:fs';
+const out = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
+out({ type: 'ready', protocolVersion: 1 });
+let seen = '';
+setInterval(() => { let v = ''; try { v = readFileSync('signal', 'utf8'); } catch {} if (v !== seen) { seen = v; out({ type: 'session_settled' }); } }, 20);
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  const data = c.type === 'get_state' ? { todoPhases: [], isSettled: false } : c.type === 'get_subagents' ? { subagents: [] } : {};
+  out({ type: 'response', id: c.id, command: c.type, success: true, data });
+  if (c.type === 'prompt') out({ type: 'agent_start' });
+}
+process.exit(0);
+`);
+  const at = new Date().toISOString();
+  for (const id of sessions) await mkdir(join(dir, id));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: sessions.map(id => ({ id, projectId: 'project', title: id, status: 'paused', cwd: join(dir, id), model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at })), activity: [] }));
+  app.app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake], shutdownHost });
+  app.app.server.listen(0, '127.0.0.1');
+  await once(app.app.server, 'listening');
+  const call = async (path, body) => {
+    const res = await fetch(`http://127.0.0.1:${app.app.server.address().port}/api${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${app.app.token}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    return [res.status, await res.json()];
+  };
+  for (const id of sessions) assert.equal((await call(`/commands?session=${id}`))[0], 200, 'starts a live OMP runner');
+  let turns = 0;
+  const until = async (done, what) => {
+    for (const end = Date.now() + 5000; Date.now() < end; await new Promise(r => setTimeout(r, 20))) if (await done()) return new Promise(r => setTimeout(r, 200));
+    assert.fail(`Timed out waiting: ${what}`);
+  };
+  // Ends the running turn of session `id`; resolves once `done()` holds, plus a moment for anything it triggers.
+  const finishTurn = async (id, done) => { await writeFile(join(dir, id, 'signal'), String(++turns)); await until(done, `${id} settles`); };
+  return { store: app.app.store, call, finishTurn, until };
+}
+
+test('Shut down PC when all work is done waits for running turns and queued messages, then shuts down once', async t => {
+  let calls = 0;
+  const { store, call, finishTurn, until } = await autoCompanion(t, ['a', 'b'], async () => { calls++; });
+  const a = store.sessions.find(s => s.id === 'a'), b = store.sessions.find(s => s.id === 'b');
+  a.status = 'running';
+  a.queuedMessages = [{ id: 'q1', text: 'next', at: new Date().toISOString() }];
+  b.status = 'running';
+
+  const [code, view] = await call('/shutdown/auto', { on: true });
+  assert.equal(code, 200);
+  assert.equal(view.on, true);
+  assert.equal((await call('/state'))[1].autoShutdown.on, true, 'every panel sees the armed option');
+
+  await finishTurn('b', () => b.status === 'review');
+  assert.equal(calls, 0, 'session a is still running');
+  await finishTurn('a', () => !a.queuedMessages.length);
+  assert.equal(a.status, 'running', 'the queued message started the next turn');
+  assert.equal(calls, 0, 'no shutdown while the queued message runs');
+  await finishTurn('a', () => a.status === 'review');
+  await until(() => calls > 0, 'the shutdown command');
+  assert.equal(calls, 1, 'the last finished turn shuts the PC down');
+  assert.deepEqual((await call('/state'))[1].autoShutdown, { on: false, since: null, firing: false, error: null });
+  await new Promise(r => setTimeout(r, 4500));
+  assert.equal(calls, 1, 'background refreshes do not shut down again');
+});
+
+test('a canceled automatic shutdown never runs; a refused one is reported and the panel keeps working', async t => {
+  let calls = 0, outcome;
+  const { store, call, finishTurn, until } = await autoCompanion(t, ['a'], async () => { calls++; if (outcome) throw outcome; });
+  const a = store.sessions.find(s => s.id === 'a');
+  a.status = 'running';
+  await call('/shutdown/auto', { on: true });
+  assert.deepEqual(await call('/shutdown/auto', { on: false }), [200, { on: false, since: null, firing: false, error: null }]);
+  await finishTurn('a', () => a.status === 'review');
+  assert.equal(calls, 0, 'canceled before the work ended');
+
+  outcome = Object.assign(new Error('Could not shut down this PC: Access is denied.'), { status: 500 });
+  assert.equal((await call('/shutdown/auto', { on: true }))[0], 200, 'nothing is working: shuts down right away');
+  await until(async () => (await call('/state'))[1].autoShutdown.error, 'the refused shutdown');
+  const [code, state] = await call('/state');
+  assert.equal(code, 200, 'the companion keeps serving after a refused shutdown');
+  assert.equal(calls, 1);
+  assert.equal(state.autoShutdown.on, false, 'a refused shutdown turns the option off instead of retrying');
+  assert.equal(state.autoShutdown.error.message, 'Could not shut down this PC: Access is denied.');
+  assert.equal(state.sessions.find(s => s.id === 'a').status, 'review');
+  assert.equal((await call('/commands?session=a'))[0], 200, 'the session can start again');
 });

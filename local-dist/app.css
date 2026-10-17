@@ -85,6 +85,9 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .sidebar-foot{display:flex;justify-content:space-between;padding:8px 4px 0;border-top:1px solid var(--border);font-size:12.5px}
 .sidebar-foot a,.link{color:var(--muted);text-decoration:none;background:none;border:0;cursor:pointer;padding:0}
 .sidebar-foot a:hover,.link:hover{color:var(--fg)}
+.auto-shutdown{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 10px;padding:7px 10px;border-radius:8px;border:1px solid color-mix(in oklch,var(--red) 30%,transparent);background:color-mix(in oklch,var(--red) 9%,transparent);color:var(--red);font-size:12.5px;font-weight:600}
+.auto-shutdown[hidden]{display:none}
+.auto-shutdown .link{color:var(--fg);font-size:12.5px;flex:none}
 .scrim{display:none}
 
 /* ---------- main ---------- */
@@ -717,7 +720,7 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 /* session menu extras */
 .menu-pop{max-height:min(70vh,560px);overflow-y:auto;min-width:280px}
 .menu-sep{height:1px;margin:5px 4px;background:var(--border)}
-.menu-pop [data-pref]{display:flex;align-items:center;gap:6px}
+.menu-pop [data-pref],.menu-pop [data-act="autoShutdown"]{display:flex;align-items:center;gap:6px}
 .menu-pop .check{display:inline-block;width:14px;color:var(--accent);flex:none}
 .meta .goal{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
