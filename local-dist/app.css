@@ -642,7 +642,7 @@ details.raw>*:not(summary){margin-top:6px}
 .adv-menu{min-width:260px;max-width:320px}
 .adv-toggle{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 9px;font-size:13px;cursor:pointer}
 .adv-info{padding:2px 9px 8px;color:var(--muted);font-size:12px;display:flex;flex-direction:column;gap:2px;border-bottom:1px solid var(--border);margin-bottom:4px}
-.adv-info b{color:var(--fg);font-weight:500;word-break:break-all}
+.adv-info b{color:var(--fg);font-weight:500;overflow-wrap:anywhere}
 .adv-note{padding:6px 9px 2px;color:var(--faint);font-size:11.5px;border-top:1px solid var(--border);margin-top:4px}
 .adv-note code{font:11px var(--mono)}
 .advisor-review{margin:6px 0 10px;border:1px solid color-mix(in oklch,var(--violet) 27%,transparent);border-left:3px solid var(--violet);border-radius:10px;background:color-mix(in oklch,var(--violet) 5%,transparent)}

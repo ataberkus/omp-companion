@@ -1534,10 +1534,15 @@
     }
     return `<details class="advisor-review" data-remember="adv:${esc(group[0].id)}" ${open ? 'open' : ''}><summary><span class="adv-icon">⚑</span> Advisor review${who && who !== 'advisor' ? ' · ' + esc(who) : ''} <span class="muted">${esc(bits)}</span><time>${esc(clock(group[0].at))}</time></summary><div class="adv-body">${body.join('')}</div></details>`;
   }
+  // OMP's /advisor status names only provider/id; the reasoning level lives in the configured role (provider/id:level).
+  function advisorModelLabel(sel) {
+    const role = splitSel(S.advCfg?.model);
+    return modelLabel(sel, role.sel === sel ? role.thinking : '');
+  }
   function advisorChip(s) {
     const a = s.advisor;
-    const label = !a ? 'Advisor' : !a.enabled ? 'Advisor off' : a.noModel ? 'Advisor: no model' : 'Advisor' + (a.model ? ' · ' + modelName(a.model.split(', ')[0]) : ' on');
-    return `<button class="model-chip adv-chip ${a?.enabled && !a.noModel ? 'on' : ''}" data-act="advMenu" title="Advisor: a second model that reviews each turn"><span aria-hidden="true">⚑</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>`;
+    const label = !a ? 'Advisor' : !a.enabled ? 'Advisor off' : a.noModel ? 'Advisor: no model' : 'Advisor' + (a.model ? ' · ' + advisorModelLabel(a.model.split(', ')[0]) : ' on');
+    return `<button class="model-chip adv-chip ${a?.enabled && !a.noModel ? 'on' : ''}" data-act="advMenu" title="${esc(label)}: a second model that reviews each turn"><span aria-hidden="true">⚑</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>`;
   }
   async function openAdvMenu(btn) {
     closeThinkMenu();
@@ -1559,7 +1564,7 @@
       <label class="adv-toggle"><span>Show advisor reviews in chat</span><span class="switch"><input type="checkbox" data-advreviews ${S.advReviews ? 'checked' : ''} ${S.advHidden ? 'disabled' : ''}><span></span></span></label>
       <label class="adv-toggle"><span>Important notes only (concern + blocker)</span><span class="switch"><input type="checkbox" data-advimportant ${S.advImportant ? 'checked' : ''} ${S.advHidden ? 'disabled' : ''}><span></span></span></label>
       <label class="adv-toggle"><span>${a.enabled && !a.noModel ? 'On for this session' : a.noModel ? 'On, but no model set' : s.advisor ? 'Off for this session' : 'Status unknown'}</span><span class="switch"><input type="checkbox" data-advset ${a.enabled ? 'checked' : ''}><span></span></span></label>
-      <div class="adv-info">${a.model ? `<div>Model <b>${esc(a.model)}</b></div>` : role ? `<div>Model <b>${esc(role)}</b> <span class="muted">from ${esc(S.advCfg.source)}</span></div>` : '<div>No advisor model set yet.</div>'}
+      <div class="adv-info">${a.model ? `<div>Model <b title="${esc(a.model)}">${esc(a.model.split(', ').map(advisorModelLabel).join(', '))}</b></div>` : role ? `<div>Model <b title="${esc(role)}">${esc(advisorModelLabel(splitSel(role).sel))}</b> <span class="muted">from ${esc(S.advCfg.source)}</span></div>` : '<div>No advisor model set yet.</div>'}
         ${pct != null ? `<div>Context ${fmtTokens(a.contextTokens)} / ${fmtTokens(a.contextWindow)} (${pct}%)</div>` : ''}${typeof a.cost === 'number' ? `<div>Spend $${a.cost.toFixed(4)}</div>` : ''}${a.state && a.enabled ? `<div>State: ${esc(a.state)}</div>` : ''}</div>
       <button data-advact="model"><span aria-hidden="true">◆</span> Change advisor model…</button>
       <button data-advact="status"><span aria-hidden="true">↻</span> Refresh status</button>
@@ -1575,7 +1580,7 @@
     const c = current();
     if (c.kind !== 'session') return;
     closeThinkMenu();
-    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action, model }); await refresh(); }
+    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action, model }); if (action === 'model') S.advCfg = null; await refresh(); }
     catch (err) { toast(err.message, 'err'); }
   }
   async function loadBg(file, force) {
@@ -2073,8 +2078,8 @@
     const nAdvChip = !s && native ? `<button class="model-chip adv-chip ${nAdv ? 'on' : ''}" data-act="nativeAdv" title="Advisor for this session once it starts"><span aria-hidden="true">⚑</span> <span>Advisor ${nAdv === undefined ? 'default' : nAdv ? 'on' : 'off'}</span></button>` : '';
     setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s) + autoChip(s)
       : (choice ? modelChip(choice.model, choice.thinking, 'Saved model') : modelChip(native?.model, native?.thinking, 'Saved model')) + nAdvChip);
-    // A failed read is retried on the next render; settings saves clear S.advCfg so the chip follows the new config.
-    if (!s && native && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }).finally(() => { S.advCfgLoading = false; }); }
+    // A failed read is retried on the next render; settings saves and advisor model changes clear S.advCfg so the chips follow the new config.
+    if ((s || native) && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }).finally(() => { S.advCfgLoading = false; }); }
     if (!s) {
       placeholder = 'Continue this session…';
       hintText = 'Enter to continue · Shift+Enter for a new line';
