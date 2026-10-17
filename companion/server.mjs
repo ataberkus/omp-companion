@@ -388,6 +388,19 @@ function treeView(r){
  for(const n of nodes)n.onPath=path.has(n.id);
  return {leafId:leaf,nodes,truncated:nodes.length>=3000};
 }
+// A user message entry's prompt as OMP's branch reads it: text parts joined, image parts kept. Advisor updates are not the user's.
+function entryPrompt(e){
+ const m=e?.type==='message'?e.message:null;if(m?.role!=='user'||(m.synthetic&&m.attribution==='agent'))return null;
+ const parts=Array.isArray(m.content)?m.content:[{type:'text',text:String(m.content??'')}];
+ return {entryId:String(e.id),text:parts.filter(c=>c?.type==='text').map(c=>c.text).join(''),images:parts.filter(c=>c?.type==='image'&&typeof c.data==='string'&&typeof c.mimeType==='string').map(c=>({type:'image',mimeType:c.mimeType,data:c.data}))};
+}
+// From get_entries: entryId's prompt, or without one the newest prompt on OMP's active path (leaf back to the root).
+function userPrompt(r,entryId){
+ const byId=new Map((Array.isArray(r?.entries)?r.entries:[]).map(e=>[e?.id,e]));
+ if(entryId!==undefined)return entryPrompt(byId.get(entryId));
+ for(let id=r?.leafId,seen=new Set();id&&!seen.has(id);id=byId.get(id)?.parentId){seen.add(id);const p=entryPrompt(byId.get(id));if(p)return p;}
+ return null;
+}
 const TODO_STATUS=['pending','in_progress','completed','abandoned','blocked'];
 function todoPhases(v){
  if(!Array.isArray(v)||v.length>30)throw error('Todos must be a list of up to 30 phases.');
@@ -1223,7 +1236,7 @@ export async function createCompanion(options={}){
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -1424,9 +1437,17 @@ export async function createCompanion(options={}){
    return {name:(s.title.replace(/[^\w.-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'omp-session')+'.html',html:await fs.readFile(r?.path||path.join(dir,s.id+'.html'),'utf8')};
   }
   if(body.type==='branch_messages'){busy();const rpc=await start(s);const r=await rpc.send({type:'get_branch_messages'});return {messages:(Array.isArray(r?.messages)?r.messages:[]).map(m=>({entryId:String(m.entryId),text:String(m.text||'').slice(0,300)})).reverse()};}
-  if(body.type==='branch'){
-   busy();const rpc=await start(s);const r=await rpc.send({type:'branch',entryId:text(body.entryId,'Message',200)});if(r?.cancelled)throw error('An extension cancelled the branch.');
-   await reload(s,rpc);append(s,'system','Branched into a new session from this point. The message you picked is back in the composer.');s.status='paused';await persist();return {session:s,text:String(r?.text||'')};
+  // OMP's RPC has no in-place tree move (navigateTree is TUI and extension only): its `branch` copies the path up to just
+  // before a user message into a new session file, keeping the old file intact. Edit last / Regenerate rewind with it too.
+  if(body.type==='branch'||body.type==='edit_last'||body.type==='regenerate'){
+   busy();const rpc=await start(s);const entryId=body.type==='branch'?text(body.entryId,'Message',200):undefined;
+   const picked=userPrompt(await rpc.send({type:'get_entries'}),entryId);
+   if(!picked&&entryId===undefined)throw error('OMP has no message of yours in this conversation yet.');
+   const r=await rpc.send({type:'branch',entryId:entryId??picked.entryId});if(r?.cancelled)throw error('An extension cancelled the branch.');
+   await reload(s,rpc);s.status='paused';
+   if(body.type==='regenerate'){append(s,'system','Went back to before your last message in a new session and sent it again. The previous reply stays in the old session file.');return command(s,{type:'prompt',message:picked.text},picked.images);}
+   append(s,'system',body.type==='branch'?'Branched into a new session from this point. The message you picked is back in the composer.':'Went back to before your last message in a new session. It is back in the composer to edit and resend.');
+   await persist();return {session:s,text:typeof r?.text==='string'?r.text:picked?.text||'',images:picked?.images||[]};
   }
   if(body.type==='handoff'){
    busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Writing the handoff…';

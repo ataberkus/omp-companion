@@ -786,6 +786,7 @@
           <button data-act="cycleThinking">Next thinking level</button>
           ${idle ? `<button data-act="launch">Launch options…${launchCount(s.launch) ? ` <small>${launchCount(s.launch)} set</small>` : ''}</button>` : ''}
           <button data-act="rename">Rename session…</button>
+          ${idle && s.messages?.some(m => m.role === 'user') ? '<button data-act="editLast">Edit last message…</button><button data-act="regenerate">Regenerate last reply</button>' : ''}
           ${idle ? '<button data-act="branch">Branch from an earlier message…</button><button data-act="handoff">Hand off to a fresh session…</button><button data-act="newSession">Start a fresh OMP session (/new)…</button><button data-act="switchSession">Switch to another saved session…</button>' : ''}
           <button data-act="export">Export as HTML</button>
           <button data-act="stats">Session stats</button>
@@ -2332,6 +2333,17 @@
       modal('Branch from an earlier message', `<p class="muted">OMP starts a new session with everything before the message you pick. That message goes back into the composer so you can change it.</p><div class="modal-list">${r.messages.map(m => `<button data-branch="${esc(m.entryId)}" title="${esc(m.text || '')}">${esc(label(m))}</button>`).join('')}</div>`);
     } catch (e) { toast(e.message, 'err'); }
   }
+  // Puts a message OMP branched back to into the composer: its text, and its images as fresh attachments (replacing the draft).
+  async function restoreComposer(r) {
+    const input = $('#input'), view = S.view;
+    if (input) { input.value = r.text || ''; if (r.text) drafts.set(view, r.text); else drafts.delete(view); autosize(input); input.focus(); }
+    S.attachments = S.attachments.filter(a => a.view !== view);
+    for (const [i, img] of (r.images || []).entries()) {
+      const bytes = Uint8Array.from(atob(img.data), ch => ch.charCodeAt(0));
+      await attachImage(new File([bytes], `message-image-${i + 1}.${img.mimeType.split('/')[1] || 'png'}`, { type: img.mimeType }));
+    }
+    update(); renderAttachments();
+  }
   async function doBranch(entryId) {
     const buttons = document.querySelectorAll('#modal [data-branch]');
     if ([...buttons].some(b => b.disabled)) return;
@@ -2340,11 +2352,21 @@
       const r = await sessionApi({ type: 'branch', entryId });
       closeModal();
       await refresh(); S.lastSig = '';
-      const input = $('#input');
-      if (input && r.text) { input.value = r.text; drafts.set(S.view, r.text); autosize(input); input.focus(); }
-      update(); toast('Branched into a new session');
+      await restoreComposer(r);
+      toast('Branched into a new session');
     } catch (e) { toast(e.message, 'err'); buttons.forEach(b => { b.disabled = false; }); }
   }
+  // OMP's RPC branch is the only rewind it offers: a new session file holding everything before the last prompt.
+  async function editLast() {
+    if (($('#input')?.value.trim() || attached().length) && !confirm('Replace the draft in the composer with your last message?')) return;
+    try {
+      const r = await sessionApi({ type: 'edit_last' });
+      await refresh(); S.lastSig = '';
+      await restoreComposer(r);
+      toast('Back to before your last message: edit it and send');
+    } catch (e) { toast(e.message, 'err'); }
+  }
+  const regenerate = () => sessionAction({ type: 'regenerate' }, { timeout: 70000 }).then(ok => { if (ok) { S.lastSig = ''; toast('Sent your last message again'); } });
   const openHandoff = () => modal('Hand off to a fresh session', `<form data-handoff><p class="muted">OMP writes a summary of this session, then continues in a fresh context that starts from that summary.</p><textarea name="instructions" rows="3" maxlength="5000" placeholder="Optional: what the handoff should focus on"></textarea><div class="question-actions"><button class="btn sm primary" type="submit">Hand off</button></div></form>`);
   async function exportHtml() {
     try {
@@ -2598,7 +2620,7 @@
       const r = await sessionApi({ type: 'tree' });
       if (!r.nodes.length) return toast('This session has no messages yet.');
       const forks = r.nodes.filter(n => n.forks).length;
-      modal('Session tree', `<p class="muted">Every message OMP recorded, including earlier branches. The highlighted path is the conversation the session continues from${forks ? ` · ${forks} ${forks === 1 ? 'fork' : 'forks'}` : ''}. Branch from one of your messages to start a new session from that point.</p><div class="tree-list">${r.nodes.map(n => `<div class="tree-node ${n.onPath ? 'on' : ''} ${esc(n.kind)}" style="--d:${Math.min(n.depth, 12)}"><i aria-hidden="true">${TREE_ICON[n.kind] || '·'}</i><span class="tree-text" title="${esc(n.text)}">${n.label ? `<b class="tag">${esc(n.label)}</b> ` : ''}${esc(n.text || '(empty)')}</span>${n.forks ? `<small class="muted">${n.forks} branches</small>` : ''}${n.kind === 'user' ? `<button class="btn sm ghost" data-branch="${esc(n.id)}" title="Start a new session from this message">Branch</button>` : ''}</div>`).join('')}${r.truncated ? '<div class="history-note">Showing the first 3,000 entries.</div>' : ''}</div>`);
+      modal('Session tree', `<p class="muted">Every message OMP recorded, including earlier branches. The highlighted path is the conversation the session continues from${forks ? ` · ${forks} ${forks === 1 ? 'fork' : 'forks'}` : ''}. <b>Branch</b> on one of your messages, on any path, starts a new session with everything before it and puts the message and its images back in the composer. OMP's RPC can't move this session back in place.</p><div class="tree-list">${r.nodes.map(n => `<div class="tree-node ${n.onPath ? 'on' : ''} ${esc(n.kind)}" style="--d:${Math.min(n.depth, 12)}"><i aria-hidden="true">${TREE_ICON[n.kind] || '·'}</i><span class="tree-text" title="${esc(n.text)}">${n.label ? `<b class="tag">${esc(n.label)}</b> ` : ''}${esc(n.text || '(empty)')}</span>${n.forks ? `<small class="muted">${n.forks} branches</small>` : ''}${n.kind === 'user' ? `<button class="btn sm ghost" data-branch="${esc(n.id)}" title="Start a new session from this message">Branch</button>` : ''}</div>`).join('')}${r.truncated ? '<div class="history-note">Showing the first 3,000 entries.</div>' : ''}</div>`);
       $('#modal')?.classList.add('wide-modal');
     } catch (e) { toast(e.message, 'err'); }
   }
@@ -4118,10 +4140,10 @@
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
     else if (act === 'toggleOverlap') { const o = S.overlapOpen ||= new Set(); o.delete(a.dataset.id) || o.add(a.dataset.id); update(); }
-    else if (['rename', 'branch', 'handoff', 'export', 'stats', 'login', 'accounts'].includes(act)) {
+    else if (['rename', 'branch', 'editLast', 'regenerate', 'handoff', 'export', 'stats', 'login', 'accounts'].includes(act)) {
       closeMenu(a.closest('.menu'));
       if (act === 'rename') { const s = S.store.sessions.find(x => x.id === c.id); const name = prompt('Session name', s?.title || ''); if (name?.trim() && name.trim() !== s?.title) sessionAction({ type: 'rename', name: name.trim() }); }
-      else ({ branch: openBranch, handoff: openHandoff, export: exportHtml, stats: showStats, login: openLogin, accounts: openAccounts })[act]();
+      else ({ branch: openBranch, editLast, regenerate, handoff: openHandoff, export: exportHtml, stats: showStats, login: openLogin, accounts: openAccounts })[act]();
     }
     else if (act === 'hide') { if (confirm('Remove this session from the panel? The OMP session file is kept, so you can continue it later from history.')) sessionCommand('hide').then(ok => { if (ok) { refreshNative(); location.hash = '#/new'; } }); }
     else if (['side', 'openPlan', 'sideTab', 'closeSide'].includes(act)) {
