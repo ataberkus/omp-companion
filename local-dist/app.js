@@ -2822,11 +2822,23 @@
   // Keys a soft keyboard sends as keydown instead of text; everything else arrives through the hidden field's input events.
   const SCREEN_NAMED = new Set(['Enter', 'Backspace', 'Tab', 'Escape', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ...Array.from({ length: 12 }, (_, i) => 'F' + (i + 1))]);
   const SCREEN_TYPE = '\u00a0'; // the hidden field always holds this, so Backspace on an "empty" soft keyboard still has something to delete
-  S.screen = { info: null, error: '', state: 'idle', note: '', monitors: [], current: -1, mods: new Set(), held: new Set(), scale: 1, left: 0, top: 0, w: 0, h: 0, drawn: false, retries: 0, fps: 0, kbps: 0, frames: 0, bytes: 0, unacked: 0, scroll: false, sentWidth: 0, quality: 'auto', monitor: -1, viewOnly: false };
-  try { const p = JSON.parse(localStorage.getItem('omp-screen') || '{}'); if (Object.hasOwn(SCREEN_QUALITY, p.quality)) S.screen.quality = p.quality; if (Number.isInteger(p.monitor)) S.screen.monitor = p.monitor; S.screen.viewOnly = p.viewOnly === true; } catch {}
-  const saveScreenPrefs = () => { try { localStorage.setItem('omp-screen', JSON.stringify({ quality: S.screen.quality, monitor: S.screen.monitor, viewOnly: S.screen.viewOnly })); } catch {} };
-  let screenWs = null, screenRetry, screenInfoPoll, screenStats, screenResize, screenDraw = Promise.resolve(), screenMove = null, screenWheel = { dx: 0, dy: 0, queued: false }, screenTypePrev = SCREEN_TYPE;
+  // The Keys row's shortcuts: [label, key code, modifiers]. The browser on a phone has none of these keys.
+  const SCREEN_SHORTCUTS = [['Copy', 'KeyC', ['ctrl']], ['Paste', 'KeyV', ['ctrl']], ['Cut', 'KeyX', ['ctrl']], ['Undo', 'KeyZ', ['ctrl']], ['Select all', 'KeyA', ['ctrl']], ['Save', 'KeyS', ['ctrl']], ['Find', 'KeyF', ['ctrl']],
+    ['Switch app', 'Tab', ['alt']], ['Desktop', 'KeyD', ['win']], ['Close', 'F4', ['alt']], ['Task Manager', 'Escape', ['ctrl', 'shift']]];
+  const SCREEN_PREFS = ['quality', 'monitor', 'viewOnly', 'trackpad', 'keys'];
+  // cursor: Trackpad mode's pointer, 0..1 across the picture. max: in-page full screen where the browser has no element full screen.
+  // minScale: how far pinching out may go; below 1 only on landscape phones, where scale 1 fills the width.
+  S.screen = { info: null, error: '', state: 'idle', note: '', monitors: [], current: -1, mods: new Set(), held: new Set(), scale: 1, minScale: 1, left: 0, top: 0, w: 0, h: 0, drawn: false, retries: 0, fps: 0, kbps: 0, frames: 0, bytes: 0, unacked: 0, scroll: false, sentWidth: 0, quality: 'auto', monitor: -1, viewOnly: false, trackpad: false, keys: false, more: false, max: false, cursor: { x: 0.5, y: 0.5 } };
+  try {
+    const p = JSON.parse(localStorage.getItem('omp-screen') || '{}');
+    if (Object.hasOwn(SCREEN_QUALITY, p.quality)) S.screen.quality = p.quality;
+    if (Number.isInteger(p.monitor)) S.screen.monitor = p.monitor;
+    for (const k of ['viewOnly', 'trackpad', 'keys']) S.screen[k] = p[k] === true;
+  } catch {}
+  const saveScreenPrefs = () => { try { localStorage.setItem('omp-screen', JSON.stringify(Object.fromEntries(SCREEN_PREFS.map(k => [k, S.screen[k]])))); } catch {} };
+  let screenWs = null, screenRetry, screenInfoPoll, screenStats, screenResize, screenDraw = Promise.resolve(), screenMove = null, screenWheel = { dx: 0, dy: 0, queued: false }, screenTypePrev = SCREEN_TYPE, screenKbOpen = false;
   const screenInput = () => S.screen.state === 'live' && !S.screen.viewOnly;
+  const screenTouchUi = () => matchMedia('(pointer: coarse)').matches;
   // Input is dropped in view-only mode; acks, config and refresh keep the picture coming.
   function screenSend(m) {
     if (screenWs?.readyState !== 1 || (S.screen.viewOnly && !['ack', 'config', 'refresh'].includes(m.t))) return;
@@ -2838,6 +2850,7 @@
       <div class="screen-view" id="screenView">
         <div class="screen-bar" id="screenBar" hidden></div>
         <div class="screen-stage" id="screenStage"><canvas id="screenCanvas" tabindex="0" hidden aria-label="The PC's screen. Click it to control the mouse; keys pressed here go to the PC."></canvas>
+          <div class="screen-cursor" id="screenCursor" hidden></div><div class="screen-ring" id="screenRing"></div>
           <div class="screen-note" id="screenNote" role="status" hidden></div><div class="screen-msg" id="screenMsg"></div></div>
         <textarea id="screenType" class="screen-type" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Type on the PC"></textarea>
       </div>`;
@@ -2907,6 +2920,7 @@
     if (!S.screen) return;
     screenDisconnect(); clearTimeout(screenInfoPoll); clearTimeout(screenResize);
     if (document.fullscreenElement?.id === 'screenView') document.exitFullscreen?.().catch(() => {});
+    S.screen.max = false;
   }
   // Auto sizes the picture to this display's pixels (the PC never sends more than its own resolution).
   function screenConfig() {
@@ -2952,19 +2966,65 @@
     renderScreenMeta();
   }
   // Fit the picture in the stage, then apply pinch zoom (scale) and pan (left/top); panning stops at the picture's edges.
+  // Landscape phones fill the stage's width instead of leaving black bars beside the picture, as long as that cuts off at most
+  // about a quarter of it (a 16:9 or 16:10 PC screen fills it; 4:3 or a portrait display stops short): the cut strip is a pan
+  // away, and pinching out (down to minScale) shows the whole picture.
   function layoutScreen() {
     const sc = S.screen, stage = $('#screenStage'), c = $('#screenCanvas');
     if (!stage || !c || !sc.w) return;
-    const W = stage.clientWidth, H = stage.clientHeight, fit = Math.min(W / sc.w, H / sc.h), w = sc.w * fit * sc.scale, h = sc.h * fit * sc.scale;
-    const place = (v, size, view) => size <= view ? (view - size) / 2 : Math.min(0, Math.max(view - size, v));
-    sc.left = place(sc.left, w, W); sc.top = place(sc.top, h, H);
+    const W = stage.clientWidth, H = stage.clientHeight, whole = Math.min(W / sc.w, H / sc.h), fit = screenLandscape() ? Math.min(W / sc.w, whole * 1.3) : whole;
+    sc.minScale = Math.min(1, whole / fit);
+    if (sc.scale < sc.minScale) { sc.scale = sc.minScale; renderScreenBar(); }
+    const w = sc.w * fit * sc.scale, h = sc.h * fit * sc.scale, fresh = sc.scale === 1;
+    // At the fill size, a picture that has just outgrown the stage starts centred, so neither the taskbar nor the title bars are cut off whole.
+    const place = (v, size, view, was) => size <= view ? (view - size) / 2 : Math.min(0, Math.max(view - size, fresh && was <= view + 1 ? (view - size) / 2 : v));
+    sc.left = place(sc.left, w, W, c.offsetWidth); sc.top = place(sc.top, h, H, c.offsetHeight);
     c.style.cssText = `width:${w}px;height:${h}px;left:${sc.left}px;top:${sc.top}px`;
+    placeScreenCursor();
+  }
+  const screenLandscape = () => matchMedia('(pointer: coarse) and (max-height: 500px)').matches;
+  // The picture is bigger than the stage: zoomed in, or filling a landscape phone's width.
+  function screenOverflows() {
+    const stage = $('#screenStage'), c = $('#screenCanvas');
+    return Boolean(stage && c && (c.offsetWidth > stage.clientWidth + 1 || c.offsetHeight > stage.clientHeight + 1));
+  }
+  // Trackpad mode draws its pointer on the picture right away; the PC's own cursor in the stream follows a frame later.
+  function placeScreenCursor() {
+    const sc = S.screen, el = $('#screenCursor'), c = $('#screenCanvas');
+    if (!el || !c) return;
+    el.hidden = !(sc.trackpad && screenInput() && sc.w && screenTouchUi());
+    if (!el.hidden) el.style.cssText = `left:${sc.left + sc.cursor.x * c.offsetWidth}px;top:${sc.top + sc.cursor.y * c.offsetHeight}px`;
+  }
+  // While the picture is bigger than the stage, the view scrolls along when the Trackpad pointer nears its edge, so the pointer never leaves sight.
+  function followScreenCursor() {
+    const sc = S.screen, stage = $('#screenStage'), c = $('#screenCanvas');
+    if (!screenOverflows()) return placeScreenCursor();
+    const m = 40, x = sc.left + sc.cursor.x * c.offsetWidth, y = sc.top + sc.cursor.y * c.offsetHeight;
+    sc.left += Math.max(0, m - x) - Math.max(0, x - (stage.clientWidth - m));
+    sc.top += Math.max(0, m - y) - Math.max(0, y - (stage.clientHeight - m));
+    layoutScreen();
+  }
+  // Feedback at a stage point given in client coordinates: "hold" fills while a long press counts down, "tap" flashes a click.
+  function screenRing(x, y, kind) {
+    const el = $('#screenRing'), r = $('#screenStage')?.getBoundingClientRect();
+    if (!el || !r) return;
+    el.className = 'screen-ring';
+    if (!kind) return;
+    void el.offsetWidth; // restart the animation
+    el.style.cssText = `left:${x - r.left}px;top:${y - r.top}px`;
+    el.className = 'screen-ring ' + kind;
+  }
+  // The Trackpad pointer in client coordinates, for feedback drawn where it clicks.
+  function screenCursorClient() {
+    const r = $('#screenCanvas').getBoundingClientRect(), p = S.screen.cursor;
+    return [r.left + p.x * r.width, r.top + p.y * r.height];
   }
   function zoomScreen(factor, px, py) {
-    const sc = S.screen, was = sc.scale > 1.01, s = Math.min(8, Math.max(1, sc.scale * factor)), k = s / sc.scale;
+    // The toolbar shows Fit while zoomed in and Fill while zoomed out below the fill size; redraw it when that changes.
+    const sc = S.screen, side = z => z > 1.01 ? 1 : z < 0.99 ? -1 : 0, s = Math.min(8, Math.max(sc.minScale, sc.scale * factor)), k = s / sc.scale, was = side(sc.scale);
     sc.left = px - (px - sc.left) * k; sc.top = py - (py - sc.top) * k; sc.scale = s;
     layoutScreen();
-    if (was !== s > 1.01) renderScreenBar();
+    if (was !== side(s)) renderScreenBar();
   }
   // Pointer position as 0..1 across the picture; the companion maps it onto the shared display.
   function screenPos(e) {
@@ -3065,26 +3125,46 @@
     });
     c.addEventListener('blur', releaseScreenKeys);
 
-    // Touch: tap = click, long press = right click, drag = drag (or scroll with "Scroll" on), two fingers = scroll at normal
-    // size, pinch = zoom, two-finger drag while zoomed = pan. A gesture's kind is fixed once it starts moving.
+    // Touch, in two modes. Touch (direct): the pointer goes where the finger lands; tap = click (a second tap close by lands on
+    // the same spot, so double taps double-click), long press = right click, drag = drag (or scroll with "↕ Scroll" on).
+    // Trackpad: one finger moves the pointer like a laptop's touchpad, faster the faster it moves, for targets smaller than a
+    // finger; tap = click where the pointer is, tap then touch-and-drag = drag, long press = right click, and a view bigger
+    // than the stage follows the pointer. Both: two-finger tap = right click, two-finger drag = scroll (pans instead while
+    // zoomed in Touch mode; at a landscape phone's fill size it pans to the picture's edge first, then scrolls), pinch = zoom.
+    // View only: one finger pans. A gesture's kind is fixed once it starts moving.
     const touches = new Map();
-    let g = null;
+    let g = null, lastTap = null, pendingClick = null;
     const pair = () => {
       const [a, b] = [...touches.values()], r = stage.getBoundingClientRect();
       return { x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top, d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) };
     };
+    const pad = () => S.screen.trackpad;
+    const cursorPos = () => ({ ...S.screen.cursor });
+    const press = (b, down, p) => screenSend({ t: 'button', b, down, ...p });
+    function rightClick(p, at) { navigator.vibrate?.(15); screenRing(...at, 'tap'); screenClick(2, p); }
+    function moveCursor(dx, dy, dt) {
+      const sc = S.screen, r = c.getBoundingClientRect(), gain = Math.min(2.5, 0.5 + Math.hypot(dx, dy) / Math.max(8, dt) * 1.5);
+      sc.cursor = { x: Math.min(1, Math.max(0, sc.cursor.x + dx * gain / r.width)), y: Math.min(1, Math.max(0, sc.cursor.y + dy * gain / r.height)) };
+      queueScreenMove(cursorPos());
+      followScreenCursor();
+    }
     function touchDown(e) {
       e.preventDefault();
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (touches.size === 1) {
-        const p = screenPos(e);
-        g = { kind: 'tap', x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, p };
-        if (screenInput()) g.timer = setTimeout(() => { if (g?.kind !== 'tap') return; g.kind = 'done'; navigator.vibrate?.(15); screenClick(2, p); }, 550);
+        const input = screenInput(), second = Boolean(pad() && pendingClick);
+        if (second) { clearTimeout(pendingClick); pendingClick = null; }
+        g = { kind: 'tap', x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, lt: e.timeStamp, at: Date.now(), second, p: pad() ? null : screenPos(e) };
+        if (input && !second) {
+          const at = pad() ? screenCursorClient() : [e.clientX, e.clientY];
+          screenRing(...at, 'hold');
+          g.timer = setTimeout(() => { if (g?.kind !== 'tap') return; g.kind = 'done'; rightClick(g.p || cursorPos(), at); }, 550);
+        }
       } else if (touches.size === 2 && g) {
-        clearTimeout(g.timer);
-        if (g.kind === 'drag') { screenMove = null; screenSend({ t: 'button', b: 0, down: false }); }
+        clearTimeout(g.timer); screenRing();
+        if (g.kind === 'drag') { screenMove = null; press(0, false, pad() ? cursorPos() : {}); }
         const p = pair();
-        g = { kind: 'two', start: p, last: p, mode: '' };
+        g = { kind: 'two', start: p, last: p, mode: '', at: Date.now(), p: g.p };
       }
     }
     function touchMove(e) {
@@ -3096,34 +3176,57 @@
         const p = pair(), l = g.last, sc = S.screen;
         if (!g.mode) {
           if (Math.abs(p.d - g.start.d) > 24) g.mode = 'zoom';
-          else if (Math.hypot(p.x - g.start.x, p.y - g.start.y) > 10) g.mode = sc.scale > 1.01 ? 'pan' : 'scroll';
+          else if (Math.hypot(p.x - g.start.x, p.y - g.start.y) > 10) g.mode = pad() && screenInput() ? 'scroll' : sc.scale > 1.01 ? 'pan' : screenOverflows() ? 'chain' : 'scroll';
           else return;
         }
-        if (g.mode === 'zoom') { sc.left += p.x - l.x; sc.top += p.y - l.y; zoomScreen(p.d / l.d, p.x, p.y); }
-        else if (g.mode === 'pan') { sc.left += p.x - l.x; sc.top += p.y - l.y; layoutScreen(); }
-        else if (screenInput()) queueScreenWheel(-(p.x - l.x) * 4, (p.y - l.y) * 4); // content follows the fingers; ~30px is a notch
+        const dx = p.x - l.x, dy = p.y - l.y;
+        if (g.mode === 'zoom') { sc.left += dx; sc.top += dy; zoomScreen(p.d / l.d, p.x, p.y); }
+        else if (g.mode === 'pan') { sc.left += dx; sc.top += dy; layoutScreen(); }
+        else if (g.mode === 'chain') {
+          const x0 = sc.left, y0 = sc.top;
+          sc.left += dx; sc.top += dy; layoutScreen();
+          const rx = dx - (sc.left - x0), ry = dy - (sc.top - y0);
+          if (screenInput() && (rx || ry)) queueScreenWheel(-rx * 4, ry * 4);
+        }
+        else if (screenInput()) queueScreenWheel(-dx * 4, dy * 4); // content follows the fingers; ~30px is a notch
         g.last = p;
         return;
       }
       if (touches.size !== 1) return;
       if (g.kind === 'tap') {
-        if (Math.hypot(e.clientX - g.x, e.clientY - g.y) < 10) return;
-        clearTimeout(g.timer);
+        // Trackpad pointing starts sooner, so small nudges move the pointer.
+        if (Math.hypot(e.clientX - g.x, e.clientY - g.y) < (pad() && screenInput() && !g.second ? 6 : 10)) return;
+        clearTimeout(g.timer); screenRing();
         // View only: one finger pans the zoomed picture instead.
-        g.kind = !screenInput() ? 'pan' : S.screen.scroll ? 'scroll' : 'drag';
-        if (g.kind === 'drag') screenSend({ t: 'button', b: 0, down: true, ...g.p });
+        g.kind = !screenInput() ? 'pan' : pad() ? (g.second ? 'drag' : 'point') : S.screen.scroll ? 'scroll' : 'drag';
+        if (g.kind === 'drag') press(0, true, g.p || cursorPos());
       }
-      if (g.kind === 'drag') queueScreenMove(screenPos(e));
-      else if (g.kind === 'scroll') queueScreenWheel(-(e.clientX - g.lx) * 4, (e.clientY - g.ly) * 4);
-      else if (g.kind === 'pan') { S.screen.left += e.clientX - g.lx; S.screen.top += e.clientY - g.ly; layoutScreen(); }
-      g.lx = e.clientX; g.ly = e.clientY;
+      const dx = e.clientX - g.lx, dy = e.clientY - g.ly;
+      if (g.kind === 'point' || (g.kind === 'drag' && pad())) moveCursor(dx, dy, e.timeStamp - g.lt);
+      else if (g.kind === 'drag') queueScreenMove(screenPos(e));
+      else if (g.kind === 'scroll') queueScreenWheel(-dx * 4, dy * 4);
+      else if (g.kind === 'pan') { S.screen.left += dx; S.screen.top += dy; layoutScreen(); }
+      g.lx = e.clientX; g.ly = e.clientY; g.lt = e.timeStamp;
     }
     function touchUp(e, cancelled) {
       touches.delete(e.pointerId);
       if (!g) return;
       clearTimeout(g.timer);
-      if (g.kind === 'tap' && !cancelled && screenInput()) screenClick(0, g.p);
-      else if (g.kind === 'drag') { screenMove = null; screenSend({ t: 'button', b: 0, down: false, ...screenPos(e) }); }
+      if (g.kind !== 'done') screenRing();
+      const input = screenInput() && !cancelled, now = Date.now();
+      if (g.kind === 'tap' && input && pad()) {
+        const at = screenCursorClient();
+        // A tap waits a moment: a second touch that drags turns it into a drag instead, a second tap into a double click.
+        if (g.second) { screenRing(...at, 'tap'); screenWithMods(() => { for (let i = 0; i < 2; i++) { press(0, true, cursorPos()); press(0, false, cursorPos()); } }); }
+        else pendingClick = setTimeout(() => { pendingClick = null; screenRing(...at, 'tap'); screenClick(0, cursorPos()); }, 250);
+      } else if (g.kind === 'tap' && input) {
+        // Fingers land a few pixels apart; the PC wants a double click's two clicks within a few of its pixels.
+        const p = lastTap && now - lastTap.at < 400 && Math.hypot(g.x - lastTap.x, g.y - lastTap.y) < 24 ? lastTap.p : g.p;
+        screenRing(g.x, g.y, 'tap');
+        screenClick(0, p);
+        lastTap = { at: now, x: g.x, y: g.y, p };
+      } else if (g.kind === 'drag') { screenMove = null; press(0, false, pad() ? cursorPos() : screenPos(e)); }
+      else if (g.kind === 'two' && !g.mode && input && now - g.at < 400) rightClick(pad() ? cursorPos() : g.p || screenPos(e), pad() ? screenCursorClient() : [e.clientX, e.clientY]);
       // The fingers left after a two-finger gesture do nothing until all are lifted.
       g = touches.size ? { kind: 'done' } : null;
     }
@@ -3135,13 +3238,19 @@
       const b = e.target.closest('[data-skey]');
       if (!b) return;
       const k = b.dataset.skey, sc = S.screen;
-      if (k === 'viewOnly') { releaseScreenKeys(); sc.viewOnly = !sc.viewOnly; sc.mods.clear(); saveScreenPrefs(); renderScreenBar(); renderScreenMeta(); }
+      if (k === 'viewOnly') { releaseScreenKeys(); sc.viewOnly = !sc.viewOnly; sc.mods.clear(); saveScreenPrefs(); renderScreenBar(); renderScreenMeta(); placeScreenCursor(); }
       else if (k === 'fit') { sc.scale = 1; layoutScreen(); renderScreenBar(); }
-      else if (k === 'keyboard') { type.focus({ preventScroll: true }); resetScreenType(type); }
+      // ⌨ again closes the keyboard: a phone keyboard has no reliable close key of its own.
+      else if (k === 'keyboard') { if (document.activeElement === type) type.blur(); else { type.focus({ preventScroll: true }); resetScreenType(type); } }
       else if (k === 'scroll') { sc.scroll = !sc.scroll; renderScreenBar(); }
+      else if (k === 'trackpad') { sc.trackpad = !sc.trackpad; saveScreenPrefs(); renderScreenBar(); placeScreenCursor(); }
+      else if (k === 'keys') { sc.keys = !sc.keys; saveScreenPrefs(); renderScreenBar(); }
+      else if (k === 'more') { sc.more = !sc.more; renderScreenBar(); }
+      else if (k === 'full') toggleScreenFull();
       // Tapping a held modifier again presses it on its own (Win opens Start).
       else if (k.startsWith('mod:')) { const m = k.slice(4); if (sc.mods.delete(m)) screenTap(SCREEN_MODS[m][0]); else sc.mods.add(m); renderScreenBar(); }
       else if (k.startsWith('key:')) screenTap(k.slice(4));
+      else if (k.startsWith('combo:')) { const s = SCREEN_SHORTCUTS[Number(k.slice(6))]; if (s) screenTap(s[1], s[2]); }
     });
     bar.addEventListener('change', e => {
       const s = e.target.closest('[data-sset]');
@@ -3162,6 +3271,7 @@
     });
     type.addEventListener('input', e => screenTyped(type, e.isComposing));
     type.addEventListener('compositionend', () => screenTyped(type, false));
+    for (const ev of ['focus', 'blur']) type.addEventListener(ev, () => renderScreenBar());
 
     // Re-fit on rotation or window resize; Auto quality asks for a new size when the stage changed a lot.
     new ResizeObserver(() => {
@@ -3192,9 +3302,27 @@
     const cover = vv.scale > 1.01 ? 0 : Math.round(document.documentElement.clientHeight - vv.height - vv.offsetTop);
     view.style.paddingBottom = cover > 1 ? cover + 'px' : '';
     if (cover > 1 && (scrollX || scrollY)) scrollTo(0, 0);
+    // Closed with the keyboard's own key (Android back, iOS ⌄), the field keeps focus: drop it so ⌨ shows the keyboard as closed.
+    const open = cover > 80;
+    if (screenKbOpen && !open && document.activeElement?.id === 'screenType') document.activeElement.blur();
+    screenKbOpen = open;
   }
   window.visualViewport?.addEventListener('resize', fitScreenView);
   window.visualViewport?.addEventListener('scroll', fitScreenView);
+  // Full screen: the browser's own where it has one for page elements; elsewhere (iPhone) the view covers the page instead.
+  function toggleScreenFull() {
+    const sc = S.screen, view = $('#screenView');
+    if (!view) return;
+    if (document.fullscreenEnabled) {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      else view.requestFullscreen?.().catch(() => {});
+      return;
+    }
+    sc.max = !sc.max;
+    view.classList.toggle('max', sc.max);
+    renderScreenBar();
+  }
+  document.addEventListener('fullscreenchange', () => renderScreenBar());
   function renderScreenMeta() {
     const sc = S.screen, el = $('#screenMeta');
     if (!el) return;
@@ -3206,15 +3334,31 @@
   function renderScreenBar() {
     const sc = S.screen, bar = $('#screenBar');
     if (!bar || sc.state !== 'live') return;
-    const touch = matchMedia('(pointer: coarse)').matches, off = sc.viewOnly ? ' disabled' : '';
+    const touch = screenTouchUi(), off = sc.viewOnly ? ' disabled' : '';
     const tog = (k, label, on, title, dis = '') => `<button class="btn sm ${on ? 'on' : 'ghost'}" data-skey="${k}" aria-pressed="${on}" title="${esc(title)}"${dis}>${label}</button>`;
     const key = (code, label, title) => `<button class="btn sm ghost" data-skey="key:${code}" title="${esc(title || label)}"${off}>${label}</button>`;
     const mons = sc.monitors.length > 1 ? `<select data-sset="monitor" aria-label="Display">${sc.monitors.map((m, i) => `<option value="${i}"${i === sc.current ? ' selected' : ''}>Display ${i + 1}${m.primary ? ' (main)' : ''} · ${m.w}×${m.h}</option>`).join('')}</select>` : '';
-    bar.innerHTML = `${mons}<select data-sset="quality" aria-label="Picture quality">${Object.entries(SCREEN_QUALITY).map(([k, v]) => `<option value="${k}"${k === sc.quality ? ' selected' : ''}>${v}</option>`).join('')}</select>
-      ${tog('viewOnly', 'View only', sc.viewOnly, 'Watch without sending mouse or keyboard input')}${sc.scale > 1.01 ? '<button class="btn sm ghost" data-skey="fit" title="Zoom back out to fit">Fit</button>' : ''}
-      ${touch ? tog('keyboard', '⌨', false, 'Open the keyboard', off) + tog('scroll', '↕ Scroll', sc.scroll, 'One-finger drag scrolls instead of dragging', off) : ''}<span class="screen-sep"></span>
-      ${Object.entries(SCREEN_MODS).map(([k, [, label]]) => tog('mod:' + k, label, sc.mods.has(k), `${label} for the next key, click or tap; tap again to press ${label} alone`, off)).join('')}
-      ${key('Escape', 'Esc')}${key('Tab', 'Tab')}${key('ArrowLeft', '←', 'Left')}${key('ArrowUp', '↑', 'Up')}${key('ArrowDown', '↓', 'Down')}${key('ArrowRight', '→', 'Right')}${key('Enter', '⏎', 'Enter')}${key('Backspace', '⌫', 'Backspace')}${key('Delete', 'Del', 'Delete')}`;
+    const quality = `<select data-sset="quality" aria-label="Picture quality">${Object.entries(SCREEN_QUALITY).map(([k, v]) => `<option value="${k}"${k === sc.quality ? ' selected' : ''}>${v}</option>`).join('')}</select>`;
+    const viewOnly = tog('viewOnly', 'View only', sc.viewOnly, 'Watch without sending mouse or keyboard input');
+    // Fill: on a landscape phone, pinched out below the size that fills the width.
+    const fit = sc.scale > 1.01 ? '<button class="btn sm ghost" data-skey="fit" title="Zoom back out to fit">Fit</button>' : sc.scale < 0.99 ? '<button class="btn sm ghost" data-skey="fit" title="Fill the width again">Fill</button>' : '';
+    const mods = Object.entries(SCREEN_MODS).map(([k, [, label]]) => tog('mod:' + k, label, sc.mods.has(k), `${label} for the next key, click or tap; tap again to press ${label} alone`, off)).join('');
+    const keys = key('Escape', 'Esc') + key('Tab', 'Tab') + key('ArrowLeft', '←', 'Left') + key('ArrowUp', '↑', 'Up') + key('ArrowDown', '↓', 'Down') + key('ArrowRight', '→', 'Right') + key('Enter', '⏎', 'Enter') + key('Backspace', '⌫', 'Backspace') + key('Delete', 'Del', 'Delete');
+    if (!touch) {
+      bar.innerHTML = `${mons}${quality}${viewOnly}${fit}<span class="screen-sep"></span>${mods}${keys}`;
+      return;
+    }
+    // Phones: one row of what's used all the time; settings (⋯) and the extra keys (Keys) open as rows below it on demand,
+    // so the picture keeps the height. The key rows scroll sideways; their fading edge shows there is more. Held sideways, the
+    // header goes and the main row becomes a column beside the picture, so it carries ☰ and ⋯ carries Disconnect (screen-land).
+    const full = document.fullscreenElement?.id === 'screenView' || sc.max;
+    const typing = document.activeElement?.id === 'screenType';
+    const more = sc.more ? `<div class="screen-row">${mons}${quality}${viewOnly}${sc.trackpad ? '' : tog('scroll', '↕ Scroll', sc.scroll, 'One-finger drag scrolls instead of dragging', off)}<button class="btn sm screen-land" data-act="screenStop">Disconnect</button></div>` : '';
+    const extra = sc.keys ? `<div class="screen-row screen-keys">${mods}${keys}${key('Home', 'Home')}${key('End', 'End')}${key('PageUp', 'PgUp', 'Page Up')}${key('PageDown', 'PgDn', 'Page Down')}</div>
+      <div class="screen-row screen-keys">${SCREEN_SHORTCUTS.map(([label, code, m], i) => `<button class="btn sm ghost" data-skey="combo:${i}" title="${esc([...m.map(x => SCREEN_MODS[x][1]), code.replace(/^Key/, '')].join('+'))}"${off}>${esc(label)}</button>`).join('')}</div>` : '';
+    const nav = `<button class="btn sm ghost screen-land" data-act="nav" aria-label="Open navigation" aria-expanded="${$('#app').classList.contains('nav-open')}" aria-controls="sidebar">☰</button>`;
+    bar.innerHTML = `<div class="screen-row">${nav}${tog('trackpad', 'Trackpad', sc.trackpad, 'Move the pointer like a laptop touchpad instead of touching where to click', off)}${tog('keyboard', '⌨', typing, typing ? 'Close the keyboard' : 'Open the keyboard', off)}${tog('keys', 'Keys', sc.keys, 'Ctrl, Alt, Win, arrows, Esc and shortcuts', off)}
+      ${sc.viewOnly && !sc.more ? viewOnly : ''}${fit}<span class="screen-sep"></span>${tog('full', '⛶', full, full ? 'Leave full screen' : 'Full screen')}${tog('more', '⋯', sc.more, 'Display, quality, view only')}</div>${more}${extra}`;
   }
   function screenMsgHtml() {
     const sc = S.screen, info = sc.info, spin = t => `<div class="working"><span class="spinner"></span> ${esc(t)}</div>`;
@@ -3234,10 +3378,15 @@
     if (!$('#screenMeta')) return;
     const sc = S.screen, live = sc.state === 'live';
     renderScreenMeta();
-    $('#screenActs').innerHTML = (live && document.fullscreenEnabled ? '<button class="btn sm ghost" data-act="screenFull" title="Full screen" aria-label="Full screen">⛶</button>' : '')
+    if (!live) sc.max = false;
+    $('#screenView').classList.toggle('max', sc.max);
+    $('#screenView').classList.toggle('live', live);
+    // Phones get ⛶ in the toolbar, which stays on screen in full screen; desktops keep it up here, next to Disconnect.
+    $('#screenActs').innerHTML = (live && document.fullscreenEnabled && !screenTouchUi() ? '<button class="btn sm ghost" data-act="screenFull" title="Full screen" aria-label="Full screen">⛶</button>' : '')
       + (live || sc.state === 'connecting' ? '<button class="btn sm" data-act="screenStop">Disconnect</button>' : '');
     const bar = $('#screenBar');
     bar.hidden = !live;
+    bar.classList.toggle('rows', screenTouchUi());
     renderScreenBar();
     const msg = screenMsgHtml(), m = $('#screenMsg');
     m.hidden = !msg; m.innerHTML = msg;
@@ -3707,7 +3856,8 @@
     // Drawer layouts (narrow, or landscape phones on Screen) cover the page: keep it out of reach while open.
     if (m) m.inert = open && getComputedStyle($('#sidebar')).position === 'fixed';
     document.querySelectorAll('[data-act="nav"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
-    if (moveFocus) (open ? $('#newBtn') : m?.querySelector('[data-act="nav"]'))?.focus();
+    // Back to the ☰ that is showing: on a landscape phone's Screen page that's the toolbar's, not the hidden header's.
+    if (moveFocus) (open ? $('#newBtn') : [...(m?.querySelectorAll('[data-act="nav"]') || [])].find(b => b.getClientRects().length))?.focus();
   }
   function pickerCtx() {
     const c = current();

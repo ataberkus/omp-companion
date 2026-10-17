@@ -789,8 +789,29 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 .screen-note{position:absolute;top:10px;left:50%;transform:translateX(-50%);max-width:calc(100% - 24px);padding:6px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--amber);font-size:12.5px;pointer-events:none}
 .screen-note[hidden]{display:none}
 .screen-type{position:absolute;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;resize:none;pointer-events:none}
+/* Touch toolbar: a main row, plus settings and key rows opened on demand. Key rows scroll sideways; the fading right edge says there is more. */
+.screen-bar.rows{flex-direction:column;align-items:stretch;flex-wrap:nowrap;gap:4px}
+.screen-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
+.screen-bar.rows .screen-row>.screen-sep{display:block}
+.screen-bar.rows .btn{min-height:34px;min-width:38px;justify-content:center}
+.screen-keys{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-right:24px;mask-image:linear-gradient(to left,transparent,#000 24px)}
+.screen-keys::-webkit-scrollbar{display:none}
+/* Full screen where the browser can't put an element in full screen (iPhone): the view covers the page, toolbar included. */
+.screen-view.max{position:fixed;inset:0;z-index:var(--z-modal);background:var(--bg)}
+/* Trackpad pointer, drawn at once; the PC's own cursor in the picture follows a frame later. */
+.screen-cursor{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #000c,inset 0 0 0 1px #000c;pointer-events:none}
+.screen-cursor::after{content:"";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:#fff;box-shadow:0 0 0 1px #000c}
+.screen-cursor[hidden]{display:none}
+/* Touch feedback: "hold" closes in while a long press counts down to its right click, "tap" flashes where a click went. */
+.screen-ring{position:absolute;width:48px;height:48px;margin:-24px 0 0 -24px;border-radius:50%;pointer-events:none;opacity:0}
+.screen-ring.hold{border:3px solid var(--accent);animation:screen-hold .55s linear forwards}
+.screen-ring.tap{background:#fff8;animation:screen-tap .35s ease-out forwards}
+@keyframes screen-hold{from{opacity:.25;transform:scale(1.6)}to{opacity:1;transform:scale(.6)}}
+@keyframes screen-tap{from{opacity:.9;transform:scale(.3)}to{opacity:0;transform:scale(1.1)}}
 /* Touch screens wrap the toolbar at any width: a sideways-scrolling row shows no scrollbar there, hiding the keys past the edge. */
 @media (max-width:820px),(pointer:coarse){.screen-bar{flex-wrap:wrap;padding:6px 8px}.screen-bar select{flex:1 1 140px;min-width:0}.screen-sep{display:none}}
+/* ☰ and Disconnect join the toolbar only on landscape phones, where the header goes (below). */
+.screen-bar .screen-land{display:none}
 /* Small phones: the frame size gives way and the stats get their own line, so fps and rate stay readable. Always that
    line, not wrapping as the numbers change: a header that changes height would move the picture under the finger. */
 @media (max-width:430px){.meta .screen-res{display:none}#screenMeta{flex-wrap:wrap;overflow:visible}#screenMeta>span:last-child{flex-basis:100%}}
@@ -805,6 +826,17 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
   .main:has(#screenView) .title-block{display:flex;align-items:center;gap:12px}
   .main:has(#screenView) .meta{margin-top:0;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
   .screen-bar{padding:4px 8px}
+  /* Live, the header goes too and the toolbar's main row becomes a column left of the picture, which then fills the
+     height and (layoutScreen) the width; the settings and key rows open under the picture. display:contents lets the
+     rows join the view's grid. */
+  .main:has(#screenView.live) .topbar{display:none}
+  .screen-view.live{display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:minmax(0,1fr) repeat(3,auto)}
+  .screen-view.live .screen-bar.rows{display:contents}
+  .screen-view.live .screen-stage{grid-column:2;grid-row:1}
+  .screen-view.live .screen-row{grid-column:2;padding:4px 8px;border-top:1px solid var(--border)}
+  .screen-view.live .screen-row:first-child{grid-column:1;grid-row:1/-1;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:2px;padding:4px;border-top:0;border-right:1px solid var(--border);overflow-y:auto;scrollbar-width:none}
+  .screen-view.live .screen-row:first-child .btn{padding-inline:6px;font-size:12px}
+  .screen-view.live .screen-bar .screen-land{display:inline-flex}
 }
 
 /* Native plan approval is distinct from the task progress panel. */
