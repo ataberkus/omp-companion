@@ -1850,6 +1850,8 @@
   // Fast (priority service) toggle; only for models with a service-tier family, or the default role's model.
   const fastOk = sel => !!modelInfo(sel || splitSel(S.models?.roles?.default || '').sel)?.fast;
   const fastChip = (sel, on) => fastOk(sel) ? `<button class="model-chip fast-chip ${on ? 'on' : ''}" data-act="fastToggle" aria-pressed="${!!on}" title="Fast mode: priority service tier"><span aria-hidden="true">⚡</span> <span>Fast ${on ? 'on' : 'off'}</span></button>` : '';
+  // Auto-approve answers OMP's tool-approval and computer-control prompts for this session while it is on (server: approvalPrompt).
+  const autoChip = s => `<button class="model-chip auto-chip ${s.autoApprove ? 'on' : ''}" data-act="autoApprove" aria-pressed="${!!s.autoApprove}" title="Auto-approve: answer OMP's tool-approval and computer-control prompts with Approve. Questions and provider safety checks still ask you."><span aria-hidden="true">✓</span> <span>Auto-approve ${s.autoApprove ? 'on' : 'off'}</span></button>`;
   function openThinkMenu(btn) {
     closeThinkMenu();
     const ctx = pickerCtx();
@@ -2045,7 +2047,7 @@
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
     const nAdvChip = !s && native ? `<button class="model-chip adv-chip ${nAdv ? 'on' : ''}" data-act="nativeAdv" title="Advisor for this session once it starts"><span aria-hidden="true">⚑</span> <span>Advisor ${nAdv === undefined ? 'default' : nAdv ? 'on' : 'off'}</span></button>` : '';
-    setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s)
+    setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s) + autoChip(s)
       : (choice ? modelChip(choice.model, choice.thinking, 'Saved model') : modelChip(native?.model, native?.thinking, 'Saved model')) + nAdvChip);
     // A failed read is retried on the next render; settings saves clear S.advCfg so the chip follows the new config.
     if (!s && native && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }).finally(() => { S.advCfgLoading = false; }); }
@@ -3530,6 +3532,7 @@
       if (c.kind === 'home') { S.home.fast = !S.home.fast; renderHome(); }
       else if (c.kind === 'session') { const s = S.store.sessions.find(x => x.id === c.id); if (s) sessionAction({ type: 'pref', key: 'fast', value: !s.fast?.enabled }); }
     }
+    else if (act === 'autoApprove') { const s = c.kind === 'session' && S.store.sessions.find(x => x.id === c.id); if (s) sessionAction({ type: 'auto_approve', enabled: !s.autoApprove }); }
     else if (act === 'model') { const ctx = pickerCtx(); if (ctx) openPicker(ctx); }
     else if (act === 'retry') {
       const s = S.store.sessions.find(x => x.id === c.id);

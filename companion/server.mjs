@@ -798,12 +798,18 @@ export async function createCompanion(options={}){
     if(questions.length&&!questions.includes(null)){const q={id:f.id,method:'ask',title:questions.length>1?`${questions.length} questions`:questions[0].question,questions};(s.uiRequests??=[]).push(q);attention(s,'question',q.title);}
     else void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
    }else if(['select','confirm','input','editor'].includes(f.method)){
-    const q={id:f.id,method:f.method,title:String(f.title||'Question').slice(0,500)};
-    if(f.method==='select'){q.options=Array.isArray(f.options)?f.options.filter(x=>typeof x==='string').slice(0,100):[];q.optionDetails=Array.isArray(f.optionDetails)?f.optionDetails.slice(0,q.options.length).map(x=>({description:String(x?.description||'').slice(0,500)})):[];q.checked=Array.isArray(f.checkedIndices)?f.checkedIndices.filter(i=>Number.isInteger(i)&&i>=0&&i<q.options.length):[];}
-    if(f.method==='confirm')q.message=String(f.message||'').slice(0,2000);
-    if(f.method==='input')q.placeholder=String(f.placeholder||'').slice(0,500);
-    if(f.method==='editor')q.prefill=String(f.prefill||'').slice(0,20000);
-    (s.uiRequests??=[]).push(q);attention(s,'question',q.title);
+    const approval=approvalPrompt(f);
+    if(approval&&s.autoApprove)void autoApprove(s,runners.get(s.id),f.id,approval).catch(e=>notice(s,'error',`Auto-approve failed: ${e.message}`));
+    else{
+     const q={id:f.id,method:f.method,title:String(f.title||'Question').slice(0,500)};
+     if(f.method==='select'){q.options=Array.isArray(f.options)?f.options.filter(x=>typeof x==='string').slice(0,100):[];q.optionDetails=Array.isArray(f.optionDetails)?f.optionDetails.slice(0,q.options.length).map(x=>({description:String(x?.description||'').slice(0,500)})):[];q.checked=Array.isArray(f.checkedIndices)?f.checkedIndices.filter(i=>Number.isInteger(i)&&i>=0&&i<q.options.length):[];}
+     if(f.method==='confirm')q.message=String(f.message||'').slice(0,2000);
+     if(f.method==='input')q.placeholder=String(f.placeholder||'').slice(0,500);
+     if(f.method==='editor')q.prefill=String(f.prefill||'').slice(0,20000);
+     // Kept so turning auto-approve on later can answer it; decided here from the untruncated title.
+     if(approval)q._approval=approval;
+     (s.uiRequests??=[]).push(q);attention(s,'question',q.title);
+    }
    }else if(f.method==='notify')notice(s,f.notifyType,f.message);
    else if(f.method==='setStatus'){s._status??={};const key=String(f.statusKey||'').slice(0,80);if(f.statusText)s._status[key]=String(f.statusText).slice(0,300);else delete s._status[key];}
    else if(f.method==='setWidget'){s._widgets??={};const key=String(f.widgetKey||'').slice(0,80);if(Array.isArray(f.widgetLines)&&f.widgetLines.length)s._widgets[key]=f.widgetLines.slice(0,40).map(l=>String(l).slice(0,500));else delete s._widgets[key];}
@@ -831,6 +837,20 @@ export async function createCompanion(options={}){
   if(f.type==='response'&&f.success&&f.command==='prompt'&&f.data?.agentInvoked===true)s._promptId=f.id;
   if(f.type==='response'&&!f.success&&f.id===s._promptId){s.error=f.error;if(['prompt','steer','follow_up','abort_and_prompt'].includes(f.command)){s.status='error';delete s._interrupt;}}
   scheduleSave();
+ }
+ // OMP's tool-approval dialogs: select('Allow tool: …',['Approve','Deny']) from its tool wrapper and eval preludes, and the
+ // computer tool's foreground-control confirm. Prompts listing provider safety checks always go to the user: OMP lets no
+ // setting bypass them. Returns the reply Approve/Yes sends and the text recorded in the chat; undefined for anything else.
+ function approvalPrompt(f){
+  const title=String(f.title||'');
+  if(f.method==='select'&&title.startsWith('Allow tool: ')&&!title.includes('\nProvider safety checks:\n')&&Array.isArray(f.options)&&f.options.length===2&&f.options[0]==='Approve'&&f.options[1]==='Deny')return {reply:{value:'Approve'},text:title};
+  if(f.method==='confirm'&&title==='Allow foreground computer control?')return {reply:{confirmed:true},text:`${title}\n${String(f.message||'')}`};
+ }
+ // Removed from the pending list before replying, so a concurrent answer can't reply to the same dialog twice.
+ async function autoApprove(s,rpc,id,approval){
+  s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==id);
+  await rpc.reply({type:'extension_ui_response',id,...approval.reply});
+  append(s,'system',`Auto-approved: ${approval.text.slice(0,4000)}`);scheduleSave();
  }
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
  function dropSteers(s){for(const m of s.messages)if(m.steer==='pending')m.steer='dropped';}
@@ -890,7 +910,7 @@ export async function createCompanion(options={}){
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -947,6 +967,13 @@ export async function createCompanion(options={}){
    else if(q.method==='confirm'){if(typeof body.confirmed!=='boolean')throw error('Choose Yes, No, or Cancel.');reply.confirmed=body.confirmed;}
    else{if(typeof body.value!=='string'||body.value.length>20000)throw error('Answer must be text under 20,000 characters.');if(q.method==='select'&&!q.options.includes(body.value))throw error('Choose one of the listed options.');reply.value=body.value;}
    await rpc.reply(reply);s.uiRequests=s.uiRequests.filter(x=>x.id!==id);return s;
+  }
+  // Approves OMP's tool-approval prompts as they arrive (approvalPrompt); turning it on also approves the ones already waiting.
+  if(body.type==='auto_approve'){
+   if(typeof body.enabled!=='boolean')throw error('Auto-approve must be true or false.');
+   if(body.enabled){s.autoApprove=true;const rpc=runners.get(s.id);if(rpc?.alive)for(const q of (s.uiRequests||[]).filter(q=>q._approval))await autoApprove(s,rpc,q.id,q._approval);}
+   else delete s.autoApprove;
+   await persist();return s;
   }
   if(body.type==='send_follow_up'){
    const queue=s.queuedMessages||[];const i=queue.findIndex(q=>q.id===body.id);
@@ -1774,8 +1801,8 @@ async function spend(sync){
     const set=new Set(store[field]);if(on){set.add(key);store[other]=store[other].filter(k=>k!==key);}else set.delete(key);store[field]=[...set];await persist();json({archived:store.archived,pinned:store.pinned});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
-   // Answers, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
-   const unlocked=['answer','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status'];
+   // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
+   const unlocked=['answer','auto_approve','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status'];
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}

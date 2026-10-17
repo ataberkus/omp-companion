@@ -629,10 +629,13 @@ details.raw>*:not(summary){margin-top:6px}
 .ctx.warm b{background:var(--amber)}.ctx.hot b{background:var(--red)}.ctx.hot{color:var(--red)}
 /* advisor */
 /* On state: same muted text as neighbouring chips; a firmer border and a tinted icon carry the state. */
-:is(.adv-chip,.fast-chip).on{border-color:var(--input)}
+:is(.adv-chip,.fast-chip,.auto-chip).on{border-color:var(--input)}
 .adv-chip.on>span[aria-hidden]:first-child{color:var(--violet)}
-.fast-chip{flex-shrink:0}
+:is(.fast-chip,.auto-chip){flex-shrink:0}
 .fast-chip:not(.on)>span[aria-hidden]:first-child{filter:grayscale(1);opacity:.7}
+/* Auto-approve on: amber, since prompts are being answered without you. */
+.auto-chip.on>span[aria-hidden]:first-child{color:var(--amber)}
+.auto-chip:not(.on)>span[aria-hidden]:first-child{opacity:.5}
 .adv-menu{min-width:260px;max-width:320px}
 .adv-toggle{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 9px;font-size:13px;cursor:pointer}
 .adv-info{padding:2px 9px 8px;color:var(--muted);font-size:12px;display:flex;flex-direction:column;gap:2px;border-bottom:1px solid var(--border);margin-bottom:4px}
