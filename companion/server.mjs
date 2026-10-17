@@ -988,6 +988,43 @@ export async function createCompanion(options={}){
  // Session toggles the dashboard can change; values are validated in command().
  const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),followUpMode:v=>({type:'set_follow_up_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
  const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],followUpMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
+ // Auto-approve: a run that OMP stopped on a provider 429 resumes once the provider's retry-after-ms wait is over, by
+ // resending the last user message like the dashboard's Retry. The due time is persisted (rateLimitResume), so a
+ // companion restart re-arms the wait instead of losing it; resumeTimers only holds the in-process timer.
+ const resumeTimers=new Map();
+ // The suffix OMP appends to provider errors (RETRY_AFTER_MS_SUFFIX in packages/ai oneshot-retry).
+ function rateLimitHint(message){const text=String(message||''),m=/(?:^|\s)retry-after-ms=([0-9]+(?:\.[0-9]+)?)(?=\s|$)/i.exec(text);return m&&/\b429\b/.test(text)?{ms:Number(m[1]),from:Date.now()}:undefined;}
+ const clockTime=d=>{const p=n=>String(n).padStart(2,'0'),t=`${p(d.getHours())}:${p(d.getMinutes())}`;return d.toDateString()===new Date().toDateString()?t:`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${t}`;};
+ function scheduleResume(s){
+  const hint=s._rateLimit;delete s._rateLimit;
+  if(!hint||!s.autoApprove)return;
+  const at=new Date(hint.from+hint.ms);s.rateLimitResume={at:at.toISOString()};
+  append(s,'system',`Rate limit reached; resuming automatically at ${clockTime(at)}.`);armResume(s);
+ }
+ function armResume(s){
+  clearTimeout(resumeTimers.get(s.id));
+  // setTimeout caps at ~24.8 days; resumeRateLimited re-arms when it fires early.
+  const t=setTimeout(()=>{resumeTimers.delete(s.id);void resumeRateLimited(s);},Math.min(Math.max(0,Date.parse(s.rateLimitResume.at)-Date.now()),2**31-1));
+  t.unref();resumeTimers.set(s.id,t);
+ }
+ // reason is shown in the chat; omitted when the user caused the cancel (a new message) or the wait no longer applies.
+ function cancelResume(s,reason){
+  clearTimeout(resumeTimers.get(s.id));resumeTimers.delete(s.id);
+  if(!s.rateLimitResume)return;delete s.rateLimitResume;
+  if(reason)append(s,'system',`Automatic resume cancelled: ${reason}.`);scheduleSave();
+ }
+ function resumeRateLimited(s){
+  return lock(s.id,async()=>{
+   const r=s.rateLimitResume;if(!r||closing)return;
+   if(Date.parse(r.at)>Date.now())return armResume(s);
+   if(!s.autoApprove||s.status!=='error'||s.hidden)return cancelResume(s);
+   const last=[...s.messages].reverse().find(m=>m.role==='user');
+   if(!last)return cancelResume(s,'no message to resend');
+   if(last.hasImage)return cancelResume(s,'the last message had an image; reattach it and send it again');
+   cancelResume(s);append(s,'system','Rate limit wait is over; resuming automatically.');
+   try{await command(s,{type:'prompt',message:last.text});}catch(e){notice(s,'error',`Automatic resume failed: ${e.message}`);}
+  });
+ }
  function settle(s,promptId=s._promptId,run=s._run){
   void lock(s.id,async()=>{
    if(s.status!=='running'||s._promptId!==promptId||s._run!==run||s._settled||s._interrupt||s.uiRequests?.length)return;
@@ -1011,7 +1048,7 @@ export async function createCompanion(options={}){
   if(!(f.type==='response'&&(f.command==='get_state'||f.command==='get_subagents')))s.updatedAt=now();
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
-  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;startWork(s);s.status='running';s.error=undefined;}
+  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
   if(f.type==='auto_compaction_end'){
    s._compacting=!!f.willRetry;
@@ -1032,7 +1069,7 @@ export async function createCompanion(options={}){
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
   if(f.type==='message_start'&&f.message?.role==='assistant'&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;void runners.get(s.id)?.send({type:'prompt',message:'/rename'}).catch(()=>{delete s._titling;});}
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
@@ -1047,7 +1084,8 @@ export async function createCompanion(options={}){
   // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
   if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)&&!(s._interrupt&&f.id!==s._interrupt)){
    if(f.id&&f.id===s._interrupt)delete s._interrupt;
-   if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}
+   // A terminal prompt_result follows the run's last agent_end, so OMP has stopped retrying by now.
+   if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);scheduleResume(s);}
    else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
    else if(f.status==='completed'&&f.sessionSettled===true)settle(s);
    if(f.status==='error'||f.status==='aborted')finishWork(s);
@@ -1247,7 +1285,7 @@ export async function createCompanion(options={}){
   if(body.type==='auto_approve'){
    if(typeof body.enabled!=='boolean')throw error('Auto-approve must be true or false.');
    if(body.enabled){s.autoApprove=true;const rpc=runners.get(s.id);if(rpc?.alive)for(const q of (s.uiRequests||[]).filter(q=>q._approval))await autoApprove(s,rpc,q.id,q._approval);}
-   else delete s.autoApprove;
+   else{delete s.autoApprove;cancelResume(s,'auto-approve turned off');}
    await persist();return s;
   }
   if(body.type==='send_follow_up'){
@@ -1328,7 +1366,7 @@ export async function createCompanion(options={}){
   if(body.type==='abort'||body.type==='abort_retry'){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
    const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
-   finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);
+   finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);cancelResume(s,'session stopped');
    delete s._promptId;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
    await persist();return s;
   }
@@ -1405,7 +1443,7 @@ export async function createCompanion(options={}){
   }
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
-  if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';activity(s,`Completed ${s.title}`,'done');await persist();return s;}
+  if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';cancelResume(s,'session marked complete');activity(s,`Completed ${s.title}`,'done');await persist();return s;}
   if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);const full=contextError(s,body.message,images);if(full)throw error(full);}
   if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
    if(images.length)throw error('Remove image attachments before checking /usage.');
@@ -1457,7 +1495,8 @@ export async function createCompanion(options={}){
    // Stop & send: OMP aborts the turn and starts this prompt in one step (abort_and_prompt).
    const interrupt=body.type==='interrupt';
    const rpcType=slashCommand?'prompt':interrupt?'abort_and_prompt':body.type,wasRunning=['running','queued'].includes(s.status);
-   if(prompting){if(!slashCommand){if(body.type==='prompt'||interrupt)delete s._streamId;s.status='running';s.error=undefined;}const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   // A message of the user's own supersedes a pending rate-limit resume; slash commands (say /usage) leave it armed.
+   if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt)delete s._streamId;s.status='running';s.error=undefined;}const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
    if((rpcType==='prompt'||interrupt)&&!slashCommand)s._promptId=id;
    if(interrupt){s._interrupt=id;delete s._retry;delete s._thinkId;}
@@ -2226,6 +2265,8 @@ async function spend(sync){
  const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
+ // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
+ for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
 // closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
 await persist();return {server,store,token,password:Boolean(password),close,flush:()=>saveChain,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
