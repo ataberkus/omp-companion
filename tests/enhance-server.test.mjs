@@ -274,6 +274,31 @@ test('isolated draft: worktree and branch removed; leftover drafts cleaned on st
   assert.ok(!(await git('branch')).stdout.includes('omp-web/'));
 });
 
+test('isolation falls back with the real reason: plain folder, repo without commits, git error (partial worktree removed)', async t => {
+  const { dir, call } = await boot(t);
+  const note = async path => {
+    const { body: s } = await call('/quick-start', { path, isolate: true });
+    assert.equal(s.isolated, false);
+    assert.equal(s.cwd, path);
+    return s.messages.filter(m => m.role === 'system').map(m => m.text).join('\n');
+  };
+  const plain = join(dir, 'plain'), empty = join(dir, 'empty'), hooked = join(dir, 'hooked');
+  for (const d of [plain, empty, hooked]) await mkdir(d);
+  const git = (repo, ...a) => exec('git', ['-C', repo, ...a]);
+  assert.match(await note(plain), /Worktree isolation skipped: this folder is not a Git repository\./);
+  await git(empty, 'init', '-q');
+  assert.match(await note(empty), /no commits yet/);
+  // A repo with commits never gets the "no commits" reason; git's own error is shown instead.
+  await git(hooked, 'init', '-q'); await git(hooked, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+  // post-checkout's exit status becomes worktree add's, after the worktree and branch already exist.
+  await writeFile(join(hooked, '.git', 'hooks', 'post-checkout'), '#!/bin/sh\necho hook refused checkout >&2\nexit 1\n', { mode: 0o755 });
+  const text = await note(hooked);
+  assert.match(text, /git worktree add failed: hook refused checkout/);
+  assert.doesNotMatch(text, /commit/);
+  assert.equal((await git(hooked, 'worktree', 'list')).stdout.trim().split('\n').length, 1, 'partial worktree removed');
+  assert.ok(!(await git(hooked, 'branch')).stdout.includes('omp-web/'), 'its branch removed');
+});
+
 test('a first send that fails before recording a message restores the draft marker', async t => {
   const { dir, call } = await boot(t, { omp: { fail: true } });
   const { body: s } = await call('/quick-start', { path: dir, draft: true });

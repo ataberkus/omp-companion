@@ -1679,10 +1679,27 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   let branch='workspace';try{branch=await git(dir,['branch','--show-current'])||'detached';}catch{}
   p={id:randomUUID(),name:String(name||'').trim().slice(0,80)||path.basename(dir)||dir,path:dir,description:'',branch,color:colors[store.projects.length%colors.length]};store.projects.push(p);activity(null,`Added project ${p.name}`);return p;
  }
+ // Checking out a whole repo can outlast git()'s 15 s on Windows: the same 746-file checkout measured 1-20 s from run to run.
+ // A timeout kills only the git.exe wrapper, so git finished the worktree anyway while the session reported it as skipped.
+ const WORKTREE_ADD_TIMEOUT=10*60000;
+ // Errors are user-facing sentences: why this folder can't get a worktree, or git's own error.
+ async function addWorktree(root,wt,b){
+  try{await gitRun(root,['rev-parse','--is-inside-work-tree'],{timeout:15000});}
+  catch(e){throw error(/not a git repository/i.test(e.message)?'this folder is not a Git repository.':`git could not read this folder: ${e.message}`);}
+  // Inside a work tree, HEAD fails to resolve only while the current branch is unborn.
+  try{await gitRun(root,['rev-parse','--verify','--quiet','HEAD^{commit}'],{timeout:15000});}catch{throw error('the repository has no commits yet, and a worktree needs at least one.');}
+  await fs.mkdir(path.dirname(wt),{recursive:true});
+  try{await gitRun(root,['worktree','add','-q','-b',b,wt,'HEAD'],{timeout:WORKTREE_ADD_TIMEOUT});}
+  catch(e){
+   // Drop whatever got created (folder, git's record, branch) so a failed attempt leaves nothing behind.
+   await removeWorktree({cwd:wt,branch:b},root).catch(()=>{});
+   throw error(e.status===504?`git worktree add did not finish within ${WORKTREE_ADD_TIMEOUT/60000} minutes.`:`git worktree add failed: ${e.message.replace(/\.?$/,'.')}`);
+  }
+ }
  async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch,draft=false}){
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
-  if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);await fs.mkdir(path.dirname(wt),{recursive:true});
-   try{await git(p.path,['worktree','add','-b',b,wt,'HEAD']);cwd=wt;branch=b;}catch(e){isolated=false;notes.push(`Worktree isolation skipped (needs a Git repository with at least one commit). Working directly in ${p.path}.`);}}
+  if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);
+   try{await addWorktree(p.path,wt,b);cwd=wt;branch=b;}catch(e){isolated=false;notes.push(`Worktree isolation skipped: ${e.message} Working directly in ${p.path}.`);}}
   // Commit the session started from: the Changes working-tree view can diff against it, so the agent's own commits show too.
   const baseSha=await git(cwd,['rev-parse','--verify','HEAD']).catch(()=>undefined);
   const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(baseSha?{baseSha}:{}),...(launch?{launch}:{}),...(draft?{draft:true}:{})};
