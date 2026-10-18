@@ -1236,7 +1236,7 @@ export async function createCompanion(options={}){
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -1279,6 +1279,8 @@ export async function createCompanion(options={}){
    return {steered:true};
   }
   if(body.type==='changes_worktree')return worktreeChanges(s,body.base==='head'?'head':'start');
+  if(body.type==='git_log')return gitLog(s);
+  if(body.type==='git_commit')return gitCommit(s,body.sha);
   if(body.type==='worktree_status')return worktreeStatus(s);
   if(body.type==='worktree_finish')return finishWorktree(s,body.action);
   const prompting=['prompt','steer','follow_up','interrupt'].includes(body.type);
@@ -1742,7 +1744,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
  // plus untracked files, in OMP's diff format with absolute paths.
  async function worktreeChanges(s,which){
   const cwd=s.cwd,q=['-c','core.quotepath=off'];
-  try{await gitRun(cwd,['rev-parse','--is-inside-work-tree'],{timeout:10000});}catch{throw error('This session’s folder is not a Git repository.',409);}
+  try{await gitRun(cwd,['rev-parse','--is-inside-work-tree'],{timeout:10000});}catch{throw notGit();}
   let base='HEAD',label='HEAD';
   if(which==='start'&&s.baseSha){try{await gitRun(cwd,['cat-file','-e',s.baseSha+'^{commit}'],{timeout:10000});base=s.baseSha;label='session start';}catch{}}
   // No commit yet: compare with the empty tree, which shows staged files.
@@ -1751,6 +1753,33 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const files=gitDiffFiles(diff),extra=untracked.split('\0').filter(Boolean);let budget=2*1024*1024;
   for(const rel of extra.slice(0,200)){const d=budget>0?await untrackedDiff(path.join(cwd,rel)).catch(e=>`… (${e.code==='EISDIR'?'folder':'unreadable'})`):'… (diff omitted: too many changes)';budget-=d.length;files.push({path:rel,op:'create',diff:d});}
   return {cwd,base:label==='HEAD'?'HEAD':base.slice(0,12),baseLabel:label,untrackedOmitted:Math.max(0,extra.length-200),files:files.map(f=>({...f,path:path.join(cwd,f.path)}))};
+ }
+ const notGit=()=>error('This session’s folder is not a Git repository.',409);
+ // The repository root, spelled like the session folder (git's --show-toplevel resolves short names and symlinks).
+ async function gitTop(cwd){let prefix;try{prefix=(await gitRun(cwd,['rev-parse','--show-prefix'],{timeout:10000})).trim();}catch{throw notGit();}return path.resolve(cwd,...prefix.split('/').filter(Boolean).map(()=>'..'));}
+ // Changes › Commits: branch, upstream, ahead/behind and recent commits of the session's folder (its worktree when isolated).
+ // `session` marks commits made since the session started (baseSha..HEAD).
+ async function gitLog(s,limit=50){
+  const cwd=s.cwd,lines=o=>o.split('\n').filter(Boolean),opt={timeout:15000};
+  const top=await gitTop(cwd);
+  const head=await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(o=>o.trim(),()=>'');
+  const [branch,upstream,dirty]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'',gitRun(cwd,['status','--porcelain'],opt).then(o=>lines(o).length,()=>null)]);
+  let ahead=0,behind=0,commits=[];
+  if(head){
+   if(upstream)[behind,ahead]=(await gitRun(cwd,['rev-list','--left-right','--count',`${upstream}...HEAD`],opt)).trim().split(/\s+/).map(Number);
+   const mine=new Set(s.baseSha?await gitRun(cwd,['rev-list',`${s.baseSha}..HEAD`],opt).then(lines,()=>[]):[]);
+   commits=lines(await gitRun(cwd,['log','--no-color',`--format=%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%s`,'-n',String(limit),'HEAD'],opt)).map(l=>{const [sha,short,author,date,parents,subject]=l.split('\x1f');return {sha,short,author,date,merge:parents.split(' ').length>1,subject,session:mine.has(sha)};});
+  }
+  return {cwd,top,branch,head:head.slice(0,12),upstream,ahead,behind,dirty,commits,limit};
+ }
+ // One commit's diff against its first parent (root commits: everything added), in OMP's diff format with absolute paths.
+ async function gitCommit(s,sha){
+  if(typeof sha!=='string'||!/^[0-9a-f]{4,64}$/i.test(sha))throw error('Choose a commit.');
+  const cwd=s.cwd,top=await gitTop(cwd);
+  try{await gitRun(cwd,['cat-file','-e',sha+'^{commit}'],{timeout:10000});}catch{throw error(`Commit ${sha.slice(0,12)} is not in this repository.`,404);}
+  const [meta,diff]=await Promise.all([gitRun(cwd,['show','-s','--no-color','--format=%H%x1f%an%x1f%aI%x1f%B',sha],{timeout:15000}),gitRun(top,['-c','core.quotepath=off','show','--format=','--no-color','--no-ext-diff','--no-renames','-m','--first-parent','--src-prefix=a/','--dst-prefix=b/','-U3',sha,'--'],{timeout:30000})]);
+  const [full,author,date,message]=meta.split('\x1f');
+  return {cwd,top,sha:full.trim(),author,date,message:(message||'').trim(),files:gitDiffFiles(diff).map(f=>({...f,path:path.join(top,f.path)}))};
  }
  const worktreeRoot=s=>{const root=store.projects.find(p=>p.id===s.projectId)?.path;if(!s.isolated||!root||!s.branch?.startsWith('omp-web/'))throw error('Only sessions in their own worktree can be finished this way.',409);return root;};
  // What finishing an isolated session would do: the branch checked out in the project folder is the merge target.
@@ -2263,7 +2292,7 @@ async function spend(sync){
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
-   const unlocked=['answer','auto_approve','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','worktree_status'];
+   const unlocked=['answer','auto_approve','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status'];
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}

@@ -79,6 +79,54 @@ test('Working tree changes: git diff since the session started plus untracked fi
   assert.match(hunkB, /-18\|l18\n\+18\|Y\n/);
 });
 
+test('Commits: branch, upstream and recent commits of the session folder, with per-commit diffs; non-git folders get a 409', async t => {
+  const { root, wt, command, app } = await setup(t);
+  await writeFile(join(wt, 'a.txt'), 'one\nTWO\nthree\n');
+  await writeFile(join(wt, 'new.txt'), 'hi\n');
+  await git(wt, 'add', '.'); await git(wt, 'commit', '-m', 'Work in worktree', '-m', 'Body line.');
+
+  // Isolated session: its worktree's branch; the commit made since the session started is marked.
+  const [code, log] = await command('w', { type: 'git_log' });
+  assert.equal(code, 200);
+  assert.deepEqual([log.branch, log.upstream, log.ahead, log.behind, log.dirty], ['omp-web/abcd1234', '', 0, 0, 0]);
+  assert.deepEqual(log.commits.map(c => [c.subject, c.author, c.session, c.merge]), [['Work in worktree', 'Test', true, false], ['init', 'Test', false, false]]);
+  assert.match(log.commits[0].sha, /^[0-9a-f]{40}$/);
+
+  const [cc, commit] = await command('w', { type: 'git_commit', sha: log.commits[0].sha });
+  assert.equal(cc, 200);
+  assert.equal(commit.message, 'Work in worktree\n\nBody line.');
+  assert.deepEqual(commit.files.map(f => [f.path, f.op]), [[join(wt, 'a.txt'), 'modify'], [join(wt, 'new.txt'), 'create']]);
+  assert.match(commit.files[0].diff, /-2\|two\n\+2\|TWO/);
+  // The root commit diffs against nothing: every file is added.
+  assert.deepEqual((await command('w', { type: 'git_commit', sha: log.commits[1].sha }))[1].files.map(f => f.op), ['create', 'create', 'create']);
+
+  // Plain session in the project folder: main, which lacks the worktree commit; an upstream gives ahead/behind.
+  const remote = join(root, '..', 'remote.git');
+  await exec('git', ['init', '--bare', remote]);
+  await git(root, 'remote', 'add', 'origin', remote);
+  await git(root, 'push', '-u', 'origin', 'main');
+  await writeFile(join(root, 'local.txt'), 'x\n'); await git(root, 'add', '.'); await git(root, 'commit', '-m', 'local only');
+  const plain = (await command('plain', { type: 'git_log' }))[1];
+  assert.deepEqual([plain.branch, plain.upstream, plain.ahead, plain.behind], ['main', 'origin/main', 1, 0]);
+  assert.deepEqual(plain.commits.map(c => c.subject), ['local only', 'init']);
+
+  // A merge commit shows its diff against the first parent.
+  await git(root, 'merge', '--no-ff', '--no-edit', 'omp-web/abcd1234');
+  const merge = (await command('plain', { type: 'git_log' }))[1].commits[0];
+  assert.equal(merge.merge, true);
+  assert.deepEqual((await command('plain', { type: 'git_commit', sha: merge.sha }))[1].files.map(f => f.path), [join(root, 'a.txt'), join(root, 'new.txt')]);
+
+  assert.equal((await command('plain', { type: 'git_commit', sha: 'not a sha' }))[0], 400);
+  assert.equal((await command('plain', { type: 'git_commit', sha: 'deadbeefdeadbeef' }))[0], 404);
+
+  const bare = join(root, '..', 'no-git');
+  await mkdir(bare);
+  app().store.sessions.push({ ...app().store.sessions[1], id: 'nogit', cwd: bare, branch: '' });
+  const [nc, ne] = await command('nogit', { type: 'git_log' });
+  assert.equal(nc, 409); assert.match(ne.error, /not a Git repository/);
+  assert.equal((await command('nogit', { type: 'git_commit', sha: merge.sha }))[0], 409);
+});
+
 test('finishing a worktree: merge, squash, rebase and push act on the branch; refusals leave both folders clean; delete removes it', async t => {
   const { root, wt, command, app } = await setup(t);
   const status = async () => (await command('w', { type: 'worktree_status' }))[1];

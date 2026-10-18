@@ -792,6 +792,7 @@
           <button data-act="stats">Session stats</button>
           ${s.sessionFile ? '<button data-act="share">Share session…</button>' : ''}
           <button data-act="commit">Commit changes in this folder…</button>
+          <button data-act="gitHistory">Branch &amp; recent commits</button>
           ${s.isolated && s.branch?.startsWith('omp-web/') ? '<button data-act="worktree">Finish worktree (merge, push, delete)…</button>' : ''}
           <div class="menu-sep"></div>
           ${pref('fast', s.fast?.enabled, 'Fast mode')}
@@ -1365,13 +1366,15 @@
     }
     return byFile;
   }
-  // Two sources: the agent's edit/write tool records (Edits, default) and the real `git diff` of the session folder (Working tree).
+  // Three sources: the agent's edit/write tool records (Edits, default), the real `git diff` of the session folder (Working tree),
+  // and the folder's recent commits with per-commit diffs (Commits).
   // "Viewed" folds a file until its diff changes again; comments on diff lines go back to the session as one message.
   const loadLS = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v && typeof v === 'object' ? v : d; } catch { return d; } };
   const saveLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
   const trimObj = (o, max) => { const k = Object.keys(o); for (const x of k.slice(0, Math.max(0, k.length - max))) delete o[x]; };
-  S.changesMode = loadLS('omp-changes', {}).mode === 'tree' ? 'tree' : 'edits';
-  S.wt = new Map(); S.noteEdit = null; S.reviewVer = 0;
+  const CHANGES_MODES = ['edits', 'tree', 'commits'];
+  S.changesMode = CHANGES_MODES.includes(loadLS('omp-changes', {}).mode) ? loadLS('omp-changes', {}).mode : 'edits';
+  S.wt = new Map(); S.gl = new Map(); S.noteEdit = null; S.reviewVer = 0;
   const viewedAll = loadLS('omp-viewed', {}), notesAll = loadLS('omp-review-notes', {});
   const hashStr = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (Math.imul(h, 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); };
   const fileSig = list => list.length + '.' + hashStr(list.map(f => f.diff || '').join('\n'));
@@ -1387,6 +1390,56 @@
     try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'changes_worktree', base: e.base }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
   }
+  // Commits: branch, upstream, ahead/behind and recent commits of the session folder; same reload policy as the working tree.
+  async function loadGitLog(id, force) {
+    const s = S.store?.sessions.find(x => x.id === id), e = S.gl.get(id) || { sel: '', commits: new Map() };
+    if (e.loading || (!force && e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt))) return;
+    e.loading = true; S.gl.set(id, e);
+    try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'git_log' }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
+    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
+  }
+  // A commit's diff never changes, so it is fetched once per session view.
+  async function loadCommit(id, sha) {
+    const e = S.gl.get(id);
+    if (!e || e.commits.has(sha)) return;
+    const c = { loading: true }; e.commits.set(sha, c); trim(e.commits, 30);
+    try { c.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'git_commit', sha }, { timeout: 60000 }); } catch (err) { c.error = err.message; }
+    c.loading = false; S.lastSig = ''; update();
+  }
+  const modeSeg = mode => `<span class="seg" role="group" aria-label="Changes source">${[['edits', 'Edits', 'Edits the agent made with its edit and write tools'], ['tree', 'Working tree', 'git diff of the session folder, including untracked files'], ['commits', 'Commits', 'Branch and recent commits of the session folder']].map(([m, label, tip]) => `<button class="${mode === m ? 'on' : ''}" aria-pressed="${mode === m}" data-chmode="${m}" title="${tip}">${label}</button>`).join('')}</span>`;
+  const layoutSeg = () => `<span class="seg" role="group" aria-label="Diff layout"><button class="${diffMode() === 'unified' ? 'on' : ''}" aria-pressed="${diffMode() === 'unified'}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" aria-pressed="${diffMode() === 'split'}" data-diffmode="split">Split</button></span>`;
+  const requestBtn = notes => notes.length ? `<button class="btn sm primary" data-act="requestChanges" title="Send every comment to the session as one message">Request changes <small>${notes.length}</small></button>` : '';
+  function renderCommits(c, src, title, back) {
+    loadGitLog(src.id);
+    const g = S.gl.get(src.id), d = g?.data, notes = notesAll[c.parent] || [];
+    const sel = g?.sel && d?.commits.some(x => x.sha === g.sel) ? g.sel : '', ce = sel ? g.commits.get(sel) : null;
+    if (sel && !ce) loadCommit(src.id, sel);
+    const track = d ? (d.upstream ? `<span title="Commits ahead of / behind ${esc(d.upstream)}">↑${d.ahead} ↓${d.behind} vs ${esc(d.upstream)}</span>` : '<span>no upstream</span>') : '';
+    setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
+      <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ commits</span></div>
+        <h1>Commits</h1><div class="meta">${d ? `<span title="${esc(d.cwd)}">⎇ ${d.branch ? esc(d.branch) : d.head ? `detached at ${esc(d.head.slice(0, 8))}` : 'no commits yet'}</span>${track}${d.dirty ? `<span>${d.dirty} uncommitted ${d.dirty === 1 ? 'change' : 'changes'}</span>` : ''}<span>${d.commits.length >= d.limit ? `latest ${d.limit} commits` : `${d.commits.length} ${d.commits.length === 1 ? 'commit' : 'commits'}`}</span>` : ''}</div></div>
+      <div class="actions">${requestBtn(notes)}${modeSeg('commits')}<button class="btn sm ghost" data-act="glReload" aria-label="Reload commits" title="Read git log again">${g?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>${layoutSeg()}</div>`);
+    const err = !d && g?.error;
+    const sig = ['commits', c.parent, diffMode(), g?.at || '', err || '', sel, ce ? (ce.loading ? 'l' : ce.error || 'd') : ''].join('|');
+    if (sig === S.lastSig) return;
+    S.lastSig = sig;
+    if (!d && !err) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading git log…</div>'; return; }
+    if (err) { $('#thread').innerHTML = `<div class="msg system err"><div class="bubble">${esc(err)}</div></div>`; return; }
+    if (!d.commits.length) { $('#thread').innerHTML = '<div class="history-note">No commits in this folder yet.</div>'; return; }
+    const list = `<div class="changes-index commit-list">${d.commits.map(x => `<a href="#" data-commit="${esc(x.sha)}" class="${x.sha === sel ? 'on' : ''}"${x.sha === sel ? ' aria-current="true"' : ''} title="${esc(x.sha)}"><code class="commit-sha">${esc(x.short)}</code><span class="fd-path">${esc(x.subject)}</span>${x.merge ? '<span class="pill">merge</span>' : ''}${x.session ? '<span class="pill" title="Made since this session started">this session</span>' : ''}<span class="muted commit-who">${esc(x.author)} · <time datetime="${esc(x.date)}" title="${esc(new Date(x.date).toLocaleString())}">${esc(agoText(x.date))}</time></span></a>`).join('')}</div>`;
+    let detail = '';
+    if (sel) {
+      const head = d.commits.find(x => x.sha === sel), cd = ce?.data;
+      const files = cd?.files || [], tot = diffStat(files);
+      detail = `<section class="commit-detail" id="commit-detail"><div class="commit-head"><code class="commit-sha">${esc(head.short)}</code><b>${esc(head.subject)}</b><span class="muted">${esc(head.author)} · ${esc(new Date(head.date).toLocaleString())}</span>${cd ? `<span class="fd-stat">${files.length} ${files.length === 1 ? 'file' : 'files'} <span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>` : ''}<button class="btn sm ghost" data-copy-text="${esc(sel)}" title="Copy commit hash" aria-label="Copy commit hash">⧉</button></div>`
+        + (cd && cd.message.includes('\n') ? `<pre class="commit-msg">${esc(cd.message.slice(cd.message.indexOf('\n')).trim())}</pre>` : '')
+        + (!ce || ce.loading ? '<div class="working"><span class="spinner"></span> Running git show…</div>' : ce.error ? `<div class="msg system err"><div class="bubble">${esc(ce.error)}</div></div>` : !files.length ? '<div class="history-note">This commit changes no files.</div>'
+          : `<div class="changes-index">${files.map((f, i) => { const st = diffStat([f]); return `<a href="#" data-jump="cd-${i}"><span class="fd-path">${esc(shortPath(f.path))}</span><span class="fd-stat"><span class="plus">+${st.adds}</span> <span class="minus">−${st.dels}</span></span></a>`; }).join('')}</div>`
+            + files.map((f, i) => `<section class="change-file" id="cd-${i}">${fileDiff(f, { edit: 'c:' + sel })}</section>`).join(''))
+        + '</section>';
+    }
+    swapHtml($('#thread'), list + detail);
+  }
   function noteRows(parent, path, edit) {
     const list = (notesAll[parent] || []).filter(n => n.path === path && n.edit === edit), ed = S.noteEdit;
     const open = ed && ed.parent === parent && ed.path === path && ed.edit === edit ? ed : null;
@@ -1399,6 +1452,7 @@
   function renderChanges(c) {
     const src = c.parent.startsWith('s:') ? S.store?.sessions.find(x => x.id === c.parent.slice(2)) : null;
     const file = c.parent.startsWith('f:') ? c.parent.slice(2) : '';
+    if (src && S.changesMode === 'commits') return renderCommits(c, src, src.title || 'Session', '#/s/' + src.id);
     const pv = file ? S.previews.get(file) : null;
     if (file && !pv) loadPreview(file);
     const tree = !!src && S.changesMode === 'tree', wt = src ? S.wt.get(src.id) : null;
@@ -1416,7 +1470,7 @@
     setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ changes</span></div>
         <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'}${tree ? '' : ` · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}`}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}${tree && wt?.data ? `<span title="${esc(wt.data.cwd)}">git diff vs ${esc(wt.data.baseLabel === 'session start' ? `session start (${wt.data.base.slice(0, 8)})` : wt.data.baseLabel)}${wt.data.untrackedOmitted ? ` · ${wt.data.untrackedOmitted} more untracked files not shown` : ''}</span>` : ''}</div></div>
-      <div class="actions">${notes.length ? `<button class="btn sm primary" data-act="requestChanges" title="Send every comment to the session as one message">Request changes <small>${notes.length}</small></button>` : ''}${src ? `<span class="seg" role="group" aria-label="Changes source"><button class="${tree ? '' : 'on'}" aria-pressed="${!tree}" data-chmode="edits" title="Edits the agent made with its edit and write tools">Edits</button><button class="${tree ? 'on' : ''}" aria-pressed="${tree}" data-chmode="tree" title="git diff of the session folder, including untracked files">Working tree</button></span>` : ''}${tree ? `<select data-wtbase aria-label="Compare with"><option value="start" ${wt?.base !== 'head' ? 'selected' : ''}>vs session start</option><option value="head" ${wt?.base === 'head' ? 'selected' : ''}>vs HEAD</option></select><button class="btn sm ghost" data-act="wtReload" aria-label="Reload working tree diff" title="Run git diff again">${wt?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>` : ''}<span class="seg" role="group" aria-label="Diff layout"><button class="${diffMode() === 'unified' ? 'on' : ''}" aria-pressed="${diffMode() === 'unified'}" data-diffmode="unified">Unified</button><button class="${diffMode() === 'split' ? 'on' : ''}" aria-pressed="${diffMode() === 'split'}" data-diffmode="split">Split</button></span></div>`);
+      <div class="actions">${requestBtn(notes)}${src ? modeSeg(mode) : ''}${tree ? `<select data-wtbase aria-label="Compare with"><option value="start" ${wt?.base !== 'head' ? 'selected' : ''}>vs session start</option><option value="head" ${wt?.base === 'head' ? 'selected' : ''}>vs HEAD</option></select><button class="btn sm ghost" data-act="wtReload" aria-label="Reload working tree diff" title="Run git diff again">${wt?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>` : ''}${layoutSeg()}</div>`);
     const sig = ['changes', c.parent, mode, diffMode(), waiting ? 'wait' : err || '', S.reviewVer, tree ? wt?.at : all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
     if (sig === S.lastSig) return;
     // A comment being typed must not be wiped by a poll; the page catches up once it is saved or cancelled.
@@ -3960,9 +4014,16 @@
     if (wa) { worktreeAct(wa); return; }
     const bt = t.closest('[data-btwtopic]');
     if (bt) { const st = btwState(current().id); st.topic = bt.dataset.btwtopic; st.history = false; update(); return; }
-    // Changes view: Edits / Working tree, and comments on diff lines.
+    // Changes view: Edits / Working tree / Commits, and comments on diff lines.
     const chm = t.closest('[data-chmode]');
-    if (chm) { S.changesMode = chm.dataset.chmode === 'tree' ? 'tree' : 'edits'; saveLS('omp-changes', { mode: S.changesMode }); S.noteEdit = null; S.lastSig = ''; update(); return; }
+    if (chm) { S.changesMode = CHANGES_MODES.includes(chm.dataset.chmode) ? chm.dataset.chmode : 'edits'; saveLS('omp-changes', { mode: S.changesMode }); S.noteEdit = null; S.lastSig = ''; update(); return; }
+    const cm = t.closest('[data-commit]'), cmc = current();
+    if (cm && cmc.kind === 'changes') {
+      e.preventDefault();
+      const g = S.gl.get(cmc.parent.slice(2));
+      if (g) { g.sel = g.sel === cm.dataset.commit ? '' : cm.dataset.commit; S.lastSig = ''; update(); if (g.sel) document.getElementById('commit-detail')?.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'start' }); }
+      return;
+    }
     const ne = t.closest('[data-note-edit]'), nd = t.closest('[data-note-del]');
     if (ne || nd) {
       const parent = current().parent, list = notesAll[parent] || [], n = list.find(x => x.id === (ne || nd).dataset[ne ? 'noteEdit' : 'noteDel']);
@@ -4145,6 +4206,8 @@
     else if (act === 'notifyEnable') askNotify();
     else if (act === 'requestChanges') requestChanges(c.parent);
     else if (act === 'wtReload' && c.kind === 'changes') loadWorktree(c.parent.slice(2), true);
+    else if (act === 'glReload' && c.kind === 'changes') loadGitLog(c.parent.slice(2), true);
+    else if (act === 'gitHistory') { closeMenu(a.closest('.menu')); S.changesMode = 'commits'; saveLS('omp-changes', { mode: 'commits' }); location.hash = '#/changes/' + encodeURIComponent('s:' + c.id); }
     else if (act === 'worktree') { closeMenu(a.closest('.menu')); openWorktree(); }
     else if (act === 'btwOpen') { closeMenu(a.closest('.menu')); Object.assign(btwState(c.id), { open: true, history: false }); update(); $('#btwForm input')?.focus(); }
     else if (act === 'btwClose') { btwState(c.id).open = false; update(); $('#input')?.focus(); }
