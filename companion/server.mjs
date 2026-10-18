@@ -1863,7 +1863,7 @@ async function spend(sync){
  const enhanceJobs=new Map();
  const IMAGE_EXT={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif'};
  async function startEnhance(body){
-  const draft=text(body.text,'Draft',20000);
+  const draft=text(body.text,'Draft',200000);
   if(!!body.session===!!body.path)throw error('Choose a session or a folder to enhance in.');
   const s=body.session?store.sessions.find(x=>x.id===body.session):null;
   if(body.session&&!s)throw error('Session not found.',404);
