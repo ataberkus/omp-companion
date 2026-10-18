@@ -88,6 +88,7 @@ test('finishing a worktree: merge, squash, rebase and push act on the branch; re
   let st = await status();
   assert.deepEqual([st.branch, st.base, st.ahead, st.behind, st.dirty, st.rootDirty, st.remote], ['omp-web/abcd1234', 'main', 0, 0, 0, 0, '']);
   assert.equal((await command('w', { type: 'worktree_finish', action: 'merge' }))[0], 409, 'nothing to merge');
+  assert.equal((await command('w', { type: 'worktree_finish', action: 'merge', commit: true }))[0], 409, 'nothing to merge or commit');
 
   await writeFile(join(wt, 'feature.txt'), 'feature\n');
   assert.equal((await status()).dirty, 1);
@@ -145,4 +146,28 @@ test('finishing a worktree: merge, squash, rebase and push act on the branch; re
   assert.equal(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
   const s = app().store.sessions.find(x => x.id === 'w');
   assert.deepEqual([s.hidden, s.status], [true, 'done']);
+});
+
+test('Push to main: merge with commit first commits the worktree\'s uncommitted changes on its branch', async t => {
+  const { root, wt, command } = await setup(t);
+  await writeFile(join(wt, 'feature.txt'), 'feature\n');
+  await writeFile(join(wt, 'a.txt'), 'edited\n');
+
+  // Without commit, uncommitted work is not merged.
+  assert.match((await command('w', { type: 'worktree_finish', action: 'merge' }))[1].error, /has no commits that main lacks/);
+
+  // A dirty project folder blocks it before anything is committed.
+  await writeFile(join(root, 'a.txt'), 'local edit\n');
+  const [code, err] = await command('w', { type: 'worktree_finish', action: 'merge', commit: true });
+  assert.equal(code, 409); assert.match(err.error, /uncommitted changes/);
+  assert.equal(await git(wt, 'rev-list', '--count', 'main..HEAD'), '0', 'worktree left uncommitted');
+  await git(root, 'checkout', '--', 'a.txt');
+
+  const [ok, merged] = await command('w', { type: 'worktree_finish', action: 'merge', commit: true });
+  assert.equal(ok, 200);
+  assert.deepEqual([merged.ahead, merged.dirty], [0, 0]);
+  assert.equal(await git(wt, 'log', '-1', '--format=%s'), 'Add feature');
+  assert.equal(await readFile(join(root, 'feature.txt'), 'utf8'), 'feature\n');
+  assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'edited\n');
+  assert.equal(await git(root, 'branch', '--show-current'), 'main');
 });
