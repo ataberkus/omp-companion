@@ -202,6 +202,20 @@ test('live tool output keeps streaming after the server clips it to its last 8,0
   assert.match(app.thread(), /BBBBBBBBBB/);
 });
 
+test('tool-result images show as full-size-on-tap thumbnails under the text output, also when they arrive after it', async () => {
+  const id = 'a'.repeat(64) + '.png';
+  let images;
+  const app = boot({ respond: stateOf(() => store([toolSession({ name: 'read', status: 'done', args: '{"path":"shot.png"}', result: 'Read image file [image/png]', images })])) });
+  await flush();
+  assert.doesNotMatch(app.thread(), /data-tool-image/);
+  images = [{ mimeType: 'image/png', id }];
+  await app.poll();
+  const html = app.thread();
+  assert.match(html, /Read image file \[image\/png\]/);
+  assert.match(html, new RegExp(`<div class="attach-preview tool-images"><div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View image 1 full size"><img data-tool-image="${id}"`));
+  assert.ok(html.indexOf('Read image file') < html.indexOf('data-tool-image'));
+});
+
 test('diffs: line-number jumps get a gap row, CR rows survive, word marks keep emoji and syntax colours', async () => {
   const files = [
     { path: 'a.js', op: 'edit', diff: ' 1|a\n-2|b\n+2|B\n 3|c\n 15|x\n-16|y\n+16|Y\n 17|z' },

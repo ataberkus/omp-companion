@@ -1036,7 +1036,31 @@
     }
     if (t.result && !(files.length && t.status !== 'error')) out.push(`<div class="result ${t.status === 'error' ? 'bad' : ''}"><div class="bar"><span>${t.status === 'error' ? 'Error' : 'Output'}</span></div><pre>${looksDiff(t.result) ? highlight(t.result, 'diff') : esc(t.result)}</pre></div>`);
     if (t.result && files.length && t.status !== 'error') out.push(`<details class="raw"><summary>Tool output</summary><pre class="fd-raw">${esc(t.result)}</pre></details>`);
+    if (t.images?.length) out.push(`<div class="attach-preview tool-images">${t.images.map((img, i) => `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View image ${i + 1} full size"><img data-tool-image="${esc(img.id)}" alt="Image from ${esc(t.name || 'tool')} output"></button></div>`).join('')}</div>`);
     return out.join('') || '<div class="muted" style="padding:4px 0">No details.</div>';
+  }
+  // Tool-result images come from /api/tool-image, which needs the Authorization header, so the <img> gets an object URL.
+  // Only images in open rows load; the 40 most recently shown stay cached. A transient failure is retried on the next render.
+  const toolImageUrls = new Map();
+  function toolImageUrl(id) {
+    let p = toolImageUrls.get(id);
+    if (p) { toolImageUrls.delete(id); toolImageUrls.set(id, p); return p; }
+    p = fetch('/api/tool-image?id=' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.token } })
+      .then(async r => r.ok ? URL.createObjectURL(await r.blob()) : r.status === 404 ? 'gone' : null, () => null);
+    p.then(u => { if (!u && toolImageUrls.get(id) === p) toolImageUrls.delete(id); });
+    toolImageUrls.set(id, p);
+    for (const [k, old] of toolImageUrls) { if (toolImageUrls.size <= 40) break; toolImageUrls.delete(k); old.then(u => u?.startsWith('blob:') && URL.revokeObjectURL(u)); }
+    return p;
+  }
+  function showToolImages(root) {
+    for (const img of root?.querySelectorAll?.('img[data-tool-image]') || []) {
+      if (img.closest('details:not([open])')) continue;
+      toolImageUrl(img.dataset.toolImage).then(u => {
+        if (!u || !img.isConnected) return;
+        if (u === 'gone') img.closest('.attach-item')?.replaceWith(Object.assign(document.createElement('span'), { className: 'msg-image-label', textContent: 'Image no longer stored' }));
+        else if (img.getAttribute('src') !== u) img.src = u;
+      });
+    }
   }
   // Group state survives re-renders; values only exist when the user overrides the default.
   const groupOpen = new Map(), rowOpen = new Map(), bodyCache = new Map();
@@ -1068,7 +1092,7 @@
     return `<details class="row tool ${bad ? 'bad' : ''} ${edits ? 'edit' : ''}" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
       <summary title="${esc(tip)}"><span class="ln">${esc(L.v)}${L.b ? ` <b>${esc(L.b)}</b>` : ''}${L.d ? ` <span class="ds">${esc(L.d)}</span>` : ''}${L.c ? ` <code>${esc(L.c.slice(0, 120))}</code>` : ''}</span>
       ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕<span class="sr-only">failed</span></span>' : ''}</summary>
-      <div class="row-body">${memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, t.result?.slice(-64), realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), diffMode()].join('|'), () => toolBody(t, a), 1000)}</div></details>`;
+      <div class="row-body">${memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, t.result?.slice(-64), realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), t.images?.map(i => i.id).join(), diffMode()].join('|'), () => toolBody(t, a), 1000)}</div></details>`;
   }
   function legacyTools(group) {
     // Pair legacy "call"/"result" text records into tool objects.
@@ -1108,6 +1132,8 @@
     // Advisor reviews sort by time and can land after a running tool; the live tail is the last main-agent message.
     const mainEnd = messages.findLastIndex(m => !m.adv), tail = messages[mainEnd];
     const runningTools = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? 1 : 0), 0);
+    // Tool images can land on a finished row (a transcript reload) without any other change.
+    const toolImages = messages.reduce((n, m) => n + (m.tool?.images?.length || 0), 0);
     // The server keeps only the last 8,000 chars of live output, so its length stops changing: sign the tail too.
     const liveOutput = messages.filter(m => m.tool?.status === 'running').map(m => (m.tool.result?.length || 0) + (m.tool.result?.slice(-64) || '')).join();
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
@@ -1123,7 +1149,7 @@
       if (u && !u.steer && (u.entryId || u.ompAt)) { for (let i = lastUser + 1; i < messages.length; i++) if (messages[i].role === 'assistant') lastReply = i; }
       else lastUser = -1;
     }
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
@@ -1197,6 +1223,7 @@
     if (draft && S.editSteer) S.editSteer.text = draft.value;
     swapHtml($('#thread'), parts.join(''));
     S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
+    showToolImages($('#thread'));
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -4372,6 +4399,7 @@
   document.addEventListener('toggle', e => {
     const d = e.target;
     const remember = (map, key) => { if (!key) return; if (d.open === (d.dataset.def === '1')) map.delete(key); else map.set(key, d.open); };
+    if (d.open) showToolImages(d);
     if (d.classList?.contains('activity')) remember(groupOpen, d.dataset.gid);
     else if (d.classList?.contains('row')) remember(rowOpen, d.dataset.rid);
     else if (d.hasAttribute?.('data-finished')) S.finishedOpen = d.open;

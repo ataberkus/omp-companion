@@ -272,6 +272,7 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .attach-item{position:relative;max-width:100%}
 .attach-item img{display:block;max-width:100%;max-height:200px;border:1px solid var(--border);border-radius:6px}
 .attach-item [data-act=removeImage]{position:absolute;top:4px;right:4px;background:#000b}
+.row-body .tool-images{margin:0;padding:0;border-top:0}
 .composer-bar .hint:has(.check){display:flex;flex-wrap:wrap;gap:2px 14px;white-space:normal;flex-basis:100%;order:1;padding-top:4px}
 .composer-bar:has(.hint .check) [data-act=start]{margin-left:auto}
 .attach-btn{flex-shrink:0}

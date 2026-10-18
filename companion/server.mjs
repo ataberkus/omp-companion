@@ -60,6 +60,7 @@ function advisorMessage(m,id,at){
  return notes.length?{id,role:'advisor',text:notes.map(n=>n.note).join('\n').slice(-100000),notes,at}:null;
 }
 const MAX_IMAGE_BYTES=5*1024*1024;
+const IMAGE_EXT={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif'};
 // Prompt cost estimates: ~4 characters per text token; images as Anthropic bills them, (w×h)/750 after its
 // 1568px / 1.15 MP downscale (the costliest common provider). The dashboard (app.js) uses the same formula.
 const textTokens=t=>Math.ceil(String(t||'').length/4);
@@ -81,18 +82,31 @@ function imageSize({mimeType,data}){
  return null;
 }
 const imagesTokens=images=>images.reduce((n,i)=>n+imageTokens(...(imageSize(i)||[])),0);
+// Image bytes as chat attachments accept them: a header matching the PNG, JPEG, WebP or GIF type, at most 5 MB.
+function imageBytesValid(mimeType,bytes){
+ const valid=mimeType==='image/png' ? bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+  :mimeType==='image/jpeg' ? bytes[0]===255&&bytes[1]===216&&bytes[2]===255
+  :mimeType==='image/webp' ? bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP'
+  :mimeType==='image/gif'&&['GIF87a','GIF89a'].includes(bytes.toString('ascii',0,6));
+ return !!bytes.length&&bytes.length<=MAX_IMAGE_BYTES&&valid;
+}
+// An image content part as chat attachments accept it (see imageBytesValid), sent as base64.
+// Returns the decoded bytes, or the reason it was refused.
+function checkImage(image){const data=image?.data;
+ if(image?.type!=='image'||!Object.hasOwn(IMAGE_EXT,image.mimeType)||typeof data!=='string'||data.length>Math.ceil(MAX_IMAGE_BYTES/3)*4||!data.length||data.length%4||!/^[A-Za-z0-9+/]+={0,2}$/.test(data))return {problem:'Use a PNG, JPEG, WebP or GIF image up to 5 MB.'};
+ const bytes=Buffer.from(data,'base64');
+ if(!imageBytesValid(image.mimeType,bytes))return {problem:'Image data does not match its file type or exceeds 5 MB.'};
+ return {bytes};
+}
+// Images in a tool result (read of a .png/.jpg), at most 8: live results carry base64 ({mimeType,bytes} once checked);
+// OMP's session files reference its blob store instead ("blob:sha256:<hex>" → {mimeType,blob}), checked when copied.
+const toolImages=content=>Array.isArray(content)?content.filter(c=>c?.type==='image').slice(0,8).map(c=>{
+ const blob=Object.hasOwn(IMAGE_EXT,c.mimeType)&&typeof c.data==='string'&&/^blob:sha256:([0-9a-f]{64})$/.exec(c.data)?.[1];
+ return blob?{mimeType:c.mimeType,blob}:{mimeType:c.mimeType,bytes:checkImage(c).bytes};}).filter(i=>i.blob||i.bytes):[];
 function chatImages(body){
  if(body.images===undefined)return [];
  if(!Array.isArray(body.images)||!body.images.length)throw error('Attach at least one image.');
- const images=body.images.map(image=>{const data=image?.data;
-  if(image?.type!=='image'||!['image/png','image/jpeg','image/webp','image/gif'].includes(image.mimeType)||typeof data!=='string'||data.length>Math.ceil(MAX_IMAGE_BYTES/3)*4||!data.length||data.length%4||!/^[A-Za-z0-9+/]+={0,2}$/.test(data))throw error('Use a PNG, JPEG, WebP or GIF image up to 5 MB.');
-  const bytes=Buffer.from(data,'base64');
-  const valid=image.mimeType==='image/png' ? bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
-   :image.mimeType==='image/jpeg' ? bytes[0]===255&&bytes[1]===216&&bytes[2]===255
-   :image.mimeType==='image/webp' ? bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP'
-   :['GIF87a','GIF89a'].includes(bytes.toString('ascii',0,6));
-  if(!bytes.length||bytes.length>MAX_IMAGE_BYTES||!valid)throw error('Image data does not match its file type or exceeds 5 MB.');
-  return {type:'image',mimeType:image.mimeType,data};});
+ const images=body.images.map(image=>{const {problem}=checkImage(image);if(problem)throw error(problem);return {type:'image',mimeType:image.mimeType,data:image.data};});
  // preview: one data URL or one per image; stored on the message as-is.
  const previews=body.preview===undefined?[]:[].concat(body.preview);
  if(previews.length>images.length||previews.some(p=>typeof p!=='string'||p.length>1024*1024||!/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(p)))throw error('Invalid image preview.');
@@ -267,13 +281,14 @@ async function lastContext(file){
  for(let i=lines.length-1;i>=0;i--){if(!lines[i].includes('"usage"'))continue;let f;try{f=JSON.parse(lines[i]);}catch{continue;}const m=f.message||{};if(f.type==='message'&&m.role==='assistant'&&usageTokens(m.usage))return usageTokens(m.usage);if(f.type==='compaction')return undefined;}
  return undefined;
 }
-async function importMessages(file,limit=400){
+async function importMessages(file,limit=400,stash){
  const frames=[];for(const line of (await readTail(file,12*1024*1024)).split('\n')){try{frames.push(JSON.parse(line));}catch{}}
- return entryMessages(frames,limit);
+ return entryMessages(frames,limit,stash);
 }
 // OMP session entries (file lines or get_entries) as thread messages; user prompts keep their entry ID for branching.
-function entryMessages(frames,limit=400){
- const out=[];const tools=new Map();
+// stash stores tool-result images ([{mimeType,bytes}] → [{mimeType,id}]); without it they are left out.
+function entryMessages(frames,limit=400,stash){
+ const out=[];const tools=new Map(),shots=new Map();
  for(const f of frames){if(f?.type!=='message'&&f?.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
   if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image'),agent=m.synthetic&&m.attribution==='agent';if(v||hasImage)out.push({id:f.id||randomUUID(),role:agent?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at,...(f.type==='message'&&f.id&&!agent?{entryId:String(f.id)}:{})});}
   else if(m.role==='assistant'){
@@ -282,10 +297,13 @@ function entryMessages(frames,limit=400){
    for(const c of Array.isArray(m.content)?m.content:[])if(c?.type==='toolCall'){const tool=toolRecord(c.name,c.arguments,c.intent);tool.status='done';const msg={id:'tool-'+c.id,role:'tool',tool,text:toolSummary(tool),at};tools.set(c.id,msg);out.push(msg);}
   }
   else if(f.type==='custom_message'||m.role==='custom'){const card=advisorMessage(m,f.id||randomUUID(),at);if(card)out.push(card);}
-  else if(m.role==='toolResult'){const msg=tools.get(m.toolCallId);if(msg){msg.tool.result=clip(contentText(m.content),8000);msg.tool.status=m.isError?'error':'done';const files=editFiles(m.details);if(files)msg.tool.files=files;msg.text=toolSummary(msg.tool);}}
+  else if(m.role==='toolResult'){const msg=tools.get(m.toolCallId);if(msg){msg.tool.result=clip(contentText(m.content),8000);msg.tool.status=m.isError?'error':'done';const files=editFiles(m.details);if(files)msg.tool.files=files;msg.text=toolSummary(msg.tool);if(stash)shots.set(msg,m.content);}}
   else if(m.role==='bashExecution'){const tool=shellRecord(m.command,m);out.push({id:'tool-'+(f.id||randomUUID()),role:'tool',tool,text:toolSummary(tool),at});}
  }
- return out.slice(-limit);
+ const kept=out.slice(-limit);
+ // Only messages that are kept get their images decoded and stored.
+ for(const msg of kept){const content=shots.get(msg);if(!content)continue;const images=toolImages(content);if(images.length)msg.tool.images=stash(images);}
+ return kept;
 }
 
 // Single parser for `omp usage --json`: the /usage chat snapshot and the live usage panel both render from this.
@@ -933,6 +951,35 @@ export async function createCompanion(options={}){
  const subagentThoughts=new Map();
  // Windows: antivirus/indexers briefly lock workspace.json, making rename fail with EPERM/EACCES/EBUSY; retry like graceful-fs.
  const replaceFile=async(from,to)=>{for(let i=0;;i++){try{return await fs.rename(from,to);}catch(e){if(i>=20||!['EPERM','EACCES','EBUSY'].includes(e.code))throw e;await new Promise(r=>setTimeout(r,50*(i+1)));}}};
+ // Tool-result images (say a read of a .jpg) are files named by their content hash; messages keep only {mimeType,id}, so
+ // /api/state polls and workspace.json stay small. The folder holds at most toolImageCap bytes: least recently stored go first.
+ // Images from OMP's session files are copied from its blob store, which names them by the same SHA-256.
+ const toolImageDir=path.join(dataDir,'tool-images'),toolImageCap=options.toolImageCap??256*1024*1024;
+ const imageWrites=new Map();let pruneTimer;
+ const stashImages=list=>list.map(({mimeType,bytes,blob})=>{
+  const id=(blob||createHash('sha256').update(bytes).digest('hex'))+'.'+IMAGE_EXT[mimeType];
+  if(!imageWrites.has(id))imageWrites.set(id,saveImage(id,mimeType,bytes,blob).catch(e=>console.error('Could not store a tool image:',e.message)).finally(()=>imageWrites.delete(id)));
+  return {mimeType,id};});
+ async function saveImage(id,mimeType,bytes,blob){
+  const file=path.join(toolImageDir,id),t=new Date();
+  try{await fs.utimes(file,t,t);return;}catch(e){if(e.code!=='ENOENT')throw e;}
+  if(blob){bytes=await ompBlob(blob,mimeType);if(!bytes)return;}
+  await fs.mkdir(toolImageDir,{recursive:true,mode:0o700});
+  const tmp=`${file}.${process.pid}.tmp`;await fs.writeFile(tmp,bytes,{mode:0o600});await replaceFile(tmp,file);
+  clearTimeout(pruneTimer);pruneTimer=setTimeout(()=>pruneImages().catch(e=>{if(e.code!=='ENOENT')console.error('Could not prune tool images:',e.message);}),500);pruneTimer.unref?.();
+ }
+ // The image OMP's blob store holds under a SHA-256, if it is still there (OMP's cleanup sweeps unreferenced blobs) and valid.
+ async function ompBlob(hex,mimeType){
+  const source=path.join(agentDir(),'blobs',hex);
+  try{if((await fs.stat(source)).size>MAX_IMAGE_BYTES)return null;const bytes=await fs.readFile(source);return imageBytesValid(mimeType,bytes)?bytes:null;}
+  catch(e){if(e.code==='ENOENT')return null;throw e;}
+ }
+ async function pruneImages(){
+  const files=[];
+  for(const name of await fs.readdir(toolImageDir)){if(imageWrites.has(name.split('.').slice(0,2).join('.')))continue;try{const st=await fs.stat(path.join(toolImageDir,name));files.push({name,size:st.size,at:st.mtimeMs});}catch{}}
+  let total=files.reduce((n,f)=>n+f.size,0);files.sort((a,b)=>a.at-b.at);
+  for(const f of files){if(total<=toolImageCap)break;await fs.rm(path.join(toolImageDir,f.name),{force:true}).catch(()=>{});total-=f.size;}
+ }
  // One write in flight plus at most one queued; the queued one serializes when it starts, so it covers every caller that joined it.
  // Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save, and a slow disk ran the heap out.
  let lastSaved,nextSave;
@@ -1095,7 +1142,7 @@ export async function createCompanion(options={}){
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
-   msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
+   msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const images=toolImages(f.result?.content);if(images.length)msg.tool.images=stashImages(images);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
   if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);
    if(s._capture){s._capture.push(text);return;}
    // Our own background /rename reports back in chat text; keep it out of the transcript.
@@ -1152,7 +1199,7 @@ export async function createCompanion(options={}){
    else if(f.method==='open_url'){const url=[f.launchUrl,f.url].find(u=>typeof u==='string'&&/^https?:\/\//i.test(u));if(url)s._openUrl={id:f.id,url:url.slice(0,4000),instructions:String(f.instructions||'').slice(0,1000)};}
    else if(f.method!=='setTitle')void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
   }
-  if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'&&out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;}
+  if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'){if(out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;const images=toolImages(f.partialResult?.content);if(images.length)msg.tool.images=stashImages(images);}}
   if(f.type==='extension_error')notice(s,'error',`Extension ${path.basename(String(f.extensionPath||'extension'))} failed${f.event?` in ${f.event}`:''}: ${f.error}`);
   if(f.type==='notice')notice(s,f.level,f.source?`${f.source}: ${f.message}`:f.message);
   if(f.type==='auto_retry_start'&&s.status!=='paused'&&s.status!=='done'){s.status='running';s.error=undefined;s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};}
@@ -1248,7 +1295,7 @@ export async function createCompanion(options={}){
   s._backfilled=true;const before=s.messages;
   const r=await read().catch(()=>null),entries=Array.isArray(r?.entries)?r.entries:[],byId=new Map(entries.map(e=>[e?.id,e])),path=new Set();
   for(let id=r?.leafId;id&&!path.has(id);id=byId.get(id)?.parentId)path.add(id);
-  const rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)));
+  const rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)),400,stashImages);
   // A message sent (or any transcript change) while reading wins; the rebuild is dropped and tried again later.
   if(!rebuilt.some(m=>m.entryId))return;
   if(s.messages!==before||['running','queued'].includes(s.status)){s._backfilled=false;return;}
@@ -1274,7 +1321,7 @@ export async function createCompanion(options={}){
   for(const m of s.messages)if(m.ompAt){const id=byTime.get(m.ompAt);if(id)m.entryId=id;delete m.ompAt;}
  }
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
- async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
+ async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile,400,stashImages).catch(()=>s.messages);delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  // `omp usage` for every logged-in provider (session's first), parsed once for both the /usage chat snapshot and GET /api/usage.
  async function providerUsage(s){
   const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');
@@ -1945,7 +1992,6 @@ async function spend(sync){
  const cliJobs=[];const cliProcs=new Map();
  // Enhance jobs: one read-only `omp -p` per click; the dashboard polls GET /api/enhance until it settles.
  const enhanceJobs=new Map();
- const IMAGE_EXT={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif'};
  async function startEnhance(body){
   const draft=text(body.text,'Draft',200000);
   if(!!body.session===!!body.path)throw error('Choose a session or a folder to enhance in.');
@@ -2198,7 +2244,14 @@ async function spend(sync){
    }
    if(req.method==='GET'&&url.pathname==='/api/draft'){const d=store.drafts[url.searchParams.get('key')];json({text:d?.text??'',at:d?.at??null});return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions'){json({dir:ompSessionsDir,sessions:await listNativeSessions()});return;}
-   if(req.method==='GET'&&url.pathname==='/api/omp-sessions/preview'){const file=sessionFileParam(url.searchParams.get('file'));let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}json({...head,file,contextTokens:await lastContext(file).catch(()=>undefined),messages:await importMessages(file,150)});return;}
+   if(req.method==='GET'&&url.pathname==='/api/omp-sessions/preview'){const file=sessionFileParam(url.searchParams.get('file'));let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}json({...head,file,contextTokens:await lastContext(file).catch(()=>undefined),messages:await importMessages(file,150,stashImages)});return;}
+   // A tool-result image by the ID its message carries (see stashImages); content-addressed, so it never changes. One pruned
+   // from tool-images is still served from OMP's blob store while OMP keeps it.
+   if(req.method==='GET'&&url.pathname==='/api/tool-image'){const id=url.searchParams.get('id')||'';const m=/^([0-9a-f]{64})\.(png|jpg|webp|gif)$/.exec(id);if(!m)throw error('Invalid image ID.');
+    const type=Object.keys(IMAGE_EXT).find(k=>IMAGE_EXT[k]===m[2]);
+    await imageWrites.get(id);let data;try{data=await fs.readFile(path.join(toolImageDir,id));}catch{data=await ompBlob(m[1],type).catch(()=>null);}
+    if(!data)throw error('This image is no longer stored.',404);
+    res.writeHead(200,{'Content-Type':type,'Content-Length':data.length,'Cache-Control':'private, max-age=31536000, immutable','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'"});res.end(data);return;}
    if(req.method==='GET'&&url.pathname==='/api/settings'){try{json(await listSettings());}catch(e){throw error(`Could not read OMP settings: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/plugins'){try{json(await listPlugins());}catch(e){throw error(`Could not read OMP plugins: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
@@ -2225,7 +2278,7 @@ async function spend(sync){
     const own=owned[0];const bg=await background(file,runner?runner.startedAt:owned.length?Infinity:undefined,(own?.subagentList||[]).map(a=>({...a,thinking:subagentThoughts.get(own.id+':'+a.id)?.text||''})));json({...bg,live});return;}
    if(req.method==='GET'&&url.pathname==='/api/transcript'){
     const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}
-    const st=await fs.stat(file),messages=await importMessages(file,600);
+    const st=await fs.stat(file),messages=await importMessages(file,600,stashImages);
     const thought=[...subagentThoughts.values()].find(t=>t.file&&samePath(t.file,file));
     const active=thought?runners.has(thought.parentId)&&thought.active:undefined;
     if(active&&thought.streaming&&thought.text&&!messages.some(m=>m.role==='thinking'&&m.sourceTimestamp!==undefined&&m.sourceTimestamp===thought.sourceTimestamp))messages.push({id:thought.id,role:'thinking',text:thought.text,at:thought.at,sourceTimestamp:thought.sourceTimestamp});
@@ -2329,7 +2382,7 @@ async function spend(sync){
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||head.preview.split('\n')[0]||'Resumed session').slice(0,120);
-    const messages=await importMessages(file).catch(()=>[]);const contextTokens=await lastContext(file).catch(()=>undefined);messages.push({id:randomUUID(),role:'system',text:'Resumed from OMP session history. Avoid prompting it here while the same session is open in a terminal.',at:now()});
+    const messages=await importMessages(file,400,stashImages).catch(()=>[]);const contextTokens=await lastContext(file).catch(()=>undefined);messages.push({id:randomUUID(),role:'system',text:'Resumed from OMP session history. Avoid prompting it here while the same session is open in a terminal.',at:now()});
     const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch});s.contextTokens=contextTokens;
     if(!head.title&&!launch?.noTitle)s.autoTitle=true;
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
