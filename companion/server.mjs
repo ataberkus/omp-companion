@@ -1885,7 +1885,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   return {root,cwd:s.cwd,exists:here,branch:s.branch,base,ahead,behind,commits,dirty,rootDirty,remote:remotes.includes('origin')?'origin':remotes[0]||'',upstream};
  }
  // Merge (merge commit or fast-forward) / squash into the project's branch, rebase onto it, push it, or delete worktree and branch.
- // With commit, merge/squash first commit the worktree's uncommitted changes on its branch (composer "Push to <base>").
+ // With commit, merge/squash first commit the worktree's uncommitted changes on its branch.
  // A failed merge or rebase is undone so neither folder is left mid-conflict.
  async function finishWorktree(s,action,{commit=false}={}){
   if(!['merge','squash','rebase','push','delete'].includes(action))throw error('Choose merge, squash, rebase, push or delete.');

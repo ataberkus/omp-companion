@@ -2297,8 +2297,9 @@
     const cwd = sid ? S.store?.sessions.find(x => x.id === sid)?.cwd : c.kind === 'native' ? S.native.find(x => x.file === c.file)?.cwd : c.kind === 'sub' ? S.subs.get(c.file)?.data?.cwd : c.kind === 'changes' ? S.native.find(x => x.file === c.parent.slice(2))?.cwd : '';
     api('/open-file', { path, ...(line ? { line } : {}), ...(cwd ? { cwd } : {}) }).then(r => toast(r.editor === 'reveal' ? `Showing ${baseName(r.path)} in its folder` : `Opened ${baseName(r.path)}${line ? ':' + line : ''}`), e => toast(e.message, 'err'));
   }
-  // Composer "Push to <base>": commits the worktree's uncommitted changes on the isolated session's omp-web/ branch, then
-  // merges it into the branch checked out in the project folder via worktree_finish merge (commit: true). The base name is fetched once per session.
+  // Composer "Push to <base>": like "Commit related changes", it sends OMP a prompt (or queues it as a follow-up while
+  // OMP is working) asking it to commit the worktree's changes on the omp-web/ branch, merge that into the branch checked
+  // out in the project folder and push it. The base name is fetched once per session.
   S.wtBase = new Map();
   function pushButton(s) {
     if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
@@ -2307,17 +2308,7 @@
       api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {});
     }
     const base = S.wtBase.get(s.id) || 'main';
-    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Commit this worktree's changes on ${esc(s.branch)} and merge it into ${esc(base)}, the branch checked out in the project folder" ${S.busy ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
-  }
-  async function pushToBase(id) {
-    S.busy = true; update();
-    try {
-      const r = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'worktree_finish', action: 'merge', commit: true }, { timeout: 150000 });
-      S.wtBase.set(id, r.base || '');
-      toast(`Merged ${r.branch} into ${r.base}`);
-      await refresh();
-    } catch (e) { toast(e.message, 'err'); }
-    finally { S.busy = false; update(); }
+    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder) and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
   }
   // ---------- finish an isolated session's worktree ----------
   function wtBody(s, st) {
@@ -2382,6 +2373,16 @@
   const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected && focus.offsetParent !== null) focus.focus(); else if (el) $('#input')?.focus(); return true; };
   const sessionApi = (body, opts) => api(`/sessions/${current().id}/command`, body, opts);
   const COMMIT_RELATED = 'Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit.';
+  const PUSH_TO_BASE = (branch, base) => `Commit this worktree's changes on its branch ${branch} with a clear commit message. Then merge ${branch} into ${base} in the project folder where ${base} is checked out (find it with \`git worktree list\`), and push ${base} to the remote. If the merge conflicts or the push fails, stop and tell me what happened. Report the commits, the merge and the push result.`;
+  // Sends a prompt to the current session, or queues it as a follow-up while OMP is working.
+  function sendOrQueue(id, message) {
+    const s = S.store?.sessions.find(x => x.id === id);
+    const queue = s?.status === 'running' || s?.status === 'queued';
+    S.busy = true; update();
+    sessionApi({ type: queue ? 'follow_up' : 'prompt', message })
+      .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
+      .finally(() => { S.busy = false; update(); });
+  }
   async function togglePlan(id) {
     const s = S.store?.sessions.find(x => x.id === id);
     if (!s || s._planSupported === false || s.planMode?.available === false) return toast('Plan mode requires updated OMP RPC support.', 'err');
@@ -4263,15 +4264,8 @@
     else if (act === 'btwNew') { Object.assign(btwState(c.id), { topic: '', history: false }); update(); $('#btwForm input')?.focus(); }
     else if (act === 'btwHistory') btwHistory(c.id);
     else if (act === 'btwCancel') { const st = btwState(c.id); sessionApi({ type: 'btw_cancel', ...(st.topic ? { recordId: st.topic } : {}) }).then(refresh, err => toast(err.message, 'err')); }
-    else if (act === 'commitRelated' && !S.busy) {
-      const s = S.store?.sessions.find(x => x.id === c.id);
-      const queue = s?.status === 'running' || s?.status === 'queued';
-      S.busy = true; update();
-      sessionApi({ type: queue ? 'follow_up' : 'prompt', message: COMMIT_RELATED })
-        .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
-        .finally(() => { S.busy = false; update(); });
-    }
-    else if (act === 'pushMain' && !S.busy) pushToBase(c.id);
+    else if (act === 'commitRelated' && !S.busy) sendOrQueue(c.id, COMMIT_RELATED);
+    else if (act === 'pushMain' && !S.busy) { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, S.wtBase.get(c.id) || 'main')); }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
