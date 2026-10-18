@@ -1282,7 +1282,7 @@ export async function createCompanion(options={}){
   if(body.type==='git_log')return gitLog(s);
   if(body.type==='git_commit')return gitCommit(s,body.sha);
   if(body.type==='worktree_status')return worktreeStatus(s);
-  if(body.type==='worktree_finish')return finishWorktree(s,body.action);
+  if(body.type==='worktree_finish')return finishWorktree(s,body.action,{commit:body.commit===true});
   const prompting=['prompt','steer','follow_up','interrupt'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
   if(prompting&&s._task)throw error(`Wait for OMP to finish first (${s._task.replace(/…$/,'').toLowerCase()}).`);
@@ -1792,15 +1792,24 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   return {root,cwd:s.cwd,exists:here,branch:s.branch,base,ahead,behind,commits,dirty,rootDirty,remote:remotes.includes('origin')?'origin':remotes[0]||'',upstream};
  }
  // Merge (merge commit or fast-forward) / squash into the project's branch, rebase onto it, push it, or delete worktree and branch.
+ // With commit, merge/squash first commit the worktree's uncommitted changes on its branch (composer "Push to <base>").
  // A failed merge or rebase is undone so neither folder is left mid-conflict.
- async function finishWorktree(s,action){
+ async function finishWorktree(s,action,{commit=false}={}){
   if(!['merge','squash','rebase','push','delete'].includes(action))throw error('Choose merge, squash, rebase, push or delete.');
   if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');
-  const st=await worktreeStatus(s),{root,branch,base}=st;
+  let st=await worktreeStatus(s);const {root,branch,base}=st;
   if(['merge','squash','rebase'].includes(action)&&!base)throw error(`${root} is not on a branch (detached HEAD). Check out the branch to merge into first.`,409);
   if(action==='merge'||action==='squash'){
-   if(!st.ahead)throw error(`${branch} has no commits that ${base} lacks. Commit the work in the worktree first.`,409);
    if(st.rootDirty)throw error(`${root} has uncommitted changes. Commit or stash them before merging.`,409);
+   if(commit&&st.exists&&st.dirty){
+    const head=(await gitRun(s.cwd,['branch','--show-current'],{timeout:10000})).trim();
+    if(head!==branch)throw error(`The worktree has ${head||'a detached HEAD'} checked out, not ${branch}. Commit its changes by hand.`,409);
+    try{await gitRun(s.cwd,['add','-A']);await gitRun(s.cwd,['commit','-m',s.title||`Work from ${branch}`]);}
+    catch(e){throw error(`Committing the worktree failed: ${e.message}`,409);}
+    activity(s,`Committed worktree changes on ${branch}`,'update');
+    st=await worktreeStatus(s);
+   }
+   if(!st.ahead)throw error(`${branch} has no commits that ${base} lacks. Commit the work in the worktree first.`,409);
    try{if(action==='merge')await gitRun(root,['merge','--no-edit',branch]);else{await gitRun(root,['merge','--squash',branch]);await gitRun(root,['commit','-m',`${s.title}\n\nSquashed from ${branch}.`]);}}
    catch(e){await gitRun(root,action==='merge'?['merge','--abort']:['reset','--merge']).catch(()=>{});throw error(`Merge failed and was undone: ${e.message}`,409);}
    activity(s,`Merged ${branch} into ${base}${action==='squash'?' (squashed)':''}`,'done');

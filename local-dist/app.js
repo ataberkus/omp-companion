@@ -2256,8 +2256,8 @@
     const cwd = sid ? S.store?.sessions.find(x => x.id === sid)?.cwd : c.kind === 'native' ? S.native.find(x => x.file === c.file)?.cwd : c.kind === 'sub' ? S.subs.get(c.file)?.data?.cwd : c.kind === 'changes' ? S.native.find(x => x.file === c.parent.slice(2))?.cwd : '';
     api('/open-file', { path, ...(line ? { line } : {}), ...(cwd ? { cwd } : {}) }).then(r => toast(r.editor === 'reveal' ? `Showing ${baseName(r.path)} in its folder` : `Opened ${baseName(r.path)}${line ? ':' + line : ''}`), e => toast(e.message, 'err'));
   }
-  // Composer "Push to <base>": merges an isolated session's omp-web/ branch into the branch checked out in the project
-  // folder via the same worktree_finish merge as ⋯ › Finish worktree. The base name is fetched once per session.
+  // Composer "Push to <base>": commits the worktree's uncommitted changes on the isolated session's omp-web/ branch, then
+  // merges it into the branch checked out in the project folder via worktree_finish merge (commit: true). The base name is fetched once per session.
   S.wtBase = new Map();
   function pushButton(s) {
     if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
@@ -2266,12 +2266,12 @@
       api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {});
     }
     const base = S.wtBase.get(s.id) || 'main';
-    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Merge this worktree's branch ${esc(s.branch)} into ${esc(base)}, the branch checked out in the project folder" ${S.busy ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
+    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Commit this worktree's changes on ${esc(s.branch)} and merge it into ${esc(base)}, the branch checked out in the project folder" ${S.busy ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
   }
   async function pushToBase(id) {
     S.busy = true; update();
     try {
-      const r = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'worktree_finish', action: 'merge' }, { timeout: 150000 });
+      const r = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'worktree_finish', action: 'merge', commit: true }, { timeout: 150000 });
       S.wtBase.set(id, r.base || '');
       toast(`Merged ${r.branch} into ${r.base}`);
       await refresh();
