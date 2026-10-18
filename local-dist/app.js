@@ -2114,7 +2114,7 @@
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     input.readOnly = !!enhancing;
     const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
-    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Commit related changes</button>` : '');
+    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Commit related changes</button>${pushButton(s)}` : '');
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
@@ -2202,6 +2202,28 @@
     const cwd = sid ? S.store?.sessions.find(x => x.id === sid)?.cwd : c.kind === 'native' ? S.native.find(x => x.file === c.file)?.cwd : c.kind === 'sub' ? S.subs.get(c.file)?.data?.cwd : c.kind === 'changes' ? S.native.find(x => x.file === c.parent.slice(2))?.cwd : '';
     api('/open-file', { path, ...(line ? { line } : {}), ...(cwd ? { cwd } : {}) }).then(r => toast(r.editor === 'reveal' ? `Showing ${baseName(r.path)} in its folder` : `Opened ${baseName(r.path)}${line ? ':' + line : ''}`), e => toast(e.message, 'err'));
   }
+  // Composer "Push to <base>": merges an isolated session's omp-web/ branch into the branch checked out in the project
+  // folder via the same worktree_finish merge as ⋯ › Finish worktree. The base name is fetched once per session.
+  S.wtBase = new Map();
+  function pushButton(s) {
+    if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
+    if (!S.wtBase.has(s.id)) {
+      S.wtBase.set(s.id, '');
+      api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {});
+    }
+    const base = S.wtBase.get(s.id) || 'main';
+    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Merge this worktree's branch ${esc(s.branch)} into ${esc(base)}, the branch checked out in the project folder" ${S.busy ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
+  }
+  async function pushToBase(id) {
+    S.busy = true; update();
+    try {
+      const r = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'worktree_finish', action: 'merge' }, { timeout: 150000 });
+      S.wtBase.set(id, r.base || '');
+      toast(`Merged ${r.branch} into ${r.base}`);
+      await refresh();
+    } catch (e) { toast(e.message, 'err'); }
+    finally { S.busy = false; update(); }
+  }
   // ---------- finish an isolated session's worktree ----------
   function wtBody(s, st) {
     const off = (ok, why) => ok ? '' : ` disabled title="${esc(why)}"`, base = esc(st.base || 'its branch'), n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
@@ -2226,6 +2248,7 @@
     if (!s) return;
     let st;
     try { st = await sessionApi({ type: 'worktree_status' }); } catch (e) { return toast(e.message, 'err'); }
+    S.wtBase.set(s.id, st.base || '');
     modal('Finish worktree', wtBody(s, st));
     const box = $('#modal')?.querySelector('[data-wtsession]'); if (box) box._st = st;
   }
@@ -4136,6 +4159,7 @@
         .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
         .finally(() => { S.busy = false; update(); });
     }
+    else if (act === 'pushMain' && !S.busy) pushToBase(c.id);
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
