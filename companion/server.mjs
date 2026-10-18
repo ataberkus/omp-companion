@@ -268,8 +268,13 @@ async function lastContext(file){
  return undefined;
 }
 async function importMessages(file,limit=400){
+ const frames=[];for(const line of (await readTail(file,12*1024*1024)).split('\n')){try{frames.push(JSON.parse(line));}catch{}}
+ return entryMessages(frames,limit);
+}
+// OMP session entries (file lines or get_entries) as thread messages; user prompts keep their entry ID for branching.
+function entryMessages(frames,limit=400){
  const out=[];const tools=new Map();
- for(const line of (await readTail(file,12*1024*1024)).split('\n')){let f;try{f=JSON.parse(line);}catch{continue;}if(f.type!=='message'&&f.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
+ for(const f of frames){if(f?.type!=='message'&&f?.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
   if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image'),agent=m.synthetic&&m.attribution==='agent';if(v||hasImage)out.push({id:f.id||randomUUID(),role:agent?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at,...(f.type==='message'&&f.id&&!agent?{entryId:String(f.id)}:{})});}
   else if(m.role==='assistant'){
    const th=thinkingText(m.content).trim();if(th)out.push({id:(f.id||randomUUID())+'-think',role:'thinking',text:th.slice(-40000),at,sourceTimestamp:m.timestamp});
@@ -1076,7 +1081,7 @@ export async function createCompanion(options={}){
   if(f.type==='message_start'&&f.message?.role==='user'){
    // Steers wait for a tool/turn boundary; OMP echoes them when read, so place them where the agent actually saw them.
    const said=contentText(f.message.content).trim(),i=s.messages.findIndex(m=>m.steer&&(m.text.trim()===said||(m.hasImage&&m.text==='Image attached'&&!said)));
-   if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();s.messages.push(m);}
+   if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();if(typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;s.messages.push(m);}
    // Otherwise the first user message of a prompt's run is that prompt. OMP stores this exact message, timestamp included,
    // as its session entry; bindEntries turns the timestamp into the entry ID that branching from this message needs.
    else if(s._promptMsg&&!(f.message.synthetic&&f.message.attribution==='agent')){const m=s.messages.find(m=>m.id===s._promptMsg);if(m&&typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;delete s._promptMsg;}
@@ -1230,7 +1235,35 @@ export async function createCompanion(options={}){
   // (e.g. Stop & send's own prompt_result reporting the interrupted run), and OMP rejects prompts while it streams.
   if(state?.isStreaming===true&&!['running','queued','done'].includes(s.status)){startWork(s);s.status='running';s.error=undefined;delete s._settled;}
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);
-  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,rpc);}catch{}}
+  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,rpc);
+  if(state?.isSettled===true&&needsBackfill(s))await backfillEntries(s,async()=>{const r=await rpc.send({type:'get_entries'});return {entries:r?.entries,leafId:r?.leafId};});}catch{}}
+ // A prompt recorded without OMP's entry ID: sent before the companion bound prompts, or a binding that failed.
+ // Slash commands and steers OMP hasn't read are not session entries.
+ const unbound=m=>m.role==='user'&&!m.entryId&&!m.ompAt&&!m.steer&&!/^\/\S/.test(m.text);
+ const needsBackfill=s=>!s._backfilled&&!s._promptMsg&&!['running','queued'].includes(s.status)&&!!s.messages?.some(unbound);
+ // Such prompts can't be matched to OMP's entries by anything but their text, so the transcript is rebuilt from OMP's own
+ // entries on its active path instead (once per companion run), which carry every prompt's entry ID. The companion's notes
+ // are kept in time order. read() gives OMP's entries and leaf: from the live runner, or the session file when none runs.
+ async function backfillEntries(s,read){
+  s._backfilled=true;const before=s.messages;
+  const r=await read().catch(()=>null),entries=Array.isArray(r?.entries)?r.entries:[],byId=new Map(entries.map(e=>[e?.id,e])),path=new Set();
+  for(let id=r?.leafId;id&&!path.has(id);id=byId.get(id)?.parentId)path.add(id);
+  const rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)));
+  // A message sent (or any transcript change) while reading wins; the rebuild is dropped and tried again later.
+  if(!rebuilt.some(m=>m.entryId))return;
+  if(s.messages!==before||['running','queued'].includes(s.status)){s._backfilled=false;return;}
+  const t=m=>new Date(m.at).getTime()||0;
+  s.messages=[...rebuilt,...before.filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)).slice(-600);delete s._entryCursor;scheduleSave();
+ }
+ // The session file's entries and the leaf OMP resumes from when it loads them: the last entry, unless a model_usage entry
+ // names another active leaf (OMP's own rule).
+ async function fileEntries(file){
+  const entries=[];for(const line of (await readTail(file,12*1024*1024)).split('\n')){let f;try{f=JSON.parse(line);}catch{continue;}if(f?.id&&f.type!=='session')entries.push(f);}
+  const own=e=>e.type==='model_usage'&&e.activeLeafId!==undefined?e.activeLeafId:e.id,ids=new Set(entries.map(e=>e.id));
+  let leafId=entries.length?own(entries.at(-1)):null;
+  if(leafId!==null&&!ids.has(leafId))leafId=entries.findLast(e=>own(e)===e.id)?.id??null;
+  return {entries,leafId};
+ }
  // Gives prompts typed in this panel their OMP entry ID once OMP has stored them (it is settled), matched by the exact
  // timestamp OMP echoed in message_start. Reads only entries newer than the last pass; one attempt per message.
  async function bindEntries(s,rpc){
@@ -2157,6 +2190,8 @@ async function spend(sync){
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
     if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView()});return;}
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
+    // A viewed session with no OMP process running gets its prompts' entry IDs from the session file (live ones from refresh).
+    {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive&&needsBackfill(s))void lock(s.id,async()=>{if(!runners.get(s.id)?.alive&&needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));}).catch(()=>{});}
     const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
