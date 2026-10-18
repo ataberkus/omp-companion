@@ -270,7 +270,7 @@ async function lastContext(file){
 async function importMessages(file,limit=400){
  const out=[];const tools=new Map();
  for(const line of (await readTail(file,12*1024*1024)).split('\n')){let f;try{f=JSON.parse(line);}catch{continue;}if(f.type!=='message'&&f.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
-  if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');if(v||hasImage)out.push({id:f.id||randomUUID(),role:m.synthetic&&m.attribution==='agent'?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at});}
+  if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image'),agent=m.synthetic&&m.attribution==='agent';if(v||hasImage)out.push({id:f.id||randomUUID(),role:agent?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at,...(f.type==='message'&&f.id&&!agent?{entryId:String(f.id)}:{})});}
   else if(m.role==='assistant'){
    const th=thinkingText(m.content).trim();if(th)out.push({id:(f.id||randomUUID())+'-think',role:'thinking',text:th.slice(-40000),at,sourceTimestamp:m.timestamp});
    const v=contentText(m.content).trim();if(v)out.push({id:f.id||randomUUID(),role:'assistant',text:v.slice(-100000),at,model:m.provider&&m.model?`${m.provider}/${m.model}`:undefined});
@@ -1077,6 +1077,9 @@ export async function createCompanion(options={}){
    // Steers wait for a tool/turn boundary; OMP echoes them when read, so place them where the agent actually saw them.
    const said=contentText(f.message.content).trim(),i=s.messages.findIndex(m=>m.steer&&(m.text.trim()===said||(m.hasImage&&m.text==='Image attached'&&!said)));
    if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();s.messages.push(m);}
+   // Otherwise the first user message of a prompt's run is that prompt. OMP stores this exact message, timestamp included,
+   // as its session entry; bindEntries turns the timestamp into the entry ID that branching from this message needs.
+   else if(s._promptMsg&&!(f.message.synthetic&&f.message.attribution==='agent')){const m=s.messages.find(m=>m.id===s._promptMsg);if(m&&typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;delete s._promptMsg;}
   }
   // Once the prompt is in OMP's history (first assistant message of a run), ask OMP to title the session; at most once per run.
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
@@ -1226,9 +1229,19 @@ export async function createCompanion(options={}){
   // Likewise a streaming OMP is working whatever s.status says: a run reported aborted or failed can keep going
   // (e.g. Stop & send's own prompt_result reporting the interrupted run), and OMP rejects prompts while it streams.
   if(state?.isStreaming===true&&!['running','queued','done'].includes(s.status)){startWork(s);s.status='running';s.error=undefined;delete s._settled;}
-  if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);}catch{}}
+  if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);
+  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,rpc);}catch{}}
+ // Gives prompts typed in this panel their OMP entry ID once OMP has stored them (it is settled), matched by the exact
+ // timestamp OMP echoed in message_start. Reads only entries newer than the last pass; one attempt per message.
+ async function bindEntries(s,rpc){
+  let r;try{r=await rpc.send({type:'get_entries',...(s._entryCursor?{since:s._entryCursor}:{})});}
+  catch{if(s._entryCursor){delete s._entryCursor;return bindEntries(s,rpc);}for(const m of s.messages)delete m.ompAt;return;}
+  const entries=Array.isArray(r?.entries)?r.entries:[];if(entries.length)s._entryCursor=String(entries.at(-1).id);
+  const byTime=new Map();for(const e of entries){const p=entryPrompt(e),t=e.message?.timestamp;if(p&&typeof t==='number')byTime.set(t,byTime.has(t)?null:p.entryId);}
+  for(const m of s.messages)if(m.ompAt){const id=byTime.get(m.ompAt);if(id)m.entryId=id;delete m.ompAt;}
+ }
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
- async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;}
+ async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile).catch(()=>s.messages);delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  // `omp usage` for every logged-in provider (session's first), parsed once for both the /usage chat snapshot and GET /api/usage.
  async function providerUsage(s){
   const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');
@@ -1382,7 +1395,7 @@ export async function createCompanion(options={}){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
    const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
    finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);cancelResume(s,'session stopped');
-   delete s._promptId;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
+   delete s._promptId;delete s._promptMsg;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
    await persist();return s;
   }
   if(body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
@@ -1519,17 +1532,17 @@ export async function createCompanion(options={}){
    const interrupt=body.type==='interrupt';
    const rpcType=slashCommand?'prompt':interrupt?'abort_and_prompt':body.type,wasRunning=['running','queued'].includes(s.status);
    // A message of the user's own supersedes a pending rate-limit resume; slash commands (say /usage) leave it armed.
-   if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt)delete s._streamId;s.status='running';s.error=undefined;}const msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt)delete s._streamId;s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
-   if((rpcType==='prompt'||interrupt)&&!slashCommand)s._promptId=id;
+   if((rpcType==='prompt'||interrupt)&&!slashCommand){s._promptId=id;s._promptMsg=msg.id;}
    if(interrupt){s._interrupt=id;delete s._retry;delete s._thinkId;}
    const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(slashCommand&&wasRunning?{streamingBehavior:'steer'}:{}),...(images.length?{images}:{})}:{})},slashCommand?0:30000);
    // Local commands must not replace the active turn's result correlation.
    if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
-   if(rpcType==='prompt'&&result?.agentInvoked===false&&!slashCommand)s.status='review';
+   if(rpcType==='prompt'&&result?.agentInvoked===false&&!slashCommand){s.status='review';delete s._promptMsg;}
    if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
    await persist();return s;
-  }catch(e){if(slashCommand){await persist();throw error(e.message);}delete s._interrupt;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
+  }catch(e){if(slashCommand){await persist();throw error(e.message);}delete s._interrupt;delete s._promptMsg;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
  }
  // Room left in the session's context window, or null when the window is unknown (no runner state yet and the
  // model isn't in the cached model list, e.g. "OMP default"): then only the upload size limits images.

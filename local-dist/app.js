@@ -542,7 +542,7 @@
       renderTopbarSession(s);
       // Another session's poll may still be in S.store; only the thread waits for this one's messages, the chrome renders now.
       if (!s.messages) { S.lastSig = ''; $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Loading…</div>'; }
-      else { loadAdvisorTx(s.sessionFile || ''); renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt, retry: s._retry, task: s._task }); }
+      else { loadAdvisorTx(s.sessionFile || ''); renderThread(withAdvisor(s.messages, s.sessionFile), s.status, s.id, { compacting: s._compacting, lastActivityAt: s.lastActivityAt, retry: s._retry, task: s._task, history: s.status !== 'running' && s.status !== 'queued' && s.messages.some(m => m.role === 'user') }); }
       renderExtras(s);
       renderBtw(s);
       showNotices(s);
@@ -1113,7 +1113,17 @@
     const steers = messages.filter(m => m.steer).map(m => m.id + m.steer).join();
     // Seconds since OMP last reported anything; bucketed so the quiet-turn notice ticks without re-rendering every poll.
     const idle = status === 'running' && opts.lastActivityAt ? Math.max(0, (Date.now() - new Date(opts.lastActivityAt)) / 1000) : 0;
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || ''].join('|');
+    // History actions (Edit & resend, Regenerate, Branch from here), only while the session is idle. A user message can be
+    // branched from once its OMP entry ID is known; Edit and Regenerate act on OMP's last prompt, so they show only when
+    // the thread's last user message is that prompt (recorded by OMP, not a steer or a companion-only command like /usage).
+    let lastUser = -1, lastReply = -1;
+    if (opts.history) {
+      for (let i = 0; i < messages.length; i++) if (messages[i].role === 'user') lastUser = i;
+      const u = messages[lastUser];
+      if (u && !u.steer && (u.entryId || u.ompAt)) { for (let i = lastUser + 1; i < messages.length; i++) if (messages[i].role === 'assistant') lastReply = i; }
+      else lastUser = -1;
+    }
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, runningTools, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
@@ -1159,9 +1169,13 @@
       const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
         : user && m.steer === 'received' ? '<span class="steer-state" title="OMP has taken this steer; it can no longer be edited or cancelled">Steering · delivery started</span>'
         : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
+      const history = !opts.history || m.steer ? ''
+        : i === lastUser ? '<button class="steer-btn" data-msgact="edit" title="Go back to before this message in a new OMP session file and put it in the composer">Edit &amp; resend</button>'
+        : i === lastReply ? '<button class="steer-btn" data-msgact="regenerate" title="Go back to before your last message in a new OMP session file and send it again">Regenerate</button>'
+        : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
       const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
         : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
-      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}<time>${esc(clock(m.at))}</time></div>
+      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
         ${body}</div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
@@ -4082,6 +4096,14 @@
         const old = S.store.sessions.find(s => s.id === current().id)?.messages?.find(m => m.id === id)?.text || '';
         S.editSteer = { id, text: old, focus: true }; S.lastSig = ''; update();
       } else { steerAct.disabled = true; steerCommand('cancel_steer', id); }
+      return;
+    }
+    const msgAct = t.closest('[data-msgact]');
+    if (msgAct) {
+      if (msgAct.disabled) return;
+      msgAct.disabled = true;
+      const act = msgAct.dataset.msgact;
+      Promise.resolve(act === 'edit' ? editLast() : act === 'regenerate' ? regenerate() : doBranch(msgAct.dataset.entry)).finally(() => { msgAct.disabled = false; });
       return;
     }
     const steerSave = t.closest('[data-steersave]');
