@@ -154,6 +154,16 @@ test('stdin round trip: draft and images reach the enhancer, never argv', async 
   assert.deepEqual(await readdir(join(dir, 'enhance')).catch(() => []), []); // images removed
 });
 
+test('drafts up to the prompt limit (200,000 chars) reach the enhancer intact', async t => {
+  const { dir, call, settle } = await boot(t);
+  const draft = 'long\n' + 'x'.repeat(200000 - 5);
+  const start = await call('/enhance', { session: 'session', text: draft });
+  assert.equal(start.status, 202);
+  assert.equal((await settle(start.body.id)).text, 'ENHANCED long');
+  assert.ok((await readFile(join(dir, 'stdin.txt'), 'utf8')).endsWith(`<draft>\n${draft}\n</draft>`));
+  assert.equal((await call('/enhance', { session: 'session', text: draft + 'x' })).status, 400);
+});
+
 test('a failed run reports OMP\'s error line, not its trailing hint', async t => {
   const { call, settle } = await boot(t);
   const { body } = await call('/enhance', { session: 'session', text: 'FAIL' });
