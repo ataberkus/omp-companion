@@ -172,13 +172,16 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
-    pending: null, attachments: [], editQueue: null, queueOpen: null, busy: false, view: '', lastSig: '', nativeAt: 0,
+    attachments: [], editQueue: null, queueOpen: null, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
     bg: new Map(), subs: new Map(), subParent: new Map(), sideOpen: true, sideTab: 'plan', finishedOpen: false, sideCounts: null, ompUpdate: { status: 'idle' },
     noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
     planBusy: new Set(), planSubmitted: new Set(),
     enhance: new Map(), // view → { id, original, model, step } while an enhance runs
-    sendingBash: null, discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send
+    // view → its in-flight send: { text, imagePreview, queued, at } for a composer message, {} for other prompts. Keyed by
+    // view, so a send still going out to one session never blocks another session's composer.
+    sending: new Map(),
+    sendingBash: new Set(), discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -647,7 +650,7 @@
   function enhanceButton(view, draft) {
     return S.enhance.has(view)
       ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`
-      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.busy ? 'disabled' : ''}>✨</button>`;
+      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.sending.has(view) ? 'disabled' : ''}>✨</button>`;
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
   async function startEnhance(view, body, original) {
@@ -692,16 +695,16 @@
   // carry the draft and images over, and enhance there. Leaving it unsent discards it (leaveDraft).
   const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
-    const l = S.home.listing, draft = S.home.prompt;
-    if (!l || S.busy || enhanceBlocked(draft)) return;
-    S.busy = true; renderHome();
+    const l = S.home.listing, draft = S.home.prompt, home = S.view;
+    if (!l || S.sending.has(home) || enhanceBlocked(draft)) return;
+    S.sending.set(home, {}); renderHome();
     let s;
     try { s = await api('/quick-start', { ...homeStartBody(l), draft: true }); }
-    catch (e) { S.busy = false; if (current().kind === 'home') renderHome(); toast(e.message, 'err'); return; }
+    catch (e) { S.sending.delete(home); if (current().kind === 'home') renderHome(); toast(e.message, 'err'); return; }
     api('/commands?session=' + encodeURIComponent(s.id)).catch(() => {}); // starts OMP in the picked folder
     const view = 'session:' + s.id, moved = attached();
     for (const a of moved) a.view = view;
-    drafts.set(view, draft); S.home.prompt = ''; S.busy = false;
+    drafts.set(view, draft); S.home.prompt = ''; S.sending.delete(home);
     await refresh();
     location.hash = '#/s/' + s.id; route(); // build the session view now so the enhance renders there
     startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft);
@@ -711,7 +714,7 @@
   function leaveDraft(prev, c) {
     if (!prev.startsWith('session:') || !['home', 'session', 'native'].includes(c.kind)) return;
     if (!S.store?.sessions.find(x => 'session:' + x.id === prev)?.draft) return;
-    if (S.pending?.view === prev || S.sendingBash === prev) { S.discardAfterSend.add(prev); return; }
+    if (S.sending.has(prev) || S.sendingBash.has(prev)) { S.discardAfterSend.add(prev); return; }
     discardView(prev);
   }
   function discardView(view) {
@@ -726,7 +729,7 @@
     if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
     if (c.kind === 'home') return enhanceFromHome();
     const input = $('#input');
-    if (!input || enhanceBlocked(input.value) || S.busy) return;
+    if (!input || enhanceBlocked(input.value) || S.sending.has(view)) return;
     const text = input.value.trim(), images = imagePayload(attached());
     let body;
     if (c.kind === 'session') {
@@ -1127,7 +1130,7 @@
   function renderThread(messages, status, ownerId, opts = {}) {
     // Drop hidden advisor messages up front so they don't split activity groups.
     if (S.advHidden) messages = messages.filter(m => m.role !== 'advisor' && m.role !== 'advisor-update');
-    const pending = S.pending && S.pending.view === S.view && !S.pending.queued ? S.pending : null;
+    const p = S.sending.get(S.view), pending = p && 'text' in p && !p.queued ? p : null;
     const last = messages[messages.length - 1];
     // Advisor reviews sort by time and can land after a running tool; the live tail is the last main-agent message.
     const mainEnd = messages.findLastIndex(m => !m.adv), tail = messages[mainEnd];
@@ -1546,16 +1549,17 @@
   }
   async function requestChanges(parent) {
     const s = S.store?.sessions.find(x => 's:' + x.id === parent), notes = notesAll[parent] || [];
-    if (!s || !notes.length || S.busy) return;
+    const view = 'session:' + s?.id;
+    if (!s || !notes.length || S.sending.has(view)) return;
     const live = ['running', 'queued'].includes(s.status);
-    S.busy = true;
+    S.sending.set(view, {});
     try {
       await api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: live ? 'steer' : 'prompt', message: reviewMessage(notes, s.cwd) });
       delete notesAll[parent]; saveLS('omp-review-notes', notesAll); S.noteEdit = null; S.reviewVer++;
       toast(`Sent ${notes.length} ${notes.length === 1 ? 'comment' : 'comments'}${live ? ' as a steer' : ''}`);
       location.hash = '#/s/' + s.id; await refresh();
     } catch (e) { toast(e.message, 'err'); }
-    finally { S.busy = false; S.lastSig = ''; update(); }
+    finally { S.sending.delete(view); S.lastSig = ''; update(); }
   }
 
   // ---------- background tasks & plan (side panel) ----------
@@ -2167,7 +2171,7 @@
     let placeholder, hintText, btns, status = '';
     const has = !!input.value.trim() || !!attachment;
     // While an enhance runs the draft is about to be replaced: nothing can be sent from it.
-    const enhancing = S.enhance.get(S.view), busy = S.busy || !!enhancing;
+    const enhancing = S.enhance.get(S.view), sending = S.sending.has(S.view), busy = sending || !!enhancing;
     const command = /^\/\S/.test(input.value.trim());
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
@@ -2179,7 +2183,7 @@
     if (!s) {
       placeholder = 'Continue this session…';
       hintText = 'Enter to continue · Shift+Enter for a new line';
-      btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${S.busy ? 'Starting…' : 'Continue ↵'}</button>`;
+      btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${sending ? 'Starting…' : 'Continue ↵'}</button>`;
       status = `<span class="grow">From OMP history${native?.cwd ? ' · ' + esc(native.cwd) : ''}. Don't continue it here while it's still open in a terminal.</span>`;
     } else if (s.status === 'running' || s.status === 'queued') {
       placeholder = 'Steer OMP while it works…';
@@ -2192,7 +2196,7 @@
       const fresh = s.messages ? !s.messages.some(m => m.role === 'user') : !s.prompt && !s.workStartedAt;
       placeholder = fresh ? 'What should OMP do?' : s.status === 'done' ? 'Send a message to reopen this session…' : 'Reply to continue…';
       hintText = 'Enter to send · Shift+Enter new line · / commands · !cmd shell';
-      btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${S.busy ? 'Sending…' : 'Send ↵'}</button>`;
+      btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${sending ? 'Sending…' : 'Send ↵'}</button>`;
       if (s.status === 'error') status = `<span class="grow">⚠ ${esc(s.error || 'OMP reported an error.')}</span><button class="btn sm" data-act="retry">Retry last message</button>`;
       else if (s.status === 'review') status = `<span class="grow">OMP finished. Review the result, reply to keep going, or mark it done.</span>`;
       else if (s.status === 'paused' && !fresh) status = `<span class="grow">Idle. Reply to continue from where it left off.</span>`;
@@ -2209,7 +2213,7 @@
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     input.readOnly = !!enhancing;
     const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
-    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Commit related changes</button>${pushButton(s)}` : '');
+    const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${sending ? 'disabled' : ''}>Commit related changes</button>${pushButton(s)}` : '');
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
     line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
@@ -2308,7 +2312,7 @@
       api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {});
     }
     const base = S.wtBase.get(s.id) || 'main';
-    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder) and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.busy ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
+    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder) and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.sending.has('session:' + s.id) ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
   }
   // ---------- finish an isolated session's worktree ----------
   function wtBody(s, st) {
@@ -2374,14 +2378,15 @@
   const sessionApi = (body, opts) => api(`/sessions/${current().id}/command`, body, opts);
   const COMMIT_RELATED = 'Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit.';
   const PUSH_TO_BASE = (branch, base) => `Commit this worktree's changes on its branch ${branch} with a clear commit message. Then merge ${branch} into ${base} in the project folder where ${base} is checked out (find it with \`git worktree list\`), and push ${base} to the remote. If the merge conflicts or the push fails, stop and tell me what happened. Report the commits, the merge and the push result.`;
-  // Sends a prompt to the current session, or queues it as a follow-up while OMP is working.
+  // Sends a prompt to session `id`, or queues it as a follow-up while OMP is working.
   function sendOrQueue(id, message) {
-    const s = S.store?.sessions.find(x => x.id === id);
+    const s = S.store?.sessions.find(x => x.id === id), view = 'session:' + id;
+    if (S.sending.has(view)) return;
     const queue = s?.status === 'running' || s?.status === 'queued';
-    S.busy = true; update();
-    sessionApi({ type: queue ? 'follow_up' : 'prompt', message })
+    S.sending.set(view, {}); update();
+    api(`/sessions/${encodeURIComponent(id)}/command`, { type: queue ? 'follow_up' : 'prompt', message })
       .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
-      .finally(() => { S.busy = false; update(); });
+      .finally(() => { S.sending.delete(view); update(); });
   }
   async function togglePlan(id) {
     const s = S.store?.sessions.find(x => x.id === id);
@@ -2667,7 +2672,7 @@
     // A retry resends an earlier prompt as-is: the composer draft and staged images stay for the next message.
     const retry = retryText != null, text = retry ? retryText : input?.value.trim();
     const attachment = retry ? [] : attached();
-    if ((!text && !attachment.length) || S.busy || S.enhance.has(S.view)) return;
+    if ((!text && !attachment.length) || S.sending.has(S.view) || S.enhance.has(S.view)) return;
     keepSpaceAccept();
     const sendView = S.view;
     // "/btw question" opens the side-question panel instead of joining the conversation.
@@ -2683,30 +2688,33 @@
     // "!command" runs in the session's shell (OMP's bash RPC); the output joins the conversation context.
     if (c.kind === 'session' && !retry && !attachment.length && /^!\S/.test(text)) {
       input.value = ''; drafts.delete(S.view); autosize(input);
-      S.sendingBash = sendView;
+      S.sendingBash.add(sendView);
       try { if (!await sessionAction({ type: 'bash', command: text.slice(1) })) { drafts.set(sendView, text); if (S.view === sendView) { input.value = text; autosize(input); } } }
-      finally { S.sendingBash = null; afterSend(sendView); }
+      finally { S.sendingBash.delete(sendView); afterSend(sendView); }
       return;
     }
-    S.busy = true;
-    S.pending = { view: S.view, text, imagePreview: attachment.map(a => a.preview), queued: kind === 'follow_up', at: Date.now() };
-    if (!retry) { S.attachments = S.attachments.filter(a => a.view !== S.view); input.value = ''; drafts.delete(S.view); autosize(input); }
+    // Everything below targets c / sendView as captured here: the user may switch views before the request settles.
+    const pending = { text, imagePreview: attachment.map(a => a.preview), queued: kind === 'follow_up', at: Date.now() };
+    let pendingView = sendView;
+    S.sending.set(pendingView, pending);
+    if (!retry) { S.attachments = S.attachments.filter(a => a.view !== sendView); input.value = ''; drafts.delete(sendView); autosize(input); }
     S.lastSig = ''; update();
-    let retryView = S.view;
+    let retryView = sendView;
     try {
       if (c.kind === 'native') {
         const ch = S.nativeChoice.get(c.file);
         const adv = S.nativeAdv.get(c.file);
         const s = await api('/omp-sessions/resume', { file: c.file, message: text, ...imagePayload(attachment), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}), ...(adv === undefined ? {} : { advisor: adv }) });
-        if (s.status === 'error') { retryView = 'session:' + s.id; await refresh(); location.hash = '#/s/' + s.id; throw new Error(s.error || 'OMP could not send this message.'); }
+        if (s.status === 'error') { retryView = 'session:' + s.id; await refresh(); if (S.view === sendView) location.hash = '#/s/' + s.id; throw new Error(s.error || 'OMP could not send this message.'); }
         await refresh();
-        S.pending = { view: 'session:' + s.id, text, imagePreview: S.pending.imagePreview, at: S.pending.at };
-        location.hash = '#/s/' + s.id;
+        // The resumed session's view shows the message as sending until the store has it.
+        S.sending.delete(pendingView); pendingView = 'session:' + s.id; S.sending.set(pendingView, { ...pending, queued: false });
+        if (S.view === sendView) location.hash = '#/s/' + s.id;
       } else {
         const s = S.store?.sessions.find(x => x.id === c.id);
         if (!s) throw new Error('This session no longer exists.');
         const type = kind === 'follow_up' ? kind : /^\/\S/.test(text) ? 'prompt' : kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
-        const response = await api(`/sessions/${c.id}/command`, { type, message: text, ...imagePayload(attachment) });
+        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command`, { type, message: text, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
         if (type === 'follow_up') toast((response.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now');
         await refresh();
@@ -2716,7 +2724,7 @@
       if (text && !retry) { drafts.set(retryView, text); const target = S.view === retryView ? $('#input') : null; if (target && !target.value) { target.value = text; autosize(target); } }
       S.attachments.push(...attachment.map(a => ({ ...a, view: retryView })));
     } finally {
-      S.busy = false; S.pending = null; S.lastSig = ''; update();
+      S.sending.delete(pendingView); S.lastSig = ''; update();
       afterSend(sendView);
     }
   }
@@ -3850,7 +3858,7 @@
             <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…"><span aria-hidden="true">⚙</span> Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label><label class="check" title="Auto-approve: answer OMP's tool-approval and computer-control prompts with Approve from the first turn. Questions and provider safety checks still ask you."><input type="checkbox" id="homeAutoApprove" ${h.autoApprove ? 'checked' : ''}> Auto-approve</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <span id="homeEnhance">${enhanceButton(S.view, h.prompt)}</span>
-            <button class="btn primary" data-act="start" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Starting…' : 'Start session ↵'}</button>
+            <button class="btn primary" data-act="start" ${S.sending.has(S.view) ? 'disabled' : ''}>${S.sending.has(S.view) ? 'Starting…' : 'Start session ↵'}</button>
           </div>
         </div>
       </div>` : ''}
@@ -3881,10 +3889,10 @@
     } catch (e) { if (seq === S.home.seq) toast(e.message, 'err'); }
   }
   async function startSession() {
-    const l = S.home.listing;
-    if (!l || S.busy) return;
-    S.busy = true; renderHome();
-    const attachment = attached(), view = S.view;
+    const l = S.home.listing, view = S.view;
+    if (!l || S.sending.has(view)) return;
+    S.sending.set(view, {}); renderHome();
+    const attachment = attached();
     S.attachments = S.attachments.filter(a => a.view !== view);
     try {
       const s = await api('/quick-start', { ...homeStartBody(l), prompt: S.home.prompt, ...imagePayload(attachment) });
@@ -3895,7 +3903,7 @@
       S.attachments.push(...attachment.map(a => ({ ...a, view })));
       toast(e.message, 'err');
     }
-    S.busy = false;
+    S.sending.delete(view);
     if (current().kind === 'home') renderHome();
   }
   function newSession(dir) {
@@ -4264,8 +4272,8 @@
     else if (act === 'btwNew') { Object.assign(btwState(c.id), { topic: '', history: false }); update(); $('#btwForm input')?.focus(); }
     else if (act === 'btwHistory') btwHistory(c.id);
     else if (act === 'btwCancel') { const st = btwState(c.id); sessionApi({ type: 'btw_cancel', ...(st.topic ? { recordId: st.topic } : {}) }).then(refresh, err => toast(err.message, 'err')); }
-    else if (act === 'commitRelated' && !S.busy) sendOrQueue(c.id, COMMIT_RELATED);
-    else if (act === 'pushMain' && !S.busy) { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, S.wtBase.get(c.id) || 'main')); }
+    else if (act === 'commitRelated') sendOrQueue(c.id, COMMIT_RELATED);
+    else if (act === 'pushMain') { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, S.wtBase.get(c.id) || 'main')); }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }

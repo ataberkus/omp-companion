@@ -298,3 +298,36 @@ test('composer drafts follow the companion: a remote draft fills an untouched co
   assert.equal(d.elements.get('input').value, '', 'sent from another device');
   assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft') && c.body).length, 0, 'pulling never writes back');
 });
+
+test('a send still in flight to one session never blocks sending in another, and each composer shows only its own send', async () => {
+  const slow = deferred();
+  const d = await boot({ sessions: [idle('a'), idle('b')], routes: { '/sessions/a/command': body => body.type === 'prompt' ? slow.promise : {} } });
+  const input = d.elements.get('input'), buttons = () => d.elements.get('buttons').innerHTML;
+  const type = async v => { input.value = v; await d.fire('input', { target: input }); };
+  await type('to a');
+  await d.key('Enter');
+  assert.match(buttons(), /disabled>Sending…/, 'a shows its own send in flight');
+  await d.go('#/s/b');
+  await type('to b');
+  assert.doesNotMatch(buttons(), /disabled/, "b's composer is not blocked by a's send");
+  await d.key('Enter');
+  assert.deepEqual(d.commands().filter(c => c.type === 'prompt').map(c => [c.session, c.message]), [['a', 'to a'], ['b', 'to b']]);
+  await type('again');
+  assert.doesNotMatch(buttons(), /disabled/, "b's finished send frees b while a's is still pending");
+  await d.go('#/s/a');
+  assert.match(buttons(), /Sending…/, 'back on a, its send is still in flight');
+  slow.resolve(idle('a', { status: 'running' }));
+  await flush();
+  assert.doesNotMatch(buttons(), /Sending…/);
+});
+
+test('Commit related changes in one session is not blocked by one still sending in another', async () => {
+  const slow = deferred();
+  const d = await boot({ sessions: [idle('a'), idle('b')], routes: { '/sessions/a/command': body => body.type === 'prompt' ? slow.promise : {} } });
+  await d.fire('click', { target: d.act('commitRelated') });
+  await d.go('#/s/b');
+  await d.fire('click', { target: d.act('commitRelated') });
+  assert.deepEqual(d.commands().filter(c => c.type === 'prompt').map(c => c.session), ['a', 'b']);
+  slow.resolve(idle('a'));
+  await flush();
+});
