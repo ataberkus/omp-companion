@@ -756,7 +756,7 @@
       `<span class="pill ${s.status}">${s.status === 'running' ? '<span class="spinner" style="width:10px;height:10px"></span>' : ''}${esc(STATUS[s.status] || s.status)}</span>`,
       s.branch && s.branch !== 'workspace' ? `<span>⎇ ${esc(s.branch)}${s.isolated ? ' (worktree)' : ''}</span>` : '',
       sessionModel(s) ? `<button type="button" class="btn-reset mdl-meta" data-act="model" title="Change model"><span aria-hidden="true">◆</span> ${esc(modelLabel(sessionModel(s), s.thinking))}</button>` : '',
-      s.tokens ? `<span>${fmtTokens(s.tokens)} tokens${s.cost ? ' · $' + s.cost.toFixed(2) : ''}</span>` : '',
+      s.tokens ? `<span>${fmtTokens(s.tokens)} tokens${s.cost || s.advisor?.cost > 0 ? ' · <span title="Session cost">$' + (s.cost || 0).toFixed(2) + '</span>' : ''}${s.advisor?.cost > 0 ? ` + <span title="Advisor cost">$${s.advisor.cost.toFixed(2)}</span>` : ''}</span>` : '',
       contextMeta(s.contextTokens, s.contextWindow || modelInfo(sessionModel(s))?.contextWindow, s.contextPercent),
       s.status === 'running' && s.tps ? `<span title="Output speed">${s.tps.toFixed(0)} tok/s</span>` : '',
       s.fast?.active ? '<span class="pill" title="Fast mode is active">⚡ Fast</span>' : '',
