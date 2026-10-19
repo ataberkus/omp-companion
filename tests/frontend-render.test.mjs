@@ -15,8 +15,8 @@ const store = sessions => ({ projects: [], sessions, archived: [] });
 const reply = (id, text, s = 0) => ({ id, role: 'assistant', text, at: at(s) });
 
 // Real app.js in a vm with just enough DOM: elements keep the innerHTML the app writes.
-function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {} } = {}) {
-  const calls = [], timers = [], toasts = [], listeners = {}, winListeners = {};
+function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session: saved = {} } = {}) {
+  const calls = [], timers = [], toasts = [], listeners = {}, winListeners = {}, stored = { ...saved };
   const node = id => ({
     id, tagName: 'DIV', innerHTML: '', value: '', style: {}, dataset: {}, children: [], attributes: [], hidden: false, scrollHeight: 0, scrollTop: 0, clientHeight: 0,
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, addEventListener() {}, setAttribute(k, v) { this['@' + k] = v; }, removeAttribute() {},
@@ -41,14 +41,14 @@ function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {} } = {}) {
   };
   runInNewContext(source, {
     document, window: { innerHeight: 900, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
-    location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: () => ({ matches: false }), Date, console: { ...console, error() {} },
-    localStorage: { getItem: () => null, setItem() {} }, sessionStorage: { getItem: () => token, setItem() {}, removeItem() {} },
+    location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: () => ({ matches: false }), Date, console: { ...console, error() {} }, confirm: () => true,
+    localStorage: { getItem: () => null, setItem() {} }, sessionStorage: { getItem: k => k in stored ? stored[k] : token, setItem: (k, v) => { stored[k] = String(v); }, removeItem: k => { delete stored[k]; } },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, fetch,
   });
   const loops = () => timers.filter(t => t.fn.name === 'loop');
   const poll = async () => { await loops().at(-1).fn().catch(() => {}); await flush(); };
   const go = async h => { location.hash = h; winListeners.hashchange.forEach(fn => fn()); await flush(); };
-  return { els, calls, toasts, loops, poll, go, document, location, listeners, thread: () => els.get('thread').innerHTML };
+  return { els, calls, timers, toasts, loops, poll, go, document, location, listeners, stored, thread: () => els.get('thread').innerHTML };
 }
 const stateOf = st => url => url.startsWith('/api/state') ? { body: typeof st === 'function' ? st(url) : st } : undefined;
 // Renders one assistant reply through the real thread and returns its bubble HTML.
@@ -90,6 +90,33 @@ test('Connect probes a pasted token without adopting it; a wrong one keeps the f
   await flush();
   assert.ok(app.toasts.includes('Connected'));
   assert.ok(app.calls.some(c => c.url.startsWith('/api/state?session=') && c.auth === 'Bearer good'));
+});
+
+test('Restart companion saves the pending draft, then reloads once the new companion answers, so its dashboard is the one running', async () => {
+  let instance = 'old';
+  const drafts = [];
+  const app = boot({ respond: (url, opts) => {
+    if (url === '/api/draft') { drafts.push([JSON.parse(opts.body), instance]); return { body: { at: 1 } }; }
+    if (url === '/api/restart') { instance = 'new'; return { body: { ok: true } }; }
+    if (url.startsWith('/api/state')) return { body: { ...store([session('s1', [])]), instance, canRestart: true } };
+  } });
+  await flush();
+  app.els.get('input').value = 'half a thought';
+  app.listeners.input[0]({ target: app.els.get('input') });
+  const act = { dataset: { act: 'restartCompanion' }, closest: () => null };
+  app.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-act]' ? act : null } });
+  await flush();
+  assert.deepEqual(drafts, [[{ key: 'session:s1', text: 'half a thought' }, 'old']], 'the draft reaches the old companion before it stops');
+  assert.equal(app.location.reloads, 0);
+  await app.timers.filter(t => t.ms === 1000).at(-1).fn();
+  await flush();
+  assert.equal(app.location.reloads, 1, 'the page reloads to load the restarted companion\'s app.js');
+  assert.equal(app.stored['omp-restarted'], '1');
+
+  const reloaded = boot({ session: { 'omp-restarted': '1' }, respond: stateOf({ ...store([session('s1', [])]), instance: 'new' }) });
+  await flush();
+  assert.ok(reloaded.toasts.includes('The companion restarted. Paused sessions continue when you send a message.'), reloaded.toasts.join('|'));
+  assert.equal(reloaded.stored['omp-restarted'], undefined, 'said once; a later reload stays quiet');
 });
 
 test('a stale page-embedded token reloads the page instead of asking for a token nobody printed', async () => {

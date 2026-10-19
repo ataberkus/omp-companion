@@ -237,18 +237,23 @@
     setTimeout(() => el.remove(), kind === 'err' ? 6000 : 3500);
   }
   // start.bat starts the companion again on the same port and token; wait until a new process (new instance id) answers.
+  // Then reload: this page still runs the app.js it loaded, so dashboard changes (and new companion APIs) take effect
+  // only with a fresh page. Pending composer drafts are saved first, so the reload brings them back.
   async function restartCompanion() {
     const before = S.store?.instance;
+    await flushDrafts();
     try { await api('/restart', {}, { timeout: 60000 }); } catch (e) { toast(e.message, 'err'); return; }
     toast('Restarting the companion…');
     for (const end = Date.now() + 120000; Date.now() < end;) {
       await new Promise(r => setTimeout(r, 1000));
       let st;
       try { st = await api('/state?session=', undefined, { timeout: 3000 }); } catch (e) { if (e.auth) return; continue; }
-      if (st?.instance && st.instance !== before) { S.lastSig = ''; await refresh(); toast('The companion restarted. Paused sessions continue when you send a message.'); return; }
+      if (st?.instance && st.instance !== before) { try { sessionStorage.setItem(RESTARTED, '1'); } catch {} location.reload(); return; }
     }
     toast('The companion did not come back within 2 minutes. Check the start.bat window on that computer.', 'err');
   }
+  // Set just before the reload that follows Restart companion; the reloaded page says the restart worked.
+  const RESTARTED = 'omp-restarted';
   function copy(text, label = 'Copied') {
     const done = ok => ok ? toast(label) : toast('Could not copy', 'err');
     if (navigator.clipboard) { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); return; }
@@ -494,13 +499,16 @@
   function saveDraft(view) {
     if (!draftKey(view) || !S.token) return;
     clearTimeout(draftTimers.get(view));
-    draftTimers.set(view, setTimeout(() => {
-      draftTimers.delete(view);
-      const text = Map.prototype.get.call(drafts, view) || '';
-      if ((draftSynced.get(view)?.text ?? '') === text) return;
-      api('/draft', { key: view, text }).then(r => draftSynced.set(view, { text, at: r.at })).catch(() => {});
-    }, 700));
+    draftTimers.set(view, setTimeout(() => sendDraft(view), 700));
   }
+  function sendDraft(view) {
+    draftTimers.delete(view);
+    const text = Map.prototype.get.call(drafts, view) || '';
+    if ((draftSynced.get(view)?.text ?? '') === text) return;
+    return api('/draft', { key: view, text }).then(r => draftSynced.set(view, { text, at: r.at })).catch(() => {});
+  }
+  // Sends drafts still waiting out their debounce now, e.g. before the page reloads.
+  const flushDrafts = () => Promise.all([...draftTimers].map(([view, timer]) => { clearTimeout(timer); return sendDraft(view); }));
   async function pullDraft() {
     const view = S.view;
     if (!draftKey(view) || draftTimers.has(view) || !S.store) return;
@@ -4632,6 +4640,7 @@
     route();
   });
 
+  try { if (sessionStorage.getItem(RESTARTED) === '1') { sessionStorage.removeItem(RESTARTED); toast('The companion restarted. Paused sessions continue when you send a message.'); } } catch {}
   route();
   loop();
 })();
