@@ -538,9 +538,14 @@ function enhanceArgs({model,thinking,overlay,system,images}){
  return ['-p','--mode','json','--no-session','--no-title','--no-skills','--no-extensions','--no-lsp','--tools=read,grep,glob','--approval-mode=always-ask','--max-time=120',
   `--config=${overlay}`,...(model?[`--model=${model}`]:[]),...(thinking?[`--thinking=${thinking}`]:[]),`--append-system-prompt=${system}`,...images.map(f=>'@'+f)];
 }
+// The last 6 user/assistant messages, minus the progress notes an agent writes between tool calls (only the last assistant
+// message of a run counts), so a long turn can't push out the user's own request. Long messages keep their start and end,
+// where a reply puts the question, options or next steps a follow-up draft points at; the latest reply gets more room.
 function enhanceInput(draft,messages){
- const tail=messages.filter(m=>m.role==='user'||m.role==='assistant').slice(-6).map(m=>`${m.role==='user'?'User':'Assistant'}: ${String(m.text||'').slice(0,1500)}`);
- return (tail.length?`<conversation>\n${tail.join('\n')}\n</conversation>\n`:'')+`<draft>\n${draft}\n</draft>`;
+ const chat=messages.filter(m=>m.role==='user'||m.role==='assistant'),tail=chat.filter((m,i)=>m.role==='user'||chat[i+1]?.role!=='assistant').slice(-6);
+ const latest=tail.findLastIndex(m=>m.role==='assistant'),clip=(t,n)=>t.length>n?`${t.slice(0,n/2)}\n[…]\n${t.slice(-n/2)}`:t;
+ const lines=tail.map((m,i)=>`${m.role==='user'?'User':'Assistant'}: ${clip(String(m.text||''),i===latest?6000:1500)}`);
+ return (lines.length?`<conversation>\n${lines.join('\n')}\n</conversation>\n`:'')+`<draft>\n${draft}\n</draft>`;
 }
 function stepLabel(toolName,args,cwd){
  const a=args||{};let s;
@@ -551,10 +556,15 @@ function stepLabel(toolName,args,cwd){
  else s=String(toolName||'working');
  return s.length>80?s.slice(0,79)+'…':s;
 }
+// One fence around the whole answer (``` or ~~~, any length, info string allowed) is unwrapped when it closes on the last line
+// or never closes (cut off). A prompt that merely starts and ends with code blocks keeps them. A ```markdown opener with a bare
+// fence as last line also unwraps: models nest ``` blocks inside it without lengthening the outer fence.
 function cleanEnhanced(text){
- const t=String(text||'').trim();const m=t.match(/^```[\w-]*\n([\s\S]*?)\n?```$/);
- // A lone opening fence (```, ```md) is no prompt at all.
- return /^```[\w-]*$/.test(t)?'':(m?m[1]:t).trim();
+ const t=String(text||'').trim(),lines=t.split('\n'),open=lines[0].match(/^(`{3,}|~{3,})\s*([^`]*)$/);
+ if(!open)return t;
+ const closes=l=>new RegExp(`^\\${open[1][0]}{${open[1].length},}\\s*$`).test(l.trim()),end=lines.findIndex((l,i)=>i>0&&closes(l));
+ const wraps=end===-1||end===lines.length-1||/^(markdown|md)$/i.test(open[2].trim())&&closes(lines.at(-1));
+ return wraps?lines.slice(1,end===-1?undefined:-1).join('\n').trim():t;
 }
 // modelRoles and defaultThinkingLevel straight from config.yml: cheap, so enhance needs no `omp models` call.
 async function modelRoles(){
@@ -588,11 +598,15 @@ disabledProviders:
   - native
   - mcp-json
 `;
-const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on.
-- Keep the user's intent, scope and language. Do not add requirements they did not ask for.
-- Look up only what the draft refers to: at most 6 tool calls. Name real files, symbols and commands you confirmed. Never invent paths.
+const ENHANCE_SYSTEM=`You are a prompt enhancer. You never do what the draft asks; you rewrite it into a clear, specific prompt for the coding agent that will receive it in this repository.
+Input: <draft> is the user's next message to that agent and the only text to rewrite. <conversation>, when present, holds the latest messages of the agent's session, for understanding the draft; the agent sees them too.
+- Fix typos and unclear wording. Keep the user's intent, scope and language: a question stays a question, and "look into X" does not become "fix X".
+- Spell out what the draft points at ("it", "that error", "do 2 and 3", "go ahead") using the conversation and the code. If neither settles it, keep the user's wording; never guess.
+- Name the real files, symbols and commands involved. Look up only what the draft refers to, with at most 6 tool calls, and name only what you confirmed. Never invent paths.
+- Add nothing the user did not ask for: no extra steps, constraints, tests, docs updates, verification, acceptance criteria, suspected causes or proposed solutions. The agent already follows the working rules in your system prompt; do not copy them into the prompt.
 - If images are attached, use what they show to make the prompt concrete; they stay attached to the final message, so refer to them rather than re-describing everything.
-- Include acceptance criteria or a verification step only when the draft implies one.
+- Write as the user, addressing the agent. Never mention the draft, these instructions or yourself, and do not present what you looked up as the user's findings.
+- A clear draft needs few changes; keep the prompt as short as the request allows.
 - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
 // Screen sharing (Windows): one helper process per viewer, Windows PowerShell compiling this C# with Add-Type (no install,
@@ -2010,21 +2024,23 @@ async function spend(sync){
   const job={id,sessionId:s?.id||null,status:'running',step:'',model:pick.label,text:'',error:'',dir};
   const child=spawn(ompExecutable,[...ompPrefix,...(options.enhancePrefix||[]),...enhanceArgs({model:pick.model,thinking:pick.thinking,overlay:enhanceOverlay,system:enhanceSystem,images:files})],{cwd,stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});
   job.child=child;enhanceJobs.set(id,job);
-  let stderr='',answer='';
+  let stderr='',answer='',stop='',failure='';
   child.stdin.on('error',()=>{});child.stdin.end(enhanceInput(draft,s?.messages??[]),'utf8');
   child.stderr.on('data',b=>{stderr=(stderr+b).slice(-8000);});
   createInterface({input:child.stdout,crlfDelay:Infinity}).on('line',line=>{let f;try{f=JSON.parse(line);}catch{return;}
    if(f.type==='tool_execution_start')job.step=stepLabel(f.toolName,f.args,cwd);
-   else if(f.type==='message_end'&&f.message?.role==='assistant')answer=contentText(f.message.content);});
+   // Provider failures (auth, rate limit) and OMP's own --max-time stop show up only here, on the last assistant message
+   // (stopReason error/aborted plus errorMessage); OMP then exits 1 with nothing on stderr.
+   else if(f.type==='message_end'&&f.message?.role==='assistant'){answer=contentText(f.message.content);stop=f.message.stopReason;failure=String(f.message.errorMessage||'').trim();}});
   const timer=setTimeout(()=>{job.timedOut=true;child.kill();},150000);timer.unref();
   job.closed=new Promise(resolve=>{let done=false;const finish=async(code,err)=>{if(done)return;done=true;clearTimeout(timer);
    const out=cleanEnhanced(answer);
-   if(job.timedOut)Object.assign(job,{status:'error',error:'Enhance timed out.'});
+   if(job.timedOut||!job.stopped&&stop==='aborted')Object.assign(job,{status:'error',error:'Enhance timed out.'});
    else if(job.stopped)job.status='cancelled';
    else if(code===0&&!err&&out)Object.assign(job,{status:'done',text:out});
-   else if(code===0&&!err)Object.assign(job,{status:'error',error:'The enhancer returned no text.'});
+   else if(code===0&&!err&&!failure)Object.assign(job,{status:'error',error:'The enhancer returned no text.'});
    // OMP prints the error first and a "Run `omp …`" hint after it; skip warnings (e.g. MCP connect failures).
-   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||`OMP exited (${code}).`});
+   else Object.assign(job,{status:'error',error:err?.message||failure||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||`OMP exited (${code}).`});
    delete job.child;job.finishedAt=now();
    await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});
    setTimeout(()=>{if(enhanceJobs.get(id)===job)enhanceJobs.delete(id);},5*60000).unref();
