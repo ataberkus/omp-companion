@@ -649,18 +649,16 @@
       ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`
       : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.busy ? 'disabled' : ''}>✨</button>`;
   }
-  // Only the view that owns the enhance shows it: a poll for a view left meanwhile must not re-render the current one
-  // (on New session that rebuilt the whole form every 500 ms, resetting the folder list and breaking IME input).
-  const refreshComposer = view => { if (S.view === view) updateComposer(); };
+  const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
   async function startEnhance(view, body, original) {
     const job = { id: null, original, model: '', step: '' };
-    S.enhance.set(view, job); refreshComposer(view);
+    S.enhance.set(view, job); refreshComposer();
     let r;
     try { r = await api('/enhance', body, { timeout: 60000 }); }
-    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(view); } toast(e.message, 'err'); return; }
+    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); } toast(e.message, 'err'); return; }
     // Cancelled while the request was in flight: stop the job it just created.
     if (S.enhance.get(view) !== job) { api('/enhance/stop', { id: r.id }).catch(() => {}); return; }
-    Object.assign(job, { id: r.id, model: r.model }); refreshComposer(view);
+    Object.assign(job, { id: r.id, model: r.model }); refreshComposer();
     pollEnhance(view);
   }
   async function pollEnhance(view) {
@@ -668,10 +666,10 @@
     if (!job?.id) return;
     let r;
     try { r = await api('/enhance?id=' + encodeURIComponent(job.id)); }
-    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(view); toast(e.message, 'err'); } return; }
+    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); toast(e.message, 'err'); } return; }
     if (S.enhance.get(view) !== job) return;
-    if (r.status === 'running') { job.step = r.step || ''; if (r.model) job.model = r.model; refreshComposer(view); setTimeout(() => pollEnhance(view), 500); return; }
-    S.enhance.delete(view); refreshComposer(view);
+    if (r.status === 'running') { job.step = r.step || ''; if (r.model) job.model = r.model; refreshComposer(); setTimeout(() => pollEnhance(view), 500); return; }
+    S.enhance.delete(view); refreshComposer();
     if (r.status === 'done') applyEnhanced(view, job.original, r.text);
     else if (r.status === 'error') toast(r.error || 'Enhance failed.', 'err');
   }
@@ -725,7 +723,7 @@
   function enhanceCurrent() {
     const c = current(), view = S.view;
     const running = S.enhance.get(view);
-    if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(view); return; }
+    if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
     if (c.kind === 'home') return enhanceFromHome();
     const input = $('#input');
     if (!input || enhanceBlocked(input.value) || S.busy) return;

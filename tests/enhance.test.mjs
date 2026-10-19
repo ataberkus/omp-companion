@@ -130,23 +130,6 @@ test('poll failure stops polling with one error toast', async () => {
   assert.equal(d.input.value, 'fix it');
 });
 
-test('an enhance in a view left meanwhile does not re-render the current one', async () => {
-  const d = await boot({ sessions: [idle('a')], routes: {
-    '/enhance': body => body ? { id: 'j', model: 'p/m' } : { status: 'running', step: 'reading x' },
-    '/browse': () => ({ path: 'C:/proj', parent: null, roots: [], recent: [], dirs: [], isGit: true }),
-  } });
-  await d.type('fix it');
-  await d.fire('click', { target: d.act('enhance') });
-  await d.go('#/new');
-  const home = d.elements.get('home');
-  let rebuilds = 0, html = home.innerHTML;
-  Object.defineProperty(home, 'innerHTML', { get: () => html, set: v => { rebuilds++; html = v; } });
-  await d.runPolls();
-  assert.equal(rebuilds, 0, 'New session (folder list, typed prompt) is not rebuilt on every poll');
-  await d.go('#/s/a');
-  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing with m · reading x…/);
-});
-
 test('history view enhances in its folder with the chosen model', async () => {
   const file = 'C:/s/x.jsonl';
   const d = await boot({ hash: '#/f/' + encodeURIComponent(file), routes: { '/omp-sessions': () => ({ sessions: [{ file, cwd: 'C:/proj', title: 'x', model: 'p/a', updatedAt: new Date().toISOString() }] }), '/omp-sessions/preview': () => ({ file, cwd: 'C:/proj', messages: [] }), '/enhance': body => body ? { id: 'j', model: 'p/a' } : { status: 'running', step: '' } } });

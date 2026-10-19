@@ -32,7 +32,7 @@ OMP has no prompt enhancer of its own. The RPC `btw` side question is not used: 
 - **Done:**
   - The draft is replaced, the caret moves to the end, and the composer gets focus.
   - A toast says `Prompt enhanced` with an **Undo** action that restores the original draft. Ctrl+Z restores it too: the replacement goes through `document.execCommand('insertText')` so it lands on the browser's native undo stack. If that is unavailable, it falls back to setting the value directly, and the toast Undo still works.
-- **Failure / cancel:** the draft is untouched. Failures show an error toast with the reason (model not found, provider error such as an expired login, timed out, OMP error). Cancel shows no toast.
+- **Failure / cancel:** the draft is untouched. Failures show an error toast with the reason (model not found, timed out, OMP error). Cancel shows no toast.
 - **Leaving the view:** the job keeps running. If the user comes back to that view before it finishes, the result is applied then. If the user has edited the draft in the meantime (it no longer equals the text that was sent to be enhanced), the result is **not** applied: an info toast offers `Use enhanced prompt` instead.
 
 ## 2. Server (`companion/server.mjs`)
@@ -116,42 +116,34 @@ cwd: session cwd / path
 Stdout is read line by line as JSON:
 
 - `tool_execution_start` → `step` = short label: `reading <path>`, `searching "<pattern>"`, `listing <glob>`. Paths are shown relative to the cwd and truncated to 80 characters.
-- `message_end` where role is `assistant` → remember its text content, `stopReason` and `errorMessage` (the last message wins).
-- Exit code 0 with non-empty text → `done`, and `text` is that text trimmed, with a fence that wraps the whole text removed: ``` or ~~~ of any length, with or without an info string, closing on the last line or never (a cut-off answer). A ```` ```markdown ```` opener whose last line is a bare fence also counts, because models nest ``` blocks inside it without lengthening the outer fence. A prompt that merely starts and ends with its own code blocks keeps them.
-- Nonzero exit or no text → `error`. The reason, in order: the last assistant message's `errorMessage` (OMP 18.12 reports provider failures such as a 401 only there and exits 1 with nothing on stderr); else the first stderr line that isn't a `Warning:` (ANSI stripped; OMP prints the error before its "Run `omp …`" hint, and `Model "@enhance" not found`-style output passes through unchanged); else `OMP exited (<code>).`
-- The server kills the process at 150 s → `error: 'Enhance timed out.'`. OMP's own `--max-time=120` stop reports the same: its last assistant message has `stopReason: 'aborted'` (`errorMessage: 'Deadline exceeded'`) and it exits 1.
+- `message_end` where role is `assistant` → remember its text content (the last one wins).
+- Exit code 0 with non-empty text → `done`, and `text` is that text trimmed, with any wrapping code fence removed.
+- Nonzero exit or no text → `error`. The reason is the last stderr line (ANSI stripped). `Model "@enhance" not found`-style output passes through unchanged.
+- The server kills the process at 150 s → `error: 'Enhance timed out.'`.
 
 ## 3. Enhancer request
 
 ### System prompt (`--append-system-prompt`)
 
-> You are a prompt enhancer. You never do what the draft asks; you rewrite it into a clear, specific prompt for the coding agent that will receive it in this repository.
-> Input: \<draft\> is the user's next message to that agent and the only text to rewrite. \<conversation\>, when present, holds the latest messages of the agent's session, for understanding the draft; the agent sees them too.
-> - Fix typos and unclear wording. Keep the user's intent, scope and language: a question stays a question, and "look into X" does not become "fix X".
-> - Spell out what the draft points at ("it", "that error", "do 2 and 3", "go ahead") using the conversation and the code. If neither settles it, keep the user's wording; never guess.
-> - Name the real files, symbols and commands involved. Look up only what the draft refers to, with at most 6 tool calls, and name only what you confirmed. Never invent paths.
-> - Add nothing the user did not ask for: no extra steps, constraints, tests, docs updates, verification, acceptance criteria, suspected causes or proposed solutions. The agent already follows the working rules in your system prompt; do not copy them into the prompt.
+> You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on.
+> - Keep the user's intent, scope and language. Do not add requirements they did not ask for.
+> - Look up only what the draft refers to: at most 6 tool calls. Name real files, symbols and commands you confirmed. Never invent paths.
 > - If images are attached, use what they show to make the prompt concrete; they stay attached to the final message, so refer to them rather than re-describing everything.
-> - Write as the user, addressing the agent. Never mention the draft, these instructions or yourself, and do not present what you looked up as the user's findings.
-> - A clear draft needs few changes; keep the prompt as short as the request allows.
+> - Include acceptance criteria or a verification step only when the draft implies one.
 > - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
-
-The enhancer runs with OMP's full coding-agent system prompt underneath. Without the "do not copy" and "add nothing" rules it pasted that prompt's working rules (verification runs, regression tests, docs updates, "report what you observed") into every rewrite, turned questions into fix requests, and filled missing subjects with an invented plan ("make it faster" became a profiling project).
 
 ### Stdin
 
 ```
 <conversation>            (session mode only; omitted when empty)
 User: …
-Assistant: …
+Assistant: …              (last 6 user/assistant messages, each truncated to 1 500 chars;
+                           tool, system and thinking entries skipped)
 </conversation>
 <draft>
 …user's draft…
 </draft>
 ```
-
-- The conversation is the last 6 user/assistant messages; tool, system and thinking entries are skipped. Of a run of consecutive assistant messages (the progress notes an agent writes between tool calls, then its reply) only the last counts, so a long turn can't push the user's own request out of the window.
-- Each message keeps its first and last half, joined by `[…]`, within 1 500 characters; the latest assistant reply gets 6 000. Replies end with the question, options or next steps a follow-up draft like "do 2 and 3" or "go ahead" points at, and about half of all replies are longer than 1 500 characters.
 
 ## 4. Starting OMP, the New-session screen, and images
 
@@ -187,7 +179,7 @@ A session created by Enhance is a **draft session** until its first message goes
 ## 5. Frontend (`local-dist/app.js`, `app.css`)
 
 - State: `S.enhance = Map<view, { id, original, model, step, pollTimer }>`.
-- Polls `GET /api/enhance?id=` every 500 ms while the view's job runs. On `done`, applies the result as described in §1. A poll re-renders the composer only while its view is shown: re-rendering whatever view is current rebuilt the whole New-session form every 500 ms.
+- Polls `GET /api/enhance?id=` every 500 ms while the view's job runs. On `done`, applies the result as described in §1.
 - The button is rendered by `renderComposer` and the home composer bar. The status line uses the existing `#statusLine`; on the home screen the job never runs, because Enhance moves to the new session first.
 - Draft discard hooks into the existing `route()` change handling: remember the previous view; if it was a draft session and the new view counts as leaving (§4), send `discard`.
   - **In-flight guard:** skip `discard` while a send for that view is still in flight. The server lock alone can't order them: the server reads the whole request body (server.mjs:1081) before it takes the lock (1134). A Send with several MB of images can therefore lose the lock to a tiny `discard` sent just after it, leaving the Send with a 404 and its draft restored into a view that no longer exists. The guard checks `S.pending?.view === prevView` (set by `send()` before its request, app.js:1942) **and** a new `S.sendingBash` view marker set around the `!cmd` path (1890-1893), which sends `bash` without setting `S.pending`.
@@ -200,7 +192,7 @@ A session created by Enhance is a **draft session** until its first message goes
 |---|---|
 | Empty draft, `/…` or `!…` | Button disabled |
 | `@enhance` role set to an unknown model | Error toast with OMP's message; draft unchanged |
-| No provider auth, network error | Error toast with OMP's message: the assistant `errorMessage` from the JSON stream, else the first non-warning stderr line |
+| No provider auth, network error | Error toast (last stderr line) |
 | Over 120 s / 150 s | Error toast `Enhance timed out.` |
 | A fourth job while three are running | 409 toast `Wait for the running enhance to finish.` |
 | Draft edited while running | Not applied; info toast with `Use enhanced prompt` action |
@@ -227,8 +219,6 @@ A session created by Enhance is a **draft session** until its first message goes
   - Leaving a draft session while its Send (or `!cmd`) request is still pending sends no `discard`. If that request then fails, `discard` is sent once it settles.
   - Server (with a fake `omp` via the existing `ompCommand` option): a `prompt` and a `discard` sent back to back for a draft session leave the session in the store with its message, and a lone `discard` removes it only after the fake process has exited.
   - Server: model resolution order (`@enhance` → session model with `--thinking=low` → none) and the argument list never contains the draft text. Tested by exporting the argument builder for unit use.
-  - Polls for a job in a view the user has left never re-render the current view.
-  - Server: the conversation tail keeps the user's request past an agent's progress notes and both ends of long messages; only a fence around the whole answer is removed; a provider error or OMP's own time limit is reported from the JSON stream, not as `OMP exited (1).`
 
 ## Out of scope
 

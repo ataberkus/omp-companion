@@ -16,8 +16,7 @@ const image = { type: 'image', mimeType: 'image/png', data: png };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-// Fake enhancer: records argv/stdin/pid, then behaves by the draft: HANG never exits, EMPTY answers nothing, FAIL fails on
-// stderr, DENIED and DEADLINE fail the way OMP reports provider errors and its --max-time stop (JSON stream only, exit 1),
+// Fake enhancer: records argv/stdin/pid, then behaves by the draft: HANG never exits, EMPTY answers nothing,
 // anything else reads one file and answers "ENHANCED <first draft line>" inside a code fence.
 const FAKE_ENHANCER = dir => `import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -35,8 +34,6 @@ process.stdin.on('end', () => {
   if (input.includes('FAIL')) { process.stderr.write('Warning: MCP server "x" failed to connect\\nModel "@enhance" not found\\n\\nRun \`omp models find <pattern>\` to search, or \`omp models\` to list all.\\n'); process.exit(1); }
   emit({ type: 'session', cwd: process.cwd() });
   if (input.includes('EMPTY')) return;
-  if (input.includes('DENIED')) { emit({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: '401 invalid x-api-key' } }); process.exitCode = 1; return; }
-  if (input.includes('DEADLINE')) { emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Let me check' }], stopReason: 'aborted', errorMessage: 'Deadline exceeded' } }); process.exitCode = 1; return; }
   emit({ type: 'tool_execution_start', toolName: 'read', args: { path: join(process.cwd(), 'src', 'a.js') } });
   const draft = input.split('<draft>\\n')[1].split('\\n')[0];
   emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '\`\`\`\\nENHANCED ' + draft + '\\n\`\`\`' }] } });
@@ -112,16 +109,12 @@ test('enhancer argv is fixed, read-only, and never carries the draft', () => {
   assert.ok(internals.enhanceArgs({ model: 'p/m', thinking: 'low', overlay: 'O', system: 'S', images: [] }).includes('--thinking=low'));
 });
 
-test('conversation tail: the request outlives an agent\'s progress notes; long messages keep both ends', () => {
-  // One long turn: the request, progress notes written between tool calls, then the final reply.
-  const turn = [{ role: 'user', text: 'add a Test button' }, ...[1, 2, 3, 4, 5, 6, 7].map(i => ({ role: 'assistant', text: 'note ' + i })), { role: 'tool', text: 'T' }, { role: 'thinking', text: 'hmm' }];
-  assert.equal(internals.enhanceInput('go ahead', turn), '<conversation>\nUser: add a Test button\nAssistant: note 7\n</conversation>\n<draft>\ngo ahead\n</draft>');
-  // The last 6 messages; each keeps its start and end within 1 500 chars, the latest reply within 6 000.
-  const msgs = [...Array(8)].map((_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: String(i).repeat(6997) + 'END' }));
-  const s = internals.enhanceInput('do 2', msgs);
-  assert.ok(s.startsWith('<conversation>\nUser: 2') && !s.includes('Assistant: 1'));
-  assert.ok(s.includes(`\nAssistant: ${'3'.repeat(750)}\n[…]\n${'3'.repeat(747)}END\nUser: 4`));
-  assert.ok(s.endsWith(`\nAssistant: ${'7'.repeat(3000)}\n[…]\n${'7'.repeat(2997)}END\n</conversation>\n<draft>\ndo 2\n</draft>`));
+test('conversation tail keeps the last 6 user/assistant turns, truncated', () => {
+  const msgs = [...Array(8)].map((_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: String(i).repeat(2000) })).concat({ role: 'tool', text: 'T' });
+  const s = internals.enhanceInput('fix it', msgs);
+  assert.match(s, /^<conversation>\nUser: 2{1500}\n/);
+  assert.ok(!s.includes('T\n') && !s.includes('User: 0'));
+  assert.ok(s.endsWith('<draft>\nfix it\n</draft>'));
   assert.equal(internals.enhanceInput('x', []), '<draft>\nx\n</draft>');
 });
 
@@ -177,14 +170,6 @@ test('a failed run reports OMP\'s error line, not its trailing hint', async t =>
   const job = await settle(body.id);
   assert.equal(job.status, 'error');
   assert.equal(job.error, 'Model "@enhance" not found');
-});
-
-test('a provider error or OMP\'s own time limit is reported from the JSON stream, not as a bare exit code', async t => {
-  const { call, settle } = await boot(t);
-  const denied = await settle((await call('/enhance', { session: 'session', text: 'DENIED' })).body.id);
-  assert.deepEqual([denied.status, denied.error], ['error', '401 invalid x-api-key']);
-  const late = await settle((await call('/enhance', { session: 'session', text: 'DEADLINE' })).body.id);
-  assert.deepEqual([late.status, late.error], ['error', 'Enhance timed out.']);
 });
 
 test('empty result is an error, not a blank draft', async t => {
@@ -373,14 +358,4 @@ test('startup cleanup keeps a draft whose transcript already has a user message 
 
 test('a result that is only a bare fence counts as empty', () => {
   for (const t of ['```', '```md', '  ```  ', '```\n```']) assert.equal(internals.cleanEnhanced(t), '', JSON.stringify(t));
-});
-
-test('only a fence around the whole answer is removed', () => {
-  const c = internals.cleanEnhanced, inner = 'Fix:\n```js\nx()\n```';
-  // A longer or tilde fence around nested blocks, and ``` blocks nested in a ```markdown wrapper: models write both.
-  for (const t of ['````md\n' + inner + '\n````', '~~~\n' + inner + '\n~~~', '```markdown\n' + inner + '\n```']) assert.equal(c(t), inner, JSON.stringify(t));
-  assert.equal(c('```md\nFix x'), 'Fix x', 'a cut-off answer loses its opening fence');
-  // A prompt that starts and ends with its own code blocks keeps them.
-  const own = '```\nTypeError: x\n```\nFix this error. Expected:\n```\nok\n```';
-  assert.equal(c(own), own);
 });
