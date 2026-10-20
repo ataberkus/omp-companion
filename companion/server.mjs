@@ -918,13 +918,25 @@ export async function createCompanion(options={}){
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceSystem=path.join(dataDir,'enhance-system.md');
  await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceSystem,ENHANCE_SYSTEM);
  const stateFile=path.join(dataDir,'workspace.json');
- // A companion killed mid-save (console closed, Task Manager) leaves its ~30 MB workspace.json.<pid>.tmp behind; no later process reuses that name.
+ // Each session's transcript (s.messages: ~99% of the bytes, 100+ MB with a few hundred sessions) is its own transcripts/<id>.json;
+ // workspace.json keeps the rest (well under 1 MB). One file for everything meant every event's save stringified ~100 MB
+ // (~300 ms of CPU) and rewrote it with flush (seconds each), back to back: 100% disk while sessions streamed.
+ const transcriptDir=path.join(dataDir,'transcripts');
+ const transcriptFile=id=>path.join(transcriptDir,(/^[\w-]{1,100}$/.test(id)?id:createHash('sha256').update(String(id)).digest('hex'))+'.json');
+ // A companion killed mid-save (console closed, Task Manager) leaves its <file>.<pid>.tmp behind; no later process reuses that name.
  // Only dead PIDs' files go: a live companion sharing this dir may be writing its own. Also the pre-PID shared workspace.json.tmp.
  const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
  for(const f of await fs.readdir(dataDir)){const m=/^workspace\.json\.(?:(\d+)\.)?tmp$/.exec(f);if(m&&!(m[1]&&alive(Number(m[1]))))await fs.rm(path.join(dataDir,f),{force:true}).catch(()=>{});}
+ for(const f of await fs.readdir(transcriptDir).catch(()=>[])){const m=/\.json\.(\d+)\.tmp$/.exec(f);if(m&&!alive(Number(m[1])))await fs.rm(path.join(transcriptDir,f),{force:true}).catch(()=>{});}
  const queuedImageFile=id=>path.join(dataDir,'queued-images',id+'.json');
  let store;
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
+ // Transcripts as last written, by session ID: a save rewrites only those that changed. A workspace.json from before the split
+ // still embeds them; those sessions have no entry here, so the first save moves them out.
+ const savedTranscripts=new Map();
+ await Promise.all(store.sessions.map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
+  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');s.messages=JSON.parse(raw);savedTranscripts.set(s.id,raw);}
+  catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
  // Sidebar keys the user pinned to the top; a key is never both pinned and archived.
@@ -939,7 +951,13 @@ export async function createCompanion(options={}){
  if(!EDITOR_CHOICES.includes(store.editor))store.editor='auto';
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
- let eventSaveTimer;const scheduleSave=()=>{if(!eventSaveTimer)eventSaveTimer=setTimeout(()=>{eventSaveTimer=undefined;void persist();},300);};
+ // Event saves are batched: within 300 ms when a session's status changed, else within 5 s (streamed text, tool output,
+ // refreshed state), which only a crash can lose; OMP's own session file still has the turn. Quit and pause save everything.
+ // Scopes as in persist(); the batch saves their union. saveNow runs a pending batch at once.
+ let saveTimer,saveDue=Infinity,saveScope;
+ const scheduleSave=(scope,lazy=false)=>{saveScope=widen(saveScope,scope);const due=Date.now()+(lazy?5000:300);if(due>=saveDue)return;
+  clearTimeout(saveTimer);saveDue=due;saveTimer=setTimeout(saveNow,due-Date.now());};
+ const saveNow=()=>{clearTimeout(saveTimer);const scope=saveScope;saveTimer=saveScope=undefined;saveDue=Infinity;return scope?persist(scope===true?undefined:[...scope]):saveChain;};
  const runners=new Map();const launches=new Map();const locks=new Map();let closing=false;let pausing=0;let saveChain=Promise.resolve();
  // "Shut down PC when all work is done" (⋯ menu). Process-local, never saved: a restarted companion does not turn the PC off by itself.
  // firing: the /api/shutdown steps are running; error: the OS refused the last automatic attempt (shown by the panel).
@@ -980,11 +998,36 @@ export async function createCompanion(options={}){
   let total=files.reduce((n,f)=>n+f.size,0);files.sort((a,b)=>a.at-b.at);
   for(const f of files){if(total<=toolImageCap)break;await fs.rm(path.join(toolImageDir,f.name),{force:true}).catch(()=>{});total-=f.size;}
  }
- // One write in flight plus at most one queued; the queued one serializes when it starts, so it covers every caller that joined it.
- // Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save, and a slow disk ran the heap out.
- let lastSaved,nextSave;
- // Per-process temp name: a second companion on another port sharing this data dir would otherwise rename our shared workspace.json.tmp away before we do (ENOENT).
- const persist=()=>{if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{nextSave=undefined;const snapshot=JSON.stringify(store,(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value);if(snapshot===lastSaved)return;const tmp=`${stateFile}.${process.pid}.tmp`;try{await fs.writeFile(tmp,snapshot,{mode:0o600,flush:true});await replaceFile(tmp,stateFile);}catch(e){await fs.rm(tmp,{force:true}).catch(()=>{});throw e;}lastSaved=snapshot;});saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
+ // Save scope: the sessions whose transcripts may have changed; undefined = all of them, [] = workspace.json only.
+ // Scopes union: true = every session, else a Set of sessions.
+ function widen(acc,scope){if(scope===undefined||acc===true)return true;acc??=new Set();for(const s of [scope].flat())acc.add(s);return acc;}
+ const omit=(key,value)=>key.startsWith('_')||key==='uiRequests'?undefined:value;
+ // Per-process temp name: a second companion on another port sharing this data dir would otherwise rename our shared temp file away before we do (ENOENT).
+ const writeAtomic=async(file,data)=>{const tmp=`${file}.${process.pid}.tmp`;try{await fs.writeFile(tmp,data,{mode:0o600,flush:true});await replaceFile(tmp,file);}catch(e){await fs.rm(tmp,{force:true}).catch(()=>{});throw e;}};
+ // One write in flight plus at most one queued; the queued one covers every caller that joined it (the union of their scopes)
+ // and serializes when it starts. Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save,
+ // and a slow disk ran the heap out. Everything is serialized at one instant, so the files on disk match one state.
+ // Transcripts are written before workspace.json lists their session, and deleted only once it no longer does.
+ // A failed save's scope joins the next one.
+ let lastSaved,nextSave,nextScope;
+ const persist=scope=>{nextScope=widen(nextScope,scope);if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{
+  const scoped=nextScope;nextSave=nextScope=undefined;
+  try{
+   const sessions=new Set(store.sessions),ids=new Set(store.sessions.map(s=>s.id)),changed=[];
+   for(const s of sessions)if(scoped===true||scoped.has(s)||!savedTranscripts.has(s.id)){const text=JSON.stringify(s.messages||[],omit);if(text!==savedTranscripts.get(s.id))changed.push([s.id,text]);}
+   const snapshot=JSON.stringify(store,function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
+   const gone=[...savedTranscripts.keys()].filter(id=>!ids.has(id));
+   if(changed.length)await fs.mkdir(transcriptDir,{recursive:true,mode:0o700});
+   // A few at a time: the first save after an upgrade writes every transcript (hundreds of flushed files). All settle
+   // before a failure is reported, so no write of this save overlaps the next one's.
+   const settled=async writes=>{const failed=(await Promise.allSettled(writes)).find(r=>r.status==='rejected');if(failed)throw failed.reason;};
+   const writeTranscripts=async()=>{for(let i=0;i<changed.length;i+=8)await settled(changed.slice(i,i+8).map(async([id,text])=>{await writeAtomic(transcriptFile(id),text);savedTranscripts.set(id,text);}));};
+   const writeIndex=async()=>{if(snapshot!==lastSaved){await writeAtomic(stateFile,snapshot);lastSaved=snapshot;}};
+   // A transcript reaches disk before workspace.json first lists its session; otherwise both are written at once.
+   if(changed.some(([id])=>!savedTranscripts.has(id))){await writeTranscripts();await writeIndex();}else await settled([writeTranscripts(),writeIndex()]);
+   for(const id of gone){await fs.rm(transcriptFile(id),{force:true});savedTranscripts.delete(id);}
+  }catch(e){nextScope=widen(nextScope,scoped===true?undefined:[...scoped]);throw e;}
+ });saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  // A session that needs the user (finished, failed, asked a question). The desktop host turns it into a Windows notification;
  // the dashboard derives its own notifications and title badge from /api/state.
@@ -1076,7 +1119,7 @@ export async function createCompanion(options={}){
  function cancelResume(s,reason){
   clearTimeout(resumeTimers.get(s.id));resumeTimers.delete(s.id);
   if(!s.rateLimitResume)return;delete s.rateLimitResume;
-  if(reason)append(s,'system',`Automatic resume cancelled: ${reason}.`);scheduleSave();
+  if(reason)append(s,'system',`Automatic resume cancelled: ${reason}.`);scheduleSave(s);
  }
  function resumeRateLimited(s){
   return lock(s.id,async()=>{
@@ -1095,12 +1138,12 @@ export async function createCompanion(options={}){
    if(s.status!=='running'||s._promptId!==promptId||s._run!==run||s._settled||s._interrupt||s.uiRequests?.length)return;
    // Completion and idle polling can report the same run before a queued prompt starts.
    s._settled=true;dropSteers(s);
-   if(s._planReview||s.planMode?.reviewPending){s.status='review';finishWork(s);scheduleSave();attention(s,'review','Plan ready for review');return;}
+   if(s._planReview||s.planMode?.reviewPending){s.status='review';finishWork(s);scheduleSave(s);attention(s,'review','Plan ready for review');return;}
    if(s.queuedMessages?.length)await sendQueued(s);
    else{s.status='review';activity(s,`${s.title} is ready for review`,'review');attention(s,'review');}
    if(s.status!=='running')finishWork(s);
-   scheduleSave();
-  }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist();}).finally(checkAutoShutdown);
+   scheduleSave(s);
+  }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist(s);}).finally(checkAutoShutdown);
  }
  function event(s,f){
   // Ghost-text predictions arrive per keystroke; they are not session activity.
@@ -1109,8 +1152,9 @@ export async function createCompanion(options={}){
   if(f.type==='btw_record'&&f.record?.id){const r=btwView(f.record);s._btw=[r,...(s._btw||[]).filter(x=>x.id!==r.id)].slice(0,20);return;}
   if(f.type==='btw_delta'){const r=s._btw?.find(x=>x.id===f.recordId);if(r&&typeof f.delta==='string'){const t=r.followUps.at(-1)||r;t.answer=(t.answer+f.delta).slice(-100000);}return;}
   // The 4 s background refresh (get_state/get_subagents) is not an update: bumping on it made every idle live session
-  // dirty, so the whole workspace.json (tens of MB) was rewritten every refresh.
+  // dirty, so it was saved again every refresh.
   if(!(f.type==='response'&&(f.command==='get_state'||f.command==='get_subagents')))s.updatedAt=now();
+  const status=s.status;
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
   if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
@@ -1217,7 +1261,8 @@ export async function createCompanion(options={}){
   if(f.type==='available_commands_update'&&Array.isArray(f.commands))commands.set(s.id,slashList(f.commands));
   if(f.type==='response'&&f.success&&f.command==='prompt'&&f.data?.agentInvoked===true)s._promptId=f.id;
   if(f.type==='response'&&!f.success&&f.id===s._promptId){s.error=f.error;if(['prompt','steer','follow_up','abort_and_prompt'].includes(f.command)){s.status='error';delete s._interrupt;}}
-  scheduleSave();
+  // Streaming deltas, tool output and the like arrive many times a second: batched lazily unless the status moved.
+  scheduleSave(s,s.status===status);
  }
  // OMP's tool-approval dialogs: select('Allow tool: …',['Approve','Deny']) from its tool wrapper and eval preludes, and the
  // computer tool's foreground-control confirm. Prompts listing provider safety checks always go to the user: OMP lets no
@@ -1231,7 +1276,7 @@ export async function createCompanion(options={}){
  async function autoApprove(s,rpc,id,approval){
   s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==id);
   await rpc.reply({type:'extension_ui_response',id,...approval.reply});
-  append(s,'system',`Auto-approved: ${approval.text.slice(0,4000)}`);scheduleSave();
+  append(s,'system',`Auto-approved: ${approval.text.slice(0,4000)}`);scheduleSave(s);
  }
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
  function dropSteers(s){for(const m of s.messages)if(m.steer==='pending')m.steer='dropped';}
@@ -1247,7 +1292,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist();}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}});
    runners.set(s.id,rpc);
    // OMP 18.10+ sends every ask question in one dialog, so multi-select choices stay visible until submitted; older builds reject the command and keep one select per toggle.
    try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});await rpc.send({type:'set_ask_dialog',enabled:true}).catch(()=>{});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
@@ -1300,7 +1345,7 @@ export async function createCompanion(options={}){
   if(!rebuilt.some(m=>m.entryId))return;
   if(s.messages!==before||['running','queued'].includes(s.status)){s._backfilled=false;return;}
   const t=m=>new Date(m.at).getTime()||0;
-  s.messages=[...rebuilt,...before.filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)).slice(-600);delete s._entryCursor;scheduleSave();
+  s.messages=[...rebuilt,...before.filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)).slice(-600);delete s._entryCursor;scheduleSave(s);
  }
  // The session file's entries and the leaf OMP resumes from when it loads them: the last entry, unless a model_usage entry
  // names another active leaf (OMP's own rule).
@@ -1334,7 +1379,7 @@ export async function createCompanion(options={}){
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
    delete s.draft;
-   try{return await command(s,body,checkedImages,queuedId);}finally{if(!sent(s)){s.draft=true;scheduleSave();}}
+   try{return await command(s,body,checkedImages,queuedId);}finally{if(!sent(s)){s.draft=true;scheduleSave(s);}}
   }
   if(body.type==='discard')return discardDraft(s);
   // Composer ghost text (OMP's spelling.autocomplete engine). Never starts OMP; any failure means no suggestion.
@@ -1394,7 +1439,7 @@ export async function createCompanion(options={}){
    if(typeof body.enabled!=='boolean')throw error('Auto-approve must be true or false.');
    if(body.enabled){s.autoApprove=true;const rpc=runners.get(s.id);if(rpc?.alive)for(const q of (s.uiRequests||[]).filter(q=>q._approval))await autoApprove(s,rpc,q.id,q._approval);}
    else{delete s.autoApprove;cancelResume(s,'auto-approve turned off');}
-   await persist();return s;
+   await persist(s);return s;
   }
   if(body.type==='send_follow_up'){
    const queue=s.queuedMessages||[];const i=queue.findIndex(q=>q.id===body.id);
@@ -1403,7 +1448,7 @@ export async function createCompanion(options={}){
    const live=['running','queued'].includes(s.status);
    const result=await command(s,{type:live?'steer':'prompt',message:item.text,preview:item.imagePreview},images,item.id);
    if(result.status==='error')return result;
-   s.queuedMessages=(s.queuedMessages||[]).filter(q=>q.id!==item.id);await persist();
+   s.queuedMessages=(s.queuedMessages||[]).filter(q=>q.id!==item.id);await persist(s);
    if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});
    return s;
   }
@@ -1411,8 +1456,8 @@ export async function createCompanion(options={}){
    const queue=s.queuedMessages||[];const i=queue.findIndex(q=>q.id===body.id);
    if(i<0)throw error('Queued message was already sent or removed.');
    if(body.type==='edit_follow_up'){const value=body.message;queue[i].text=queue[i].hasImage&&typeof value==='string'&&!value.trim()?'':text(value,'Message',200000);}
-   else{const [item]=queue.splice(i,1);await persist();if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});return s;}
-   await persist();return s;
+   else{const [item]=queue.splice(i,1);await persist(s);if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});return s;}
+   await persist(s);return s;
   }
   if(body.type==='cancel_steer'||body.type==='edit_steer'){
    const m=s.messages.find(m=>m.id===body.id);
@@ -1426,18 +1471,18 @@ export async function createCompanion(options={}){
     // Delivery can win the cancel request before its transcript echo arrives.
     if(m.steer==='pending')m.steer='received';
     if(body.type==='cancel_steer')notice(s,'info','OMP has already started delivering this steer; it can no longer be cancelled.');
-    await persist();if(body.type==='edit_steer')throw error('OMP already read this steer.');
+    await persist(s);if(body.type==='edit_steer')throw error('OMP already read this steer.');
     return s;
    }
    // RPC events can reorder the transcript while removal is awaiting its reply.
-   const i=s.messages.indexOf(m);if(i>=0)s.messages.splice(i,1);await persist();
+   const i=s.messages.indexOf(m);if(i>=0)s.messages.splice(i,1);await persist(s);
    return body.type==='edit_steer'?command(s,{type:'steer',message:body.message}):s;
   }
   if(body.type==='set_model'){
    const {selector,thinking}=modelChoice(body);if(selector)s.modelSelector=selector;if(thinking)s.thinkingChoice=thinking;
    const rpc=runners.get(s.id);if(rpc?.alive){const i=selector.indexOf('/');if(selector)await rpc.send({type:'set_model',provider:selector.slice(0,i),modelId:selector.slice(i+1)});if(thinking)await rpc.send({type:'set_thinking_level',level:thinking});await refresh(s,rpc);}
    else{if(selector){const i=selector.indexOf('/');s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking)s.thinking=thinking;}
-   await persist();return s;
+   await persist(s);return s;
   }
   const busy=()=>{if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');};
   if(['plan_mode','plan_review','plan_approve'].includes(body.type)){
@@ -1462,21 +1507,21 @@ export async function createCompanion(options={}){
    try{const result=await rpc.send(request);
     if(body.type==='plan_review')s._planReview=result?.proposal;
     if(body.type==='plan_approve'){if(s._planReview?.id===request.proposalId)delete s._planReview;if(body.action!=='refine'||request.feedback)s.status='running';}
-    await refresh(s,rpc);await persist();return body.type==='plan_review'?{proposal:s._planReview}:s;
+    await refresh(s,rpc);await persist(s);return body.type==='plan_review'?{proposal:s._planReview}:s;
    }catch(e){throw error(e.message,e.code==='stale_proposal'?409:400);}
   }
-  if(body.type==='rename'){const name=text(body.name,'Session name',120);const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'set_session_name',name});s.title=name;delete s.autoTitle;await persist();return s;}
+  if(body.type==='rename'){const name=text(body.name,'Session name',120);const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'set_session_name',name});s.title=name;delete s.autoTitle;await persist(s);return s;}
   if(body.type==='pref'){
    if(!Object.hasOwn(PREF_VALUES,body.key)||!PREF_VALUES[body.key].includes(body.value))throw error('Invalid session setting.');
    const rpc=await start(s);try{await rpc.send(PREFS[body.key](body.value));}catch(e){throw error(e.message);}
-   (s.prefs??={})[body.key]=body.value;await refresh(s,rpc);await persist();return s;
+   (s.prefs??={})[body.key]=body.value;await refresh(s,rpc);await persist(s);return s;
   }
   if(body.type==='abort'||body.type==='abort_retry'){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
    const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
    finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);cancelResume(s,'session stopped');
    delete s._promptId;delete s._promptMsg;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
-   await persist();return s;
+   await persist(s);return s;
   }
   if(body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
   if(body.type==='tree'){const rpc=await start(s);return treeView(await rpc.send({type:'get_tree'}));}
@@ -1487,9 +1532,9 @@ export async function createCompanion(options={}){
    // Remember the choice so a restarted runner keeps it.
    if(r.model?.provider&&r.model?.id){s.modelSelector=`${r.model.provider}/${r.model.id}`;if(r.thinkingLevel)s.thinkingChoice=r.thinkingLevel;}
    if(typeof r.level==='string')s.thinkingChoice=r.level;
-   await refresh(s,rpc);await persist();return s;
+   await refresh(s,rpc);await persist(s);return s;
   }
-  if(body.type==='todos'){const phases=todoPhases(body.phases);const rpc=await start(s);const r=await rpc.send({type:'set_todos',phases});s.todos=Array.isArray(r?.todoPhases)?r.todoPhases:phases;await persist();return s;}
+  if(body.type==='todos'){const phases=todoPhases(body.phases);const rpc=await start(s);const r=await rpc.send({type:'set_todos',phases});s.todos=Array.isArray(r?.todoPhases)?r.todoPhases:phases;await persist(s);return s;}
   if(body.type==='launch'){
    busy();const launch=await launchOptions(body.launch);
    if(JSON.stringify(launch??null)!==JSON.stringify(s.launch??null)){
@@ -1498,13 +1543,13 @@ export async function createCompanion(options={}){
     if(runners.get(s.id)?.alive){const prev=s.status;runners.get(s.id).kill();for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));await start(s);s.status=prev;s.error=undefined;}
     append(s,'system',launch?'Launch options updated. OMP restarted with them.':'Launch options cleared. OMP restarted with its defaults.');
    }
-   await persist();return s;
+   await persist(s);return s;
   }
   if(body.type==='compact'){
    busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Compacting context…';s._compacting=true;
    rpc.send({type:'compact',...(instructions?{customInstructions:instructions}:{})},0).then(async r=>{await refresh(s,rpc);append(s,'system',`Context compacted${typeof r?.tokensBefore==='number'?` (was ${r.tokensBefore.toLocaleString('en-US')} tokens)`:''}.`);},e=>append(s,'system',`Compaction failed: ${e.message}`))
-    .finally(()=>{delete s._task;s._compacting=false;void persist();});
-   await persist();return s;
+    .finally(()=>{delete s._task;s._compacting=false;void persist(s);});
+   await persist(s);return s;
   }
   if(body.type==='new_session'||body.type==='switch_session'){
    busy();let file;
@@ -1515,15 +1560,15 @@ export async function createCompanion(options={}){
    s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,rpc);
    if(body.type==='switch_session'){const head=await readSessionHead(file).catch(()=>null);if(head?.title)s.title=head.title.slice(0,120);}
    append(s,'system',body.type==='new_session'?'Started a fresh OMP session. The previous conversation stays in its own session file.':'Switched to another saved OMP session.');
-   s.status='paused';await persist();return s;
+   s.status='paused';await persist(s);return s;
   }
   // Runs outside the session lock (timeout 0) so Stop, answers and other commands still get through while it works.
   if(body.type==='bash'){
    const cmd=text(body.command,'Command',20000);if(s._bash)throw error('A shell command is already running.');
    const rpc=await start(s);const msg=append(s,'tool','bash','tool-bash-'+randomUUID());msg.tool=shellRecord(cmd);msg.startedAt=now();msg.text=toolSummary(msg.tool);s._bash=msg.id;
    rpc.send({type:'bash',command:cmd},0).then(r=>Object.assign(msg.tool,shellRecord(cmd,r)),e=>{msg.tool.status='error';msg.tool.result=e.message;})
-    .finally(()=>{msg.tool.ms=Date.now()-new Date(msg.startedAt).getTime();msg.text=toolSummary(msg.tool);delete s._bash;scheduleSave();});
-   await persist();return s;
+    .finally(()=>{msg.tool.ms=Date.now()-new Date(msg.startedAt).getTime();msg.text=toolSummary(msg.tool);delete s._bash;scheduleSave(s);});
+   await persist(s);return s;
   }
   if(body.type==='stats'){const rpc=await start(s);return {stats:await rpc.send({type:'get_session_stats'})};}
   if(body.type==='export'){
@@ -1542,31 +1587,31 @@ export async function createCompanion(options={}){
    await reload(s,rpc);s.status='paused';
    if(body.type==='regenerate'){append(s,'system','Went back to before your last message in a new session and sent it again. The previous reply stays in the old session file.');return command(s,{type:'prompt',message:picked.text},picked.images);}
    append(s,'system',body.type==='branch'?'Branched into a new session from this point. The message you picked is back in the composer.':'Went back to before your last message in a new session. It is back in the composer to edit and resend.');
-   await persist();return {session:s,text:typeof r?.text==='string'?r.text:picked?.text||'',images:picked?.images||[]};
+   await persist(s);return {session:s,text:typeof r?.text==='string'?r.text:picked?.text||'',images:picked?.images||[]};
   }
   if(body.type==='handoff'){
    busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Writing the handoff…';
    rpc.send({type:'handoff',...(instructions?{customInstructions:instructions}:{})},0).then(async r=>{await reload(s,rpc);append(s,'system',`Handed off to a fresh session${r?.savedPath?`. Handoff document: ${r.savedPath}`:''}.`);},e=>append(s,'system',`Handoff failed: ${e.message}`))
-    .finally(()=>{delete s._task;void persist();});
-   await persist();return s;
+    .finally(()=>{delete s._task;void persist(s);});
+   await persist(s);return s;
   }
   if(body.type==='login_providers'){const rpc=await start(s);const r=await rpc.send({type:'get_login_providers'});return {providers:(Array.isArray(r?.providers)?r.providers:[]).map(p=>({id:String(p.id),name:String(p.name||p.id),available:p.available!==false,authenticated:!!p.authenticated}))};}
   // OAuth runs until the user finishes in the browser; the link arrives as open_url, pasted codes as input questions.
   if(body.type==='login'){
    const id=text(body.provider,'Provider',100);const rpc=await start(s);notice(s,'info',`Starting ${id} login…`);
-   rpc.send({type:'login',providerId:id},0).then(()=>{notice(s,'info',`Logged in to ${id}.`);accountsChanged();},e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave();});
+   rpc.send({type:'login',providerId:id},0).then(()=>{notice(s,'info',`Logged in to ${id}.`);accountsChanged();},e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave(s);});
    return s;
   }
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
-  if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist();return s;}
-  if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';cancelResume(s,'session marked complete');activity(s,`Completed ${s.title}`,'done');await persist();return s;}
+  if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist(s);return s;}
+  if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';cancelResume(s,'session marked complete');activity(s,`Completed ${s.title}`,'done');await persist(s);return s;}
   if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);const full=contextError(s,body.message,images);if(full)throw error(full);}
   if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
    if(images.length)throw error('Remove image attachments before checking /usage.');
    const rpc=await start(s);await refresh(s,rpc);
    const report=modelUsageText(await providerUsage(s));
    append(s,'user',body.message,queuedId||randomUUID());append(s,'assistant',report);s.updatedAt=now();
-   await persist();return s;
+   await persist(s);return s;
   }
   const slashCommand=prompting&&/^\/\S/.test(body.message);
   // OMP's own state decides whether it is busy; a drifted status would otherwise send a prompt OMP rejects.
@@ -1581,7 +1626,7 @@ export async function createCompanion(options={}){
   if(body.type==='follow_up'&&['running','queued'].includes(s.status)){
    const item={id:randomUUID(),text:body.message,hasImage:!!images.length,imagePreview:images.length?body.preview:undefined,at:now()};
    if(images.length){await fs.mkdir(path.dirname(queuedImageFile(item.id)),{recursive:true,mode:0o700});await fs.writeFile(queuedImageFile(item.id),JSON.stringify(images),{mode:0o600});}
-   (s.queuedMessages??=[]).push(item);await persist();return s;
+   (s.queuedMessages??=[]).push(item);await persist(s);return s;
   }
   if(body.type==='follow_up')body.type='prompt';
   if(body.type==='advisor'){
@@ -1596,11 +1641,11 @@ export async function createCompanion(options={}){
     const fresh=await start(s);s.status=prev;s.error=undefined;
     s._silentAdvisorUntil=Date.now()+5000;await fresh.send({type:'prompt',message:'/advisor on'});
     append(s,'system',`Advisor model set to ${body.model} (${where}).`);
-    await advisorStatus(s,fresh);await persist();return s;
+    await advisorStatus(s,fresh);await persist(s);return s;
    }
    // The composer's advisor chip shows the result, so the on/off reply stays out of the chat.
    if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await rpc.send({type:'prompt',message:`/advisor ${body.action}`});}
-   await advisorStatus(s,rpc);await persist();return s;}
+   await advisorStatus(s,rpc);await persist(s);return s;}
   if(body.type==='prompt'&&s.status==='running'&&!slashCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
    const rpc=await start(s);
@@ -1621,8 +1666,8 @@ export async function createCompanion(options={}){
    if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
    if(rpcType==='prompt'&&result?.agentInvoked===false&&!slashCommand){s.status='review';delete s._promptMsg;}
    if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
-   await persist();return s;
-  }catch(e){if(slashCommand){await persist();throw error(e.message);}delete s._interrupt;delete s._promptMsg;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist();return s;}
+   await persist(s);return s;
+  }catch(e){if(slashCommand){await persist(s);throw error(e.message);}delete s._interrupt;delete s._promptMsg;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist(s);return s;}
  }
  // Room left in the session's context window, or null when the window is unknown (no runner state yet and the
  // model isn't in the cached model list, e.g. "OMP default"): then only the upload size limits images.
@@ -1650,10 +1695,10 @@ export async function createCompanion(options={}){
    // A message that alone no longer fits stays queued, holding back the ones behind it: the user can compact, edit or remove it.
    try{await command(s,{type:'prompt',message,preview:Array.isArray(preview)&&!preview.length?undefined:preview},images,item.id);}
    catch(e){notice(s,'error',`The next queued message was not sent and stays queued, with any queued after it. ${e.message}`);return;}
-   if(s.status==='error'){s.messages=s.messages.filter(m=>m.id!==item.id);await persist();return;}
+   if(s.status==='error'){s.messages=s.messages.filter(m=>m.id!==item.id);await persist(s);return;}
    if(closing)return;
    const sent=new Set(batch.map(q=>q.id));s.queuedMessages=s.queuedMessages.filter(q=>!sent.has(q.id));
-   await persist();
+   await persist(s);
    for(const q of batch)if(q.hasImage)await fs.rm(queuedImageFile(q.id),{force:true}).catch(()=>{});
    if(s.status==='review'&&s.queuedMessages.length)s.status='running';
    else break;
@@ -1800,7 +1845,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(baseSha?{baseSha}:{}),...(launch?{launch}:{}),...(draft?{draft:true}:{})};
   if(selector){const i=selector.indexOf('/');s.modelSelector=selector;s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking){s.thinkingChoice=thinking;s.thinking=thinking;}
   for(const n of notes)append(s,'system',n);store.sessions.unshift(s);activity(s,sessionFile?`Resumed ${title}`:`Started ${title}`,'running');
-  if(prompt)await command(s,{type:'prompt',message:prompt});else await persist();return s;
+  if(prompt)await command(s,{type:'prompt',message:prompt});else await persist(s);return s;
  }
  const sent=s=>s.messages.some(m=>m.role==='user'||m.id?.startsWith('tool-bash-'))||!!s.queuedMessages?.length;
  // Removes an Enhance-created session nobody sent anything to: enhance job, OMP process (awaited), its empty
@@ -1809,7 +1854,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   if(!s.draft||sent(s))return {discarded:false};
   // OMP's transcript is the truth: after a crash mid first send, workspace.json can still say draft with no messages.
   const recorded=s.sessionFile?(await importMessages(s.sessionFile).catch(()=>[])).some(m=>m.role==='user'):false;
-  if(recorded){delete s.draft;await persist();return {discarded:false};}
+  if(recorded){delete s.draft;await persist(s);return {discarded:false};}
   await Promise.allSettled([...enhanceJobs.values()].filter(j=>j.sessionId===s.id).map(stopEnhance));
   await stopRunner(s);
   // rmdir (not rm -r) only succeeds on an empty folder, so OMP's other sessions for the same cwd are never touched.
@@ -1819,7 +1864,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){removed=await removeWorktree(s,root);if(!removed)console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);}
   if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);store.pinned=store.pinned.filter(k=>k!=='s:'+s.id);delete store.drafts['session:'+s.id];}
   else s.hidden=true;
-  await persist();return {discarded:true};
+  await persist(s);return {discarded:true};
  }
  // Removes an isolated session's worktree folder and its omp-web/ branch; false when Windows still holds the folder.
  async function removeWorktree(s,root){
@@ -1923,9 +1968,9 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
    if(!await removeWorktree(s,root))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
    // The session's folder is gone, so it leaves the panel; its OMP transcript stays in history.
    s.hidden=true;s.status='done';s.worktreeRemoved=now();delete store.drafts['session:'+s.id];
-   activity(s,`Deleted worktree and branch ${branch}`,'done');await persist();return {action,deleted:true};
+   activity(s,`Deleted worktree and branch ${branch}`,'done');await persist(s);return {action,deleted:true};
   }
-  await persist();return {action,...await worktreeStatus(s)};
+  await persist(s);return {action,...await worktreeStatus(s)};
  }
  // Files edited (edit/write tool records) by two active sessions that share a folder rather than separate worktrees.
  // Set as _overlaps on both sessions before each /api/state reply.
@@ -2099,7 +2144,8 @@ async function spend(sync){
  }
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
  let refreshBusy=false;
- const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{await Promise.all([...runners].filter(([,r])=>r.alive).map(([id,r])=>refresh(store.sessions.find(s=>s.id===id),r)));await persist();}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();},4000);refreshTimer.unref();
+ // Refreshed state (todos, context use, model) is saved lazily; a status change it causes (settle) saves on its own.
+ const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{const live=[...runners].filter(([,r])=>r.alive).map(([id,r])=>[store.sessions.find(s=>s.id===id),r]).filter(([s])=>s);await Promise.all(live.map(([s,r])=>refresh(s,r)));scheduleSave(live.map(([s])=>s),true);}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();},4000);refreshTimer.unref();
  // Fill the account cache shortly after startup, so the first Choose provider accounts… opens instantly.
  const accountTimer=setTimeout(()=>refreshAccounts().catch(()=>{}),1000);accountTimer.unref();
  // The page's own host as a ws: source too: older Safari doesn't count ws: under 'self' (the Screen page's WebSocket).
@@ -2265,14 +2311,14 @@ async function spend(sync){
    if(req.method==='GET'&&url.pathname==='/api/usage'){
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
     // Sessions on "OMP default" have no provider until OMP reports its model, as /usage resolves it.
-    if(!s.provider||!s.model)await lock(s.id,async()=>{const rpc=await start(s);await refresh(s,rpc);await persist();});
+    if(!s.provider||!s.model)await lock(s.id,async()=>{const rpc=await start(s);await refresh(s,rpc);await persist(s);});
     json({...await providerUsage(s),updatedAt:now()});return;
    }
    if(req.method==='GET'&&url.pathname==='/api/accounts'){try{json(await listAccounts());}catch(e){throw error(`Could not list provider accounts: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/commands'){
     if(url.searchParams.has('path')){json({commands:await discoverCommands(await resolveDir(url.searchParams.get('path')))});return;}
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
-    await lock(s.id,async()=>{await start(s);await persist();});json({commands:commands.get(s.id)||[]});return;
+    await lock(s.id,async()=>{await start(s);await persist(s);});json({commands:commands.get(s.id)||[]});return;
    }
    if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const owned=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file));const runner=owned.map(s=>runners.get(s.id)).find(Boolean);const live=!!runner;
     const own=owned[0];const bg=await background(file,runner?runner.startedAt:owned.length?Infinity:undefined,(own?.subagentList||[]).map(a=>({...a,thinking:subagentThoughts.get(own.id+':'+a.id)?.text||''})));json({...bg,live});return;}
@@ -2294,7 +2340,7 @@ async function spend(sync){
    if(!body||typeof body!=='object'||Array.isArray(body))throw error('JSON object required.');
    if(url.pathname==='/api/projects'){
     const dir=await resolveDir(body.path);if(store.projects.some(p=>samePath(p.path,dir)))throw error('This directory is already registered.');
-    const p=await ensureProject(dir,typeof body.name==='string'?body.name:'');p.description=String(body.description||'');await persist();json(p,201);return;
+    const p=await ensureProject(dir,typeof body.name==='string'?body.name:'');p.description=String(body.description||'');await persist([]);json(p,201);return;
    }
    if(url.pathname==='/api/sessions'){
     const p=store.projects.find(p=>p.id===body.projectId);if(!p)throw error('Project not found.');const title=text(body.title,'Session title',120);const prompt=text(body.prompt,'Initial prompt',200000);
@@ -2307,9 +2353,9 @@ async function spend(sync){
    if(url.pathname==='/api/cli'){json(await runCli(body),202);return;}
    if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
    if(url.pathname==='/api/enhance'){json(await startEnhance(body),202);return;}
-   if(url.pathname==='/api/enhance/settings'){if(!THINKING.includes(body.thinking))throw error('Unknown reasoning level.');store.enhanceThinking=body.thinking;await persist();json({thinking:store.enhanceThinking});return;}
+   if(url.pathname==='/api/enhance/settings'){if(!THINKING.includes(body.thinking))throw error('Unknown reasoning level.');store.enhanceThinking=body.thinking;await persist([]);json({thinking:store.enhanceThinking});return;}
    // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
-   if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist();json({provider,account});return;}
+   if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist([]);json({provider,account});return;}
    if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}
    if(url.pathname==='/api/screen/ticket'){
     if(!screenSupported)throw error('Screen sharing works when the companion runs on Windows.',409);
@@ -2341,9 +2387,9 @@ async function spend(sync){
     if(body.text)store.drafts[key]={text:body.text,at:Date.now()};else delete store.drafts[key];
     // Oldest drafts go first past 200, so an abandoned pile cannot grow workspace.json without bound.
     const keys=Object.keys(store.drafts);if(keys.length>200)for(const k of keys.sort((a,b)=>store.drafts[a].at-store.drafts[b].at).slice(0,keys.length-200))delete store.drafts[k];
-    scheduleSave();json({key,at:store.drafts[key]?.at??null});return;
+    scheduleSave([]);json({key,at:store.drafts[key]?.at??null});return;
    }
-   if(url.pathname==='/api/editor'){if(!EDITOR_CHOICES.includes(body.editor))throw error('Unknown editor.');store.editor=body.editor;await persist();json({editor:store.editor});return;}
+   if(url.pathname==='/api/editor'){if(!EDITOR_CHOICES.includes(body.editor))throw error('Unknown editor.');store.editor=body.editor;await persist([]);json({editor:store.editor});return;}
    // Open in editor: a file from a diff or tool call, relative paths resolved against the session folder.
    if(url.pathname==='/api/open-file'){
     let file=text(body.path,'File path',4000);const line=Number.isInteger(body.line)&&body.line>0?body.line:undefined;
@@ -2378,7 +2424,7 @@ async function spend(sync){
     const submitted=!!message||body.images!==undefined;
     const existing=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));
     const gone=k=>k!=='f:'+file&&k!=='f:'+body.file;store.archived=store.archived.filter(gone);store.pinned=store.pinned.filter(gone);
-    if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(),existing));return;}
+   if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(existing),existing));return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||head.preview.split('\n')[0]||'Resumed session').slice(0,120);
@@ -2398,7 +2444,7 @@ async function spend(sync){
      // Archiving a session that is ready for review completes it and stops its OMP process.
      if(field==='archived'&&on&&s.status==='review'){await lock(s.id,()=>command(s,{type:'complete'}));runners.get(s.id)?.kill();}}
     // Pinning and archiving exclude each other: setting one clears the other.
-    const set=new Set(store[field]);if(on){set.add(key);store[other]=store[other].filter(k=>k!==key);}else set.delete(key);store[field]=[...set];await persist();json({archived:store.archived,pinned:store.pinned});return;
+    const set=new Set(store[field]);if(on){set.add(key);store[other]=store[other].filter(k=>k!==key);}else set.delete(key);store[field]=[...set];await persist([]);json({archived:store.archived,pinned:store.pinned});return;
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
@@ -2439,13 +2485,14 @@ async function spend(sync){
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(eventSaveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
  for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
 // closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
-await persist();return {server,store,token,password:Boolean(password),close,flush:()=>saveChain,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
+// flush: runs any batched save now and resolves once everything changed so far is on disk.
+await persist();return {server,store,token,password:Boolean(password),close,flush:saveNow,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';

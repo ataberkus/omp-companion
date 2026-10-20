@@ -71,8 +71,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal(promptCode, 200);
   assert.deepEqual(prompted.messages.find(m => m.role === 'advisor')?.notes, [{ note: 'Check <boundary>', severity: 'concern', advisor: 'Architecture' }, { note: 'Keep it simple', severity: 'nit' }]);
   await app.flush();
-  const saved = JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8'));
-  assert.equal(saved.sessions[0].messages.find(m => m.role === 'advisor')?.notes[0].note, 'Check <boundary>');
+  const saved = JSON.parse(await readFile(join(dir, 'transcripts', 'session.json'), 'utf8'));
+  assert.equal(saved.find(m => m.role === 'advisor')?.notes[0].note, 'Check <boundary>');
   const [previewCode, preview] = await request('/omp-sessions/preview?file=' + encodeURIComponent(nativeFile));
   assert.equal(previewCode, 200);
   assert.deepEqual(preview.messages.filter(m => m.role === 'advisor').map(m => m.notes), [advice.details.notes]);

@@ -92,11 +92,11 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal(unknownStatus, 200);
   assert.notEqual(unknown.status, 'error');
   await app.flush();
-  const saved = JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8'));
-  assert.equal(saved.sessions.find(s => s.id === resumed.id).messages.find(m => m.role === 'user' && m.imagePreview)?.imagePreview, preview);
+  const saved = JSON.parse(await readFile(join(dir, 'transcripts', resumed.id + '.json'), 'utf8'));
+  assert.equal(saved.find(m => m.role === 'user' && m.imagePreview)?.imagePreview, preview);
 });
 
-test('images in tool results are kept live and from the transcript, served by ID, and never stored in workspace.json', async t => {
+test('images in tool results are kept live and from the transcript, served by ID, and never stored in workspace.json or transcripts', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-tool-image-'));
   let app;
   const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -168,7 +168,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal((await image(id))[2].toString('base64'), marked, 'a pruned image is still served while OMP keeps its blob');
   assert.equal((await image(expectOne(preview.messages.find(m => m.id === 'tool-r3')?.tool?.images)))[0], 404, 'a swept blob is reported as no longer stored');
   await app.flush();
-  assert.ok(!(await readFile(join(dir, 'workspace.json'), 'utf8')).includes(marked));
+  for (const file of ['workspace.json', ...(await readdir(join(dir, 'transcripts'))).map(f => join('transcripts', f))])
+    assert.ok(!(await readFile(join(dir, file), 'utf8')).includes(marked), file);
 });
 
 test('stored tool images stay within the configured cap', async t => {
