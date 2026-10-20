@@ -229,6 +229,21 @@ test('live tool output keeps streaming after the server clips it to its last 8,0
   assert.match(app.thread(), /BBBBBBBBBB/);
 });
 
+test('a thought keeps streaming live above a steer OMP has not read yet', async () => {
+  let thought = 'Analyzing the hold-gate.';
+  const steer = { id: 'st', role: 'user', text: 'Done when: pushed', steer: 'pending', at: at(2) };
+  const st = () => store([session('s1', [{ id: 'u', role: 'user', text: 'Work', at: at(0) }, { id: 'th', role: 'thinking', text: thought, at: at(1) }, steer], { status: 'running' })]);
+  const app = boot({ respond: stateOf(st) });
+  await flush();
+  thought += ' Extending it when one-shot is enabled.';
+  await app.poll();
+  const html = app.thread();
+  assert.match(html, /one-shot is enabled/, 'deltas to the thought re-render while the steer is the last message');
+  assert.match(html, /class="activity live"/, 'the thought is still the live tail');
+  assert.equal((html.match(/data-rid="th"/g) || []).length, 1);
+  assert.ok(html.indexOf('data-rid="th"') < html.indexOf('msg:st'), 'the unread steer waits below the live activity');
+});
+
 test('tool-result images show as full-size-on-tap thumbnails under the text output, also when they arrive after it', async () => {
   const id = 'a'.repeat(64) + '.png';
   let images;

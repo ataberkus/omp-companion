@@ -1082,6 +1082,8 @@
     const line = String(text).split('\n').map(l => l.replace(/[*_#`>]/g, '').trim()).find(Boolean) || 'Thinking';
     return line.length > 110 ? line.slice(0, 110) + '…' : line;
   };
+  // A steer OMP hasn't read yet; the server keeps these at the end of the transcript until OMP echoes them.
+  const unreadSteer = m => m.role === 'user' && (m.steer === 'pending' || m.steer === 'received');
   function activityRow(m, live, lastInLive, L) {
     const rid = m.id;
     if (m.role === 'thinking') {
@@ -1140,8 +1142,9 @@
     if (S.advHidden) messages = messages.filter(m => m.role !== 'advisor' && m.role !== 'advisor-update');
     const p = S.sending.get(S.view), pending = p && 'text' in p && !p.queued ? p : null;
     const last = messages[messages.length - 1];
-    // Advisor reviews sort by time and can land after a running tool; the live tail is the last main-agent message.
-    const mainEnd = messages.findLastIndex(m => !m.adv), tail = messages[mainEnd];
+    // Advisor reviews sort by time and can land after a running tool; the live tail is the last main-agent message. Steers OMP
+    // hasn't read wait at the end of the thread, below the activity that is still streaming into the tail.
+    const mainEnd = messages.findLastIndex(m => !m.adv && !unreadSteer(m)), tail = messages[mainEnd];
     const runningTools = messages.reduce((n, m) => n + (m.tool?.status === 'running' ? 1 : 0), 0);
     // Tool images can land on a finished row (a transcript reload) without any other change.
     const toolImages = messages.reduce((n, m) => n + (m.tool?.images?.length || 0), 0);
@@ -1160,7 +1163,7 @@
       if (u && !u.steer && (u.entryId || u.ompAt)) { for (let i = lastUser + 1; i < messages.length; i++) if (messages[i].role === 'assistant') lastReply = i; }
       else lastUser = -1;
     }
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, tail?.id, tail?.text?.length, tail?.text?.slice(-64), runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
@@ -1624,7 +1627,10 @@
     if (!extra.length) return messages;
     const t = m => new Date(m.at).getTime() || 0;
     const since = messages.length ? t(messages[0]) : 0;
-    return [...messages, ...extra.filter(m => t(m) >= since)].map((m, i) => [m, i]).sort((a, b) => t(a[0]) - t(b[0]) || a[1] - b[1]).map(x => x[0]);
+    // Unread steers stay last: sorting by their send time would put them back into the middle of the live turn.
+    let end = messages.length;
+    while (end > 0 && unreadSteer(messages[end - 1])) end--;
+    return [...messages.slice(0, end), ...extra.filter(m => t(m) >= since)].map((m, i) => [m, i]).sort((a, b) => t(a[0]) - t(b[0]) || a[1] - b[1]).map(x => x[0]).concat(messages.slice(end));
   }
   function advisorReview(group) {
     if (!S.advReviews || S.advHidden) return '';

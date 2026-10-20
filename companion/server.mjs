@@ -1032,7 +1032,11 @@ export async function createCompanion(options={}){
  // A session that needs the user (finished, failed, asked a question). The desktop host turns it into a Windows notification;
  // the dashboard derives its own notifications and title badge from /api/state.
  const attention=(s,kind,detail='')=>{if(closing||s.hidden)return;try{options.onAttention?.({id:s.id,title:s.title,kind,detail:String(detail||'').slice(0,300)});}catch(e){console.error('Attention hook failed:',e.message);}};
- const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else s.messages.push({id,role,text:value.slice(-100000),at:now()});s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
+// Steers OMP hasn't read stay at the end of the transcript: the turn's activity keeps arriving before them, so a steer sent
+// mid-thought doesn't split the live activity group, and its echo moves it to where OMP actually read it.
+const unreadSteer=m=>m.role==='user'&&(m.steer==='pending'||m.steer==='received');
+const place=(s,m)=>{let i=s.messages.length;while(i>0&&unreadSteer(s.messages[i-1]))i--;s.messages.splice(i,0,m);};
+const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else{const m={id,role,text:value.slice(-100000),at:now()};if(role==='user')s.messages.push(m);else place(s,m);}s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
  const commands=new Map();
  const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},{name:'btw',description:'Ask a side question about this session; the answer stays out of the conversation',aliases:[],hint:'<question>',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage'&&c.name!=='btw').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}))];
@@ -1157,7 +1161,8 @@ export async function createCompanion(options={}){
   const status=s.status;
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
-  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
+  // A run whose last message never ended (abort, crash) must not stream the next thought or reply into the old one.
+  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;delete s._thinkId;delete s._streamId;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
   if(f.type==='auto_compaction_end'){
    s._compacting=!!f.willRetry;
@@ -1172,7 +1177,7 @@ export async function createCompanion(options={}){
   if(f.type==='message_start'&&f.message?.role==='user'){
    // Steers wait for a tool/turn boundary; OMP echoes them when read, so place them where the agent actually saw them.
    const said=contentText(f.message.content).trim(),i=s.messages.findIndex(m=>m.steer&&(m.text.trim()===said||(m.hasImage&&m.text==='Image attached'&&!said)));
-   if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();if(typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;s.messages.push(m);}
+   if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();if(typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;place(s,m);}
    // Otherwise the first user message of a prompt's run is that prompt. OMP stores this exact message, timestamp included,
    // as its session entry; bindEntries turns the timestamp into the entry ID that branching from this message needs.
    else if(s._promptMsg&&!(f.message.synthetic&&f.message.attribution==='agent')){const m=s.messages.find(m=>m.id===s._promptMsg);if(m&&typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;delete s._promptMsg;}
@@ -1292,7 +1297,7 @@ export async function createCompanion(options={}){
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
    const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}});
+   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}});
    runners.set(s.id,rpc);
    // OMP 18.10+ sends every ask question in one dialog, so multi-select choices stay visible until submitted; older builds reject the command and keep one select per toggle.
    try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});await rpc.send({type:'set_ask_dialog',enabled:true}).catch(()=>{});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
@@ -1657,10 +1662,10 @@ export async function createCompanion(options={}){
    const interrupt=body.type==='interrupt';
    const rpcType=slashCommand?'prompt':interrupt?'abort_and_prompt':body.type,wasRunning=['running','queued'].includes(s.status);
    // A message of the user's own supersedes a pending rate-limit resume; slash commands (say /usage) leave it armed.
-   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt)delete s._streamId;s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt){delete s._streamId;delete s._thinkId;}s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
    if((rpcType==='prompt'||interrupt)&&!slashCommand){s._promptId=id;s._promptMsg=msg.id;}
-   if(interrupt){s._interrupt=id;delete s._retry;delete s._thinkId;}
+   if(interrupt){s._interrupt=id;delete s._retry;}
    const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(slashCommand&&wasRunning?{streamingBehavior:'steer'}:{}),...(images.length?{images}:{})}:{})},slashCommand?0:30000);
    // Local commands must not replace the active turn's result correlation.
    if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;

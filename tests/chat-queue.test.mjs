@@ -246,6 +246,52 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal((await post({ type: 'cancel_steer', id: cancelId }))[0], 200);
 });
 
+test('a steer sent mid-thought waits below the live turn and leaves its thought whole', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-chat-steer-think-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const fake = join(dir, 'omp.mjs');
+  // Live steering: the streaming message keeps thinking after OMP takes the steer, runs its tool, and the steer is echoed
+  // only at the next turn boundary.
+  await writeFile(fake, `import { createInterface } from 'node:readline';
+const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
+const think = delta => out({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta } });
+let steer, stage = 0;
+out({ type: 'ready' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const c = JSON.parse(line);
+  if (c.type === 'steer') steer = c.message;
+  out({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {} });
+  if (c.type === 'prompt') { out({ type: 'agent_start' }); out({ type: 'message_start', message: { role: 'assistant', content: [] } }); think('Analyzing. '); }
+  if (c.type === 'steer') think('Still analyzing.');
+  if (c.type === 'cycle_model' && stage++ === 0) {
+    out({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Analyzing. Still analyzing.' }] } });
+    out({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } });
+  } else if (c.type === 'cycle_model') {
+    out({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }] } });
+    out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: steer }] } });
+    out({ type: 'message_start', message: { role: 'assistant', content: [] } }); think('Following the steer.');
+  }
+}`);
+  const at = new Date().toISOString();
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const url = `http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`;
+  const post = body => fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const shape = () => app.store.sessions[0].messages.map(m => m.role === 'thinking' ? 'thinking:' + m.text : m.role + (m.steer ? ':' + m.steer : ''));
+  const wait = async want => { for (let i = 0; i < 40 && JSON.stringify(shape()) !== JSON.stringify(want); i++) await new Promise(r => setTimeout(r, 25)); assert.deepEqual(shape(), want); };
+
+  await post({ type: 'prompt', message: 'Work' });
+  await post({ type: 'steer', message: 'Done when: pushed' });
+  await wait(['user', 'thinking:Analyzing. Still analyzing.', 'user:pending']);
+  await post({ type: 'cycle_model' });
+  await wait(['user', 'thinking:Analyzing. Still analyzing.', 'tool', 'user:pending']);
+  await post({ type: 'cycle_model' });
+  await wait(['user', 'thinking:Analyzing. Still analyzing.', 'tool', 'user', 'thinking:Following the steer.']);
+});
+
 test('a stopped run\'s late prompt_result does not pause the next prompt', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-abort-'));
   let app;
