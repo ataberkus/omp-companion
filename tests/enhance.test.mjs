@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8');
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(setImmediate); };
+const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const seq = list => () => list.length > 1 ? list.shift() : list[0];
 
 // Runs the real dashboard against a tiny DOM (as frontend-interaction.test.mjs), plus queued timers and recorded toasts.
@@ -137,27 +138,66 @@ test('history view enhances in its folder with the chosen model', async () => {
   assert.deepEqual(d.posts('/enhance'), [{ path: 'C:/proj', model: 'p/a', text: 'fix it' }]);
 });
 
-test('New-session Enhance runs in the picked folder, keeps the draft there, and blocks Start until it settles', async () => {
-  const polls = seq([{ status: 'running', step: 'reading src/a.js' }, { status: 'done', text: 'Better' }]);
-  const d = await boot({ hash: '#/new', routes: {
+test('New-session Enhance creates a draft session, moves the draft there and enhances in it', async () => {
+  const sessions = [];
+  const d = await boot({ hash: '#/new', sessions, routes: {
     '/browse': () => ({ path: 'C:/proj', parent: null, roots: [], recent: [], dirs: [], isGit: true }),
-    '/enhance': body => body ? { id: 'j', model: 'p/m' } : polls(),
-    '/quick-start': () => ({ id: 'n' }),
+    '/quick-start': () => { sessions.push(idle('n', { draft: true, cwd: 'C:/proj' })); return { id: 'n' }; },
+    '/enhance': body => body ? { id: 'j', model: 'p/m' } : { status: 'running', step: '' },
   } });
   await d.fire('click', { target: d.target({ '[data-go]': d.node('', { dataset: { go: 'C:/proj' } }) }) });
   const home = d.elements.get('homePrompt');
   home.value = 'fix it'; await d.fire('input', { target: home });
   await d.fire('click', { target: d.act('enhance') });
-  assert.deepEqual(d.posts('/enhance'), [{ path: 'C:/proj', text: 'fix it' }]);
-  assert.equal(d.location.hash, '#/new', 'no session is created to enhance');
-  assert.equal(home.readOnly, true);
-  await d.key('Enter', {}, home);
-  assert.deepEqual(d.posts('/quick-start'), [], 'Enter does not start the session while enhancing');
-  await d.runPolls();
-  assert.equal(home.value, 'Better');
-  assert.equal(home.readOnly, false);
-  d.toastAction('Undo');
-  assert.equal(home.value, 'fix it');
-  await d.key('Enter', {}, home);
-  assert.equal(d.posts('/quick-start')[0]?.prompt, 'fix it', 'the restored draft is what starts the session');
+  const [qs] = d.posts('/quick-start');
+  assert.equal(qs.draft, true);
+  assert.equal(qs.path, 'C:/proj');
+  assert.ok(!('prompt' in qs) && !('images' in qs), 'the draft session starts empty');
+  assert.ok(d.calls.some(c => c.url === '/api/commands?session=n'), 'OMP is started in the picked folder');
+  assert.equal(d.location.hash, '#/s/n');
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'n', text: 'fix it' }]);
+  assert.equal(d.input.value, 'fix it');
+  assert.equal(d.input.readOnly, true);
+});
+
+test('a failed draft-session start leaves New session untouched', async () => {
+  const d = await boot({ hash: '#/new', routes: {
+    '/browse': () => ({ path: 'C:/proj', parent: null, roots: [], recent: [], dirs: [], isGit: false }),
+    '/quick-start': () => { throw new Error('nope'); },
+  } });
+  await d.fire('click', { target: d.target({ '[data-go]': d.node('', { dataset: { go: 'C:/proj' } }) }) });
+  const home = d.elements.get('homePrompt');
+  home.value = 'fix it'; await d.fire('input', { target: home });
+  await d.fire('click', { target: d.act('enhance') });
+  assert.equal(d.location.hash, '#/new');
+  assert.deepEqual(d.posts('/enhance'), []);
+  assert.equal(d.toasts().filter(t => /\berr\b/.test(t.className)).length, 1);
+});
+
+test('leaving a draft for New session or another session discards it; its own Changes view does not', async () => {
+  const d = await boot({ hash: '#/s/d', sessions: [idle('d', { draft: true }), idle('b')] });
+  const discards = () => d.calls.filter(c => c.body?.type === 'discard').map(c => c.url);
+  await d.go('#/changes/s:d');
+  await d.go('#/s/d');
+  assert.deepEqual(discards(), []);
+  await d.go('#/new');
+  assert.deepEqual(discards(), ['/api/sessions/d/command']);
+  await d.go('#/s/b');
+  await d.go('#/new');
+  assert.equal(discards().length, 1, 'normal sessions are never discarded');
+});
+
+for (const outcome of ['fails', 'succeeds']) test(`a send in flight defers discard; it is sent once the send ${outcome}`, async () => {
+  const pending = deferred();
+  const d = await boot({ hash: '#/s/d', sessions: [idle('d', { draft: true })], routes: {
+    '/sessions/d/command': body => body.type === 'prompt' ? pending.promise : { discarded: true },
+  } });
+  const discards = () => d.calls.filter(c => c.body?.type === 'discard').length;
+  await d.type('hi');
+  await d.key('Enter');
+  await d.go('#/new');
+  assert.equal(discards(), 0, 'no discard while the send is in flight');
+  if (outcome === 'fails') pending.reject(new Error('down')); else pending.resolve({ id: 'd', status: 'review' });
+  for (let i = 0; i < 16; i++) await new Promise(setImmediate);
+  assert.equal(discards(), 1, 'the server decides once the send settled');
 });
