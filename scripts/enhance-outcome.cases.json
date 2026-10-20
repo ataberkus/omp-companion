@@ -1,0 +1,43 @@
+{
+ "repos": {
+  "QuantumNetLib": { "test": "dotnet test QuantumNetLib.sln 2>&1" },
+  "LibraryManagementSystem": { "test": "dotnet test LibraryManagementSystem.sln 2>&1" },
+  "apex": { "test": "npm test 2>&1", "copy": ["node_modules"], "ignore": ["tests/.checkpoint-fixture-*"] },
+  "kulup-video": { "test": "npm test 2>&1" },
+  "Loamrift": { "test": "for f in $(git ls-files '*.js'); do node --check \"$f\" || exit 1; done; echo syntax ok" }
+ },
+ "cases": [
+  { "id": "QuantumNetLib-2", "checks": [ { "name": "LerpClamped clamps t to 0..1, Lerp unchanged", "cmd": "dotnet test QuantumNetLib.Tests/QuantumNetLib.Tests.csproj --filter FullyQualifiedName~OutcomeHidden 2>&1",
+    "files": { "QuantumNetLib.Tests/OutcomeHiddenTests.cs": "using Xunit;\nnamespace QuantumNetLib.Tests\n{\n    public class OutcomeHiddenTests\n    {\n        [Fact]\n        public void LerpClamped_ClampsT()\n        {\n            Assert.Equal(0f, QMath.LerpClamped(0f, 10f, -1f), 4);\n            Assert.Equal(10f, QMath.LerpClamped(0f, 10f, 2f), 4);\n            Assert.Equal(2.5f, QMath.LerpClamped(0f, 10f, 0.25f), 4);\n            Assert.Equal(15f, QMath.Lerp(0f, 10f, 1.5f), 4);\n        }\n    }\n}\n" } } ] },
+  { "id": "QuantumNetLib-4" },
+  { "id": "QuantumNetLib-5", "checks": [ { "name": "NextBool(float) 0/1 return without drawing, range check still throws", "cmd": "dotnet test QuantumNetLib.Tests/QuantumNetLib.Tests.csproj --filter FullyQualifiedName~OutcomeHidden 2>&1",
+    "files": { "QuantumNetLib.Tests/OutcomeHiddenTests.cs": "using Xunit;\nnamespace QuantumNetLib.Tests\n{\n    public class OutcomeHiddenTests\n    {\n        [Fact]\n        public void NextBool_FloatEdges_SkipTheGenerator()\n        {\n            var a = new QRandom(42L);\n            var b = new QRandom(42L);\n            Assert.False(a.NextBool(0f));\n            Assert.Equal(b.Next(), a.Next());\n            Assert.True(a.NextBool(1f));\n            Assert.Equal(b.Next(), a.Next());\n            Assert.Throws<QException>(() => a.NextBool(2f));\n        }\n    }\n}\n" } } ] },
+  { "id": "QuantumNetLib-6", "checks": [ { "name": "Vec3 zero vector normalizes to zero, others to length 1", "cmd": "dotnet test QuantumNetLib.Tests/QuantumNetLib.Tests.csproj --filter FullyQualifiedName~OutcomeHidden 2>&1",
+    "files": { "QuantumNetLib.Tests/OutcomeHiddenTests.cs": "using Xunit;\nnamespace QuantumNetLib.Tests\n{\n    public class OutcomeHiddenTests\n    {\n        [Fact]\n        public void Vec3_NormalizedZero()\n        {\n            var z = new Vec3(0f, 0f, 0f).Normalized;\n            Assert.Equal(0f, z.X);\n            Assert.Equal(0f, z.Y);\n            Assert.Equal(0f, z.Z);\n            Assert.Equal(1f, new Vec3(0f, 3f, 4f).Normalized.Length, 4);\n        }\n    }\n}\n" } } ] },
+  { "id": "LibraryManagementSystem-1" },
+  { "id": "LibraryManagementSystem-2", "checks": [ { "name": "DailyFineRate const replaces the literal, solution builds", "cmd": "f=LibraryManagementSystem/Data/LendingRepository.cs; grep -Eq 'const decimal DailyFineRate *= *0?\\.50?m' \"$f\" || { echo 'no DailyFineRate const'; exit 1; }; [ \"$(grep -c '0\\.50m' \"$f\")\" -le 1 ] || { echo 'literal still used'; exit 1; }; dotnet build LibraryManagementSystem.sln -v q 2>&1" } ] },
+  { "id": "LibraryManagementSystem-3", "checks": [ { "name": "Borrow validation message translated, solution builds", "cmd": "f=LibraryManagementSystem/Forms/LendingForm.cs; ! grep -q 'Please select a book and a member.' \"$f\" || { echo 'English message still there'; exit 1; }; dotnet build LibraryManagementSystem.sln -v q 2>&1" } ] },
+  { "id": "LibraryManagementSystem-4", "note": "Resolves to option 2: parameterise all queries in LendingRepository.cs and update the mocks in LendingRepositoryTests to the parameterised calls; 'skip the migration part' means do NOT do the BookRepository/AuthorRepository migration pass from option 3 (and not options 1 or 4). LendingRepositoryTests already fail before any change (they need a database or non-virtual members are mocked), so making them pass is not part of the request.", "checks": [ { "name": "solution builds", "cmd": "dotnet build LibraryManagementSystem.sln -v q 2>&1" } ] },
+  { "id": "apex-2", "checks": [ { "name": "the enhance test file has a new case and passes", "cmd": "! git diff --quiet HEAD -- tests/dashboard-enhance.test.mjs || { echo 'test file unchanged'; exit 1; }; node --test tests/dashboard-enhance.test.mjs 2>&1" } ] },
+  { "id": "apex-4" },
+  { "id": "kulup-video-4" },
+  { "id": "kulup-video-6" },
+  { "id": "Loamrift-2" },
+  { "id": "Loamrift-6", "checks": [ { "name": "saplingDrop chance is .2, the .4 gate in play.js untouched", "cmd": "grep -E '^function saplingDrop' js/game/survival.js | grep -Eq 'random\\(\\) *< *0?\\.2[^0-9]' || { echo 'saplingDrop chance not .2'; exit 1; }; git diff --quiet HEAD -- js/game/play.js || { echo 'play.js changed'; exit 1; }" } ] },
+  { "id": "QuantumNetLib-1" },
+  { "id": "QuantumNetLib-3", "checks": [ { "name": "no files changed", "cmd": "out=$(git status --porcelain -- . ':(exclude)**/bin/**' ':(exclude)**/obj/**' ':(exclude)**/TestResults/**'); [ -z \"$out\" ] || { echo \"$out\"; exit 1; }" } ] },
+  { "id": "LibraryManagementSystem-5", "checks": [ { "name": "solution builds", "cmd": "dotnet build LibraryManagementSystem.sln -v q 2>&1" } ] },
+  { "id": "LibraryManagementSystem-6", "checks": [ { "name": "no files changed", "cmd": "out=$(git status --porcelain -- . ':(exclude)**/bin/**' ':(exclude)**/obj/**' ':(exclude)**/TestResults/**'); [ -z \"$out\" ] || { echo \"$out\"; exit 1; }" } ] },
+  { "id": "apex-1" },
+  { "id": "apex-3" },
+  { "id": "apex-6", "checks": [ { "name": "models.mjs untouched, preflight test file has a new case and passes", "cmd": "git diff --quiet HEAD -- extensions/apex-core/models.mjs || { echo 'models.mjs changed'; exit 1; }; ! git diff --quiet HEAD -- tests/preflight.test.mjs || { echo 'preflight test unchanged'; exit 1; }; node --test tests/preflight.test.mjs 2>&1" } ] },
+  { "id": "kulup-video-1" },
+  { "id": "kulup-video-2", "checks": [ { "name": "no files changed", "cmd": "out=$(git status --porcelain); [ -z \"$out\" ] || { echo \"$out\"; exit 1; }" } ] },
+  { "id": "kulup-video-3" },
+  { "id": "kulup-video-5" },
+  { "id": "Loamrift-1" },
+  { "id": "Loamrift-3", "checks": [ { "name": "hungry toast is a threshold, string kept", "cmd": "! grep -q 'player.food===6&&' js/game/survival.js || { echo 'still food===6'; exit 1; }; grep -q 'You are getting hungry' js/game/survival.js || { echo 'toast text lost'; exit 1; }" } ] },
+  { "id": "Loamrift-4", "checks": [ { "name": "regenFactor untouched", "cmd": "[ \"$(git show HEAD:js/game/survival.js | grep -E 'function regenFactor')\" = \"$(grep -E 'function regenFactor' js/game/survival.js)\" ] || { echo 'regenFactor changed'; exit 1; }" } ] },
+  { "id": "Loamrift-5", "checks": [ { "name": "no files changed", "cmd": "out=$(git status --porcelain); [ -z \"$out\" ] || { echo \"$out\"; exit 1; }" } ] }
+ ]
+}
