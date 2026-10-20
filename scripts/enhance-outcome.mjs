@@ -92,9 +92,10 @@ async function makeWorkspace(srcDir, dest, copyDirs) {
  for (const f of await fs.readdir(dest)) if (/^\.env(\..+)?$/.test(f) && f !== '.env.example') await fs.rm(path.join(dest, f), { force: true });
 }
 async function diffOf(dir, ignore = []) {
- const skip = ['--', '.', ':(exclude)**/bin/**', ':(exclude)**/obj/**', ':(exclude)node_modules/**', ...ignore.map(g => `:(exclude)${g}`)];
- // Leftover nested repos without a commit (apex's checkpoint fixtures) make a plain `git add -A` fail.
- await exec('git', ['add', '-A', ...skip], { cwd: dir, maxBuffer: 64 << 20 });
+ const leftovers = ignore.map(g => `:(exclude)${g}`), skip = ['--', '.', ':(exclude)**/bin/**', ':(exclude)**/obj/**', ':(exclude)node_modules/**', ...leftovers];
+ // Leftover nested repos without a commit (apex's checkpoint fixtures) make a plain `git add -A` fail; excluding a
+ // gitignored path (node_modules, bin) makes it fail too, so `add` only skips the leftovers and `diff` the rest.
+ await exec('git', ['add', '-A', '--', '.', ...leftovers], { cwd: dir, maxBuffer: 64 << 20 });
  const stat = (await exec('git', ['diff', '--cached', '--stat', 'HEAD', ...skip], { cwd: dir, maxBuffer: 64 << 20 })).stdout;
  const diff = (await exec('git', ['diff', '--cached', 'HEAD', ...skip], { cwd: dir, maxBuffer: 64 << 20 })).stdout;
  await exec('git', ['reset', '-q'], { cwd: dir });
@@ -225,7 +226,9 @@ async function main() {
  const ompVersion = (await exec(OMP, [...OMP_PREFIX, '--version']).then(r => r.stdout.trim(), () => 'omp ?'));
  const prevs = []; for (const d of opt.reuse) prevs.push(JSON.parse(await fs.readFile(path.join(path.resolve(d), 'results.json'), 'utf8')));
  const data = { started: new Date().toISOString(), ompVersion, agentModel: opt.model || null, thinking: opt.thinking || null, samples: opt.samples, variants: opt.variants, cases, results: {}, baselines: {} };
- const save = () => fs.writeFile(path.join(outDir, 'results.json'), JSON.stringify(data, null, 1));
+ // Saves are serialized and atomic (temp file + rename): a killed run keeps its last complete results.json.
+ let saving = Promise.resolve();
+ const save = () => (saving = saving.then(async () => { const f = path.join(outDir, 'results.json'); await fs.writeFile(f + '.tmp', JSON.stringify(data, null, 1)); await fs.rename(f + '.tmp', f); }));
  const before = {}; for (const r of new Set(cases.map(c => c.repo))) before[r] = existsSync(path.join(repoDir(r), '.git')) ? (await exec('git', ['status', '--porcelain'], { cwd: repoDir(r) })).stdout : null;
 
  // Each repo's test command on an untouched workspace, once.
