@@ -4,6 +4,9 @@ rem Variables set here (OMP_WEB_HOST, OMP_WEB_RESTART_EXIT) stay in this script,
 setlocal
 cd /d "%~dp0"
 rem Sessions run OMP's SDK (the npm package @oh-my-pi/pi-coding-agent) inside the companion, on Bun.
+rem Started from Explorer, PATH can miss the user's entries (Windows drops an oversized user Path): try the default install folders.
+where bun >nul 2>nul || if exist "%USERPROFILE%\.bun\bin\bun.exe" set "PATH=%PATH%;%USERPROFILE%\.bun\bin"
+where omp >nul 2>nul || if exist "%LOCALAPPDATA%\omp\omp.exe" set "PATH=%PATH%;%LOCALAPPDATA%\omp"
 where bun >nul 2>nul || (echo Bun was not found. Install it from https://bun.sh and try again. & pause & exit /b 1)
 if not exist node_modules\@oh-my-pi\pi-coding-agent\package.json (
   where npm >nul 2>nul || (echo OMP's SDK is not installed and npm was not found. Install Node.js from https://nodejs.org, then run npm ci here. & pause & exit /b 1)

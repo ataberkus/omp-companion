@@ -2,6 +2,7 @@ import { createServer, STATUS_CODES } from 'node:http';
 import { connect } from 'node:net';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,18 @@ import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 import { ompHost } from './omp.mjs';
 const exec=promisify(execFile);
+// Apps started from Explorer can get a PATH without the user's entries (Windows drops an oversized user Path), so the
+// default install folders of OMP and Bun are appended when they exist and are missing: `omp` and `bun` still resolve.
+export function addInstallDirs(env=process.env,{home=os.homedir(),localAppData=env.LOCALAPPDATA,exists=existsSync}={}){
+ const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';
+ const dirs=String(env[key]||'').split(path.delimiter).filter(Boolean);
+ const norm=d=>path.resolve(d).replace(/[\\/]+$/,'').toLowerCase();
+ const have=new Set(dirs.map(norm));
+ const add=[localAppData&&path.join(localAppData,'omp'),path.join(home,'.bun','bin')].filter(d=>d&&!have.has(norm(d))&&exists(d));
+ if(add.length)env[key]=[...dirs,...add].join(path.delimiter);
+ return add;
+}
+addInstallDirs();
 const now=()=>new Date().toISOString();
 // One work interval spans steering, questions, retries and queued continuations.
 const startWork=s=>{if(!s.workStartedAt||s.workFinishedAt){s.workStartedAt=now();delete s.workFinishedAt;}};
