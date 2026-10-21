@@ -9,7 +9,7 @@ import { execFile, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
-import { RpcProcess } from './rpc.mjs';
+import { ompHost } from './omp.mjs';
 const exec=promisify(execFile);
 const now=()=>new Date().toISOString();
 // One work interval spans steering, questions, retries and queued continuations.
@@ -913,10 +913,12 @@ export async function createCompanion(options={}){
  const publicHosts=(options.publicHosts||String(process.env.OMP_WEB_PUBLIC_HOSTS||'').split(',')).map(h=>h.trim().toLowerCase()).filter(Boolean);
  for(const h of publicHosts)if(!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(h))throw new Error(`OMP_WEB_PUBLIC_HOSTS: "${h}" is not a host name (give names like pc.tailnet.ts.net, without scheme or port).`);
  const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
- // OMP_BIN may point at the native executable or a source checkout's cli.ts.
+ // OMP_BIN may point at the native executable or a source checkout's cli.ts. Sessions run OMP in-process (its SDK: the
+ // checkout's, or the bundled @oh-my-pi/pi-coding-agent); the CLI still runs updates, usage, enhance and the Tools page.
  const ompEntry=options.ompCommand||process.env.OMP_BIN||'omp',ompSource=/\.ts$/i.test(ompEntry);
  const ompExecutable=ompSource?'bun':ompEntry,ompPrefix=ompSource?[path.resolve(ompEntry)]:[];
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
+ const omp=options.omp||ompHost(ompEntry);omp.warm?.();
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceSystem=path.join(dataDir,'enhance-system.md');
  await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceSystem,ENHANCE_SYSTEM);
@@ -1045,43 +1047,36 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},{name:'btw',description:'Ask a side question about this session; the answer stays out of the conversation',aliases:[],hint:'<question>',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage'&&c.name!=='btw').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}))];
  const commandProbes=new Set();
  async function discoverCommands(dir){
-  let list;
-  const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...(options.ompArgs??['--mode','rpc-ui','--no-session'])],dir,f=>{if(f.type==='available_commands_update'&&Array.isArray(f.commands))list=slashList(f.commands);},()=>{});
-  commandProbes.add(rpc);
+  const probe=omp.start({cwd:dir,args:['--no-session'],onEvent:()=>{},onExit:()=>{}});
+  commandProbes.add(probe);
   try{
-   // Startup publishes the catalog before handling get_state; no prompt or saved session is needed.
-   await rpc.send({type:'get_state'});
-   if(!list)throw error('OMP did not provide its slash commands. Update OMP and try again.',502);
-   return list;
-  }finally{await stopProbe(rpc);}
+   const list=await probe.commands();
+   if(!Array.isArray(list))throw error('OMP did not provide its slash commands. Update OMP and try again.',502);
+   return slashList(list);
+  }finally{await stopProbe(probe);}
  }
- async function stopProbe(rpc){
-  const stopped=new Promise(resolve=>rpc.child.once('close',resolve));
-  if(!rpc.stopping)rpc.kill();
-  if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;
-  commandProbes.delete(rpc);
- }
+ async function stopProbe(probe){await probe.kill();commandProbes.delete(probe);}
  // `/session pin` with no account lists "N. <label>[ (active)]" lines under "OAuth accounts for <provider>:".
  const accountLabels=out=>/^OAuth accounts for /.test(out)?out.split(/\r?\n/).map(l=>l.match(/^\d+\. (.+?)(?: \(active\))?$/)?.[1]).filter(Boolean):[];
- // OMP has no RPC that lists stored accounts, so a throwaway session selects one model per logged-in provider and reads
- // `/session pin`. RPC set_model does not change OMP's saved default model.
+ // OMP has no call that lists stored accounts, so a throwaway session selects one model per logged-in provider and reads
+ // `/session pin`. Its setModel does not change OMP's saved default model.
  async function probeAccounts(){
   const out=[];
-  const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...(options.ompArgs??['--mode','rpc-ui','--no-session'])],os.homedir(),f=>{if(f.type==='command_output')out.push(typeof f.text==='string'?f.text:contentText(f.content));},()=>{});
-  commandProbes.add(rpc);
+  const probe=omp.start({cwd:os.homedir(),args:['--no-session'],onEvent:f=>{if(f.type==='command_output')out.push(typeof f.text==='string'?f.text:contentText(f.content));},onExit:()=>{}});
+  commandProbes.add(probe);
   try{
-   const providers=(await rpc.send({type:'get_login_providers'}))?.providers;
-   const models=(await rpc.send({type:'get_available_models'},60000))?.models;
+   const providers=(await probe.loginProviders())?.providers;
+   const models=(await probe.availableModels())?.models;
    const list=[];
    for(const p of Array.isArray(providers)?providers.filter(p=>p.authenticated):[]){
     const m=Array.isArray(models)&&models.find(m=>m.provider===p.id);if(!m)continue;
-    try{await rpc.send({type:'set_model',provider:m.provider,modelId:m.id});}catch{continue;}
-    out.length=0;await rpc.send({type:'prompt',message:'/session pin'});
+    try{await probe.setModel(m.provider,m.id);}catch{continue;}
+    out.length=0;await probe.prompt({message:'/session pin'});
     const accounts=accountLabels(out.join('\n').trim());
     if(accounts.length)list.push({id:String(p.id),name:String(p.name||p.id),accounts});
    }
    return list;
-  }finally{await stopProbe(rpc);}
+  }finally{await stopProbe(probe);}
  }
  // A probe takes seconds (an OMP start plus a model switch per provider), so the dialog is served from this cache,
  // filled at startup and refreshed in the background on every read. A login bumps the generation: a probe that
@@ -1101,7 +1096,6 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  }
  const accountsChanged=()=>{accountGen++;accountCache=undefined;refreshAccounts().catch(()=>{});};
  // Session toggles the dashboard can change; values are validated in command().
- const PREFS={fast:v=>({type:'set_fast_mode',enabled:v}),autoCompaction:v=>({type:'set_auto_compaction',enabled:v}),autoRetry:v=>({type:'set_auto_retry',enabled:v}),steeringMode:v=>({type:'set_steering_mode',mode:v}),followUpMode:v=>({type:'set_follow_up_mode',mode:v}),interruptMode:v=>({type:'set_interrupt_mode',mode:v})};
  const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],followUpMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
  // Auto-approve: a run that OMP stopped on a provider 429 resumes once the provider's retry-after-ms wait is over, by
  // resending the last user message like the dashboard's Retry. The due time is persisted (rateLimitResume), so a
@@ -1153,17 +1147,13 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist(s);}).finally(checkAutoShutdown);
  }
  function event(s,f){
-  // Ghost-text predictions arrive per keystroke; they are not session activity.
-  if(f.type==='response'&&(f.command==='predict_word'||f.command==='predict_word_feedback'))return;
   // /btw side questions stream outside the transcript: kept on the session for the dashboard only (not persisted).
   if(f.type==='btw_record'&&f.record?.id){const r=btwView(f.record);s._btw=[r,...(s._btw||[]).filter(x=>x.id!==r.id)].slice(0,20);return;}
   if(f.type==='btw_delta'){const r=s._btw?.find(x=>x.id===f.recordId);if(r&&typeof f.delta==='string'){const t=r.followUps.at(-1)||r;t.answer=(t.answer+f.delta).slice(-100000);}return;}
-  // The 4 s background refresh (get_state/get_subagents) is not an update: bumping on it made every idle live session
-  // dirty, so it was saved again every refresh.
-  if(!(f.type==='response'&&(f.command==='get_state'||f.command==='get_subagents')))s.updatedAt=now();
+  s.updatedAt=now();
   const status=s.status;
   // Advisor toggles print command_output, which is not progress on the turn itself.
-  if(f.type!=='response'&&f.type!=='command_output')s.lastActivityAt=now();
+  if(f.type!=='command_output')s.lastActivityAt=now();
   // A run whose last message never ended (abort, crash) must not stream the next thought or reply into the old one.
   if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;delete s._thinkId;delete s._streamId;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
@@ -1187,7 +1177,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   }
   // Once the prompt is in OMP's history (first assistant message of a run), ask OMP to title the session; at most once per run.
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
-  if(f.type==='message_start'&&f.message?.role==='assistant'&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;void runners.get(s.id)?.send({type:'prompt',message:'/rename'}).catch(()=>{delete s._titling;});}
+  if(f.type==='message_start'&&f.message?.role==='assistant'&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;const runner=runners.get(s.id);if(runner)void runner.prompt({message:'/rename'}).catch(()=>{delete s._titling;});}
   if(f.type==='message_end'){
    const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}}
@@ -1229,7 +1219,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    else if(f.method==='ask'){
     const questions=Array.isArray(f.questions)?f.questions.map(askQuestion):[];
     if(questions.length&&!questions.includes(null)){const q={id:f.id,method:'ask',title:questions.length>1?`${questions.length} questions`:questions[0].question,questions};(s.uiRequests??=[]).push(q);attention(s,'question',q.title);}
-    else void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
+    else{try{runners.get(s.id)?.answer(f.id,{cancelled:true});}catch{}}
    }else if(['select','confirm','input','editor'].includes(f.method)){
     const approval=approvalPrompt(f);
     if(approval&&s.autoApprove)void autoApprove(s,runners.get(s.id),f.id,approval).catch(e=>notice(s,'error',`Auto-approve failed: ${e.message}`));
@@ -1249,7 +1239,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    else if(f.method==='set_editor_text')s._editorText={id:f.id,text:String(f.text??'').slice(0,200000)};
    // Login flows: the browser can't be opened for the user without a click, so the dashboard shows the link.
    else if(f.method==='open_url'){const url=[f.launchUrl,f.url].find(u=>typeof u==='string'&&/^https?:\/\//i.test(u));if(url)s._openUrl={id:f.id,url:url.slice(0,4000),instructions:String(f.instructions||'').slice(0,1000)};}
-   else if(f.method!=='setTitle')void runners.get(s.id)?.reply({type:'extension_ui_response',id:f.id,cancelled:true}).catch(()=>{});
+   else if(f.method!=='setTitle'){try{runners.get(s.id)?.answer(f.id,{cancelled:true});}catch{}}
   }
   if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'){if(out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;const images=toolImages(f.partialResult?.content);if(images.length)msg.tool.images=stashImages(images);}}
   if(f.type==='extension_error')notice(s,'error',`Extension ${path.basename(String(f.extensionPath||'extension'))} failed${f.event?` in ${f.event}`:''}: ${f.error}`);
@@ -1257,7 +1247,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(f.type==='auto_retry_start'&&s.status!=='paused'&&s.status!=='done'){s.status='running';s.error=undefined;s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};}
   if(f.type==='auto_retry_end'){delete s._retry;if(!f.success)append(s,'system',`Retries stopped after attempt ${f.attempt}${f.finalError?`: ${f.finalError}`:'.'}`);}
   if(f.type==='retry_fallback_applied')append(s,'system',`Switched from ${f.from} to fallback model ${f.to}${f.reason?` (${f.reason})`:''}.`);
-  if(f.type==='model_changed'){const rpc=runners.get(s.id);if(rpc)void refresh(s,rpc);}
+  if(f.type==='model_changed'){const runner=runners.get(s.id);if(runner)void refresh(s,runner);}
   if(f.type==='thinking_level_changed'&&f.thinkingLevel)s.thinking=f.thinkingLevel;
   if(f.type==='ttsr_triggered'&&Array.isArray(f.rules)&&f.rules.length)append(s,'system',`Rule applied: ${f.rules.map(r=>r?.name||r?.id||'rule').join(', ')}`);
   if(f.type==='irc_message'){const v=contentText(f.message?.content);if(v)append(s,'system',v);}
@@ -1267,8 +1257,8 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(f.type==='plan_review')s._planReview=f.proposal;
   if(f.type==='plan_review_clear'&&s._planReview?.id===f.proposalId)delete s._planReview;
   if(f.type==='available_commands_update'&&Array.isArray(f.commands))commands.set(s.id,slashList(f.commands));
-  if(f.type==='response'&&f.success&&f.command==='prompt'&&f.data?.agentInvoked===true)s._promptId=f.id;
-  if(f.type==='response'&&!f.success&&f.id===s._promptId){s.error=f.error;if(['prompt','steer','follow_up','abort_and_prompt'].includes(f.command)){s.status='error';delete s._interrupt;}}
+  // A prompt OMP accepted and then failed (say, the provider rejected it).
+  if(f.type==='prompt_error'&&f.id===s._promptId){s.error=f.error;s.status='error';delete s._interrupt;}
   // Streaming deltas, tool output and the like arrive many times a second: batched lazily unless the status moved.
   scheduleSave(s,s.status===status);
  }
@@ -1281,9 +1271,9 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(f.method==='confirm'&&title==='Allow foreground computer control?')return {reply:{confirmed:true},text:`${title}\n${String(f.message||'')}`};
  }
  // Removed from the pending list before replying, so a concurrent answer can't reply to the same dialog twice.
- async function autoApprove(s,rpc,id,approval){
+ async function autoApprove(s,runner,id,approval){
   s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==id);
-  await rpc.reply({type:'extension_ui_response',id,...approval.reply});
+  runner.answer(id,approval.reply);
   append(s,'system',`Auto-approved: ${approval.text.slice(0,4000)}`);scheduleSave(s);
  }
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
@@ -1299,33 +1289,32 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
-   const args=options.ompArgs??(s.native?['--mode','rpc-ui',...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--mode','rpc-ui','--session-dir',sessionDir,'--continue',...pick]);
-   const rpc=new RpcProcess(ompExecutable,[...ompPrefix,...args],s.cwd,f=>{if(!closing&&runners.get(s.id)===rpc)event(s,f);},(e,stopping)=>{if(runners.get(s.id)!==rpc)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}});
-   runners.set(s.id,rpc);
-   // OMP 18.10+ sends every ask question in one dialog, so multi-select choices stay visible until submitted; older builds reject the command and keep one select per toggle.
-   try{await rpc.ready;if(!s.autoTitle)await rpc.send({type:'set_session_name',name:s.title});await rpc.send({type:'set_subagent_subscription',level:'events'});await rpc.send({type:'set_ask_dialog',enabled:true}).catch(()=>{});if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await rpc.send({type:'set_model',provider:s.provider,modelId:s.model});
-    // Per-session toggles live in the OMP process, so a restarted runner gets them back.
-    for(const [key,value] of Object.entries(s.prefs||{}))await rpc.send(PREFS[key](value)).catch(e=>notice(s,'warning',e.message));
-    await refresh(s,rpc);return rpc;}catch(e){runners.delete(s.id);rpc.kill();throw e;}
+   const args=s.native?[...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--session-dir',sessionDir,'--continue',...pick];
+   const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
+   runners.set(s.id,runner);
+   try{await runner.ready;if(!s.autoTitle)await runner.setSessionName(s.title);if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await runner.setModel(s.provider,s.model);
+    // Per-session toggles live in the OMP session, so a restarted runner gets them back.
+    for(const [key,value] of Object.entries(s.prefs||{}))await runner.setPref(key,value).catch(e=>notice(s,'warning',e.message));
+    await refresh(s,runner);return runner;}catch(e){runners.delete(s.id);runner.kill();throw e;}
   })();launches.set(s.id,promise);try{return await promise;}finally{launches.delete(s.id);}
  }
- // The status reply can arrive after send() resolves, so stay silent until it shows up (or a few seconds pass).
- async function advisorStatus(s,rpc){s._silentAdvisorUntil=Date.now()+5000;try{await rpc.send({type:'prompt',message:'/advisor status'});}catch{s._silentAdvisorUntil=0;}}
- // Runs a local slash command and returns its output instead of adding it to the chat. OMP writes a command's
- // command_output frames before its response, so they all land while the capture is open.
- async function slashOutput(s,rpc,message){const out=s._capture=[];try{await rpc.send({type:'prompt',message});}finally{if(s._capture===out)delete s._capture;}return out.join('\n').trim();}
+ // The status reply can arrive after the prompt resolves, so stay silent until it shows up (or a few seconds pass).
+ async function advisorStatus(s,runner){s._silentAdvisorUntil=Date.now()+5000;try{await runner.prompt({message:'/advisor status'});}catch{s._silentAdvisorUntil=0;}}
+ // Runs a local slash command and returns its output instead of adding it to the chat. OMP emits a command's
+ // command_output events before the prompt resolves, so they all land while the capture is open.
+ async function slashOutput(s,runner,message){const out=s._capture=[];try{await runner.prompt({message});}finally{if(s._capture===out)delete s._capture;}return out.join('\n').trim();}
  // OMP rotates between a provider's OAuth accounts unless the session is pinned (/session pin applies to the current
  // model's provider and survives restarts of that session). Pins the account the user chose, once per runner and choice.
- async function applyAccount(s,rpc){
+ async function applyAccount(s,runner){
   const provider=s.provider,label=store.accountChoices[provider],key=provider+'\n'+label;
-  if(!provider||!label||rpc.account===key)return;
-  rpc.account=key;
-  const out=await slashOutput(s,rpc,`/session pin ${label}`).catch(e=>e.message);
+  if(!provider||!label||runner.account===key)return;
+  runner.account=key;
+  const out=await slashOutput(s,runner,`/session pin ${label}`).catch(e=>e.message);
   if(out.startsWith('Pinned '))return;
-  if(/streaming/i.test(out)){delete rpc.account;return;}
+  if(/streaming/i.test(out)){delete runner.account;return;}
   notice(s,'warning',`Could not switch ${provider} to ${label}: ${out||'OMP did not answer.'}`);
  }
- async function refresh(s,rpc){const promptId=s._promptId,run=s._run;try{const state=await rpc.send({type:'get_state'});
+ async function refresh(s,runner){const promptId=s._promptId,run=s._run;try{const state=await runner.state();
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,...(state.followUpMode?{followUp:state.followUpMode}:{}),interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
   if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);s._skillImages=state.skillImages===true;}
@@ -1334,9 +1323,9 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   // Likewise a streaming OMP is working whatever s.status says: a run reported aborted or failed can keep going
   // (e.g. Stop & send's own prompt_result reporting the interrupted run), and OMP rejects prompts while it streams.
   if(state?.isStreaming===true&&!['running','queued','done'].includes(s.status)){startWork(s);s.status='running';s.error=undefined;delete s._settled;}
-  if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,rpc);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await rpc.send({type:'get_subagents'});const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);
-  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,rpc);
-  if(state?.isSettled===true&&needsBackfill(s))await backfillEntries(s,async()=>{const r=await rpc.send({type:'get_entries'});return {entries:r?.entries,leafId:r?.leafId};});}catch{}}
+  if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,runner);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await runner.subagents();const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);
+  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,runner);
+  if(state?.isSettled===true&&needsBackfill(s))await backfillEntries(s,async()=>{const r=await runner.entries();return {entries:r?.entries,leafId:r?.leafId};});}catch{}}
  // A prompt recorded without OMP's entry ID: sent before the companion bound prompts, or a binding that failed.
  // Slash commands and steers OMP hasn't read are not session entries.
  const unbound=m=>m.role==='user'&&!m.entryId&&!m.ompAt&&!m.steer&&!/^\/\S/.test(m.text);
@@ -1366,15 +1355,15 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  }
  // Gives prompts typed in this panel their OMP entry ID once OMP has stored them (it is settled), matched by the exact
  // timestamp OMP echoed in message_start. Reads only entries newer than the last pass; one attempt per message.
- async function bindEntries(s,rpc){
-  let r;try{r=await rpc.send({type:'get_entries',...(s._entryCursor?{since:s._entryCursor}:{})});}
-  catch{if(s._entryCursor){delete s._entryCursor;return bindEntries(s,rpc);}for(const m of s.messages)delete m.ompAt;return;}
+ async function bindEntries(s,runner){
+  let r;try{r=await runner.entries(s._entryCursor);}
+  catch{if(s._entryCursor){delete s._entryCursor;return bindEntries(s,runner);}for(const m of s.messages)delete m.ompAt;return;}
   const entries=Array.isArray(r?.entries)?r.entries:[];if(entries.length)s._entryCursor=String(entries.at(-1).id);
   const byTime=new Map();for(const e of entries){const p=entryPrompt(e),t=e.message?.timestamp;if(p&&typeof t==='number')byTime.set(t,byTime.has(t)?null:p.entryId);}
   for(const m of s.messages)if(m.ompAt){const id=byTime.get(m.ompAt);if(id)m.entryId=id;delete m.ompAt;}
  }
  // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
- async function reload(s,rpc){await refresh(s,rpc);if(s.sessionFile)s.messages=await importMessages(s.sessionFile,400,stashImages).catch(()=>s.messages);delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
+ async function reload(s,runner){await refresh(s,runner);if(s.sessionFile)s.messages=await importMessages(s.sessionFile,400,stashImages).catch(()=>s.messages);delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  // `omp usage` for every logged-in provider (session's first), parsed once for both the /usage chat snapshot and GET /api/usage.
  async function providerUsage(s){
   const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');
@@ -1392,12 +1381,12 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(body.type==='discard')return discardDraft(s);
   // Composer ghost text (OMP's spelling.autocomplete engine). Never starts OMP; any failure means no suggestion.
   if(body.type==='predict_word'||body.type==='predict_word_feedback'){
-   const rpc=runners.get(s.id),draft=body.text,cursor=body.cursor;
+   const runner=runners.get(s.id),draft=body.text,cursor=body.cursor;
    if(typeof draft!=='string'||draft.length>200000||!Number.isInteger(cursor)||cursor<0||cursor>draft.length)throw error('Invalid draft.');
-   if(!rpc?.alive)return {suffix:null};
-   if(body.type==='predict_word_feedback'){if(typeof body.suggestion!=='string'||!body.suggestion||body.suggestion.length>200)throw error('Invalid suggestion.');void rpc.send({type:body.type,text:draft,cursor,suggestion:body.suggestion,accepted:body.accepted===true}).catch(()=>{});return {};}
+   if(!runner?.alive)return {suffix:null};
+   if(body.type==='predict_word_feedback'){if(typeof body.suggestion!=='string'||!body.suggestion||body.suggestion.length>200)throw error('Invalid suggestion.');void runner.predictFeedback(draft,cursor,body.suggestion,body.accepted===true).catch(()=>{});return {};}
    // The first request can wait minutes while OMP's prediction daemon loads its engine.
-   try{const r=await rpc.send({type:'predict_word',text:draft,cursor},155000);return {suffix:typeof r?.suffix==='string'&&r.suffix?r.suffix:null};}catch{return {suffix:null};}
+   try{const r=await runner.predictWord(draft,cursor);return {suffix:typeof r?.suffix==='string'&&r.suffix?r.suffix:null};}catch{return {suffix:null};}
   }
   // /btw typed in the composer goes to OMP's side-question channel instead of the transcript, running or not.
   if(['prompt','steer','follow_up','interrupt'].includes(body.type)&&typeof body.message==='string'&&/^\/btw(\s|$)/.test(body.message.trimStart())){
@@ -1406,22 +1395,22 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   }
   if(body.type==='btw'){
    const question=text(body.question,'Side question',20000),recordId=body.recordId===undefined?undefined:text(body.recordId,'Topic',200);
-   const rpc=await start(s);let r;
-   try{r=await rpc.send({type:'btw',question,...(recordId?{recordId}:{})},60000);}catch(e){throw error(e.message,/still running/.test(e.message)?409:400);}
+   const runner=await start(s);let r;
+   try{r=await runner.btw(question,recordId);}catch(e){throw error(e.message,/still running/.test(e.message)?409:400);}
    // The btw_record frame normally lands first; keep it, since answer deltas may already have been added to it.
    if(r?.record?.id&&!s._btw?.some(x=>x.id===r.record.id))s._btw=[btwView(r.record),...(s._btw||[])].slice(0,20);
    return {record:s._btw?.find(x=>x.id===r?.record?.id)};
   }
-  if(body.type==='btw_cancel'){const rpc=runners.get(s.id);if(!rpc?.alive)return {cancelled:false};const recordId=body.recordId===undefined?undefined:text(body.recordId,'Topic',200);const r=await rpc.send({type:'btw_cancel',...(recordId?{recordId}:{})});return {cancelled:r?.cancelled===true};}
-  if(body.type==='btw_history'){const rpc=await start(s);const r=await rpc.send({type:'get_btw_history'});s._btw=(Array.isArray(r?.records)?r.records:[]).filter(x=>x?.id).slice(0,20).map(btwView);return {records:s._btw};}
-  // Stop or steer one running subagent of this session (ids from get_subagents).
+  if(body.type==='btw_cancel'){const runner=runners.get(s.id);if(!runner?.alive)return {cancelled:false};const recordId=body.recordId===undefined?undefined:text(body.recordId,'Topic',200);const r=await runner.btwCancel(recordId);return {cancelled:r?.cancelled===true};}
+  if(body.type==='btw_history'){const runner=await start(s);const r=await runner.btwHistory();s._btw=(Array.isArray(r?.records)?r.records:[]).filter(x=>x?.id).slice(0,20).map(btwView);return {records:s._btw};}
+  // Stop or steer one running subagent of this session (ids from subagents()).
   if(body.type==='subagent_cancel'||body.type==='subagent_steer'){
-   const id=text(body.id,'Subagent ID',200),rpc=runners.get(s.id);
+   const id=text(body.id,'Subagent ID',200),runner=runners.get(s.id);
    if(!s.subagentList?.some(a=>a.id===id))throw error('This subagent is not part of this session.',404);
-   if(!rpc?.alive)throw error('OMP is no longer running.',409);
-   if(body.type==='subagent_cancel'){const r=await rpc.send({type:'cancel_subagent',subagentId:id});await refresh(s,rpc);return {cancelled:r?.cancelled===true};}
+   if(!runner?.alive)throw error('OMP is no longer running.',409);
+   if(body.type==='subagent_cancel'){const r=await runner.cancelSubagent(id);await refresh(s,runner);return {cancelled:r?.cancelled===true};}
    const message=text(body.message,'Message',20000);
-   try{await rpc.send({type:'steer_subagent',subagentId:id,message},60000);}catch(e){throw error(e.message,409);}
+   try{await runner.steerSubagent(id,message);}catch(e){throw error(e.message,409);}
    return {steered:true};
   }
   if(body.type==='changes_worktree')return worktreeChanges(s,body.base==='head'?'head':'start');
@@ -1433,19 +1422,19 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   const images=prompting?(checkedImages??chatImages(body)):[];
   if(prompting&&s._task)throw error(`Wait for OMP to finish first (${s._task.replace(/…$/,'').toLowerCase()}).`);
   if(body.type==='answer'){
-   const rpc=runners.get(s.id),id=text(body.id,'Question ID',200),q=s.uiRequests?.find(q=>q.id===id);
-   if(!rpc?.alive||!q)throw error('This question is no longer pending.');
-   let reply={type:'extension_ui_response',id};
+   const runner=runners.get(s.id),id=text(body.id,'Question ID',200),q=s.uiRequests?.find(q=>q.id===id);
+   if(!runner?.alive||!q)throw error('This question is no longer pending.');
+   const reply={};
    if(body.cancelled===true)reply.cancelled=true;
    else if(q.method==='ask')reply.answers=askAnswers(q,body.answers);
    else if(q.method==='confirm'){if(typeof body.confirmed!=='boolean')throw error('Choose Yes, No, or Cancel.');reply.confirmed=body.confirmed;}
    else{if(typeof body.value!=='string'||body.value.length>20000)throw error('Answer must be text under 20,000 characters.');if(q.method==='select'&&!q.options.includes(body.value))throw error('Choose one of the listed options.');reply.value=body.value;}
-   await rpc.reply(reply);s.uiRequests=s.uiRequests.filter(x=>x.id!==id);return s;
+   runner.answer(id,reply);s.uiRequests=s.uiRequests.filter(x=>x.id!==id);return s;
   }
   // Approves OMP's tool-approval prompts as they arrive (approvalPrompt); turning it on also approves the ones already waiting.
   if(body.type==='auto_approve'){
    if(typeof body.enabled!=='boolean')throw error('Auto-approve must be true or false.');
-   if(body.enabled){s.autoApprove=true;const rpc=runners.get(s.id);if(rpc?.alive)for(const q of (s.uiRequests||[]).filter(q=>q._approval))await autoApprove(s,rpc,q.id,q._approval);}
+   if(body.enabled){s.autoApprove=true;const runner=runners.get(s.id);if(runner?.alive)for(const q of (s.uiRequests||[]).filter(q=>q._approval))await autoApprove(s,runner,q.id,q._approval);}
    else{delete s.autoApprove;cancelResume(s,'auto-approve turned off');}
    await persist(s);return s;
   }
@@ -1472,10 +1461,10 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    if(!m){if(body.type==='cancel_steer')return s;throw error('This steer is no longer available.');}
    if(m.steer==='dropped')throw error('This steer was not delivered.');
    if(body.type==='edit_steer'&&m.hasImage)throw error('Steers with images can only be cancelled.');
-   const rpc=runners.get(s.id);
-   const r=m.steer==='pending'&&rpc?.alive?await rpc.send({type:'remove_queued_message',message:m.hasImage&&m.text==='Image attached'?'':m.text,queue:'steering'}):null;
+   const runner=runners.get(s.id);
+   const r=m.steer==='pending'&&runner?.alive?await runner.removeQueued(m.hasImage&&m.text==='Image attached'?'':m.text,'steering'):null;
    if(!r?.removed){
-    if(m.steer==='pending'&&!rpc?.alive)throw error('OMP is no longer running.');
+    if(m.steer==='pending'&&!runner?.alive)throw error('OMP is no longer running.');
     // Delivery can win the cancel request before its transcript echo arrives.
     if(m.steer==='pending')m.steer='received';
     if(body.type==='cancel_steer')notice(s,'info','OMP has already started delivering this steer; it can no longer be cancelled.');
@@ -1488,17 +1477,17 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   }
   if(body.type==='set_model'){
    const {selector,thinking}=modelChoice(body);if(selector)s.modelSelector=selector;if(thinking)s.thinkingChoice=thinking;
-   const rpc=runners.get(s.id);if(rpc?.alive){const i=selector.indexOf('/');if(selector)await rpc.send({type:'set_model',provider:selector.slice(0,i),modelId:selector.slice(i+1)});if(thinking)await rpc.send({type:'set_thinking_level',level:thinking});await refresh(s,rpc);}
+   const runner=runners.get(s.id);if(runner?.alive){const i=selector.indexOf('/');if(selector)await runner.setModel(selector.slice(0,i),selector.slice(i+1));if(thinking)await runner.setThinking(thinking);await refresh(s,runner);}
    else{if(selector){const i=selector.indexOf('/');s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking)s.thinking=thinking;}
    await persist(s);return s;
   }
   const busy=()=>{if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');};
   if(['plan_mode','plan_review','plan_approve'].includes(body.type)){
-   let request;
+   let call;
    if(body.type==='plan_mode'){
     if(typeof body.enabled!=='boolean')throw error('Plan mode enabled must be true or false.');
     if(body.workflow!==undefined&&!['parallel','iterative'].includes(body.workflow))throw error('Choose parallel or iterative planning.');
-    request={type:'set_plan_mode',enabled:body.enabled,...(body.workflow?{workflow:body.workflow}:{})};
+    call=runner=>runner.setPlanMode(body.enabled,body.workflow);
    }else if(body.type==='plan_approve'){
     const proposalId=text(body.proposalId,'Proposal ID',200);
     if(!['preserve','fresh','compact','refine'].includes(body.action))throw error('Choose an approval action or request refinement.');
@@ -1508,41 +1497,42 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
     if(body.executionModel!==undefined&&(typeof body.executionModel!=='string'||!/^[\w.~@+-]+\/[\w.~@:+\/-]+$/.test(body.executionModel)))throw error('Invalid execution model.');
     if(body.action==='refine'&&body.executionModel!==undefined)throw error('Refinement keeps the planning model; do not select an execution model.');
     if(s._planReview?.id!==proposalId)throw error('This plan is no longer pending. Reopen the current plan before approving.',409);
-    request={type:'approve_plan',proposalId,action:body.action,...(body.feedback?.trim()?{feedback:body.feedback.trim()}:{}),...(body.executionModel?{executionModel:body.executionModel}:{})};
-   }else request={type:'review_plan'};
-   busy();const rpc=await start(s);
+    const request={proposalId,action:body.action,...(body.feedback?.trim()?{feedback:body.feedback.trim()}:{}),...(body.executionModel?{executionModel:body.executionModel}:{})};
+    call=runner=>runner.approvePlan(request);
+   }else call=runner=>runner.reviewPlan();
+   busy();const runner=await start(s);
    if(!s._planSupported)throw error('This OMP build does not expose plan mode over RPC. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts.',409);
-   try{const result=await rpc.send(request);
+   try{const result=await call(runner);
     if(body.type==='plan_review')s._planReview=result?.proposal;
-    if(body.type==='plan_approve'){if(s._planReview?.id===request.proposalId)delete s._planReview;if(body.action!=='refine'||request.feedback)s.status='running';}
-    await refresh(s,rpc);await persist(s);return body.type==='plan_review'?{proposal:s._planReview}:s;
+    if(body.type==='plan_approve'){if(s._planReview?.id===body.proposalId)delete s._planReview;if(body.action!=='refine'||body.feedback?.trim())s.status='running';}
+    await refresh(s,runner);await persist(s);return body.type==='plan_review'?{proposal:s._planReview}:s;
    }catch(e){throw error(e.message,e.code==='stale_proposal'?409:400);}
   }
-  if(body.type==='rename'){const name=text(body.name,'Session name',120);const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'set_session_name',name});s.title=name;delete s.autoTitle;await persist(s);return s;}
+  if(body.type==='rename'){const name=text(body.name,'Session name',120);const runner=runners.get(s.id);if(runner?.alive)await runner.setSessionName(name);s.title=name;delete s.autoTitle;await persist(s);return s;}
   if(body.type==='pref'){
    if(!Object.hasOwn(PREF_VALUES,body.key)||!PREF_VALUES[body.key].includes(body.value))throw error('Invalid session setting.');
-   const rpc=await start(s);try{await rpc.send(PREFS[body.key](body.value));}catch(e){throw error(e.message);}
-   (s.prefs??={})[body.key]=body.value;await refresh(s,rpc);await persist(s);return s;
+   const runner=await start(s);try{await runner.setPref(body.key,body.value);}catch(e){throw error(e.message);}
+   (s.prefs??={})[body.key]=body.value;await refresh(s,runner);await persist(s);return s;
   }
   if(body.type==='abort'||body.type==='abort_retry'){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
-   const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:'abort'});
+   const runner=runners.get(s.id);if(runner?.alive)await runner.abort();
    finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);cancelResume(s,'session stopped');
    delete s._promptId;delete s._promptMsg;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
    await persist(s);return s;
   }
-  if(body.type==='abort_bash'){const rpc=runners.get(s.id);if(rpc?.alive)await rpc.send({type:body.type});return s;}
-  if(body.type==='tree'){const rpc=await start(s);return treeView(await rpc.send({type:'get_tree'}));}
-  if(body.type==='last_reply'){const rpc=await start(s);const r=await rpc.send({type:'get_last_assistant_text'});return {text:typeof r?.text==='string'?r.text:''};}
+  if(body.type==='abort_bash'){const runner=runners.get(s.id);if(runner?.alive)await runner.abortBash();return s;}
+  if(body.type==='tree'){const runner=await start(s);return treeView(await runner.tree());}
+  if(body.type==='last_reply'){const runner=await start(s);const r=await runner.lastAssistantText();return {text:typeof r?.text==='string'?r.text:''};}
   if(body.type==='cycle_model'||body.type==='cycle_thinking'){
-   const rpc=await start(s);const r=await rpc.send({type:body.type==='cycle_model'?'cycle_model':'cycle_thinking_level'});
+   const runner=await start(s);const r=body.type==='cycle_model'?await runner.cycleModel():await runner.cycleThinking();
    if(!r)throw error(body.type==='cycle_model'?'OMP has only one model to cycle through. Configure model roles or scoped models.':'This model has no thinking levels to cycle through.');
    // Remember the choice so a restarted runner keeps it.
    if(r.model?.provider&&r.model?.id){s.modelSelector=`${r.model.provider}/${r.model.id}`;if(r.thinkingLevel)s.thinkingChoice=r.thinkingLevel;}
    if(typeof r.level==='string')s.thinkingChoice=r.level;
-   await refresh(s,rpc);await persist(s);return s;
+   await refresh(s,runner);await persist(s);return s;
   }
-  if(body.type==='todos'){const phases=todoPhases(body.phases);const rpc=await start(s);const r=await rpc.send({type:'set_todos',phases});s.todos=Array.isArray(r?.todoPhases)?r.todoPhases:phases;await persist(s);return s;}
+  if(body.type==='todos'){const phases=todoPhases(body.phases);const runner=await start(s);const r=await runner.setTodos(phases);s.todos=Array.isArray(r?.todoPhases)?r.todoPhases:phases;await persist(s);return s;}
   if(body.type==='launch'){
    busy();const launch=await launchOptions(body.launch);
    if(JSON.stringify(launch??null)!==JSON.stringify(s.launch??null)){
@@ -1554,18 +1544,18 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    await persist(s);return s;
   }
   if(body.type==='compact'){
-   busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Compacting context…';s._compacting=true;
-   rpc.send({type:'compact',...(instructions?{customInstructions:instructions}:{})},0).then(async r=>{await refresh(s,rpc);append(s,'system',`Context compacted${typeof r?.tokensBefore==='number'?` (was ${r.tokensBefore.toLocaleString('en-US')} tokens)`:''}.`);},e=>append(s,'system',`Compaction failed: ${e.message}`))
+   busy();const runner=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Compacting context…';s._compacting=true;
+   runner.compact(instructions||undefined).then(async r=>{await refresh(s,runner);append(s,'system',`Context compacted${typeof r?.tokensBefore==='number'?` (was ${r.tokensBefore.toLocaleString('en-US')} tokens)`:''}.`);},e=>append(s,'system',`Compaction failed: ${e.message}`))
     .finally(()=>{delete s._task;s._compacting=false;void persist(s);});
    await persist(s);return s;
   }
   if(body.type==='new_session'||body.type==='switch_session'){
    busy();let file;
    if(body.type==='switch_session'){file=sessionFileParam(body.file);const other=store.sessions.find(x=>x.id!==s.id&&!x.hidden&&x.sessionFile&&samePath(x.sessionFile,file));if(other)throw error(`That session is already open in the panel as “${other.title}”.`,409);}
-   const rpc=await start(s);
-   const r=await rpc.send(body.type==='new_session'?{type:'new_session'}:{type:'switch_session',sessionPath:file},60000);
+   const runner=await start(s);
+   const r=body.type==='new_session'?await runner.newSession():await runner.switchSession(file);
    if(r?.cancelled)throw error('An extension cancelled the session change.');
-   s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,rpc);
+   s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);
    if(body.type==='switch_session'){const head=await readSessionHead(file).catch(()=>null);if(head?.title)s.title=head.title.slice(0,120);}
    append(s,'system',body.type==='new_session'?'Started a fresh OMP session. The previous conversation stays in its own session file.':'Switched to another saved OMP session.');
    s.status='paused';await persist(s);return s;
@@ -1573,41 +1563,41 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   // Runs outside the session lock (timeout 0) so Stop, answers and other commands still get through while it works.
   if(body.type==='bash'){
    const cmd=text(body.command,'Command',20000);if(s._bash)throw error('A shell command is already running.');
-   const rpc=await start(s);const msg=append(s,'tool','bash','tool-bash-'+randomUUID());msg.tool=shellRecord(cmd);msg.startedAt=now();msg.text=toolSummary(msg.tool);s._bash=msg.id;
-   rpc.send({type:'bash',command:cmd},0).then(r=>Object.assign(msg.tool,shellRecord(cmd,r)),e=>{msg.tool.status='error';msg.tool.result=e.message;})
+   const runner=await start(s);const msg=append(s,'tool','bash','tool-bash-'+randomUUID());msg.tool=shellRecord(cmd);msg.startedAt=now();msg.text=toolSummary(msg.tool);s._bash=msg.id;
+   runner.bash(cmd).then(r=>Object.assign(msg.tool,shellRecord(cmd,r)),e=>{msg.tool.status='error';msg.tool.result=e.message;})
     .finally(()=>{msg.tool.ms=Date.now()-new Date(msg.startedAt).getTime();msg.text=toolSummary(msg.tool);delete s._bash;scheduleSave(s);});
    await persist(s);return s;
   }
-  if(body.type==='stats'){const rpc=await start(s);return {stats:await rpc.send({type:'get_session_stats'})};}
+  if(body.type==='stats'){const runner=await start(s);return {stats:await runner.sessionStats()};}
   if(body.type==='export'){
-   const rpc=await start(s);const dir=path.join(dataDir,'exports');await fs.mkdir(dir,{recursive:true,mode:0o700});
-   const r=await rpc.send({type:'export_html',outputPath:path.join(dir,s.id+'.html')},120000);
+   const runner=await start(s);const dir=path.join(dataDir,'exports');await fs.mkdir(dir,{recursive:true,mode:0o700});
+   const r=await runner.exportHtml(path.join(dir,s.id+'.html'));
    return {name:(s.title.replace(/[^\w.-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'omp-session')+'.html',html:await fs.readFile(r?.path||path.join(dir,s.id+'.html'),'utf8')};
   }
-  if(body.type==='branch_messages'){busy();const rpc=await start(s);const r=await rpc.send({type:'get_branch_messages'});return {messages:(Array.isArray(r?.messages)?r.messages:[]).map(m=>({entryId:String(m.entryId),text:String(m.text||'').slice(0,300)})).reverse()};}
-  // OMP's RPC has no in-place tree move (navigateTree is TUI and extension only): its `branch` copies the path up to just
+  if(body.type==='branch_messages'){busy();const runner=await start(s);const r=await runner.branchMessages();return {messages:(Array.isArray(r?.messages)?r.messages:[]).map(m=>({entryId:String(m.entryId),text:String(m.text||'').slice(0,300)})).reverse()};}
+  // OMP's host API has no in-place tree move (navigateTree is TUI and extension only): its `branch` copies the path up to just
   // before a user message into a new session file, keeping the old file intact. Edit last / Regenerate rewind with it too.
   if(body.type==='branch'||body.type==='edit_last'||body.type==='regenerate'){
-   busy();const rpc=await start(s);const entryId=body.type==='branch'?text(body.entryId,'Message',200):undefined;
-   const picked=userPrompt(await rpc.send({type:'get_entries'}),entryId);
+   busy();const runner=await start(s);const entryId=body.type==='branch'?text(body.entryId,'Message',200):undefined;
+   const picked=userPrompt(await runner.entries(),entryId);
    if(!picked&&entryId===undefined)throw error('OMP has no message of yours in this conversation yet.');
-   const r=await rpc.send({type:'branch',entryId:entryId??picked.entryId});if(r?.cancelled)throw error('An extension cancelled the branch.');
-   await reload(s,rpc);s.status='paused';
+   const r=await runner.branch(entryId??picked.entryId);if(r?.cancelled)throw error('An extension cancelled the branch.');
+   await reload(s,runner);s.status='paused';
    if(body.type==='regenerate'){append(s,'system','Went back to before your last message in a new session and sent it again. The previous reply stays in the old session file.');return command(s,{type:'prompt',message:picked.text},picked.images);}
    append(s,'system',body.type==='branch'?'Branched into a new session from this point. The message you picked is back in the composer.':'Went back to before your last message in a new session. It is back in the composer to edit and resend.');
    await persist(s);return {session:s,text:typeof r?.text==='string'?r.text:picked?.text||'',images:picked?.images||[]};
   }
   if(body.type==='handoff'){
-   busy();const rpc=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Writing the handoff…';
-   rpc.send({type:'handoff',...(instructions?{customInstructions:instructions}:{})},0).then(async r=>{await reload(s,rpc);append(s,'system',`Handed off to a fresh session${r?.savedPath?`. Handoff document: ${r.savedPath}`:''}.`);},e=>append(s,'system',`Handoff failed: ${e.message}`))
+   busy();const runner=await start(s);const instructions=typeof body.instructions==='string'?body.instructions.trim().slice(0,5000):'';s._task='Writing the handoff…';
+   runner.handoff(instructions||undefined).then(async r=>{await reload(s,runner);append(s,'system',`Handed off to a fresh session${r?.savedPath?`. Handoff document: ${r.savedPath}`:''}.`);},e=>append(s,'system',`Handoff failed: ${e.message}`))
     .finally(()=>{delete s._task;void persist(s);});
    await persist(s);return s;
   }
-  if(body.type==='login_providers'){const rpc=await start(s);const r=await rpc.send({type:'get_login_providers'});return {providers:(Array.isArray(r?.providers)?r.providers:[]).map(p=>({id:String(p.id),name:String(p.name||p.id),available:p.available!==false,authenticated:!!p.authenticated}))};}
+  if(body.type==='login_providers'){const runner=await start(s);const r=await runner.loginProviders();return {providers:(Array.isArray(r?.providers)?r.providers:[]).map(p=>({id:String(p.id),name:String(p.name||p.id),available:p.available!==false,authenticated:!!p.authenticated}))};}
   // OAuth runs until the user finishes in the browser; the link arrives as open_url, pasted codes as input questions.
   if(body.type==='login'){
-   const id=text(body.provider,'Provider',100);const rpc=await start(s);notice(s,'info',`Starting ${id} login…`);
-   rpc.send({type:'login',providerId:id},0).then(()=>{notice(s,'info',`Logged in to ${id}.`);accountsChanged();},e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave(s);});
+   const id=text(body.provider,'Provider',100);const runner=await start(s);notice(s,'info',`Starting ${id} login…`);
+   runner.login(id).then(()=>{notice(s,'info',`Logged in to ${id}.`);accountsChanged();},e=>notice(s,'error',`Login to ${id} failed: ${e.message}`)).finally(()=>{delete s._openUrl;scheduleSave(s);});
    return s;
   }
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
@@ -1616,7 +1606,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);const full=contextError(s,body.message,images);if(full)throw error(full);}
   if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
    if(images.length)throw error('Remove image attachments before checking /usage.');
-   const rpc=await start(s);await refresh(s,rpc);
+   const runner=await start(s);await refresh(s,runner);
    const report=modelUsageText(await providerUsage(s));
    append(s,'user',body.message,queuedId||randomUUID());append(s,'assistant',report);s.updatedAt=now();
    await persist(s);return s;
@@ -1639,7 +1629,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(body.type==='follow_up')body.type='prompt';
   if(body.type==='advisor'){
    if(!['on','off','status','model'].includes(body.action))throw error('Invalid advisor action.');
-   const rpc=await start(s);
+   const runner=await start(s);
    if(body.action==='model'){
     // A running OMP reads its advisors only at startup, so the session is restarted (while idle) to pick up the new model.
     if(['running','queued'].includes(s.status))throw error('Wait for this turn to finish, then change the advisor model.');
@@ -1647,33 +1637,34 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
     const prev=s.status;runners.get(s.id)?.kill();
     for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));
     const fresh=await start(s);s.status=prev;s.error=undefined;
-    s._silentAdvisorUntil=Date.now()+5000;await fresh.send({type:'prompt',message:'/advisor on'});
+    s._silentAdvisorUntil=Date.now()+5000;await fresh.prompt({message:'/advisor on'});
     append(s,'system',`Advisor model set to ${body.model} (${where}).`);
     await advisorStatus(s,fresh);await persist(s);return s;
    }
    // The composer's advisor chip shows the result, so the on/off reply stays out of the chat.
-   if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await rpc.send({type:'prompt',message:`/advisor ${body.action}`});}
-   await advisorStatus(s,rpc);await persist(s);return s;}
+   if(body.action!=='status'){s._silentAdvisorUntil=Date.now()+5000;await runner.prompt({message:`/advisor ${body.action}`});}
+   await advisorStatus(s,runner);await persist(s);return s;}
   if(body.type==='prompt'&&s.status==='running'&&!slashCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
-   const rpc=await start(s);
+   const runner=await start(s);
    // Before the turn starts: OMP refuses to change the account mid-stream.
-   if(prompting&&s.status!=='running')await applyAccount(s,rpc);
+   if(prompting&&s.status!=='running')await applyAccount(s,runner);
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
    // Only prompt dispatch executes slash commands; steer would queue their literal text.
-   // Stop & send: OMP aborts the turn and starts this prompt in one step (abort_and_prompt).
+   // Stop & send: OMP aborts the turn and starts this prompt in one step (interrupt).
    const interrupt=body.type==='interrupt';
-   const rpcType=slashCommand?'prompt':interrupt?'abort_and_prompt':body.type,wasRunning=['running','queued'].includes(s.status);
+   const kind=slashCommand?'prompt':interrupt?'interrupt':body.type,wasRunning=['running','queued'].includes(s.status);
    // A message of the user's own supersedes a pending rate-limit resume; slash commands (say /usage) leave it armed.
    let msg;if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt){delete s._streamId;delete s._thinkId;}s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
-   if((rpcType==='prompt'||interrupt)&&!slashCommand){s._promptId=id;s._promptMsg=msg.id;}
+   if((kind==='prompt'||interrupt)&&!slashCommand){s._promptId=id;s._promptMsg=msg.id;}
    if(interrupt){s._interrupt=id;delete s._retry;}
-   const result=await rpc.send({type:rpcType,id,...(prompting?{message:body.message,...(slashCommand&&wasRunning?{streamingBehavior:'steer'}:{}),...(images.length?{images}:{})}:{})},slashCommand?0:30000);
+   const input={id,...(prompting?{message:body.message,...(slashCommand&&wasRunning?{streamingBehavior:'steer'}:{}),...(images.length?{images}:{})}:{})};
+   const result=kind==='prompt'?await runner.prompt(input,slashCommand?0:30000):kind==='steer'?await runner.steer(input):kind==='follow_up'?await runner.followUp(input):await runner.interrupt(input);
    // Local commands must not replace the active turn's result correlation.
    if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
-   if(rpcType==='prompt'&&result?.agentInvoked===false&&!slashCommand){s.status='review';delete s._promptMsg;}
-   if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,rpc);}
+   if(kind==='prompt'&&result?.agentInvoked===false&&!slashCommand){s.status='review';delete s._promptMsg;}
+   if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,runner);}
    await persist(s);return s;
   }catch(e){if(slashCommand){await persist(s);throw error(e.message);}delete s._interrupt;delete s._promptMsg;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist(s);return s;}
  }
@@ -1884,8 +1875,8 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   }
   await git(root,['branch','-D',s.branch]).catch(()=>{});return true;
  }
- // Kills the session's OMP process and waits for it to exit, so Windows lets go of its working directory.
- async function stopRunner(s){const rpc=runners.get(s.id);if(rpc){const stopped=new Promise(r=>rpc.child.once('close',r));if(!rpc.stopping)rpc.kill();if(rpc.child.exitCode===null&&rpc.child.signalCode===null)await stopped;}}
+ // Stops the session's OMP and waits until it has let go, so Windows releases its working directory.
+ async function stopRunner(s){await runners.get(s.id)?.kill();}
  // Changes › Working tree: the real `git diff` of the session's folder against the commit it started from (or HEAD),
  // plus untracked files, in OMP's diff format with absolute paths.
  async function worktreeChanges(s,which){
@@ -2319,7 +2310,7 @@ async function spend(sync){
    if(req.method==='GET'&&url.pathname==='/api/usage'){
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
     // Sessions on "OMP default" have no provider until OMP reports its model, as /usage resolves it.
-    if(!s.provider||!s.model)await lock(s.id,async()=>{const rpc=await start(s);await refresh(s,rpc);await persist(s);});
+    if(!s.provider||!s.model)await lock(s.id,async()=>{const runner=await start(s);await refresh(s,runner);await persist(s);});
     json({...await providerUsage(s),updatedAt:now()});return;
    }
    if(req.method==='GET'&&url.pathname==='/api/accounts'){try{json(await listAccounts());}catch(e){throw error(`Could not list provider accounts: ${e.message}`,502);}return;}
@@ -2479,7 +2470,7 @@ async function spend(sync){
   }catch(e){const status=e.status||500;socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n${e.message}`);}
  });
  // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
- const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
+ const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>r.kill());for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
  // Work left: a running or queued turn, or a compaction/handoff/shell command in progress. Queued messages of a running
  // session are covered by its status (and by the session lock while settle() dispatches them); those of a stopped session
@@ -2493,7 +2484,7 @@ async function spend(sync){
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>new Promise(resolve=>{r.child.once('close',resolve);if(!r.stopping)r.kill();}));const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
@@ -2502,7 +2493,16 @@ async function spend(sync){
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
 await persist();return {server,store,token,password:Boolean(password),close,flush:saveNow,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+const mainEntry=process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url);
+// Sessions run OMP's SDK, which needs Bun: started by Node, the companion runs itself under Bun with the same arguments
+// and passes Bun's exit code on (start.bat's restart code included). Ctrl+C reaches both; the child does the shutdown.
+if(mainEntry&&!process.versions.bun){
+ const child=spawn('bun',[fileURLToPath(import.meta.url),...process.argv.slice(2)],{stdio:'inherit'});
+ process.on('SIGINT',()=>{});process.on('SIGTERM',()=>child.kill('SIGTERM'));
+ child.on('error',e=>{console.error(e.code==='ENOENT'?'\nThe companion needs Bun to run OMP sessions, and bun was not found on PATH. Install it from https://bun.sh and try again.\n':`\nCould not start Bun: ${e.message}\n`);process.exit(1);});
+ child.on('exit',(code,signal)=>process.exit(code??(signal?1:0)));
+}
+if(mainEntry&&process.versions.bun){
  const port=Number(process.env.OMP_WEB_PORT||4545);const host=process.env.OMP_WEB_HOST||'127.0.0.1';const wild=host==='0.0.0.0'||host==='::';
  const inUse=`\nPort ${port} is already in use: the companion is probably already running at http://127.0.0.1:${port}/\nClose it, or set OMP_WEB_PORT to use another port.\n`;
  // Probe before createCompanion: it pauses running sessions and saves workspace.json, which would clobber the live companion's state.

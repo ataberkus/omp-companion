@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 // workspace.json holds every session's transcript (tens of MB in real use); the 4 s background refresh of an idle
 // live session must not rewrite it.
@@ -12,20 +13,11 @@ test('an idle live session does not rewrite workspace.json on background refresh
   const dir = await mkdtemp(join(tmpdir(), 'omp-idle-save-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-out({ type: 'ready', protocolVersion: 1 });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [], isSettled: true } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`);
+  const omp = fakeOmp({ state: () => ({ todoPhases: [], isSettled: true }) });
   const at = new Date().toISOString();
   const file = join(dir, 'workspace.json');
   await writeFile(file, JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/commands?session=session`, { headers: { Authorization: 'Bearer ' + app.token } });
@@ -45,27 +37,23 @@ test('a streaming session rewrites only its own transcript, and transcripts surv
   const dir = await mkdtemp(join(tmpdir(), 'omp-transcript-save-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-out({ type: 'ready', protocolVersion: 1 });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'prompt' ? { agentInvoked: true } : c.type === 'get_state' ? { todoPhases: [], isSettled: true } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type === 'prompt' && !c.message.startsWith('/')) {
-    out({ type: 'agent_start' });
-    out({ type: 'message_start', message: { role: 'assistant' } });
-    for (const delta of ['Hello', ' streamed', ' world']) out({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } });
-    out({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Hello streamed world' }], stopReason: 'stop' } });
-    out({ type: 'prompt_result', id: c.id, agentInvoked: true, status: 'completed', sessionSettled: true });
-  }
-}
-`);
+  const omp = fakeOmp({
+    prompt(c) {
+      if (!c.message.startsWith('/')) setImmediate(() => {
+        this.emit({ type: 'agent_start' });
+        this.emit({ type: 'message_start', message: { role: 'assistant' } });
+        for (const delta of ['Hello', ' streamed', ' world']) this.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta } });
+        this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Hello streamed world' }], stopReason: 'stop' } });
+        this.emit({ type: 'prompt_result', id: c.id, agentInvoked: true, status: 'completed', sessionSettled: true });
+      });
+      return { agentInvoked: true };
+    },
+    state: () => ({ todoPhases: [], isSettled: true }),
+  });
   const at = new Date().toISOString();
   const session = (id, text) => ({ id, projectId: 'project', title: id, status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: id + '-old', role: 'user', text, at }], todos: [], createdAt: at, updatedAt: at });
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [session('a', 'earlier in a'), session('b', 'earlier in b')], activity: [] }));
-  const open = async () => { app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); };
+  const open = async () => { app = await createCompanion({ dataDir: dir, omp }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); };
   const transcript = async id => JSON.parse(await readFile(join(dir, 'transcripts', id + '.json'), 'utf8')).map(m => m.text);
   await open();
   assert.ok(JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions.every(s => !('messages' in s)), 'workspace.json no longer embeds transcripts');

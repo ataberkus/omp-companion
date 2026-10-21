@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Side-by-side comparison of ✨ Enhance prompt variants on real repos. Not part of `npm test`: every run is a real model call
-// through `omp -p`. A variant is companion/server.mjs (+ rpc.mjs) at a git revision, in a saved directory, or in the working
+// through `omp -p`. A variant is companion/server.mjs (+ the sibling modules it imports) at a git revision, in a saved directory, or in the working
 // tree. Each run spawns `omp` the way startEnhance does: that variant's enhanceArgs, ENHANCE_OVERLAY, ENHANCE_SYSTEM and (when
 // it has one) ENHANCE_GUARD files, and its enhanceInput (draft + conversation) on stdin, with the target repo as cwd and the
 // same model for every variant. It then scores security (tools, out-of-repo access, secret echo, repo/skill writes), accuracy
@@ -73,13 +73,15 @@ const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.om
 // ---------- variants ----------
 async function loadVariant({ name, spec }, outDir) {
  const dir = path.join(outDir, 'variants', name);
- let server, rpc;
- if (spec === '.') { server = await fs.readFile(path.join(ROOT, 'companion/server.mjs'), 'utf8'); rpc = await fs.readFile(path.join(ROOT, 'companion/rpc.mjs'), 'utf8'); }
- else if (spec.startsWith('file:')) { const d = path.resolve(spec.slice(5)); server = await fs.readFile(path.join(d, 'server.mjs'), 'utf8'); rpc = await fs.readFile(path.join(d, 'rpc.mjs'), 'utf8'); }
- else { const show = f => exec('git', ['show', `${spec}:${f}`], { cwd: ROOT, maxBuffer: 64 << 20 }).then(r => r.stdout); server = await show('companion/server.mjs'); rpc = await show('companion/rpc.mjs'); }
+ // server.mjs imports sibling modules (rpc.mjs in older revisions, omp.mjs now); the variant gets the ones it names.
+ const read = spec === '.' ? f => fs.readFile(path.join(ROOT, 'companion', f), 'utf8')
+  : spec.startsWith('file:') ? f => fs.readFile(path.join(path.resolve(spec.slice(5)), f), 'utf8')
+  : f => exec('git', ['show', `${spec}:companion/${f}`], { cwd: ROOT, maxBuffer: 64 << 20 }).then(r => r.stdout);
+ const server = await read('server.mjs');
+ const siblings = await Promise.all([...new Set([...server.matchAll(/from '\.\/([\w-]+\.mjs)'/g)].map(m => m[1]))].map(async f => [f, await read(f)]));
  await fs.mkdir(dir, { recursive: true });
  // A spec that is this directory already (a rerun of --report-style reuse) must not be rewritten mid-import.
- if (path.resolve(spec.slice(5)) !== path.resolve(dir)) { await fs.writeFile(path.join(dir, 'server.mjs'), server); await fs.writeFile(path.join(dir, 'rpc.mjs'), rpc); }
+ if (path.resolve(spec.slice(5)) !== path.resolve(dir)) { await fs.writeFile(path.join(dir, 'server.mjs'), server); for (const [f, text] of siblings) await fs.writeFile(path.join(dir, f), text); }
  const { internals } = await import(pathToFileURL(path.join(dir, 'server.mjs')).href + `?v=${sha(server)}`);
  const system = internals.ENHANCE_SYSTEM ?? server.match(/const ENHANCE_SYSTEM=`([\s\S]*?)`;/)?.[1];
  for (const k of ['enhanceArgs', 'enhanceInput', 'cleanEnhanced', 'enhanceModel', 'ENHANCE_OVERLAY']) if (!internals[k]) die(`Variant ${name}: internals.${k} is missing.`);
@@ -590,7 +592,7 @@ async function main() {
   console.log(await writeReports(dir, data, opt.diffs));
   return;
  }
- if (!opt.variants.length) die('Give at least one --variant name=spec (spec: a git revision, "." for the working tree, or file:<dir with server.mjs and rpc.mjs>).');
+ if (!opt.variants.length) die('Give at least one --variant name=spec (spec: a git revision, "." for the working tree, or file:<dir with server.mjs and the modules it imports>).');
  const outDir = path.resolve(opt.out || path.join(os.tmpdir(), 'omp-enhance-compare', new Date().toISOString().replace(/[:.]/g, '-')));
  await fs.mkdir(outDir, { recursive: true });
  const reposRoot = path.resolve(opt.reposRoot || path.join(ROOT, '..'));

@@ -16,12 +16,11 @@ if (process.platform !== 'win32') {
   process.exit(1);
 }
 
-// build.rs copies this Node.js into the app, so the version that builds is the version that ships.
-const major = Number(process.versions.node.split('.')[0]);
-if (major < 22) problems.push(`Node.js 22 or newer is required (this is ${process.version}). Install it from https://nodejs.org or: winget install --id OpenJS.NodeJS.LTS -e`);
+// build.rs copies this Bun into the app, so the version that builds is the version that ships (OMP's SDK runs on it).
+if (run('bun', ['--version']) === null) problems.push('Bun is missing. Install it from https://bun.sh or: powershell -c "irm bun.sh/install.ps1 | iex"');
 
-if (!existsSync(path.join(root, 'node_modules', '@tauri-apps', 'cli', 'package.json'))) {
-  console.log('npm dependencies (Tauri CLI) are missing; running npm ci…');
+if (!['@tauri-apps/cli', '@oh-my-pi/pi-coding-agent'].every(p => existsSync(path.join(root, 'node_modules', p, 'package.json')))) {
+  console.log('npm dependencies (Tauri CLI, OMP SDK) are missing; running npm ci…');
   // npm ci installs exactly the committed package-lock.json and never rewrites it, so a fresh clone stays clean.
   // npm_execpath is npm's own CLI when this runs as an npm script; calling it through node avoids npm.cmd shell quoting.
   const [cmd, args] = process.env.npm_execpath ? [process.execPath, [process.env.npm_execpath, 'ci']] : ['npm', ['ci']];

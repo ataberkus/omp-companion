@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 const session = (id, extra = {}) => { const at = new Date().toISOString(); return { id, title: id, status: 'paused', cwd: extra.cwd, native: false, messages: [], todos: [], createdAt: at, updatedAt: at, ...extra }; };
 async function start(t, sessions, options = {}) {
@@ -101,23 +102,19 @@ test('two active sessions in the same folder editing the same file are flagged o
 
 test('a session that settles, fails or asks a question is reported once through onAttention', async t => {
   const events = [];
-  const fake = `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type !== 'prompt') continue;
-  out({ type: 'agent_start' });
-  if (c.message === 'ask') out({ type: 'extension_ui_request', id: 'q1', method: 'confirm', title: 'Delete the cache?' });
-  else if (c.message === 'fail') out({ type: 'prompt_result', id: c.id, status: 'error', error: { message: 'Rate limited' } });
-  else { out({ type: 'prompt_result', id: c.id, status: 'completed', sessionSettled: true }); out({ type: 'session_settled' }); }
-}`;
-  const fakeDir = await mkdtemp(join(tmpdir(), 'omp-attn-'));
-  t.after(() => rm(fakeDir, { recursive: true, force: true }));
-  await writeFile(join(fakeDir, 'omp.mjs'), fake);
-  const c = await start(t, dir => [session('s', { cwd: dir, title: 'Docs' })], { ompCommand: process.execPath, ompArgs: [join(fakeDir, 'omp.mjs')], onAttention: e => events.push(e) });
+  const omp = fakeOmp({
+    state: () => ({ todoPhases: [] }),
+    prompt({ id, message }) {
+      queueMicrotask(() => {
+        this.emit({ type: 'agent_start' });
+        if (message === 'ask') this.emit({ type: 'extension_ui_request', id: 'q1', method: 'confirm', title: 'Delete the cache?' });
+        else if (message === 'fail') this.emit({ type: 'prompt_result', id, status: 'error', error: { message: 'Rate limited' } });
+        else { this.emit({ type: 'prompt_result', id, status: 'completed', sessionSettled: true }); this.emit({ type: 'session_settled' }); }
+      });
+      return {};
+    },
+  });
+  const c = await start(t, dir => [session('s', { cwd: dir, title: 'Docs' })], { omp, onAttention: e => events.push(e) });
   const wait = async n => { for (let i = 0; i < 300 && events.length < n; i++) await new Promise(r => setTimeout(r, 10)); assert.equal(events.length, n); };
 
   const prompt = async message => assert.equal((await c.call('/sessions/s/command', { type: 'prompt', message }))[0], 200);

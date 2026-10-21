@@ -6,42 +6,44 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('work time spans steers, questions, yields and queued turns, then freezes until new work starts', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 0, 1) });
   const dir = await mkdtemp(join(tmpdir(), 'omp-work-time-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-let promptId, stoppedId, settled = true;
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'extension_ui_response') { out({ type: 'tool_execution_end', toolCallId: 'ask', toolName: 'ask', result: { content: [] } }); continue; }
-  const local = c.type === 'prompt' && c.message.startsWith('/');
-  const data = c.type === 'get_state' ? { isSettled: settled } : c.type === 'get_subagents' ? { subagents: [] } : c.type === 'prompt' ? { agentInvoked: !local } : {};
-  if (c.type === 'prompt' && !local) { promptId = c.id; settled = false; out({ type: 'agent_start' }); }
-  if (c.type === 'steer') {
-    out({ type: 'message_start', message: { role: 'user', content: c.message } });
-    out({ type: 'tool_execution_start', toolCallId: 'ask', toolName: 'ask', args: {} });
-    out({ type: 'extension_ui_request', id: 'question', method: 'select', title: 'Continue?', options: ['Yes'] });
-  }
-  if (c.type === 'set_model' && c.modelId === 'yield') {
-    out({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Still waiting for background work' }], stopReason: 'stop' } });
-    out({ type: 'agent_end', isTerminal: false });
-    out({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: false });
-  }
-  if (c.type === 'set_model' && c.modelId === 'finish') { settled = true; out({ type: 'session_settled' }); }
-  if (c.type === 'abort') { stoppedId = promptId; settled = true; }
-  if (c.type === 'set_model' && c.modelId === 'late') out({ type: 'prompt_result', id: stoppedId, agentInvoked: true, status: 'aborted' });
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-}`);
+  let promptId, stoppedId, settled = true;
+  const omp = fakeOmp({
+    answer() { this.emit({ type: 'tool_execution_end', toolCallId: 'ask', toolName: 'ask', result: { content: [] } }); },
+    state: () => ({ isSettled: settled }),
+    prompt(c) {
+      const local = c.message.startsWith('/');
+      if (!local) { promptId = c.id; settled = false; this.emit({ type: 'agent_start' }); }
+      return { agentInvoked: !local };
+    },
+    steer(c) {
+      this.emit({ type: 'message_start', message: { role: 'user', content: c.message } });
+      this.emit({ type: 'tool_execution_start', toolCallId: 'ask', toolName: 'ask', args: {} });
+      this.emit({ type: 'extension_ui_request', id: 'question', method: 'select', title: 'Continue?', options: ['Yes'] });
+      return {};
+    },
+    setModel(provider, modelId) {
+      if (modelId === 'yield') {
+        this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Still waiting for background work' }], stopReason: 'stop' } });
+        this.emit({ type: 'agent_end', isTerminal: false });
+        this.emit({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: false });
+      }
+      if (modelId === 'finish') { settled = true; this.emit({ type: 'session_settled' }); }
+      if (modelId === 'late') this.emit({ type: 'prompt_result', id: stoppedId, agentInvoked: true, status: 'aborted' });
+      return {};
+    },
+    abort() { stoppedId = promptId; settled = true; return {}; },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Work', status: 'paused', cwd: dir, model: 'OMP default', messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
   const launch = async () => {
-    app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+    app = await createCompanion({ dataDir: dir, omp });
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
   };

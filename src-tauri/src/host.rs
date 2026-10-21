@@ -1,4 +1,4 @@
-// Bundled Node.js running desktop/host.mjs: line-delimited JSON over stdin/stdout.
+// Bundled Bun running desktop/host.mjs: line-delimited JSON over stdin/stdout.
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -32,16 +32,21 @@ fn tail(buf: &Mutex<String>) -> String {
     buf.lock().clone()
 }
 
+/// `restart_token` restarts a host after a crash: it keeps the window's token and skips the `omp update` check.
 pub fn spawn(
-    node: &Path,
+    bun: &Path,
     script: &Path,
+    restart_token: Option<&str>,
     on_event: impl Fn(Value) + Send + 'static,
     on_exit: impl FnOnce(String) + Send + 'static,
 ) -> Result<(Host, Ready), String> {
-    let mut cmd = Command::new(node);
+    let mut cmd = Command::new(bun);
     // `npm run desktop` (debug build) skips the token by default; release builds keep it unless the user opts out.
     if cfg!(debug_assertions) && std::env::var_os("OMP_WEB_NO_TOKEN").is_none() {
         cmd.env("OMP_WEB_NO_TOKEN", "1");
+    }
+    if let Some(token) = restart_token {
+        cmd.env("OMP_WEB_DESKTOP_TOKEN", token).env("OMP_WEB_NO_UPDATE", "1");
     }
     let mut child = cmd
         .arg(script)
@@ -50,7 +55,7 @@ pub fn spawn(
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .map_err(|e| format!("Could not start the bundled Node.js: {e}"))?;
+        .map_err(|e| format!("Could not start the bundled Bun: {e}"))?;
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -177,6 +182,11 @@ impl Host {
     /// Fire-and-forget quit for shutdown paths that cannot wait for the answer.
     pub fn send_quit(&self) {
         let _ = self.write(&json!({ "id": 0, "cmd": "quit" }));
+    }
+
+    /// The process has not exited yet (it may still be stuck).
+    pub fn running(&self) -> bool {
+        matches!(self.child.lock().try_wait(), Ok(None))
     }
 
     /// Waits for the process to exit; kills it once `timeout` passes.

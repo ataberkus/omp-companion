@@ -17,6 +17,7 @@ tauri-plugin-notification = "2"
 serde_json = "1"
 dunce = "1"
 parking_lot = "0.12"
+tauri-plugin-updater = "2"
 
 [profile.release]
 codegen-units = 1

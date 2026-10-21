@@ -10,10 +10,13 @@
     "prebuild": "node scripts/check-build.mjs",
     "build": "tauri build",
     "predist": "node scripts/check-build.mjs",
-    "dist": "tauri build",
+    "dist": "tauri build --config src-tauri/tauri.release.conf.json",
     "test": "node --test \"tests/*.test.mjs\""
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.12.5"
   }
 }

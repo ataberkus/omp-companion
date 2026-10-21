@@ -5,11 +5,12 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const exists = p => readFile(p).then(() => true, () => false);
-const ompPids = async dir => (await readdir(dir)).filter(f => f.startsWith('omp-pid-')).map(f => Number(f.slice(8)));
+const nativeDir = (dir, session) => join(dir, 'native-' + session.n);
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
 const image = { type: 'image', mimeType: 'image/png', data: png };
@@ -39,25 +40,25 @@ process.stdin.on('end', () => {
   emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '\`\`\`\\nENHANCED ' + draft + '\\n\`\`\`' }] } });
 });`;
 
-// Fake OMP session runner: records its pid; `prompt` drops a marker, then answers after 300 ms;
-// get_state reports a session file that holds only a header (no user message).
-const FAKE_OMP = (dir, { fail = false } = {}) => fail ? 'process.exit(1);' : `import { createInterface } from 'node:readline';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-const out = ${JSON.stringify(dir)};
-writeFileSync(join(out, 'omp-pid-' + process.pid), '');
-// Like OMP: one folder per working directory, the session file inside it.
-mkdirSync(join(out, 'native-' + process.pid), { recursive: true });
-const file = join(out, 'native-' + process.pid, 'session.jsonl');
-writeFileSync(file, JSON.stringify({ type: 'session', cwd: process.cwd(), id: 'x' }) + '\\n');
-const send = o => process.stdout.write(JSON.stringify(o) + '\\n');
-send({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'prompt') { writeFileSync(join(out, 'prompt-seen'), ''); setTimeout(() => send({ type: 'response', id: c.id, success: true, command: c.type, data: { agentInvoked: false } }), 300); continue; }
-  const data = c.type === 'get_state' ? { todoPhases: [], sessionFile: file } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  send({ type: 'response', id: c.id, success: true, command: c.type, data });
-}`;
+// Fake OMP session: `prompt` drops a marker, then answers after 300 ms; state reports a session file that holds
+// only a header (no user message). `fail` makes OMP exit at start-up.
+const FAKE_OMP = (dir, { fail = false } = {}) => {
+  let count = 0;
+  return fakeOmp(session => {
+    session.n = ++count;
+    // Like OMP: one folder per working directory, the session file inside it.
+    const file = join(nativeDir(dir, session), 'session.jsonl');
+    return {
+      async open() {
+        if (fail) throw new Error('OMP exited (1).');
+        await mkdir(nativeDir(dir, session), { recursive: true });
+        await writeFile(file, JSON.stringify({ type: 'session', cwd: session.cwd, id: 'x' }) + '\n');
+      },
+      async prompt() { await writeFile(join(dir, 'prompt-seen'), ''); await sleep(300); return { agentInvoked: false }; },
+      state: () => ({ todoPhases: [], sessionFile: file }),
+    };
+  });
+};
 
 async function boot(t, { config = '', omp = {}, session = {} } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-enhance-'));
@@ -67,13 +68,13 @@ async function boot(t, { config = '', omp = {}, session = {} } = {}) {
   process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
   await mkdir(join(dir, 'agent'), { recursive: true });
   await writeFile(join(dir, 'agent', 'config.yml'), config);
-  const enh = join(dir, 'enh.mjs'), fakeOmp = join(dir, 'omp.mjs');
+  const enh = join(dir, 'enh.mjs');
   await writeFile(enh, FAKE_ENHANCER(dir));
-  await writeFile(fakeOmp, FAKE_OMP(dir, omp));
+  const ompHost = FAKE_OMP(dir, omp);
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: 'm1', role: 'user', text: 'earlier question', at: now }], todos: [], createdAt: now, updatedAt: now, ...session }], activity: [] }));
   const start = async () => {
-    state.app = await createCompanion({ dataDir: dir, ompSessionsDir: dir, ompCommand: process.execPath, ompArgs: [fakeOmp], enhancePrefix: [enh] });
+    state.app = await createCompanion({ dataDir: dir, ompSessionsDir: dir, ompCommand: process.execPath, omp: ompHost, enhancePrefix: [enh] });
     state.app.server.listen(0, '127.0.0.1');
     await once(state.app.server, 'listening');
     state.base = `http://127.0.0.1:${state.app.server.address().port}/api`;
@@ -85,7 +86,7 @@ async function boot(t, { config = '', omp = {}, session = {} } = {}) {
     return { status: res.status, body: await res.json() };
   };
   const settle = async id => { for (let i = 0; i < 100; i++) { const r = await call('/enhance?id=' + id); if (r.body.status !== 'running') return r.body; await sleep(50); } throw new Error('enhance never finished'); };
-  return { dir, state, call, settle, restart };
+  return { dir, state, call, settle, restart, omp: ompHost };
 }
 
 test('enhance model resolution order', () => {
@@ -249,16 +250,16 @@ test('discard sent while the first prompt holds the lock keeps the session', asy
 });
 
 test('lone discard removes the session, its empty session file and only after OMP exited', async t => {
-  const { dir, call } = await boot(t);
+  const { dir, call, omp } = await boot(t);
   const { body: s } = await call('/quick-start', { path: dir, draft: true });
   await call('/commands?session=' + s.id);
-  const [pid] = await ompPids(dir);
-  const file = join(dir, `native-${pid}`, 'session.jsonl');
+  const ompSession = omp.last;
+  const folder = nativeDir(dir, ompSession), file = join(folder, 'session.jsonl');
   assert.ok(await exists(file));
   assert.deepEqual((await call(`/sessions/${s.id}/command`, { type: 'discard' })).body, { discarded: true });
-  assert.equal(alive(pid), false, 'OMP process had exited before discard answered');
+  assert.equal(ompSession.alive, false, 'OMP session had exited before discard answered');
   assert.equal(await exists(file), false);
-  assert.equal(await readdir(join(dir, `native-${pid}`)).then(() => true, () => false), false, 'its emptied folder is removed too');
+  assert.equal(await readdir(folder).then(() => true, () => false), false, 'its emptied folder is removed too');
   assert.equal((await call('/state')).body.sessions.some(x => x.id === s.id), false);
   // Normal sessions are never discarded.
   assert.deepEqual((await call('/sessions/session/command', { type: 'discard' })).body, { discarded: false });

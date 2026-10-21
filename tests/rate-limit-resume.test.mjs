@@ -5,45 +5,45 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 // Like OMP when a 429's retry-after-ms exceeds retry.maxDelayMs: the failed turn's message_end, auto_retry_end without
-// a retry, then the terminal prompt_result. The first `fails` prompts get the 429; get_session_stats reports the prompt count.
-const fakeOmp = (wait, fails) => `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-const reply = (c, data = {}) => out({ type: 'response', id: c.id, command: c.type, success: true, data });
-const error = '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\\'s rate limit. Please try again later."},"request_id":"req_1"} retry-after-ms=${wait}';
-let prompts = 0;
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'get_state') reply(c, { todoPhases: [] });
-  else if (c.type === 'get_subagents') reply(c, { subagents: [] });
-  else if (c.type === 'get_session_stats') reply(c, { prompts });
-  else if (c.type === 'prompt') {
-    reply(c, { agentInvoked: true }); out({ type: 'agent_start' });
-    if (++prompts <= ${fails}) {
-      out({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: error } });
-      out({ type: 'auto_retry_end', success: false, attempt: 1, finalError: 'Provider requested a longer wait. Original error: ' + error });
-      out({ type: 'agent_end', messages: [] });
-      out({ type: 'prompt_result', id: c.id, agentInvoked: true, status: 'error', error: { message: error } });
-    } else {
-      out({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
-      out({ type: 'prompt_result', id: c.id, agentInvoked: true, status: 'completed', sessionSettled: true });
-      out({ type: 'session_settled' });
-    }
-  } else reply(c);
-}
-`;
+// a retry, then the terminal prompt_result. The first `fails` prompts get the 429; sessionStats reports the prompt count.
+const rateLimitedOmp = (wait, fails) => fakeOmp(() => {
+  const error = `429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."},"request_id":"req_1"} retry-after-ms=${wait}`;
+  let prompts = 0;
+  return {
+    state: () => ({ todoPhases: [] }),
+    sessionStats: () => ({ prompts }),
+    prompt({ id }) {
+      const failed = ++prompts <= fails;
+      // The turn's events follow the accepted prompt, as OMP streams them after replying.
+      setImmediate(() => {
+        this.emit({ type: 'agent_start' });
+        if (failed) {
+          this.emit({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: error } });
+          this.emit({ type: 'auto_retry_end', success: false, attempt: 1, finalError: 'Provider requested a longer wait. Original error: ' + error });
+          this.emit({ type: 'agent_end', messages: [] });
+          this.emit({ type: 'prompt_result', id, agentInvoked: true, status: 'error', error: { message: error } });
+        } else {
+          this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
+          this.emit({ type: 'prompt_result', id, agentInvoked: true, status: 'completed', sessionSettled: true });
+          this.emit({ type: 'session_settled' });
+        }
+      });
+      return { agentInvoked: true };
+    },
+  };
+});
 
 async function setup(t, { wait, fails = 1, session = {} }) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-rate-limit-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, fakeOmp(wait, fails));
+  const omp = rateLimitedOmp(wait, fails);
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [{ id: 'session', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at, ...session }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const post = async body => {

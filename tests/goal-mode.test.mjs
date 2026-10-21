@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 const restoredGoal = { objective: 'Restored objective', status: 'paused', tokensUsed: 125, tokenBudget: 1000 };
 const wait = async predicate => {
@@ -16,72 +17,68 @@ async function fixture(t, support = 'enabled') {
   const dir = await mkdtemp(join(tmpdir(), 'omp-goal-api-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs'), log = join(dir, 'actions.jsonl'), release = join(dir, 'release');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-const log = ${JSON.stringify(log)}, release = ${JSON.stringify(release)}, support = ${JSON.stringify(support)};
-const emit = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-const record = action => appendFileSync(log, JSON.stringify(action) + '\\n');
-const reply = (c, data = {}) => emit({ type: 'response', id: c.id, command: c.type, success: true, data });
-let goal = ${JSON.stringify(restoredGoal)}, active = false, released = '', question;
-record('launch');
-emit({ type: 'ready' });
-emit({ type: 'available_commands_update', commands: support === 'enabled' ? [{ name: 'goal', description: 'Native goal controls', source: 'builtin', input: { hint: '[objective|set|show|pause|resume|drop|budget]' } }] : [] });
-createInterface({ input: process.stdin }).on('line', line => {
-  const c = JSON.parse(line);
-  if (c.type === 'extension_ui_response') {
-    if (!question || c.id !== question.id) return;
-    const pending = question; question = undefined;
-    if (!c.cancelled && c.confirmed) { goal = null; emit({ type: 'goal_updated', goal }); }
-    reply(pending.command, { agentInvoked: false });
-    return;
-  }
-  if (c.type === 'get_state') {
-    const nextRelease = existsSync(release) ? readFileSync(release, 'utf8') : '';
-    if (active && nextRelease !== released) {
-      released = nextRelease; active = false;
-      emit({ type: 'prompt_result', status: 'completed' });
-      emit({ type: 'session_settled' });
-    }
-    reply(c, { model: { provider: 'test', id: 'test' }, todoPhases: [], isSettled: !active,
-      ...(support === 'legacy' ? {} : { goalMode: { available: support === 'enabled', enabled: !!goal && goal.status === 'active', goal } }) });
-    return;
-  }
-  if (c.type === 'get_subagents') { reply(c, { subagents: [] }); return; }
-  if (c.type === 'prompt' && c.message.startsWith('/advisor')) { reply(c, { agentInvoked: false }); return; }
-  if (['prompt', 'steer', 'follow_up'].includes(c.type)) {
-    if (c.type === 'prompt' && /^\\/goal(?:\\s|$)/.test(c.message) && support === 'enabled') {
-      const [, action = 'show', value] = c.message.match(/^\\/goal(?:\\s+(\\S+)(?:\\s+([\\s\\S]*))?)?$/);
-      record('goal:' + action + (value ? ':' + value : ''));
-      if (action === 'drop') {
-        question = { id: 'drop-' + c.id, command: c };
-        emit({ type: 'extension_ui_request', id: question.id, method: 'confirm', title: 'Drop goal?', message: 'Drop the current objective?' });
-        return;
-      }
-      if (action === 'set') {
-        goal = { objective: value, status: 'active', tokensUsed: 0, tokenBudget: 1000 };
-        active = true;
-        emit({ type: 'goal_updated', goal }); emit({ type: 'agent_start' });
-      }
-      // Pause intentionally emits no event: get_state must repair the UI snapshot.
-      if (action === 'pause' && goal) goal.status = 'paused';
-      if (action === 'resume' && goal) { goal.status = 'active'; emit({ type: 'goal_updated', goal }); }
-      if (action === 'budget' && goal) goal.tokenBudget = Number(value);
-      reply(c, { agentInvoked: action === 'set' });
-      return;
-    }
-    record('model:' + c.message);
-    active = true; emit({ type: 'agent_start' }); reply(c, { agentInvoked: true }); return;
-  }
-  reply(c);
-});
-`);
+  const log = [];
+  let release = '';
+  const omp = fakeOmp(() => {
+    let goal = structuredClone(restoredGoal), active = false, released = '', question;
+    log.push('launch');
+    const work = function ({ message }) {
+      log.push('model:' + message);
+      active = true; this.emit({ type: 'agent_start' }); return { agentInvoked: true };
+    };
+    return {
+      open() {
+        this.emit({ type: 'available_commands_update', commands: support === 'enabled' ? [{ name: 'goal', description: 'Native goal controls', source: 'builtin', input: { hint: '[objective|set|show|pause|resume|drop|budget]' } }] : [] });
+      },
+      answer(id, reply) {
+        if (!question || id !== question.id) return;
+        const pending = question; question = undefined;
+        if (!reply.cancelled && reply.confirmed) { goal = null; this.emit({ type: 'goal_updated', goal }); }
+        pending.resolve({ agentInvoked: false });
+      },
+      state() {
+        if (active && release !== released) {
+          released = release; active = false;
+          this.emit({ type: 'prompt_result', status: 'completed' });
+          this.emit({ type: 'session_settled' });
+        }
+        return { model: { provider: 'test', id: 'test' }, todoPhases: [], isSettled: !active,
+          ...(support === 'legacy' ? {} : { goalMode: { available: support === 'enabled', enabled: !!goal && goal.status === 'active', goal } }) };
+      },
+      prompt(c) {
+        if (c.message.startsWith('/advisor')) return { agentInvoked: false };
+        if (/^\/goal(?:\s|$)/.test(c.message) && support === 'enabled') {
+          const [, action = 'show', value] = c.message.match(/^\/goal(?:\s+(\S+)(?:\s+([\s\S]*))?)?$/);
+          log.push('goal:' + action + (value ? ':' + value : ''));
+          if (action === 'drop') {
+            return new Promise(resolve => {
+              question = { id: 'drop-' + c.id, resolve };
+              this.emit({ type: 'extension_ui_request', id: question.id, method: 'confirm', title: 'Drop goal?', message: 'Drop the current objective?' });
+            });
+          }
+          if (action === 'set') {
+            goal = { objective: value, status: 'active', tokensUsed: 0, tokenBudget: 1000 };
+            active = true;
+            this.emit({ type: 'goal_updated', goal }); this.emit({ type: 'agent_start' });
+          }
+          // Pause intentionally emits no event: state() must repair the UI snapshot.
+          if (action === 'pause' && goal) goal.status = 'paused';
+          if (action === 'resume' && goal) { goal.status = 'active'; this.emit({ type: 'goal_updated', goal }); }
+          if (action === 'budget' && goal) goal.tokenBudget = Number(value);
+          return { agentInvoked: action === 'set' };
+        }
+        return work.call(this, c);
+      },
+      steer: work,
+      followUp: work,
+    };
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], activity: [], sessions: [{
     id: 'session', title: 'Goal', cwd: dir, native: false, status: 'paused', model: 'OMP default',
     messages: [], todos: [], goal: { objective: 'Stale cached objective', status: 'active' }, createdAt: at, updatedAt: at,
   }] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -92,8 +89,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   return {
     app, session: app.store.sessions[0], request,
     command: body => request('/api/sessions/session/command', body),
-    actions: () => readFile(log, 'utf8').then(data => data.trim().split('\n').map(JSON.parse)),
-    release: async turn => { await writeFile(release, String(turn)); return request('/api/sessions/session/command', { type: 'set_model', model: 'test/test' }); },
+    actions: async () => [...log],
+    release: async turn => { release = String(turn); return request('/api/sessions/session/command', { type: 'set_model', model: 'test/test' }); },
   };
 }
 

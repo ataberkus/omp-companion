@@ -5,36 +5,29 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 // A stale browser tab must never approve a newer plan or grant implementation access.
 test('plan approval rejects stale IDs and invalid choices without consuming the pending review', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-plan-api-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-let enabled = false, proposal, sequence = 0;
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'get_state') data = { model: { provider: 'test', id: 'test' }, todoPhases: [], planMode: { available: true, enabled, paused: false, reviewPending: !!proposal }, planReview: proposal };
-  if (c.type === 'get_subagents') data = { subagents: [] };
-  if (c.type === 'set_plan_mode') enabled = c.enabled;
-  if (c.type === 'review_plan') { proposal = { id: String(++sequence), title: 'Change', planFilePath: 'local://change-plan.md', content: '# Change\\nReview before implementation.' }; data = { proposal }; }
-  if (c.type === 'approve_plan') {
-    if (c.proposalId !== proposal?.id) { emit({ type: 'response', id: c.id, command: c.type, success: false, code: 'stale_proposal', error: 'Stale proposal' }); continue; }
-    const id = proposal.id; proposal = undefined;
-    emit({ type: 'plan_review_clear', proposalId: id });
-    if (c.action !== 'refine') { enabled = false; emit({ type: 'command_output', text: 'Implementation started' }); }
-  }
-  emit({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`);
+  let enabled = false, proposal, sequence = 0;
+  const omp = fakeOmp({
+    state: () => ({ model: { provider: 'test', id: 'test' }, todoPhases: [], planMode: { available: true, enabled, paused: false, reviewPending: !!proposal }, planReview: proposal }),
+    setPlanMode(value) { enabled = value; return {}; },
+    reviewPlan() { proposal = { id: String(++sequence), title: 'Change', planFilePath: 'local://change-plan.md', content: '# Change\nReview before implementation.' }; return { proposal }; },
+    approvePlan(c) {
+      if (c.proposalId !== proposal?.id) throw Object.assign(new Error('Stale proposal'), { code: 'stale_proposal' });
+      const id = proposal.id; proposal = undefined;
+      this.emit({ type: 'plan_review_clear', proposalId: id });
+      if (c.action !== 'refine') { enabled = false; this.emit({ type: 'command_output', text: 'Implementation started' }); }
+      return {};
+    },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [{ id: 'session', title: 'Plan', cwd: dir, status: 'paused', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const command = async body => {
@@ -66,32 +59,29 @@ test('queued turns wait when review preparation precedes the proposal frame', as
   const dir = await mkdtemp(join(tmpdir(), 'omp-plan-queue-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-let reviewPending = false;
-const planMode = () => ({ available: true, enabled: true, paused: false, reviewPending });
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { model: { provider: 'test', id: 'test' }, todoPhases: [], planMode: planMode() } : {};
-  emit({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type === 'prompt') {
-    emit({ type: 'agent_start' });
-    reviewPending = true;
-    emit({ type: 'plan_mode_changed', planMode: planMode() });
-    emit({ type: 'agent_end', messages: [] });
-    emit({ type: 'session_settled' });
-  }
-}
-`);
+  let reviewPending = false;
+  const planMode = () => ({ available: true, enabled: true, paused: false, reviewPending });
+  const omp = fakeOmp({
+    state: () => ({ model: { provider: 'test', id: 'test' }, todoPhases: [], planMode: planMode() }),
+    prompt() {
+      // OMP answered the prompt before streaming its events.
+      setTimeout(() => {
+        this.emit({ type: 'agent_start' });
+        reviewPending = true;
+        this.emit({ type: 'plan_mode_changed', planMode: planMode() });
+        this.emit({ type: 'agent_end', messages: [] });
+        this.emit({ type: 'session_settled' });
+      });
+      return {};
+    },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({
     projects: [], activity: [],
     sessions: [{ id: 'session', title: 'Plan', cwd: dir, status: 'paused', native: false, messages: [], todos: [], createdAt: at, updatedAt: at,
       queuedMessages: [{ id: 'queued', text: 'Future user turn', at }] }],
   }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`, {

@@ -5,37 +5,34 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 // A native idle snapshot must win over unrelated command output, even when session_settled is missing.
 test('idle polling settles a finished turn despite unrelated command output', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-settle-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-let settled = true;
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'get_state') {
-    if (settled) process.stdout.write(JSON.stringify({ type: 'command_output', text: 'Advisor disabled.' }) + '\\n');
-    data = { todoPhases: [], model: { provider: 'test', id: 'test' }, isSettled: settled, isCompacting: false };
-  }
-  if (c.type === 'get_subagents') data = { subagents: [] };
-  if (c.type === 'prompt' && !c.message.startsWith('/')) {
-    settled = false;
-    process.stdout.write(JSON.stringify({ type: 'agent_start' }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'agent_end' }) + '\\n');
-    setTimeout(() => { settled = true; }, 200);
-    data = { agentInvoked: true };
-  }
-  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data }) + '\\n');
-}`);
+  let settled = true;
+  const omp = fakeOmp({
+    state() {
+      if (settled) this.emit({ type: 'command_output', text: 'Advisor disabled.' });
+      return { todoPhases: [], model: { provider: 'test', id: 'test' }, isSettled: settled, isCompacting: false };
+    },
+    prompt(c) {
+      if (c.message.startsWith('/')) return {};
+      settled = false;
+      setTimeout(() => {
+        this.emit({ type: 'agent_start' });
+        this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }], stopReason: 'stop' } });
+        this.emit({ type: 'agent_end' });
+      });
+      setTimeout(() => { settled = true; }, 200);
+      return { agentInvoked: true };
+    },
+  });
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -59,37 +56,40 @@ test('completion frames settle once, preserve queued work, and correlate fast re
   const dir = await mkdtemp(join(tmpdir(), 'omp-completion-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = frames => process.stdout.write(frames.map(f => JSON.stringify(f) + '\\n').join(''));
-out([{ type: 'ready' }]);
-let promptId, stalePoll = false;
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const frames = [{ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'prompt' ? { agentInvoked: true } : {} }];
-  if (c.type === 'prompt' && !c.message.startsWith('/')) {
-    promptId = c.id;
-    frames.push({ type: 'agent_start' });
-    if (c.message === 'Third turn') frames.push(
-      { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'All work finished' }], stopReason: 'stop' } },
-      { type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: true });
-  }
-  if (c.type === 'set_steering_mode') stalePoll = true;
-  if (c.type === 'get_state' && stalePoll) {
-    stalePoll = false;
-    frames[0].data = { isSettled: true, isCompacting: false };
-    frames.unshift({ type: 'agent_start' });
-  }
-  if (c.type === 'set_auto_retry') frames.push({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: false });
-  if (c.type === 'set_fast_mode') {
-    frames.push({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: true });
-    if (c.enabled) frames.push({ type: 'session_settled' });
-  }
-  out(frames);
-}`);
+  let promptId, stalePoll = false;
+  const omp = fakeOmp({
+    prompt(c) {
+      if (!c.message.startsWith('/')) {
+        promptId = c.id;
+        setTimeout(() => {
+          this.emit({ type: 'agent_start' });
+          if (c.message === 'Third turn') {
+            this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'All work finished' }], stopReason: 'stop' } });
+            this.emit({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: true });
+          }
+        });
+      }
+      return { agentInvoked: true };
+    },
+    state() {
+      if (!stalePoll) return {};
+      stalePoll = false;
+      this.emit({ type: 'agent_start' });
+      return { isSettled: true, isCompacting: false };
+    },
+    setPref(key, value) {
+      if (key === 'steeringMode') stalePoll = true;
+      if (key === 'autoRetry') setTimeout(() => this.emit({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: false }));
+      if (key === 'fast') setTimeout(() => {
+        this.emit({ type: 'prompt_result', id: promptId, agentInvoked: true, status: 'completed', sessionSettled: true });
+        if (value) this.emit({ type: 'session_settled' });
+      });
+      return {};
+    },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const post = async body => {

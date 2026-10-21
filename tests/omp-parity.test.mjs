@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 const { launchOptions, launchArgs, treeView, todoPhases } = internals;
 
@@ -43,35 +44,26 @@ async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-parity-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const nativeDir = join(dir, 'native'), log = join(dir, 'rpc.jsonl'), fake = join(dir, 'omp.mjs');
+  const nativeDir = join(dir, 'native');
   await mkdir(join(nativeDir, 'proj'), { recursive: true });
   const other = join(nativeDir, 'proj', 'other.jsonl');
   await writeFile(other, [{ type: 'session', id: 'other', cwd: dir }, { type: 'title', title: 'Other work' }].map(l => JSON.stringify(l)).join('\n') + '\n');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-const reply = (c, data = {}) => emit({ type: 'response', id: c.id, command: c.type, success: true, data });
-let todos = [], model = 'a', level = 'low';
-emit({ type: 'ready' });
-createInterface({ input: process.stdin }).on('line', line => {
-  const c = JSON.parse(line);
-  appendFileSync(${JSON.stringify(log)}, JSON.stringify(c) + '\\n');
-  if (c.type === 'get_state') return reply(c, { model: { provider: 'test', id: model }, thinkingLevel: level, todoPhases: todos, isSettled: true });
-  if (c.type === 'get_subagents') return reply(c, { subagents: [] });
-  if (c.type === 'get_tree') return reply(c, { leafId: 'a', tree: [{ entry: { id: 'u', type: 'message', message: { role: 'user', content: 'hello' } }, children: [{ entry: { id: 'a', parentId: 'u', type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }, children: [] }] }] });
-  if (c.type === 'get_last_assistant_text') return reply(c, { text: 'last words' });
-  if (c.type === 'set_todos') { todos = c.phases; return reply(c, { todoPhases: todos }); }
-  if (c.type === 'cycle_model') { model = 'b'; return reply(c, { model: { provider: 'test', id: model }, thinkingLevel: 'high', isScoped: true }); }
-  if (c.type === 'cycle_thinking_level') return reply(c, null);
-  if (c.type === 'new_session' || c.type === 'switch_session') { todos = []; return reply(c, { cancelled: false }); }
-  if (c.type === 'prompt') { emit({ type: 'agent_start' }); return reply(c); }
-  if (c.type === 'abort_and_prompt') { emit({ type: 'agent_start' }); return reply(c); }
-  reply(c);
-});
-`);
+  let todos = [], model = 'a';
+  const omp = fakeOmp({
+    state: () => ({ model: { provider: 'test', id: model }, thinkingLevel: 'low', todoPhases: todos, isSettled: true }),
+    tree: () => ({ leafId: 'a', tree: [{ entry: { id: 'u', type: 'message', message: { role: 'user', content: 'hello' } }, children: [{ entry: { id: 'a', parentId: 'u', type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }, children: [] }] }] }),
+    lastAssistantText: () => ({ text: 'last words' }),
+    setTodos(phases) { todos = phases; return { todoPhases: todos }; },
+    cycleModel() { model = 'b'; return { model: { provider: 'test', id: model }, thinkingLevel: 'high', isScoped: true }; },
+    cycleThinking: () => null,
+    newSession() { todos = []; return { cancelled: false }; },
+    switchSession() { todos = []; return { cancelled: false }; },
+    prompt() { this.emit({ type: 'agent_start' }); return {}; },
+    interrupt() { this.emit({ type: 'agent_start' }); return {}; },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], activity: [], sessions: [{ id: 'session', title: 'Parity', cwd: dir, native: false, status: 'paused', model: 'OMP default', messages: [], todos: [], createdAt: at, updatedAt: at }] }));
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const base = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -79,7 +71,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     const res = await fetch(base + route, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return [res.status, await res.json()];
   };
-  return { dir, other, app, session: () => app.store.sessions[0], command: body => request('/sessions/session/command', body), request, sent: async () => (await readFile(log, 'utf8')).trim().split('\n').map(l => JSON.parse(l)) };
+  return { dir, other, app, session: () => app.store.sessions[0], command: body => request('/sessions/session/command', body), request, omp };
 }
 
 test('session RPC parity: tree, last reply, todos, cycling, new and switched sessions', async t => {
@@ -104,12 +96,11 @@ test('session RPC parity: tree, last reply, todos, cycling, new and switched ses
   const [status, switched] = await f.command({ type: 'switch_session', file: f.other });
   assert.equal(status, 200);
   assert.equal(switched.title, 'Other work');
-  const sent = await f.sent();
-  assert.ok(sent.some(c => c.type === 'new_session'));
-  assert.ok(sent.some(c => c.type === 'switch_session' && c.sessionPath === f.other));
+  assert.ok(f.omp.sent('newSession').length > 0);
+  assert.ok(f.omp.sent('switchSession').some(([path]) => path === f.other));
 });
 
-test('launch options are stored per session and rejected while work is running; stop & send uses abort_and_prompt', async t => {
+test('launch options are stored per session and rejected while work is running; stop & send uses interrupt', async t => {
   const f = await fixture(t);
   assert.equal((await f.command({ type: 'launch', launch: { approvalMode: 'sometimes' } }))[0], 400);
   const [, launched] = await f.command({ type: 'launch', launch: { approvalMode: 'yolo', noLsp: true } });
@@ -122,7 +113,7 @@ test('launch options are stored per session and rejected while work is running; 
   assert.equal((await f.command({ type: 'interrupt', message: '/compact' }))[0], 400, 'Slash commands cannot replace a running turn');
   const [, interrupted] = await f.command({ type: 'interrupt', message: 'Do this instead' });
   assert.equal(interrupted.status, 'running');
-  assert.ok((await f.sent()).some(c => c.type === 'abort_and_prompt' && c.message === 'Do this instead'));
+  assert.ok(f.omp.sent('interrupt').some(([c]) => c.message === 'Do this instead'));
   assert.ok(interrupted.messages.some(m => m.role === 'user' && m.text === 'Do this instead'));
 });
 

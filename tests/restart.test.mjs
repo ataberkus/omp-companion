@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('a restart handoff carries a fresh random token only; stale or malformed notes mean a normal start', () => {
   const token = 'ab'.repeat(32), at = 1_000_000;
@@ -21,20 +22,11 @@ async function start(t, options) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-restart-'));
   const state = { dir, file: join(dir, 'workspace.json') };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-out({ type: 'ready', protocolVersion: 1 });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [], isSettled: false } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`);
+  const omp = fakeOmp({ state: () => ({ todoPhases: [], isSettled: false }) });
   const at = new Date().toISOString();
   const session = (id, status) => ({ id, projectId: 'project', title: id, status, cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at });
   await writeFile(state.file, JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [session('run', 'paused'), session('rev', 'review')], activity: [] }));
-  state.app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake], ...options(state) });
+  state.app = await createCompanion({ dataDir: dir, omp, ...options(state) });
   state.app.server.listen(0, '127.0.0.1');
   await once(state.app.server, 'listening');
   state.call = async (path, body) => {

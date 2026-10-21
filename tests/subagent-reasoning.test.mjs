@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, rm, writeFile, utimes } from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('subagent reasoning is visible before transcript saves and survives registry refresh without duplicate thoughts', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-subagent-reasoning-'));
@@ -21,47 +23,42 @@ test('subagent reasoning is visible before transcript saves and survives registr
   await utimes(child, old, old);
   const thinking = ('Compare the ownership boundary before editing.\n' + 'Keep the stream separate from saved history. '.repeat(12)).trim();
   const next = 'Inspect the next turn without carrying the old partial thought.';
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-const file = ${JSON.stringify(child)};
-let level = 'off', running = false, text = ${JSON.stringify(thinking)}, turn = 0, stamp = Date.now();
-const meta = { id: 'Child', index: 0, agent: 'task', sessionFile: file, parentToolCallId: 'task1' };
-const child = { ...meta, status: 'running', description: 'Find the cause', progress: { id: 'Child', status: 'running', lastIntent: 'Reading ownership code', toolCount: 3 } };
-const message = () => ({ role: 'assistant', content: [{ type: 'thinking', thinking: text }], timestamp: stamp });
-const emit = event => { if (level === 'events') out({ type: 'subagent_event', payload: { id: 'Child', event } }); };
-const persist = () => appendFileSync(file, JSON.stringify({ type: 'message', id: 'saved-' + turn++, timestamp: new Date().toISOString(), message: message() }) + '\\n');
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'set_subagent_subscription') level = c.level;
-  if (c.type === 'get_state') data = { sessionFile: ${JSON.stringify(parent)}, todoPhases: [] };
-  if (c.type === 'get_subagents') data = { subagents: running ? [child] : [] };
-  if (c.type === 'prompt') {
-    running = true;
-    out({ type: 'agent_start' });
-    out({ type: 'subagent_lifecycle', payload: { ...meta, status: 'started' } });
-    emit({ type: 'message_start', message: { role: 'assistant', content: [], timestamp: stamp } });
-    emit({ type: 'message_update', message: message(), assistantMessageEvent: { type: 'thinking_delta', delta: text, contentIndex: 0 } });
-  }
-  if (c.type === 'steer' && c.message === 'persist') persist();
-  if (c.type === 'steer' && c.message === 'end') emit({ type: 'message_end', message: message() });
-  if (c.type === 'steer' && c.message === 'next') {
-    text = ${JSON.stringify(next)}; stamp++;
-    emit({ type: 'message_start', message: { role: 'assistant', content: [], timestamp: stamp } });
-    emit({ type: 'message_update', message: message(), assistantMessageEvent: { type: 'thinking_delta', delta: text, contentIndex: 0 } });
-  }
-  if (c.type === 'steer' && c.message === 'finish') {
-    persist(); emit({ type: 'message_end', message: message() }); running = false;
-    out({ type: 'subagent_lifecycle', payload: { ...meta, status: 'completed' } });
-  }
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`);
+  let text = thinking, turn = 0, stamp = Date.now(), running = false;
+  const meta = { id: 'Child', index: 0, agent: 'task', sessionFile: child, parentToolCallId: 'task1' };
+  const childAgent = { ...meta, status: 'running', description: 'Find the cause', progress: { id: 'Child', status: 'running', lastIntent: 'Reading ownership code', toolCount: 3 } };
+  const message = () => ({ role: 'assistant', content: [{ type: 'thinking', thinking: text }], timestamp: stamp });
+  const persist = () => appendFileSync(child, JSON.stringify({ type: 'message', id: 'saved-' + turn++, timestamp: new Date().toISOString(), message: message() }) + '\n');
+  const omp = fakeOmp(session => {
+    const sub = event => session.emit({ type: 'subagent_event', payload: { id: 'Child', event } });
+    return {
+      state: () => ({ sessionFile: parent, todoPhases: [] }),
+      subagents: () => ({ subagents: running ? [childAgent] : [] }),
+      prompt() {
+        running = true;
+        this.emit({ type: 'agent_start' });
+        this.emit({ type: 'subagent_lifecycle', payload: { ...meta, status: 'started' } });
+        sub({ type: 'message_start', message: { role: 'assistant', content: [], timestamp: stamp } });
+        sub({ type: 'message_update', message: message(), assistantMessageEvent: { type: 'thinking_delta', delta: text, contentIndex: 0 } });
+        return {};
+      },
+      steer({ message: m }) {
+        if (m === 'persist') persist();
+        if (m === 'end') sub({ type: 'message_end', message: message() });
+        if (m === 'next') {
+          text = next; stamp++;
+          sub({ type: 'message_start', message: { role: 'assistant', content: [], timestamp: stamp } });
+          sub({ type: 'message_update', message: message(), assistantMessageEvent: { type: 'thinking_delta', delta: text, contentIndex: 0 } });
+        }
+        if (m === 'finish') {
+          persist(); sub({ type: 'message_end', message: message() }); running = false;
+          this.emit({ type: 'subagent_lifecycle', payload: { ...meta, status: 'completed' } });
+        }
+        return {};
+      },
+    };
+  });
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'p', path: dir, name: 'Project' }], sessions: [{ id: 's', projectId: 'p', title: 'Parent', status: 'paused', cwd: dir, sessionFile: parent, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -113,7 +110,7 @@ test('background reports the reasoning level each subagent last ran with, and no
   await writeFile(join(sub, 'Changed.jsonl'), lines(init('anthropic/claude-opus-5-5:low'), reply('low'), { type: 'thinking_level_change', thinkingLevel: 'xhigh' }));
   await writeFile(join(sub, 'Unknown.jsonl'), lines(init('anthropic/claude-opus-5-5:auto'), reply()));
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: ['-e', ''] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, omp: fakeOmp() });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/background?file=${encodeURIComponent(parent)}`, { headers: { Authorization: 'Bearer ' + app.token } });
@@ -136,17 +133,9 @@ test('background gives running and task-linked subagents the model, level and st
   await writeFile(join(sub, 'Scout.jsonl'), lines({ type: 'model_change', model: 'anthropic/claude-opus-5-5' }, init('anthropic/claude-opus-5-5:auto'), reply('high')));
   await writeFile(join(sub, 'Fresh.jsonl'), lines({ type: 'model_change', model: 'anthropic/claude-opus-5-5' }, init('anthropic/claude-opus-5-5:auto')));
   const entry = id => ({ id, agent: 'scout', status: 'running', description: 'Audit ' + id, sessionFile: join(sub, id + '.jsonl'), progress: { id, status: 'running' } });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  out({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { sessionFile: ${JSON.stringify(parent)}, todoPhases: [] } : c.type === 'get_subagents' ? { subagents: ${JSON.stringify([entry('Scout'), entry('Fresh')])} } : {} });
-}
-`);
+  const omp = fakeOmp({ state: () => ({ sessionFile: parent, todoPhases: [] }), subagents: () => ({ subagents: [entry('Scout'), entry('Fresh')] }) });
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'p', path: dir, name: 'Project' }], sessions: [{ id: 's', projectId: 'p', title: 'Parent', status: 'paused', cwd: dir, sessionFile: parent, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -185,19 +174,9 @@ test('background marks async subagents finished when the transcript completes th
     ...spawn('c2', 'Finished', t0 + 60e3), snapshot('w1', t0 + 70e3, [['Finished', 'running']]), snapshot('w2', t0 + 80e3, [['Finished', 'completed']])];
   const write = list => writeFile(parent, list.map(x => JSON.stringify(x)).join('\n') + '\n');
   await write(lines);
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { writeFileSync } from 'node:fs';
-writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid));
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  out({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { sessionFile: ${JSON.stringify(parent)}, todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {} });
-}
-`);
+  const omp = fakeOmp({ state: () => ({ sessionFile: parent, todoPhases: [] }) });
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'p', path: dir, name: 'Project' }], sessions: [{ id: 's', projectId: 'p', title: 'Parent', status: 'paused', cwd: dir, sessionFile: parent, messages: [], todos: [], createdAt: at(t0), updatedAt: at(t0) }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: sessions, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -215,7 +194,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.deepEqual(status, { Killed: 'stale', Finished: 'done', Working: 'running' });
   assert.ok(bg.tasks.find(j => j.id === 'Finished').finishedAt, 'a finished job stops its timer');
   // OMP exits (crash, stop): its jobs die with it, although the transcript was just written.
-  process.kill(Number(await readFile(join(dir, 'pid'), 'utf8')));
+  omp.last.exit('OMP exited (1).');
   let stopped;
   for (let i = 0; i < 50 && (stopped = await request('/background?file=' + encodeURIComponent(parent))).live; i++) await new Promise(r => setTimeout(r, 100));
   assert.equal(stopped.live, false);

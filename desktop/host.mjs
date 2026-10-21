@@ -88,7 +88,11 @@ async function main() {
   const onAttention = a => send({ event: 'attention', title: `${a.title} ${verbs[a.kind] || 'needs you'}`.slice(0, 200), body: a.detail || 'Open OMP Control Room to continue.' });
   // Screen sharing starts off at every launch, like network access; only the tray turns it on (OMP_WEB_SCREEN doesn't apply here).
   const onScreen = v => send({ event: 'screen', address: v?.address ?? null });
-  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen }); }
+  // A host the shell restarts after a crash keeps the window's token (unless a password is the token). Removed from the
+  // environment at once, so OMP's tools and CLI runs never inherit it.
+  const token = process.env.OMP_WEB_DESKTOP_TOKEN;
+  delete process.env.OMP_WEB_DESKTOP_TOKEN;
+  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}) }); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);

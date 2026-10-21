@@ -5,27 +5,23 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('/usage reports remaining provider quota without steering, queueing or replacing the active turn', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-usage-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-let model = { provider: 'alpha', id: 'selected' };
-emit({ type: 'ready' });
-emit({ type: 'available_commands_update', commands: [{ name: 'usage' }] });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'set_model') model = { provider: c.provider, id: c.modelId };
-  const data = c.type === 'get_state' ? { model, isSettled: false, todoPhases: [] } : {};
-  if (c.type === 'prompt') emit({ type: 'agent_start' });
-  if (c.type === 'steer') emit({ type: 'command_output', text: 'INCORRECT: quota command reached the agent' });
-  emit({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`);
-  // Node can act as both the RPC runner and the existing `omp usage --json` CLI.
+  const omp = fakeOmp(() => {
+    let model = { provider: 'alpha', id: 'selected' };
+    return {
+      open() { this.emit({ type: 'available_commands_update', commands: [{ name: 'usage' }] }); },
+      setModel(provider, modelId) { model = { provider, id: modelId }; },
+      state: () => ({ model, isSettled: false, todoPhases: [] }),
+      prompt() { this.emit({ type: 'agent_start' }); return {}; },
+      steer() { this.emit({ type: 'command_output', text: 'INCORRECT: quota command reached the agent' }); },
+    };
+  });
+  // Node acts as the existing `omp usage --json` CLI.
   await writeFile(join(dir, 'usage'), `const fs = require('node:fs');
 const data = JSON.parse(fs.readFileSync(__dirname + '/usage-data.json', 'utf8'));
 if (data.error) { process.stderr.write(data.error); process.exit(1); }
@@ -53,7 +49,7 @@ process.stdout.write(JSON.stringify(data));
   const at = new Date().toISOString();
   const blank = { id: 'blank', title: 'Default model', cwd: dir, status: 'paused', native: false, provider: '', model: '', messages: [], todos: [], createdAt: at, updatedAt: at };
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [{ id: 'session', title: 'Usage', cwd: dir, status: 'paused', native: false, provider: 'alpha', model: 'selected', messages: [], todos: [], createdAt: at, updatedAt: at }, blank], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const base = `http://127.0.0.1:${app.server.address().port}`;

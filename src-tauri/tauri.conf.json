@@ -9,13 +9,21 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
-    "externalBin": ["binaries/node"],
+    "externalBin": ["binaries/bun"],
     "resources": {
       "../companion/": "companion/",
+      "../node_modules/": "node_modules/",
       "../local-dist/": "local-dist/",
       "../desktop/host.mjs": "desktop/host.mjs",
       "../desktop/links.mjs": "desktop/links.mjs"
     },
     "windows": { "nsis": { "installMode": "currentUser" } }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlENDYzQTE2MUU0NUU3OUIKUldTYjUwVWVGanBHbldVNUpmcGFGd3hBR3dPZFhwQTlqN012dmZyWWtndXFwYVNnYWV2cHJseG4K",
+      "endpoints": ["https://github.com/ataberkus/omp-companion/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }

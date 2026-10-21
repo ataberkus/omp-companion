@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 // Each prompt raises OMP's two approval dialogs (tool wrapper select, computer-control confirm) next to a provider
 // safety check and an ordinary question; every reply OMP receives is echoed back as command output.
@@ -12,29 +13,23 @@ test('auto-approve answers only approval prompts, and approves waiting ones when
   const dir = await mkdtemp(join(tmpdir(), 'omp-auto-approve-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-let round = 0;
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'extension_ui_response') { emit({ type: 'command_output', text: 'reply ' + JSON.stringify(c) }); continue; }
-  if (c.type === 'prompt' || c.type === 'steer') {
+  let round = 0;
+  const raise = function () {
     round++;
-    emit({ type: 'extension_ui_request', id: 'control' + round, method: 'confirm', title: 'Allow foreground computer control?', message: 'Click Save in Notepad' });
-    emit({ type: 'extension_ui_request', id: 'tool' + round, method: 'select', title: 'Allow tool: bash\\nCommand: npm test', options: ['Approve', 'Deny'] });
-    emit({ type: 'extension_ui_request', id: 'safety' + round, method: 'select', title: 'Allow tool: computer\\nProvider safety checks:\\n1. Sensitive site', options: ['Approve', 'Deny'] });
-    emit({ type: 'extension_ui_request', id: 'question' + round, method: 'confirm', title: 'Drop goal?', message: 'This removes the goal record.' });
-  }
-  if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
-  else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
-  else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
-}
-`);
+    this.emit({ type: 'extension_ui_request', id: 'control' + round, method: 'confirm', title: 'Allow foreground computer control?', message: 'Click Save in Notepad' });
+    this.emit({ type: 'extension_ui_request', id: 'tool' + round, method: 'select', title: 'Allow tool: bash\nCommand: npm test', options: ['Approve', 'Deny'] });
+    this.emit({ type: 'extension_ui_request', id: 'safety' + round, method: 'select', title: 'Allow tool: computer\nProvider safety checks:\n1. Sensitive site', options: ['Approve', 'Deny'] });
+    this.emit({ type: 'extension_ui_request', id: 'question' + round, method: 'confirm', title: 'Drop goal?', message: 'This removes the goal record.' });
+  };
+  const omp = fakeOmp({
+    answer(id, reply) { this.emit({ type: 'command_output', text: 'reply ' + JSON.stringify({ type: 'extension_ui_response', id, ...reply }) }); },
+    prompt() { raise.call(this); return { agentInvoked: true }; },
+    steer() { raise.call(this); return {}; },
+    state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' } }),
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [{ id: 'session', title: 'Auto', cwd: dir, status: 'paused', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const command = async body => {
@@ -92,21 +87,13 @@ test('quick-start with autoApprove answers approval prompts from the first turn'
   const dir = await mkdtemp(join(tmpdir(), 'omp-auto-start-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'extension_ui_response') { emit({ type: 'command_output', text: 'reply ' + JSON.stringify(c) }); continue; }
-  if (c.type === 'prompt') emit({ type: 'extension_ui_request', id: 'tool', method: 'select', title: 'Allow tool: bash\\nCommand: npm test', options: ['Approve', 'Deny'] });
-  if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
-  else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
-  else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
-}
-`);
+  const omp = fakeOmp({
+    answer(id, reply) { this.emit({ type: 'command_output', text: 'reply ' + JSON.stringify({ type: 'extension_ui_response', id, ...reply }) }); },
+    prompt() { this.emit({ type: 'extension_ui_request', id: 'tool', method: 'select', title: 'Allow tool: bash\nCommand: npm test', options: ['Approve', 'Deny'] }); return { agentInvoked: true }; },
+    state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' } }),
+  });
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const start = async body => {

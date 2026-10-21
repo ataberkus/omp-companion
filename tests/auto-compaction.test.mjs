@@ -5,35 +5,30 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('automatic compaction is visible while active and only reports real outcomes', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-compaction-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-let compacting = false;
-const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
-send({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'get_state') data = { todoPhases: [], model: { provider: 'test', id: 'test' }, isCompacting: compacting };
-  if (c.type === 'get_subagents') data = { subagents: [] };
-  if (c.type === 'prompt' || c.message === 'begin') {
-    compacting = true;
-    send({ type: 'auto_compaction_start', reason: 'threshold' });
-  } else if (c.type === 'steer' && c.message === 'retry') {
-    send({ type: 'auto_compaction_end', willRetry: true, errorMessage: 'transient' });
-  } else if (c.type === 'steer' && ['finish', 'fail', 'skip'].includes(c.message)) {
-    compacting = false;
-    send({ type: 'auto_compaction_end', ...(c.message === 'fail' ? { errorMessage: 'limit reached' } : c.message === 'skip' ? { skipped: true } : { result: { summary: 'done' } }) });
-  }
-  send({ type: 'response', id: c.id, command: c.type, success: true, data });
-}`);
+  let compacting = false;
+  const begin = function () { compacting = true; this.emit({ type: 'auto_compaction_start', reason: 'threshold' }); return {}; };
+  const omp = fakeOmp({
+    state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' }, isCompacting: compacting }),
+    prompt: begin,
+    steer({ message }) {
+      if (message === 'begin') return begin.call(this);
+      if (message === 'retry') this.emit({ type: 'auto_compaction_end', willRetry: true, errorMessage: 'transient' });
+      else if (['finish', 'fail', 'skip'].includes(message)) {
+        compacting = false;
+        this.emit({ type: 'auto_compaction_end', ...(message === 'fail' ? { errorMessage: 'limit reached' } : message === 'skip' ? { skipped: true } : { result: { summary: 'done' } }) });
+      }
+      return {};
+    },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}`;

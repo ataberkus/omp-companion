@@ -5,6 +5,9 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
+
+const after = fn => setImmediate(fn);
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
 const image = { type: 'image', mimeType: 'image/png', data: png };
@@ -13,33 +16,27 @@ test('queued follow-ups stay out of live work, can be edited or removed, and dis
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-queue-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  const log = join(dir, 'sent.jsonl');
-  const release = join(dir, 'release');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { existsSync, appendFileSync } from 'node:fs';
-const log = ${JSON.stringify(log)}, release = ${JSON.stringify(release)};
-let released = false;
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'prompt' || c.type === 'follow_up') appendFileSync(log, JSON.stringify({ type: c.type, message: c.message, images: c.images }) + '\\n');
-  if (c.type === 'get_state' && !released && existsSync(release)) {
-    released = true;
-    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: true }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
-  }
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, command: c.type, success: true, data }) + '\\n');
-  if (c.type === 'prompt' && released) {
-    process.stdout.write(JSON.stringify({ type: 'agent_start' }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: false }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
-  }
-}`);
+  const log = [];
+  let release = false, released = false;
+  const omp = fakeOmp({
+    prompt(c) {
+      log.push({ type: 'prompt', message: c.message, images: c.images });
+      if (released) after(() => { this.emit({ type: 'agent_start' }); this.emit({ type: 'prompt_result', status: 'completed', sessionSettled: false }); this.emit({ type: 'session_settled' }); });
+      return {};
+    },
+    followUp(c) { log.push({ type: 'follow_up', message: c.message, images: c.images }); return {}; },
+    state() {
+      if (!released && release) {
+        released = true;
+        this.emit({ type: 'prompt_result', status: 'completed', sessionSettled: true });
+        this.emit({ type: 'session_settled' });
+      }
+      return { todoPhases: [] };
+    },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`;
@@ -59,21 +56,21 @@ for await (const line of createInterface({ input: process.stdin })) {
   const secondId = more.queuedMessages[1].id;
   assert.equal((await post({ type: 'edit_follow_up', id, message: 'Edited for later' }))[1].queuedMessages[0].text, 'Edited for later');
   assert.equal((await post({ type: 'cancel_follow_up', id: secondId }))[1].queuedMessages.length, 1);
-  assert.equal((await readFile(log, 'utf8')).trim().split('\n').length, 1);
+  assert.equal(log.length, 1);
   const [, stopped] = await post({ type: 'abort' });
   assert.equal(stopped.status, 'paused');
   assert.equal(stopped.queuedMessages.length, 1);
-  assert.equal((await readFile(log, 'utf8')).trim().split('\n').length, 1);
+  assert.equal(log.length, 1);
   assert.equal((await post({ type: 'hide' }))[0], 400);
   assert.equal((await post({ type: 'complete' }))[0], 400);
   assert.equal((await post({ type: 'prompt', message: 'Resume current work' }))[0], 200);
   assert.equal(app.store.sessions[0].queuedMessages.length, 1);
 
-  await writeFile(release, 'go');
+  release = true;
   assert.equal((await post({ type: 'set_model', model: 'test/model' }))[0], 200);
   let sent;
   for (let i = 0; i < 40; i++) {
-    sent = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
+    sent = log;
     if (sent.length === 3 && !app.store.sessions[0].queuedMessages.length && app.store.sessions[0].status === 'review') break;
     await new Promise(r => setTimeout(r, 25));
   }
@@ -90,29 +87,22 @@ test('closing while a queued prompt awaits OMP keeps it available for retry', as
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-close-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs'), release = join(dir, 'release'), sent = join(dir, 'queued-sent');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { existsSync, writeFileSync } from 'node:fs';
-const release = ${JSON.stringify(release)}, sent = ${JSON.stringify(sent)};
-let settled = false;
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'prompt' && c.message === 'Send me later') { writeFileSync(sent, 'received'); continue; }
-  if (c.type === 'prompt') {
-    process.stdout.write(JSON.stringify({ type: 'agent_start' }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: false }) + '\\n');
-  }
-  if (c.type === 'get_state' && !settled && existsSync(release)) {
-    settled = true;
-    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
-  }
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, command: c.type, success: true, data }) + '\\n');
-}`);
+  let release = false, settled = false, received = false;
+  const omp = fakeOmp({
+    prompt(c) {
+      if (c.message === 'Send me later') { received = true; return new Promise(() => {}); }
+      this.emit({ type: 'agent_start' });
+      this.emit({ type: 'prompt_result', status: 'completed', sessionSettled: false });
+      return {};
+    },
+    state() {
+      if (!settled && release) { settled = true; this.emit({ type: 'session_settled' }); }
+      return { todoPhases: [] };
+    },
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`;
@@ -123,14 +113,9 @@ for await (const line of createInterface({ input: process.stdin })) {
   };
   await post({ type: 'prompt', message: 'First turn' });
   await post({ type: 'follow_up', message: 'Send me later' });
-  await writeFile(release, 'go');
+  release = true;
   await post({ type: 'set_model', model: 'test/model' });
-  let received = false;
-  for (let i = 0; i < 60; i++) {
-    received = await readFile(sent, 'utf8').then(() => true, () => false);
-    if (received) break;
-    await new Promise(r => setTimeout(r, 25));
-  }
+  for (let i = 0; i < 60 && !received; i++) await new Promise(r => setTimeout(r, 25));
   assert.equal(received, true);
   await app.close();
   await app.flush();
@@ -143,39 +128,38 @@ test('steers stay pending until OMP reads them, and queued messages can be sent 
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-steer-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs'), log = join(dir, 'sent.jsonl');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-const log = ${JSON.stringify(log)};
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-const queue = [];
-let delivering;
-const read = text => { const i = queue.indexOf(text); if (i >= 0) queue.splice(i, 1); out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } }); };
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (['prompt', 'steer'].includes(c.type)) appendFileSync(log, JSON.stringify({ type: c.type, message: c.message }) + '\\n');
-  if (c.type === 'steer') queue.push(c.message);
-  if (c.type === 'get_state' && delivering) { read(delivering); delivering = undefined; }
-  if (c.type === 'remove_queued_message') {
-    if (c.message === 'Read during cancel') read(c.message);
-    if (c.message === 'Taken by OMP') { queue.splice(queue.indexOf(c.message), 1); delivering = c.message; }
-    if (c.message === 'Cancel after reordering') read('Earlier pending');
-  }
-  const index = c.type === 'remove_queued_message' && c.queue === 'steering' ? queue.indexOf(c.message) : -1;
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : c.type === 'remove_queued_message' ? { removed: index >= 0 } : {};
-  if (index >= 0) queue.splice(index, 1);
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type === 'prompt') { out({ type: 'agent_start' }); out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: c.message }] } }); }
-  if (c.type === 'steer' && c.message === 'Read me') {
-    out({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } });
-    read('Read me');
-  }
-  if (c.type === 'abort') out({ type: 'prompt_result', status: 'aborted' });
-}`);
+  const log = [];
+  const queue = [];
+  let delivering;
+  const omp = fakeOmp(session => {
+    const read = text => { const i = queue.indexOf(text); if (i >= 0) queue.splice(i, 1); session.emit({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } }); };
+    return {
+      prompt(c) {
+        log.push({ type: 'prompt', message: c.message });
+        after(() => { this.emit({ type: 'agent_start' }); this.emit({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: c.message }] } }); });
+        return {};
+      },
+      steer(c) {
+        log.push({ type: 'steer', message: c.message });
+        queue.push(c.message);
+        if (c.message === 'Read me') after(() => { this.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } }); read('Read me'); });
+        return {};
+      },
+      state() { if (delivering) { read(delivering); delivering = undefined; } return { todoPhases: [] }; },
+      removeQueued(text, kind) {
+        if (text === 'Read during cancel') read(text);
+        if (text === 'Taken by OMP') { queue.splice(queue.indexOf(text), 1); delivering = text; }
+        if (text === 'Cancel after reordering') read('Earlier pending');
+        const index = kind === 'steering' ? queue.indexOf(text) : -1;
+        if (index >= 0) queue.splice(index, 1);
+        return { removed: index >= 0 };
+      },
+      abort() { after(() => this.emit({ type: 'prompt_result', status: 'aborted' })); return {}; },
+    };
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`;
@@ -215,8 +199,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 
   const [, again] = await post({ type: 'follow_up', message: 'While idle' });
   assert.equal(again.queuedMessages?.length || 0, 0, 'idle sessions send follow-ups immediately');
-  const sentLog = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(sentLog.map(x => [x.type, x.message]), [['prompt', 'Work'], ['steer', 'Read me'], ['steer', 'Never read'], ['steer', 'Cancel me'], ['steer', 'Fixed'], ['steer', 'Later one'], ['prompt', 'While idle']]);
+  assert.deepEqual(log.map(x => [x.type, x.message]), [['prompt', 'Work'], ['steer', 'Read me'], ['steer', 'Never read'], ['steer', 'Cancel me'], ['steer', 'Fixed'], ['steer', 'Later one'], ['prompt', 'While idle']]);
   assert.equal((await post({ type: 'send_follow_up', id: 'missing' }))[0], 400);
 
   await post({ type: 'steer', message: 'Read during cancel' });
@@ -250,32 +233,33 @@ test('a steer sent mid-thought waits below the live turn and leaves its thought 
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-steer-think-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
   // Live steering: the streaming message keeps thinking after OMP takes the steer, runs its tool, and the steer is echoed
   // only at the next turn boundary.
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-const think = delta => out({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta } });
-let steer, stage = 0;
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'steer') steer = c.message;
-  out({ type: 'response', id: c.id, command: c.type, success: true, data: c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {} });
-  if (c.type === 'prompt') { out({ type: 'agent_start' }); out({ type: 'message_start', message: { role: 'assistant', content: [] } }); think('Analyzing. '); }
-  if (c.type === 'steer') think('Still analyzing.');
-  if (c.type === 'cycle_model' && stage++ === 0) {
-    out({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Analyzing. Still analyzing.' }] } });
-    out({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } });
-  } else if (c.type === 'cycle_model') {
-    out({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }] } });
-    out({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: steer }] } });
-    out({ type: 'message_start', message: { role: 'assistant', content: [] } }); think('Following the steer.');
-  }
-}`);
+  let steer, stage = 0;
+  const omp = fakeOmp(session => {
+    const think = delta => session.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta } });
+    return {
+      prompt() { after(() => { this.emit({ type: 'agent_start' }); this.emit({ type: 'message_start', message: { role: 'assistant', content: [] } }); think('Analyzing. '); }); return {}; },
+      steer(c) { steer = c.message; after(() => think('Still analyzing.')); return {}; },
+      cycleModel() {
+        after(() => {
+          if (stage++ === 0) {
+            this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Analyzing. Still analyzing.' }] } });
+            this.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } });
+          } else {
+            this.emit({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }] } });
+            this.emit({ type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: steer }] } });
+            this.emit({ type: 'message_start', message: { role: 'assistant', content: [] } }); think('Following the steer.');
+          }
+        });
+        return {};
+      },
+      state: () => ({ todoPhases: [] }),
+    };
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`;
@@ -296,21 +280,18 @@ test('a stopped run\'s late prompt_result does not pause the next prompt', async
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-abort-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
   // Like OMP: prompt_result is keyed by the prompt's id and can land after the abort reply and the next prompt.
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-out({ type: 'ready' });
-let first;
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type === 'prompt') { out({ type: 'agent_start' }); if (first) out({ type: 'prompt_result', id: first, status: 'aborted' }); else first = c.id; }
-}`);
+  let first;
+  const omp = fakeOmp({
+    prompt(c) {
+      after(() => { this.emit({ type: 'agent_start' }); if (first) this.emit({ type: 'prompt_result', id: first, status: 'aborted' }); else first = c.id; });
+      return {};
+    },
+    state: () => ({ todoPhases: [] }),
+  });
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const post = body => fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
@@ -329,45 +310,43 @@ test('queued follow-ups that only fit the context one at a time are sent separat
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-queue-ctx-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  // Each session runs in its own folder; a "release" file there completes its current turn, after which every prompt completes at once.
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { existsSync, appendFileSync } from 'node:fs';
-import { join } from 'node:path';
-const log = join(process.cwd(), 'sent.jsonl'), release = join(process.cwd(), 'release');
-let released = false;
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'prompt') appendFileSync(log, JSON.stringify({ message: c.message, images: c.images?.length || 0 }) + '\\n');
-  if (c.type === 'get_state' && !released && existsSync(release)) {
-    released = true;
-    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: true }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
-  }
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, command: c.type, success: true, data }) + '\\n');
-  if (c.type === 'prompt' && released) {
-    process.stdout.write(JSON.stringify({ type: 'agent_start' }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'prompt_result', status: 'completed', sessionSettled: false }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'session_settled' }) + '\\n');
-  }
-}`);
+  // Each session runs in its own folder; releasing it completes its current turn, after which every prompt completes at once.
+  const logs = new Map(), releases = new Set();
+  const omp = fakeOmp(session => {
+    let released = false;
+    const id = session.cwd.split(/[\\/]/).at(-1);
+    return {
+      prompt(c) {
+        if (!logs.has(id)) logs.set(id, []);
+        logs.get(id).push({ message: c.message, images: c.images?.length || 0 });
+        if (released) after(() => { this.emit({ type: 'agent_start' }); this.emit({ type: 'prompt_result', status: 'completed', sessionSettled: false }); this.emit({ type: 'session_settled' }); });
+        return {};
+      },
+      state() {
+        if (!released && releases.has(id)) {
+          released = true;
+          this.emit({ type: 'prompt_result', status: 'completed', sessionSettled: true });
+          this.emit({ type: 'session_settled' });
+        }
+        return { todoPhases: [] };
+      },
+    };
+  });
   const at = new Date().toISOString();
   // 4,000 tokens left: two big images (≈3,068) fit, four (≈6,136) don't.
   const session = id => ({ id, projectId: id, title: id, status: 'paused', cwd: join(dir, id), model: 'OMP default', native: false, contextWindow: 5000, contextTokens: 1000, prefs: { followUpMode: 'all' }, messages: [], todos: [], createdAt: at, updatedAt: at });
   for (const id of ['split', 'stuck']) await mkdir(join(dir, id));
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: ['split', 'stuck'].map(id => ({ id, path: join(dir, id), name: id })), sessions: [session('split'), session('stuck')], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const post = async (id, body) => {
     const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/${id}/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return [res.status, await res.json()];
   };
-  const sent = async id => (await readFile(join(dir, id, 'sent.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  const sent = async id => logs.get(id) || [];
   const settle = async (id, done) => {
-    await writeFile(join(dir, id, 'release'), 'go');
+    releases.add(id);
     assert.equal((await post(id, { type: 'set_model', model: 'test/model' }))[0], 200);
     for (let i = 0; i < 80 && !await done(); i++) await new Promise(r => setTimeout(r, 25));
   };

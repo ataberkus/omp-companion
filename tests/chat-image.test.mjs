@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
 const image = { type: 'image', mimeType: 'image/png', data: png };
@@ -17,28 +18,21 @@ test('image-only, steered and resumed chat messages reach OMP while invalid imag
   const dir = await mkdtemp(join(tmpdir(), 'omp-chat-image-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'get_state') data = { todoPhases: [], model: { provider: 'test', id: 'test' } };
-  if (c.type === 'get_subagents') data = { subagents: [] };
-  if (typeof c.message === 'string' && c.message.startsWith('/advisor')) { appendFileSync(${JSON.stringify(join(dir, 'advisor.log'))}, c.message + '\\n'); process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data: {} }) + '\\n'); continue; }
-  if (['prompt', 'steer', 'follow_up'].includes(c.type)) {
-    const accepted = c.images?.length >= 1 && c.images.every(i => i.type === 'image' && i.mimeType === 'image/png' && i.data === '${png}' && !('name' in i) && !('filename' in i)) && (c.message === '' || c.message === 'With text');
-    process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: accepted, command: c.type, data: { agentInvoked: false }, error: accepted ? undefined : 'Image was not forwarded to OMP' }) + '\\n');
-  } else process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data }) + '\\n');
-}`);
+  const send = c => {
+    if (c.message.startsWith('/advisor')) return {};
+    const accepted = c.images?.length >= 1 && c.images.every(i => i.type === 'image' && i.mimeType === 'image/png' && i.data === png && !('name' in i) && !('filename' in i)) && (c.message === '' || c.message === 'With text');
+    if (!accepted) throw new Error('Image was not forwarded to OMP');
+    return { agentInvoked: false };
+  };
+  const omp = fakeOmp({ state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' } }), prompt: send, steer: send, followUp: send });
+  const advisor = () => omp.calls.filter(c => ['prompt', 'steer', 'followUp'].includes(c.method) && c.args[0].message.startsWith('/advisor')).map(c => c.args[0].message);
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }, { id: 'tight', projectId: 'project', title: 'Tight', status: 'paused', cwd: dir, model: 'OMP default', native: false, contextWindow: 5000, contextTokens: 1000, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
   const nativeDir = join(dir, 'native');
   const nativeFile = join(nativeDir, 'project', 'history.jsonl');
   await mkdir(join(nativeDir, 'project'), { recursive: true });
   await writeFile(nativeFile, [JSON.stringify({ type: 'session', cwd: dir, id: 'native-session', timestamp: now }), JSON.stringify({ type: 'title', title: 'History' }), JSON.stringify({ type: 'message', timestamp: now, message: { role: 'user', content: [image] } })].join('\n') + '\n');
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}`;
@@ -66,7 +60,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal(resumed.status, 'review');
   assert.equal(resumed.messages.find(m => m.role === 'user' && m.imagePreview)?.imagePreview, preview);
   assert.ok(resumed.messages.some(m => m.hasImage && !m.imagePreview && m.text === 'Image attached'));
-  assert.match(await readFile(join(dir, 'advisor.log'), 'utf8'), /^\/advisor on$/m);
+  assert.ok(advisor().includes('/advisor on'));
   // New session from home with an image-only prompt also shows the preview.
   const [quickStatus, quick] = await post('/quick-start', { path: dir, prompt: '', images: [image], preview });
   assert.equal(quickStatus, 201);
@@ -76,7 +70,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal(multiStatus, 201);
   assert.notEqual(multi.status, 'error');
   assert.deepEqual(multi.messages.find(m => m.role === 'user')?.imagePreview, [preview, preview, preview]);
-  assert.match(await readFile(join(dir, 'advisor.log'), 'utf8'), /^\/advisor off$/m);
+  assert.ok(advisor().includes('/advisor off'));
   // No fixed image count: seven small images fit the 4,000 tokens left in "tight"…
   const [manyStatus, many] = await post('/sessions/tight/command', { type: 'prompt', message: 'With text', images: Array(7).fill(image) });
   assert.equal(manyStatus, 200);
@@ -105,19 +99,16 @@ test('images in tool results are kept live and from the transcript, served by ID
   const marked = Buffer.concat([Buffer.from(png, 'base64'), Buffer.from('tool-image-marker-0001')]).toString('base64');
   const content = [{ type: 'text', text: 'Read image file [image/png]' }, { type: 'image', mimeType: 'image/png', data: marked },
     { type: 'image', mimeType: 'image/svg+xml', data: png }, { type: 'image', mimeType: 'image/jpeg', data: png }];
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = f => process.stdout.write(JSON.stringify(f) + '\\n');
-out({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [] } : c.type === 'get_subagents' ? { subagents: [] } : c.type === 'prompt' ? { agentInvoked: true } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type === 'prompt') {
-    out({ type: 'tool_execution_start', toolCallId: 'r1', toolName: 'read', args: { path: 'shot.png' } });
-    out({ type: 'tool_execution_end', toolCallId: 'r1', toolName: 'read', result: { content: ${JSON.stringify(content)} } });
-  }
-}`);
+  const omp = fakeOmp({
+    state: () => ({ todoPhases: [] }),
+    prompt() {
+      setImmediate(() => {
+        this.emit({ type: 'tool_execution_start', toolCallId: 'r1', toolName: 'read', args: { path: 'shot.png' } });
+        this.emit({ type: 'tool_execution_end', toolCallId: 'r1', toolName: 'read', result: { content } });
+      });
+      return { agentInvoked: true };
+    },
+  });
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
   // OMP's session file keeps tool images in its blob store, by SHA-256: one still there, one swept.
@@ -136,7 +127,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     { type: 'message', id: 't1', timestamp: now, message: { role: 'toolResult', toolCallId: 'r2', content: ref(hash) } },
     { type: 'message', id: 't2', timestamp: now, message: { role: 'toolResult', toolCallId: 'r3', content: ref('f'.repeat(64)) } },
   ].map(f => JSON.stringify(f)).join('\n') + '\n');
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}`;
@@ -187,7 +178,7 @@ test('stored tool images stay within the configured cap', async t => {
     { type: 'message', id: 't' + n, timestamp: now, message: { role: 'toolResult', toolCallId: 'r' + n, content: [{ type: 'image', mimeType: 'image/png', data: shot(n).toString('base64') }] } });
   await writeFile(nativeFile, frames.map(f => JSON.stringify(f)).join('\n') + '\n');
   const cap = Math.floor(shot(1).length * 1.5);
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, ompCommand: process.execPath, ompArgs: ['-e', ''], toolImageCap: cap });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: nativeDir, omp: fakeOmp(), toolImageCap: cap });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const preview = await (await fetch(`http://127.0.0.1:${app.server.address().port}/api/omp-sessions/preview?file=${encodeURIComponent(nativeFile)}`, { headers: { Authorization: `Bearer ${app.token}` } })).json();

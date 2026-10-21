@@ -1,55 +1,49 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
-// A fake OMP that speaks the btw / subagent RPC like rpc-btw.ts: btw_record before the response, deltas after it.
-const FAKE = `import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-const emit = f => process.stdout.write(JSON.stringify(f) + '\\n');
-const records = new Map();
-let n = 0;
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  appendFileSync(process.env.FAKE_LOG, JSON.stringify(c) + '\\n');
-  let data = {};
-  if (c.type === 'get_state') data = { model: { provider: 'test', id: 'test' }, todoPhases: [] };
-  // Exits shortly after a cancel, so the test can check what happens once OMP is gone.
-  if (c.type === 'cancel_subagent') { data = { cancelled: c.subagentId === 'Sub-1' }; setTimeout(() => process.exit(0), 300); }
-  if (c.type === 'get_subagents') data = { subagents: [{ id: 'Sub-1', agent: 'task', description: 'Fix parser', status: 'running' }] };
-  if (c.type === 'get_btw_history') data = { records: [...records.values()].reverse() };
-  if (c.type === 'btw_cancel') data = { cancelled: false };
-  if (c.type === 'btw') {
-    const turn = { question: c.question, answer: '', status: 'running', createdAt: Date.now() };
-    let r = c.recordId && records.get(c.recordId);
-    if (r) r.followUps.push(turn); else { r = { id: 'btw-' + ++n, ...turn, followUps: [] }; records.set(r.id, r); }
-    emit({ type: 'btw_record', record: r });
-    emit({ type: 'response', id: c.id, command: c.type, success: true, data: { record: r } });
-    const t = r.followUps.at(-1) || r;
-    emit({ type: 'btw_delta', recordId: r.id, delta: 'Answer to ' });
-    t.answer = 'Answer to ' + c.question; t.status = 'complete';
-    emit({ type: 'btw_record', record: r });
-    continue;
-  }
-  emit({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`;
+// A fake OMP that speaks the btw / subagent API like rpc-btw.ts: btw_record before the result, deltas after it.
+const fake = () => fakeOmp(() => {
+  const records = new Map();
+  let n = 0;
+  return {
+    state: () => ({ model: { provider: 'test', id: 'test' }, todoPhases: [] }),
+    // Exits shortly after a cancel, so the test can check what happens once OMP is gone.
+    cancelSubagent(id) { setTimeout(() => this.exit('OMP exited (0).'), 300); return { cancelled: id === 'Sub-1' }; },
+    subagents: () => ({ subagents: [{ id: 'Sub-1', agent: 'task', description: 'Fix parser', status: 'running' }] }),
+    btwHistory: () => ({ records: [...records.values()].reverse() }),
+    btwCancel: () => ({ cancelled: false }),
+    steerSubagent: () => ({}),
+    btw(question, recordId) {
+      const turn = { question, answer: '', status: 'running', createdAt: Date.now() };
+      let r = recordId && records.get(recordId);
+      if (r) r.followUps.push(turn); else { r = { id: 'btw-' + ++n, ...turn, followUps: [] }; records.set(r.id, r); }
+      this.emit({ type: 'btw_record', record: structuredClone(r) });
+      const result = { record: structuredClone(r) };
+      setTimeout(() => {
+        const t = r.followUps.at(-1) || r;
+        this.emit({ type: 'btw_delta', recordId: r.id, delta: 'Answer to ' });
+        t.answer = 'Answer to ' + question; t.status = 'complete';
+        this.emit({ type: 'btw_record', record: structuredClone(r) });
+      }, 0);
+      return result;
+    },
+  };
+});
 
 async function setup(t) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-btw-'));
-  const log = join(dir, 'rpc.log');
   let app;
-  t.after(async () => { if (app) await app.close(); delete process.env.FAKE_LOG; await rm(dir, { recursive: true, force: true }); });
-  await writeFile(join(dir, 'omp.mjs'), FAKE);
-  await writeFile(log, '');
-  process.env.FAKE_LOG = log;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const omp = fake();
   const at = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [{ id: 'session', title: 'Side', cwd: dir, status: 'review', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [join(dir, 'omp.mjs')] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const call = async (path, body) => {
@@ -57,7 +51,7 @@ async function setup(t) {
     return [res.status, await res.json()];
   };
   const command = body => call('/sessions/session/command', body);
-  const sent = async type => (await readFile(log, 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(c => c.type === type);
+  const sent = async method => omp.sent(method);
   return { app: () => app, call, command, sent };
 }
 
@@ -104,12 +98,12 @@ test('subagents of the session can be stopped and steered; other ids and a stopp
 
   const [, steered] = await command({ type: 'subagent_steer', id: 'Sub-1', message: 'Use the existing lexer.' });
   assert.deepEqual(steered, { steered: true });
-  assert.deepEqual((await sent('steer_subagent')).map(c => [c.subagentId, c.message]), [['Sub-1', 'Use the existing lexer.']]);
+  assert.deepEqual((await sent('steerSubagent')).map(([id, message]) => [id, message]), [['Sub-1', 'Use the existing lexer.']]);
   assert.equal((await command({ type: 'subagent_steer', id: 'Sub-1', message: '' }))[0], 400);
 
   assert.deepEqual((await command({ type: 'subagent_cancel', id: 'Sub-1' }))[1], { cancelled: true });
   assert.equal((await command({ type: 'subagent_cancel', id: 'Other' }))[0], 404);
-  assert.equal((await sent('cancel_subagent')).length, 1);
+  assert.equal((await sent('cancelSubagent')).length, 1);
 
   // OMP exited: the subagent is still listed, but nothing can reach it.
   let last;

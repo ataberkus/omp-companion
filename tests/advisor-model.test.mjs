@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('changing the advisor model rewrites WATCHDOG.yml and restarts the idle session', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-advisor-model-'));
@@ -18,23 +19,16 @@ test('changing the advisor model rewrites WATCHDOG.yml and restarts the idle ses
   });
   const watchdog = join(dir, 'WATCHDOG.yml');
   await writeFile(watchdog, '# my advisors\nadvisors:\n  - name: default\n    model: old/model:high # keep this comment\n  - name: second\n    model: other/model\n');
-  const starts = join(dir, 'starts.log');
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-appendFileSync(${JSON.stringify(starts)}, 'start\\n');
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'get_state') data = { todoPhases: [], model: { provider: 'test', id: 'test' }, isSettled: true };
-  if (c.type === 'get_subagents') data = { subagents: [] };
-  if (c.type === 'prompt' && c.message === '/advisor status') process.stdout.write(JSON.stringify({ type: 'command_output', text: 'Advisor is enabled (new/model). Spend: 1 input, 1 output, $0.0000.' }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data }) + '\\n');
-}`);
+  const omp = fakeOmp({
+    state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' }, isSettled: true }),
+    prompt({ message }) {
+      if (message === '/advisor status') this.emit({ type: 'command_output', text: 'Advisor is enabled (new/model). Spend: 1 input, 1 output, $0.0000.' });
+      return {};
+    },
+  });
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'review', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -52,5 +46,5 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal(session.status, 'review');
   assert.equal(session.advisor.model, 'new/model');
   assert.equal(await readFile(watchdog, 'utf8'), '# my advisors\nadvisors:\n  - name: default\n    model: new/model:xhigh # keep this comment\n  - name: second\n    model: other/model\n');
-  assert.ok((await readFile(starts, 'utf8')).trim().split('\n').length >= 2, 'OMP was restarted');
+  assert.ok(omp.sessions.length >= 2, 'OMP was restarted');
 });

@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('shutdown commands are fixed argv per platform', () => {
   assert.deepEqual(internals.shutdownCommand('win32'), ['shutdown', ['/s', '/t', '0']]);
@@ -17,22 +18,13 @@ test('Shut down PC pauses and saves sessions first; a refused shutdown is report
   const dir = await mkdtemp(join(tmpdir(), 'omp-shutdown-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const out = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-out({ type: 'ready', protocolVersion: 1 });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [], isSettled: false } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-}
-`);
+  const omp = fakeOmp({ state: () => ({ todoPhases: [], isSettled: false }) });
   const at = new Date().toISOString();
   const session = (id, status) => ({ id, projectId: 'project', title: id, status, cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at });
   const file = join(dir, 'workspace.json');
   await writeFile(file, JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [session('run', 'paused'), session('rev', 'review')], activity: [] }));
   let saved, outcome;
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake], shutdownHost: async () => { saved = JSON.parse(await readFile(file, 'utf8')); if (outcome) throw outcome; } });
+  app = await createCompanion({ dataDir: dir, omp, shutdownHost: async () => { saved = JSON.parse(await readFile(file, 'utf8')); if (outcome) throw outcome; } });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const call = async (path, body) => {
@@ -55,31 +47,20 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.equal((await call('/commands?session=run'))[0], 200, 'a paused session can start again');
 });
 
-// "Shut down PC when all work is done": each session's fake OMP runs in its own folder and announces a settled turn
-// whenever the signal file there changes.
+// "Shut down PC when all work is done": each session's fake OMP runs in its own folder; finishTurn announces a settled
+// turn there.
 async function autoCompanion(t, sessions, shutdownHost) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-auto-shutdown-'));
   const app = { app: null };
   t.after(async () => { if (app.app) await app.app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-import { readFileSync } from 'node:fs';
-const out = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-out({ type: 'ready', protocolVersion: 1 });
-let seen = '';
-setInterval(() => { let v = ''; try { v = readFileSync('signal', 'utf8'); } catch {} if (v !== seen) { seen = v; out({ type: 'session_settled' }); } }, 20);
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  const data = c.type === 'get_state' ? { todoPhases: [], isSettled: false } : c.type === 'get_subagents' ? { subagents: [] } : {};
-  out({ type: 'response', id: c.id, command: c.type, success: true, data });
-  if (c.type === 'prompt') out({ type: 'agent_start' });
-}
-process.exit(0);
-`);
+  const omp = fakeOmp({
+    state: () => ({ todoPhases: [], isSettled: false }),
+    prompt() { queueMicrotask(() => this.emit({ type: 'agent_start' })); return {}; },
+  });
   const at = new Date().toISOString();
   for (const id of sessions) await mkdir(join(dir, id));
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: sessions.map(id => ({ id, projectId: 'project', title: id, status: 'paused', cwd: join(dir, id), model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at })), activity: [] }));
-  app.app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake], shutdownHost });
+  app.app = await createCompanion({ dataDir: dir, omp, shutdownHost });
   app.app.server.listen(0, '127.0.0.1');
   await once(app.app.server, 'listening');
   const call = async (path, body) => {
@@ -87,13 +68,15 @@ process.exit(0);
     return [res.status, await res.json()];
   };
   for (const id of sessions) assert.equal((await call(`/commands?session=${id}`))[0], 200, 'starts a live OMP runner');
-  let turns = 0;
   const until = async (done, what) => {
     for (const end = Date.now() + 5000; Date.now() < end; await new Promise(r => setTimeout(r, 20))) if (await done()) return new Promise(r => setTimeout(r, 200));
     assert.fail(`Timed out waiting: ${what}`);
   };
   // Ends the running turn of session `id`; resolves once `done()` holds, plus a moment for anything it triggers.
-  const finishTurn = async (id, done) => { await writeFile(join(dir, id, 'signal'), String(++turns)); await until(done, `${id} settles`); };
+  const finishTurn = async (id, done) => {
+    for (const s of omp.sessions) if (s.alive && s.cwd === join(dir, id)) s.emit({ type: 'session_settled' });
+    await until(done, `${id} settles`);
+  };
   return { store: app.app.store, call, finishTurn, until };
 }
 

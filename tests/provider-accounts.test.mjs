@@ -1,53 +1,49 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
-// Fake OMP mirrors the real `/session pin` texts (slash-commands/builtin-session.ts); every pin is logged per process.
+// Fake OMP mirrors the real `/session pin` texts (slash-commands/builtin-session.ts); every pin is logged per session.
 // Stored accounts are read from a file on each listing, so a test can log in another account between probes.
 const ACCOUNTS = { anthropic: ['old@example.com', 'new@example.com (Work)'], google: ['solo@example.com'] };
-const fakeOmp = (log, accountsFile) => `import { createInterface } from 'node:readline';
-import { appendFileSync, readFileSync } from 'node:fs';
-let model = { provider: 'anthropic', id: 'claude' }, pinned;
-const out = text => process.stdout.write(JSON.stringify({ type: 'command_output', text }) + '\\n');
-process.stdout.write(JSON.stringify({ type: 'ready' }) + '\\n');
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  let data = {};
-  if (c.type === 'get_state') data = { todoPhases: [], model };
-  if (c.type === 'get_subagents') data = { subagents: [] };
-  if (c.type === 'get_login_providers') data = { providers: [{ id: 'anthropic', name: 'Anthropic', authenticated: true }, { id: 'google', name: 'Google', authenticated: true }, { id: 'openai', name: 'OpenAI', authenticated: false }] };
-  if (c.type === 'get_available_models') data = { models: [{ provider: 'anthropic', id: 'claude' }, { provider: 'google', id: 'gemini' }] };
-  if (c.type === 'set_model') { model = { provider: c.provider, id: c.modelId }; data = model; }
-  if (c.type === 'prompt' && c.message.startsWith('/session pin')) {
-    const list = JSON.parse(readFileSync(${JSON.stringify(accountsFile)}, 'utf8'))[model.provider], arg = c.message.slice('/session pin'.length).trim();
-    if (!arg) out(['OAuth accounts for ' + model.provider + ':', ...list.map((a, i) => (i + 1) + '. ' + a + (a === pinned ? ' (active)' : '')), '', 'Pin one with \`/session pin <number|email|account id>\`.'].join('\\n'));
-    else if (list.includes(arg)) { pinned = arg; appendFileSync(${JSON.stringify(log)}, model.provider + ' ' + arg + '\\n'); out('Pinned ' + arg + ' to this session for ' + model.provider + '.'); }
-    else out('No ' + model.provider + ' account matches "' + arg + '".');
-    data = { agentInvoked: false };
-  } else if (c.type === 'prompt') {
-    appendFileSync(${JSON.stringify(log)}, 'prompt ' + c.message + ' as ' + pinned + '\\n');
-    data = { agentInvoked: false };
-  }
-  process.stdout.write(JSON.stringify({ type: 'response', id: c.id, success: true, command: c.type, data }) + '\\n');
-}`;
+const accountsOmp = (log, accountsFile) => fakeOmp(() => {
+  let model = { provider: 'anthropic', id: 'claude' }, pinned;
+  return {
+    state: () => ({ todoPhases: [], model }),
+    loginProviders: () => ({ providers: [{ id: 'anthropic', name: 'Anthropic', authenticated: true }, { id: 'google', name: 'Google', authenticated: true }, { id: 'openai', name: 'OpenAI', authenticated: false }] }),
+    availableModels: () => ({ models: [{ provider: 'anthropic', id: 'claude' }, { provider: 'google', id: 'gemini' }] }),
+    setModel(provider, modelId) { model = { provider, id: modelId }; return model; },
+    prompt({ message }) {
+      const out = text => this.emit({ type: 'command_output', text });
+      if (message.startsWith('/session pin')) {
+        const list = JSON.parse(readFileSync(accountsFile, 'utf8'))[model.provider], arg = message.slice('/session pin'.length).trim();
+        if (!arg) out([`OAuth accounts for ${model.provider}:`, ...list.map((a, i) => `${i + 1}. ${a}${a === pinned ? ' (active)' : ''}`), '', 'Pin one with `/session pin <number|email|account id>`.'].join('\n'));
+        else if (list.includes(arg)) { pinned = arg; appendFileSync(log, `${model.provider} ${arg}\n`); out(`Pinned ${arg} to this session for ${model.provider}.`); }
+        else out(`No ${model.provider} account matches "${arg}".`);
+      } else appendFileSync(log, `prompt ${message} as ${pinned}\n`);
+      return { agentInvoked: false };
+    },
+  };
+});
 
 test('chosen provider account is listed, pinned before prompts, and kept across restarts', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-accounts-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const log = join(dir, 'pins.log'), fake = join(dir, 'omp.mjs'), accountsFile = join(dir, 'accounts.json');
+  const log = join(dir, 'pins.log'), accountsFile = join(dir, 'accounts.json');
   await writeFile(log, '');
   await writeFile(accountsFile, JSON.stringify(ACCOUNTS));
-  await writeFile(fake, fakeOmp(log, accountsFile));
+  const omp = accountsOmp(log, accountsFile);
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
   let url;
   const launch = async () => {
-    app = await createCompanion({ dataDir: dir, ompSessionsDir: join(dir, 'native'), ompCommand: process.execPath, ompArgs: [fake] });
+    app = await createCompanion({ dataDir: dir, ompSessionsDir: join(dir, 'native'), omp });
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -100,12 +96,12 @@ test('account list is served from cache, refreshed in the background, and re-rea
   const dir = await mkdtemp(join(tmpdir(), 'omp-accounts-cache-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs'), accountsFile = join(dir, 'accounts.json');
+  const accountsFile = join(dir, 'accounts.json');
   await writeFile(accountsFile, JSON.stringify(ACCOUNTS));
-  await writeFile(fake, fakeOmp(join(dir, 'pins.log'), accountsFile));
+  const omp = accountsOmp(join(dir, 'pins.log'), accountsFile);
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompSessionsDir: join(dir, 'native'), ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: join(dir, 'native'), omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;

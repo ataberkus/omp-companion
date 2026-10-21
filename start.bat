@@ -3,9 +3,15 @@ rem Starts the OMP companion and opens the control room in your browser.
 rem Variables set here (OMP_WEB_HOST, OMP_WEB_RESTART_EXIT) stay in this script, not in the console that ran it.
 setlocal
 cd /d "%~dp0"
-where node >nul 2>nul || (echo Node.js was not found. Install it from https://nodejs.org and try again. & pause & exit /b 1)
+rem Sessions run OMP's SDK (the npm package @oh-my-pi/pi-coding-agent) inside the companion, on Bun.
+where bun >nul 2>nul || (echo Bun was not found. Install it from https://bun.sh and try again. & pause & exit /b 1)
+if not exist node_modules\@oh-my-pi\pi-coding-agent\package.json (
+  where npm >nul 2>nul || (echo OMP's SDK is not installed and npm was not found. Install Node.js from https://nodejs.org, then run npm ci here. & pause & exit /b 1)
+  echo Installing OMP's SDK ^(npm ci^)...
+  call npm ci || (echo npm ci failed. & pause & exit /b 1)
+)
 if defined OMP_BIN echo Using OMP: %OMP_BIN%
-if not defined OMP_BIN where omp >nul 2>nul || echo Warning: omp was not found on PATH. Sessions will not start until OMP is installed.
+if not defined OMP_BIN where omp >nul 2>nul || echo Warning: omp was not found on PATH. Updates, usage and the Tools page need the OMP CLI.
 rem Reachable from your network (and your tailnet, if Tailscale runs) with a login. Set OMP_WEB_PASSWORD to choose the password;
 rem without it the console prints a random connection token per launch. Set OMP_WEB_HOST=127.0.0.1 to keep it on this PC only,
 rem or to this PC's Tailscale address (100.x.y.z) to accept only tailnet devices (see "Away from home with Tailscale" in README.md).
@@ -15,7 +21,7 @@ title OMP companion
 rem Restart companion (dashboard menu) stops the companion with exit code 75; the loop starts it again on the same port.
 set OMP_WEB_RESTART_EXIT=75
 :run
-node companion\server.mjs %*
+bun companion\server.mjs %*
 if "%ERRORLEVEL%"=="75" (echo. & echo Restarting the companion... & goto run)
 echo.
 echo The companion stopped.

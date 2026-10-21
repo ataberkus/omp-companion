@@ -5,34 +5,29 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 test('interactive questions accept valid answers, reject stale choices, and cancel safely', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-question-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'extension_ui_response') {
-    if (c.id === 'choice' && c.value === 'Second') emit({ type: 'extension_ui_request', id: 'reason', method: 'input', title: 'Why?', placeholder: 'Your reason' });
-    else if (c.id === 'reason' && c.value === 'Because' && !('confirmed' in c)) emit({ type: 'extension_ui_request', id: 'confirm', method: 'confirm', title: 'Confirm', message: 'Proceed?' });
-    else if (c.id === 'confirm' && c.confirmed === false) emit({ type: 'extension_ui_request', id: 'editor', method: 'editor', title: 'Notes', prefill: 'Draft' });
-    else if (c.id === 'editor' && c.cancelled === true) emit({ type: 'command_output', text: 'Question cancelled' });
-    else emit({ type: 'command_output', text: 'Invalid reply reached OMP' });
-    continue;
-  }
-  if (c.type === 'prompt') emit({ type: 'extension_ui_request', id: 'choice', method: 'select', title: 'Choose', options: ['First', 'Second'], optionDetails: [{ description: 'A' }, { description: 'B' }], checkedIndices: [1, 5] });
-  if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
-  else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
-  else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
-}
-`);
+  const omp = fakeOmp({
+    answer(id, c) {
+      if (id === 'choice' && c.value === 'Second') this.emit({ type: 'extension_ui_request', id: 'reason', method: 'input', title: 'Why?', placeholder: 'Your reason' });
+      else if (id === 'reason' && c.value === 'Because' && !('confirmed' in c)) this.emit({ type: 'extension_ui_request', id: 'confirm', method: 'confirm', title: 'Confirm', message: 'Proceed?' });
+      else if (id === 'confirm' && c.confirmed === false) this.emit({ type: 'extension_ui_request', id: 'editor', method: 'editor', title: 'Notes', prefill: 'Draft' });
+      else if (id === 'editor' && c.cancelled === true) this.emit({ type: 'command_output', text: 'Question cancelled' });
+      else this.emit({ type: 'command_output', text: 'Invalid reply reached OMP' });
+    },
+    prompt() {
+      this.emit({ type: 'extension_ui_request', id: 'choice', method: 'select', title: 'Choose', options: ['First', 'Second'], optionDetails: [{ description: 'A' }, { description: 'B' }], checkedIndices: [1, 5] });
+      return { agentInvoked: true };
+    },
+    state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' } }),
+  });
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
@@ -73,31 +68,24 @@ for await (const line of createInterface({ input: process.stdin })) {
   assert.ok(!app.store.sessions[0].messages.some(m => m.text === 'Invalid reply reached OMP'));
 });
 
-test('ask dialogs are opted into and only well-formed answers reach OMP', async t => {
+test('ask dialogs reach the panel and only well-formed answers reach OMP', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-ask-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
-  const fake = join(dir, 'omp.mjs');
-  await writeFile(fake, `import { createInterface } from 'node:readline';
-const emit = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
-let askDialog = false;
-emit({ type: 'ready' });
-for await (const line of createInterface({ input: process.stdin })) {
-  const c = JSON.parse(line);
-  if (c.type === 'extension_ui_response') { emit({ type: 'command_output', text: 'ANSWERS ' + JSON.stringify(c.answers) }); continue; }
-  if (c.type === 'set_ask_dialog') askDialog = c.enabled === true;
-  if (c.type === 'prompt' && askDialog) emit({ type: 'extension_ui_request', id: 'ask', method: 'ask', questions: [
-    { id: 'langs', question: 'Which languages?', header: 'Lang', options: [{ label: 'Alpha', description: 'first' }, { label: 'Beta' }, { label: 'Gamma' }], multi: true },
-    { id: 'db', question: 'Database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }], recommended: 1 },
-  ] });
-  if (c.type === 'get_state') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { todoPhases: [], model: { provider: 'test', id: 'test' } } });
-  else if (c.type === 'get_subagents') emit({ type: 'response', id: c.id, success: true, command: c.type, data: { subagents: [] } });
-  else emit({ type: 'response', id: c.id, success: true, command: c.type, data: c.type === 'prompt' ? { agentInvoked: true } : {} });
-}
-`);
+  const omp = fakeOmp({
+    answer(id, c) { this.emit({ type: 'command_output', text: 'ANSWERS ' + JSON.stringify(c.answers) }); },
+    prompt() {
+      this.emit({ type: 'extension_ui_request', id: 'ask', method: 'ask', questions: [
+        { id: 'langs', question: 'Which languages?', header: 'Lang', options: [{ label: 'Alpha', description: 'first' }, { label: 'Beta' }, { label: 'Gamma' }], multi: true },
+        { id: 'db', question: 'Database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }], recommended: 1 },
+      ] });
+      return { agentInvoked: true };
+    },
+    state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' } }),
+  });
   const now = new Date().toISOString();
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath, ompArgs: [fake] });
+  app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api`;
