@@ -8,8 +8,8 @@ import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
 
 // node:http, not fetch: fetch cannot set the Host header.
-const get = (port, path, headers = {}) => new Promise((resolve, reject) => {
-  const req = request({ host: '127.0.0.1', port, path, headers: { Host: `127.0.0.1:${port}`, ...headers } }, res => {
+const get = (port, path, headers = {}, address = '127.0.0.1') => new Promise((resolve, reject) => {
+  const req = request({ host: address, port, path, headers: { Host: `${address}:${port}`, ...headers } }, res => {
     let body = '';
     res.setEncoding('utf8').on('data', c => { body += c; }).on('end', () => resolve({ status: res.statusCode, body }));
   });
@@ -57,4 +57,36 @@ test('OMP_WEB_PUBLIC_HOSTS names pass Host and Origin by exact match; other name
 
 test('a public host entry that is not a bare name is refused at start', async () => {
   for (const h of ['http://pc.ts.net', 'pc.ts.net:4545']) await assert.rejects(createCompanion({ dataDir: join(tmpdir(), 'unused'), publicHosts: [h] }), /OMP_WEB_PUBLIC_HOSTS/);
+});
+
+// The desktop app's "Allow phones on my network" binds 0.0.0.0; this PC's Tailscale adapter then lists its 100.x address.
+test('bound to all interfaces, this PC\'s Tailscale address passes Host and Origin; a tailnet address of another device does not', async t => {
+  const networkInterfaces = () => ({
+    Ethernet: [{ family: 'IPv4', address: '192.168.1.17', internal: false }],
+    Tailscale: [{ family: 'IPv4', address: '100.114.117.34', internal: false }, { family: 'IPv6', address: 'fd7a:115c:a1e0::482b:7523', internal: false }],
+  });
+  const port = await start(t, { password: 'pw-1234', networkInterfaces, tailscale: async () => null });
+  const auth = { Authorization: 'Bearer pw-1234' };
+  for (const host of ['100.114.117.34', '[fd7a:115c:a1e0::482b:7523]']) {
+    assert.equal((await get(port, '/api/state', { ...auth, Host: `${host}:${port}`, Origin: `http://${host}:${port}` })).status, 200, host);
+  }
+  assert.equal((await get(port, '/api/state', { Host: `100.114.117.34:${port}` })).status, 401);
+  assert.equal((await get(port, '/api/state', { ...auth, Host: `100.107.222.62:${port}` })).status, 403);
+  assert.equal((await get(port, '/api/state', { ...auth, Host: `100.114.117.34:${port}`, Origin: 'http://evil.example' })).status, 403);
+});
+
+// The desktop app's tailnet listener (OMP_WEB_HOST=100.x) sits beside the 127.0.0.1 one; 127.0.0.2 stands in for the tailnet address.
+test('an extra listener accepts its own address; the loopback listener keeps refusing it', { skip: process.platform === 'darwin' && 'macOS has no 127.0.0.2' }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'omp-remote-auth-'));
+  const app = await createCompanion({ dataDir, password: 'pw-1234', tailscale: async () => null });
+  t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const port = app.server.address().port;
+  const extra = app.serve().listen(port, '127.0.0.2');
+  await once(extra, 'listening');
+  const auth = { Authorization: 'Bearer pw-1234' };
+  assert.equal((await get(port, '/api/state', auth, '127.0.0.2')).status, 200);
+  assert.equal((await get(port, '/api/state', { ...auth, Host: `127.0.0.2:${port}` })).status, 403);
+  assert.equal((await get(port, '/api/state', auth)).status, 200);
 });

@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 import { ompHost } from './omp.mjs';
+import { cliEnv, syncOmpSdk } from './omp-sdk.mjs';
 const exec=promisify(execFile);
 // Apps started from Explorer can get a PATH without the user's entries (Windows drops an oversized user Path), so the
 // default install folders of OMP and Bun are appended when they exist and are missing: `omp` and `bun` still resolve.
@@ -889,21 +890,32 @@ export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promis
 const cleanUpdateOutput=(...parts)=>parts.filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-6000);
 // `omp update` checks the release channel and installs only when a newer build exists. entry: native executable or a source checkout's cli.ts.
 export async function updateOmp(entry,{cwd=os.homedir(),timeout=20*60*1000}={}){
- const source=/\.ts$/i.test(entry),env={...process.env};
- if(path.isAbsolute(entry)&&!source){const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';env[key]=path.dirname(entry)+path.delimiter+(env[key]||'');}
+ const source=/\.ts$/i.test(entry),env=cliEnv(entry);
  try{
   const {stdout,stderr}=await exec(source?'bun':entry,[...(source?[path.resolve(entry)]:[]),'update'],{cwd,env,timeout,maxBuffer:8*1024*1024,windowsHide:true});
   return {status:'done',output:cleanUpdateOutput(stdout,stderr)||'OMP update finished without output.'};
  }catch(e){return {status:'error',exitCode:typeof e.code==='number'?e.code:null,output:cleanUpdateOutput(e.stdout,e.stderr,e.killed?'Update timed out.':e.message)||'OMP update failed.'};}
 }
+const defaultDataDir=()=>process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
 // Opening the companion first brings OMP up to date, before any OMP process starts. A failed or timed-out update
 // starts with the installed build. OMP_WEB_NO_UPDATE=1 skips it; a source checkout is updated with git instead.
-export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10*60*1000,log=console.log}={}){
+// Sessions run OMP's SDK in this process and `omp update` replaces only the CLI, so the SDK release matching the CLI is
+// installed next (syncOmpSdk). Whatever of the time budget the CLI update left goes to that install; one still
+// running when the budget ends finishes in the background and counts from the next start.
+export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10*60*1000,log=console.log,dataDir=defaultDataDir()}={}){
  if(process.env.OMP_WEB_NO_UPDATE==='1')return {status:'skipped'};
  if(/\.ts$/i.test(entry)){log('OMP runs from a source checkout; skipping omp update.');return {status:'skipped'};}
+ const deadline=Date.now()+timeout;
  log('Checking for OMP updates…');
  const result=await updateOmp(entry,{timeout});
  log(result.status==='done'?result.output:`OMP update failed; starting with the installed version.\n${result.output}`);
+ // Older SDK copies are pruned only while no session can have loaded one, i.e. before the budget ends.
+ let late=false,timer;
+ await fs.mkdir(dataDir,{recursive:true,mode:0o700});
+ const sync=syncOmpSdk({entry,dataDir,prune:()=>!late});
+ const sdk=await Promise.race([sync,new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,deadline-Date.now()),null);})]).finally(()=>clearTimeout(timer));
+ if(sdk){if(sdk.output)log(sdk.output);}
+ else{late=true;log('Installing the matching OMP SDK continues in the background; sessions use it from the next start.');sync.then(r=>r.output&&log(r.output));}
  return result;
 }
 // Leaves an already-current file untouched (opening it for write can fail with EPERM on Windows, e.g. under a
@@ -925,13 +937,14 @@ export async function createCompanion(options={}){
  // OMP_WEB_PUBLIC_HOSTS: extra host names (a Tailscale MagicDNS name, say) accepted in Host and Origin by exact match on the port.
  const publicHosts=(options.publicHosts||String(process.env.OMP_WEB_PUBLIC_HOSTS||'').split(',')).map(h=>h.trim().toLowerCase()).filter(Boolean);
  for(const h of publicHosts)if(!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(h))throw new Error(`OMP_WEB_PUBLIC_HOSTS: "${h}" is not a host name (give names like pc.tailnet.ts.net, without scheme or port).`);
- const dataDir=options.dataDir||process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
+ const dataDir=options.dataDir||defaultDataDir();
  // OMP_BIN may point at the native executable or a source checkout's cli.ts. Sessions run OMP in-process (its SDK: the
- // checkout's, or the bundled @oh-my-pi/pi-coding-agent); the CLI still runs updates, usage, enhance and the Tools page.
+ // checkout's, else the newest SDK copy startupUpdate installed in dataDir, else the bundled @oh-my-pi/pi-coding-agent);
+ // the CLI still runs updates, usage, enhance and the Tools page.
  const ompEntry=options.ompCommand||process.env.OMP_BIN||'omp',ompSource=/\.ts$/i.test(ompEntry);
  const ompExecutable=ompSource?'bun':ompEntry,ompPrefix=ompSource?[path.resolve(ompEntry)]:[];
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
- const omp=options.omp||ompHost(ompEntry);omp.warm?.();
+ const omp=options.omp||ompHost(ompEntry,{dataDir});omp.warm?.();
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceSystem=path.join(dataDir,'enhance-system.md');
  await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceSystem,ENHANCE_SYSTEM);
@@ -1631,7 +1644,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(prompting&&images.length&&/^\/skill:/.test(body.message)){await start(s);if(!s._skillImages)throw error('This OMP build drops image attachments on /skill: commands. Set OMP_BIN to an updated build, or send the image in a normal message, then invoke the skill.');}
   if(prompting&&/^\/goal(?:\s|$)/.test(body.message)){
    await start(s);
-   if(!s._goalSupported)throw error('This OMP build has no RPC goal mode. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts; /goal was not sent to the model.',409);
+   if(!s._goalSupported)throw error('This OMP build has no goal mode the companion can host (see the companion log); /goal was not sent to the model.',409);
    if(!s._goalAvailable)throw error('Goal mode is disabled in OMP. Enable goal.enabled in OMP settings; /goal was not sent to the model.',409);
   }
   if(body.type==='follow_up'&&['running','queued'].includes(s.status)){
@@ -1726,7 +1739,10 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  let updateState={status:'idle'};
  async function runUpdate(startedAt){
   const result=await updateOmp(ompEntry,{cwd:dataDir});
-  updateState={...result,startedAt,finishedAt:now()};
+  // `omp update` replaced only the CLI: install the matching SDK for sessions, which load OMP once per companion start.
+  const sdk=result.status==='done'&&!ompSource?await syncOmpSdk({entry:ompEntry,dataDir}):null;
+  const note=sdk?.status==='installed'?`${sdk.output} Restart the companion to run new sessions on it.`:sdk?.status==='error'?sdk.output:'';
+  updateState={...result,output:cleanUpdateOutput(result.output,note),startedAt,finishedAt:now()};
   if(result.status==='done'){modelCache=undefined;configDefaults=undefined;}
  }
  // Matched on the last key segment's suffix, so thresholdTokens or redactSecrets are not treated as secrets.
@@ -2167,13 +2183,15 @@ async function spend(sync){
  // This PC's Tailscale name and addresses, looked up at most once a minute; options.tailscale replaces the lookup (tests).
  let tsCache=null,tsAt=0,tsPending;
  const tailscale=()=>Date.now()-tsAt<60000?Promise.resolve(tsCache):tsPending??=(options.tailscale||tailscaleSelf)().catch(()=>null).then(v=>{tsCache=v;tsAt=Date.now();tsPending=undefined;return v;});
- // Host/Origin gate for API requests and the screen WebSocket (CORS doesn't cover WebSockets, so its Origin check matters most).
+ // Host/Origin gate for API requests and the screen WebSocket (CORS doesn't cover WebSockets, so its Origin check matters most),
+ // against the address of the listener `srv` that took the request.
  // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's adapter addresses, still rejecting DNS-rebinding names.
  // OMP_WEB_PUBLIC_HOSTS names are matched exactly too, so any other name (DNS rebinding) is still refused. So is this PC's own
  // MagicDNS name while the companion listens on its tailnet address: only the tailnet resolves it, to this PC.
- async function checkOrigin(req){
-  const a=server.address(),port=a?.port,wild=a&&['0.0.0.0','::'].includes(a.address),names=new Set(['127.0.0.1','localhost',...publicHosts]);
-  if(wild){for(const list of Object.values(os.networkInterfaces()))for(const n of list||[])names.add(n.family==='IPv6'?`[${n.address}]`:n.address);}else if(a?.address)names.add(a.family==='IPv6'?`[${a.address}]`:a.address);
+ const networkInterfaces=options.networkInterfaces||os.networkInterfaces;// tests pass this PC's adapters
+ async function checkOrigin(req,srv){
+  const a=srv.address(),port=a?.port,wild=a&&['0.0.0.0','::'].includes(a.address),names=new Set(['127.0.0.1','localhost',...publicHosts]);
+  if(wild){for(const list of Object.values(networkInterfaces()))for(const n of list||[])names.add(n.family==='IPv6'?`[${n.address}]`:n.address);}else if(a?.address)names.add(a.family==='IPv6'?`[${a.address}]`:a.address);
   const host=String(req.headers.host||'').toLowerCase(),origin=req.headers.origin;
   const allowed=()=>{const hosts=new Set([...names].map(n=>`${n}:${port}`));return {host:hosts.has(host),origin:!origin||allowedOrigins.has(origin)||hosts.has(origin.replace(/^http:\/\//,''))&&origin.startsWith('http://')};};
   let ok=allowed();
@@ -2261,12 +2279,12 @@ async function spend(sync){
  }
  // The desktop app's tray turns screen sharing on and off at runtime; turning it off ends a running view at once.
  const setScreen=on=>{screenOn=screenSupported&&Boolean(on);if(!screenOn){screenTickets.clear();dropViewer(4002,'Screen sharing was turned off on this PC.');}return screenOn;};
- const server=createServer(async(req,res)=>{
+ async function onRequest(req,res,srv){
  // Big JSON (the viewed session's messages, transcripts, settings) goes out gzipped when the client accepts it; zlib runs off the event loop.
  const send=(status,headers,body)=>{if(body.length<1024||!/\bgzip\b/.test(req.headers['accept-encoding']||'')){res.writeHead(status,headers);res.end(body);return;}gzip(body,{level:1},(e,z)=>{if(res.headersSent)return;res.writeHead(status,e?headers:{...headers,'Content-Encoding':'gzip'});res.end(e?body:z);});};
  const json=(value,status=200)=>send(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'},JSON.stringify(value));
   try{
-   const {origin,host}=await checkOrigin(req),port=server.address()?.port;
+   const {origin,host}=await checkOrigin(req,srv),port=srv.address()?.port;
    if(origin){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Methods','GET, POST, OPTIONS');res.setHeader('Access-Control-Allow-Headers','Authorization, Content-Type');res.setHeader('Access-Control-Allow-Private-Network','true');}
    if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
    const url=new URL(req.url,`http://127.0.0.1:${port}`);
@@ -2464,12 +2482,12 @@ async function spend(sync){
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
- });
+ }
  // The screen WebSocket: same Host/Origin gate as every request, then a ticket that only the token could buy (POST /api/screen/ticket).
- server.on('upgrade',async(req,socket,head)=>{
+ async function onUpgrade(req,socket,head,srv){
   socket.on('error',()=>{});
   try{
-   await checkOrigin(req);
+   await checkOrigin(req,srv);
    const url=new URL(req.url,'http://localhost');
    if(url.pathname!=='/api/screen/ws')throw error('Route not found.',404);
    if(closing)throw error('The companion is closing.',503);
@@ -2481,7 +2499,12 @@ async function spend(sync){
    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')}\r\n\r\n`);
    startViewer(socket,head,req.socket.remoteAddress);
   }catch(e){const status=e.status||500;socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n${e.message}`);}
- });
+ }
+ // serve(): one more listener for this companion (the desktop app's tailnet address), sharing its sessions, token and screen;
+ // Host/Origin follow the address each listener is bound to. close() closes every one.
+ const servers=new Set();
+ const serve=()=>{const srv=createServer((req,res)=>onRequest(req,res,srv));srv.on('upgrade',(req,socket,head)=>onUpgrade(req,socket,head,srv));servers.add(srv);return srv;};
+ const server=serve();
  // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
  const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>r.kill());for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
@@ -2497,14 +2520,14 @@ async function spend(sync){
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await new Promise(r=>{server.close(r);server.closeAllConnections();});await sessionStops;await Promise.all(probeStops);await enhanceStops;};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));await sessionStops;await Promise.all(probeStops);await enhanceStops;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
  for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
 // closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
-await persist();return {server,store,token,password:Boolean(password),close,flush:saveNow,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
+await persist();return {server,serve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
 const mainEntry=process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url);
 // Sessions run OMP's SDK, which needs Bun: started by Node, the companion runs itself under Bun with the same arguments

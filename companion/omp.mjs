@@ -2,20 +2,26 @@
 // `omp` builds its own (same CLI flag semantics), and driven with direct calls; its events arrive as plain objects.
 // OMP's SDK is TypeScript that needs Bun, so this module only loads OMP when a session starts under Bun.
 // The plan, goal, side-question, subagent, prompt-result and settle controllers are OMP's own in-process classes
-// (shipped under modes/rpc/); the companion uses them so it behaves exactly like OMP's other hosts.
+// (shipped under modes/rpc/); the companion uses them so it behaves exactly like OMP's other hosts. OMP builds without
+// the /goal host get the companion's (goal-host.mjs), built on OMP's goal controller.
 import { existsSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { GoalController, goalSlashHost } from './goal-host.mjs';
+import { RUNTIME_FILES, ompSources } from './omp-sdk.mjs';
 
 export const NOT_RUNNING = 'OMP process is not running.';
 const READY_MS = 30000;
 
-/** Folder of OMP's TypeScript sources: the checkout whose cli.ts OMP_BIN names, else the bundled @oh-my-pi/pi-coding-agent. */
-export function ompSourceDir(entry) {
- if (/\.ts$/i.test(entry || '')) return path.dirname(path.resolve(entry));
- return path.dirname(fileURLToPath(import.meta.resolve('@oh-my-pi/pi-coding-agent')));
+// An SDK copy that fails to load (a newer OMP that moved files the companion imports, say) falls back to the next one.
+async function loadFirst(sources) {
+ if (!process.versions.bun) throw new Error('OMP sessions need the Bun runtime. Start the companion with `node companion/server.mjs` or `bun companion/server.mjs`.');
+ for (let i = 0; ; i++) {
+  try { return await runtime(sources[i]); }
+  catch (e) { if (i === sources.length - 1) throw e; console.error(`OMP in ${sources[i]} could not load (${e.message}); using ${sources[i + 1]}.`); }
+ }
 }
 
 const runtimes = new Map();
@@ -26,45 +32,67 @@ function runtime(src) {
 }
 
 async function loadRuntime(src) {
- if (!process.versions.bun) throw new Error('OMP sessions need the Bun runtime. Start the companion with `node companion/server.mjs` or `bun companion/server.mjs`.');
  if (!existsSync(path.join(src, 'sdk.ts'))) throw new Error(`OMP's SDK was not found in ${src}. Run npm install, or point OMP_BIN at a checkout's packages/coding-agent/src/cli.ts.`);
  // Like OMP's headless hosts: bash without a PTY (nothing draws a terminal) and no OMP auto-titles (the companion titles sessions).
  process.env.PI_NO_PTY = '1'; process.env.PI_NO_TITLE = '1';
  const at = rel => import(pathToFileURL(path.join(src, rel)).href);
  const optional = rel => existsSync(path.join(src, rel)) ? at(rel) : null;
  const pkg = spec => import(pathToFileURL(Bun.resolveSync(spec, src)).href);
- const [sdk, settingsMod, registryMod, configRegistry, main, cliArgs, toolSettings, authSync, discovery, discoveryHelpers, bus, runtimeInit, rpc, btw, goal, results, settle, subagents, compat, builtins, available, messages, todo, tokenRate, modeSettings, predict, oauth, tuiTheme, words, plan, goalSlash] = await Promise.all([
-  at('sdk.ts'), at('config/settings.ts'), at('config/model-registry.ts'), at('config/registry.ts'), at('main.ts'), at('cli/args.ts'), at('tools/settings.ts'),
-  at('session/auth-broker-config.ts'), at('discovery/index.ts'), at('discovery/helpers.ts'), at('utils/event-bus.ts'), at('modes/runtime-init.ts'),
-  at('modes/rpc/rpc-mode.ts'), at('modes/rpc/rpc-btw.ts'), at('modes/rpc/rpc-goal.ts'), at('modes/rpc/rpc-prompt-results.ts'), at('modes/rpc/rpc-session-settle.ts'),
-  at('modes/rpc/rpc-subagents.ts'), at('modes/rpc/rpc-compat.ts'), at('slash-commands/acp-builtins.ts'), at('slash-commands/available-commands.ts'),
-  at('session/messages.ts'), at('tools/todo.ts'), at('utils/token-rate.ts'), at('modes/settings.ts'), at('predict/client.ts'),
+ const names = Object.keys(RUNTIME_FILES);
+ const [modules, oauth, tuiTheme, words, plan, goalSlash] = await Promise.all([
+  Promise.all(names.map(name => at(RUNTIME_FILES[name]))),
   pkg('@oh-my-pi/pi-ai/oauth'), pkg('@oh-my-pi/pi-tui/theme'), pkg('@oh-my-pi/pi-tui/prompt/word-completion'),
-  // Plan-mode and /goal hosting exist only in OMP builds that ship these controllers; state() reports which ones do.
+  // Plan-mode and /goal hosting ship only in some OMP builds; state() reports plan mode only when it does.
   optional('modes/rpc/rpc-plan-mode.ts'), optional('modes/rpc/rpc-goal-slash.ts'),
  ]);
+ const m = Object.fromEntries(names.map((name, i) => [name, modules[i]]));
+ const goal = goalSlash
+  ? { goalSlash, goalController: (session, dropped) => new m.goal.RpcGoalController(session, dropped, 'interactive') }
+  : await companionGoal(at, pkg, m.goal);
  // One settings tree, credential store and model catalog for every session, as OMP's ACP server shares them;
  // each session gets its project's settings overlay.
- const settings = await settingsMod.Settings.init({ cwd: os.homedir() });
- const authStorage = await sdk.discoverAuthStorage(undefined, { settings });
- authSync.createAuthStorageSettingsSync(settings, authStorage);
- const modelRegistry = new registryMod.ModelRegistry(authStorage, undefined, { settings });
- discovery.initializeWithSettings(settings);
+ const settings = await m.settingsMod.Settings.init({ cwd: os.homedir() });
+ const authStorage = await m.sdk.discoverAuthStorage(undefined, { settings });
+ m.authSync.createAuthStorageSettingsSync(settings, authStorage);
+ const modelRegistry = new m.registryMod.ModelRegistry(authStorage, undefined, { settings });
+ m.discovery.initializeWithSettings(settings);
  await modelRegistry.hydrateCredentialScopedModelCaches();
  modelRegistry.refreshInBackground();
  await tuiTheme.ensureTheme?.();
  settings.startWatching();
- return { sdk, main, cliArgs, configRegistry, toolSettings, bus, discoveryHelpers, runtimeInit, rpc, btw, goal, results, settle, subagents, compat, builtins, available, messages, todo, tokenRate, modeSettings, predict, oauth, tuiTheme, words, plan, goalSlash, settings, authStorage, modelRegistry };
+ return { ...m, oauth, tuiTheme, words, plan, ...goal, settings, authStorage, modelRegistry };
 }
 
-/** The companion's OMP: `start` opens one session; `entry` is OMP_BIN (a checkout's cli.ts selects that checkout's SDK). */
-export function ompHost(entry) {
- const src = () => ompSourceDir(entry);
+// The companion's /goal host for OMP builds without modes/rpc/rpc-goal-slash.ts. Without the pieces it needs, /goal stays
+// unsupported (state() reports no goalMode) instead of keeping sessions from starting.
+async function companionGoal(at, pkg, goal) {
+ try {
+  const [goalSettings, registry, format] = await Promise.all([at('goals/settings.ts'), at('slash-commands/builtin-registry.ts'), pkg('@oh-my-pi/pi-tui/chrome/format')]);
+  const goalCommand = registry.BUILTIN_SLASH_COMMAND_DEFS.find(c => c.name === 'goal');
+  if (!goalCommand) throw new Error('OMP defines no /goal command');
+  return {
+   goalSlash: goalSlashHost({ cfgGoalEnabled: goalSettings.cfgGoalEnabled, goalCommand, formatCoarseDuration: format.formatCoarseDuration }),
+   goalController: (session, dropped) => new GoalController(goal.RpcGoalController, session, dropped, goalSettings),
+  };
+ } catch (e) {
+  console.error(`Goal mode is unavailable with this OMP build: ${e.message}`);
+  return { goalSlash: null, goalController: (session, dropped) => new goal.RpcGoalController(session, dropped) };
+ }
+}
+
+/**
+ * The companion's OMP: `start` opens one session. `entry` is OMP_BIN: a checkout's cli.ts selects that checkout's SDK;
+ * otherwise sessions load the newest OMP SDK installed under `dataDir` by syncOmpSdk, else the bundled one.
+ */
+export function ompHost(entry, { dataDir } = {}) {
+ // Chosen once per process, so sessions never mix two OMP copies (an SDK installed meanwhile counts from the next start).
+ let loaded;
+ const load = () => loaded ??= loadFirst(ompSources(entry, dataDir)).catch(e => { loaded = undefined; throw e; });
  return {
   // Loads OMP ahead of the first session so opening one does not pay for the import.
-  warm() { if (process.versions.bun) runtime(src()).catch(() => {}); },
+  warm() { if (process.versions.bun) load().catch(() => {}); },
   /** Returns the session at once; `ready` settles when it can take commands. */
-  start({ cwd, args, onEvent, onExit }) { return new OmpSession(() => runtime(src()), cwd, args, onEvent, onExit); },
+  start({ cwd, args, onEvent, onExit }) { return new OmpSession(load, cwd, args, onEvent, onExit); },
  };
 }
 
@@ -155,7 +183,7 @@ class OmpSession {
   this.#tracker = new rt.results.RpcExtensionUserMessageTracker();
   this.#predictor = new rpc.RpcWordPredictor();
   this.#btw = new rt.btw.RpcBtwController(session, out);
-  this.#goal = new rt.goal.RpcGoalController(session, () => void this.#settle.check(), 'interactive');
+  this.#goal = rt.goalController(session, () => void this.#settle.check());
   const scheduled = rt.settle.watchedScheduledTurnProbe(() => this.#goal.continuationPending, () => this.#settle);
   this.#results = new rt.results.RpcPromptResults(session, out, scheduled);
   this.#settle = new rt.settle.RpcSessionSettleWatcher(session, out, scheduled);
@@ -329,13 +357,15 @@ class OmpSession {
    try {
     const goalArgs = this.#rt.goalSlash?.parseRpcGoalSlash(text);
     if (goalArgs !== undefined) {
-     const { objective } = await this.#rt.goalSlash.runRpcGoalSlash(goalArgs, this.#session, this.#goal, this.#ui);
-     if (objective === undefined) { this.#results.discard(ticket); return { agentInvoked: false }; }
-     command.message = objective;
-     const outcome = await this.#input('prompt', command, ticket);
-     if (outcome === 'local') { this.#results.discard(ticket); return { agentInvoked: false }; }
-     if (outcome === 'cancelled') this.#results.settle(ticket);
-     return { agentInvoked: outcome !== 'cancelled' };
+     try {
+      const { objective } = await this.#rt.goalSlash.runRpcGoalSlash(goalArgs, this.#session, this.#goal, this.#ui);
+      if (objective === undefined) { this.#results.discard(ticket); return { agentInvoked: false }; }
+      command.message = objective;
+      const outcome = await this.#input('prompt', command, ticket);
+      if (outcome === 'local') { this.#results.discard(ticket); return { agentInvoked: false }; }
+      if (outcome === 'cancelled') this.#results.settle(ticket);
+      return { agentInvoked: outcome !== 'cancelled' };
+     } finally { this.#goal.hostTurnDone?.(); }
     }
     const planSlash = this.#plan && typeof text === 'string' ? text.trim().match(/^\/(plan|plan-review)(?:\s+(.*))?$/) : null;
     if (planSlash) {

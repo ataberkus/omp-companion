@@ -4,12 +4,18 @@
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 import * as os from 'node:os';
 import * as readline from 'node:readline';
-import { createCompanion, portBusy, startupUpdate, tailscaleSelf } from '../companion/server.mjs';
+import { createCompanion, portBusy, startupUpdate, tailnetAddress, tailscaleSelf } from '../companion/server.mjs';
 import { phoneLinks } from './links.mjs';
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
 const alreadyRunning = `The companion is already running on port ${port}, probably node companion/server.mjs or another OMP Control Room. Close it and try again.`;
 let companion, closing, lan = false;
+// OMP_WEB_HOST naming this PC's Tailscale address (100.x.y.z or fd7a:115c:a1e0::…) adds a listener there from launch, so
+// devices on the tailnet reach the app while the LAN stays closed. Any other OMP_WEB_HOST is ignored: the window needs
+// 127.0.0.1 and only the tray toggle opens the LAN. While the toggle is on, 0.0.0.0 covers the tailnet and this listener steps aside.
+const tailnetHost = tailnetAddress(process.env.OMP_WEB_HOST || '') ? process.env.OMP_WEB_HOST : '';
+let tailnet, tailnetUp = false, tailnetRetry, tailnetTask = Promise.resolve();
+const tailnetStep = step => (tailnetTask = tailnetTask.then(step));
 
 // stdout carries only protocol lines; the shell ignores anything that is not JSON.
 const send = (msg, cb) => process.stdout.write(JSON.stringify(msg) + '\n', cb);
@@ -32,12 +38,45 @@ function bind(host) {
 }
 
 async function setLan(on) {
-  try { await bind(on ? '0.0.0.0' : '127.0.0.1'); lan = on; return { lan }; }
-  catch (e) {
+  try {
+    if (on) await closeTailnet();
+    await bind(on ? '0.0.0.0' : '127.0.0.1'); lan = on;
+    if (!on) openTailnet();
+    return { lan };
+  } catch (e) {
     await bind('127.0.0.1').catch(() => {});
     lan = false;
+    openTailnet();
     throw e;
   }
+}
+
+// Tailscale often connects after the app starts (both start at sign-in), so an address that is not up yet is retried every 30 s.
+function openTailnet() {
+  clearTimeout(tailnetRetry);
+  return tailnetStep(() => new Promise(resolve => {
+    if (!tailnetHost || lan || tailnetUp || closing) return resolve();
+    tailnet ??= companion.serve();
+    const onError = e => {
+      tailnet.off('listening', onListening);
+      console.error(`Could not listen on ${tailnetHost}:${port} (${e.code || e.message}); is Tailscale connected? Retrying in 30 s.`);
+      tailnetRetry = setTimeout(openTailnet, 30000);
+      tailnetRetry.unref?.();
+      resolve();
+    };
+    const onListening = () => { tailnet.off('error', onError); tailnetUp = true; console.error(`Listening on the tailnet: http://${tailnetHost.includes(':') ? `[${tailnetHost}]` : tailnetHost}:${port}/`); resolve(); };
+    tailnet.once('error', onError).once('listening', onListening).listen(port, tailnetHost);
+  }));
+}
+
+function closeTailnet() {
+  clearTimeout(tailnetRetry);
+  return tailnetStep(() => {
+    if (!tailnetUp) return;
+    tailnetUp = false;
+    companion.closeScreen();
+    return new Promise(resolve => { tailnet.closeAllConnections(); tailnet.close(() => resolve()); });
+  });
 }
 
 const shutdown = () => (closing ??= companion ? companion.close() : Promise.resolve());
@@ -100,6 +139,7 @@ async function main() {
   server.listen(port, '127.0.0.1', () => {
     server.off('error', onStartError);
     send({ event: 'ready', port, token: companion.token });
+    openTailnet();
   });
 }
 

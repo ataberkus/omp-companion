@@ -73,12 +73,13 @@ const agentDir = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.om
 // ---------- variants ----------
 async function loadVariant({ name, spec }, outDir) {
  const dir = path.join(outDir, 'variants', name);
- // server.mjs imports sibling modules (rpc.mjs in older revisions, omp.mjs now); the variant gets the ones it names.
+ // server.mjs imports sibling modules (rpc.mjs in older revisions, omp.mjs and the modules it imports now); the variant gets every one they name.
  const read = spec === '.' ? f => fs.readFile(path.join(ROOT, 'companion', f), 'utf8')
   : spec.startsWith('file:') ? f => fs.readFile(path.join(path.resolve(spec.slice(5)), f), 'utf8')
   : f => exec('git', ['show', `${spec}:companion/${f}`], { cwd: ROOT, maxBuffer: 64 << 20 }).then(r => r.stdout);
  const server = await read('server.mjs');
- const siblings = await Promise.all([...new Set([...server.matchAll(/from '\.\/([\w-]+\.mjs)'/g)].map(m => m[1]))].map(async f => [f, await read(f)]));
+ const siblings = new Map(), queue = [server];
+ while (queue.length) for (const [, f] of queue.shift().matchAll(/from '\.\/([\w-]+\.mjs)'/g)) if (!siblings.has(f)) { const text = await read(f); siblings.set(f, text); queue.push(text); }
  await fs.mkdir(dir, { recursive: true });
  // A spec that is this directory already (a rerun of --report-style reuse) must not be rewritten mid-import.
  if (path.resolve(spec.slice(5)) !== path.resolve(dir)) { await fs.writeFile(path.join(dir, 'server.mjs'), server); for (const [f, text] of siblings) await fs.writeFile(path.join(dir, f), text); }
