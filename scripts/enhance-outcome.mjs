@@ -74,6 +74,15 @@ function sh(cmd, cwd, timeoutMs) {
  });
 }
 const tail = (s, n = 40) => String(s || '').split(/\r?\n/).filter(l => l.trim()).slice(-n).join('\n');
+// Suites with fixed ports (kulup-video's server tests) collide when two workspaces of one repo run them at once: one run at
+// a time per repo here, and one retry for a collision with another process (another harness, or an agent's own test run).
+const repoLocks = new Map();
+function repoSh(repo, cmd, cwd) {
+ const run = async () => { let r = await sh(cmd, cwd, CHECK_TIMEOUT_MS); if (r.code !== 0 && /EADDRINUSE/.test(r.out)) { await new Promise(res => setTimeout(res, 5000)); r = await sh(cmd, cwd, CHECK_TIMEOUT_MS); } return r; };
+ const next = (repoLocks.get(repo) || Promise.resolve()).then(run, run);
+ repoLocks.set(repo, next.catch(() => {}));
+ return next;
+}
 
 // ---------- workspaces ----------
 async function makeWorkspace(srcDir, dest, copyDirs) {
@@ -271,11 +280,11 @@ async function main() {
    w.checks = [];
    for (const k of c.checks || []) {
     for (const [rel, content] of Object.entries(k.files || {})) { await fs.mkdir(path.dirname(path.join(dir, rel)), { recursive: true }); await fs.writeFile(path.join(dir, rel), content); }
-    const res = await sh(k.cmd, dir, CHECK_TIMEOUT_MS); w.checks.push({ name: k.name, pass: res.code === 0, out: tail(res.out, 60) });
+    const res = await repoSh(c.repo, k.cmd, dir); w.checks.push({ name: k.name, pass: res.code === 0, out: tail(res.out, 60) });
     for (const rel of Object.keys(k.files || {})) await fs.rm(path.join(dir, rel), { force: true });
    }
    w.suiteBefore = data.baselines[c.repo] ? { code: data.baselines[c.repo].code, out: tail(data.baselines[c.repo].out, 60) } : null;
-   if (rs.test) { const r = await sh(rs.test, dir, CHECK_TIMEOUT_MS); w.suite = { code: r.code, out: tail(r.out, 60), ms: r.ms }; }
+   if (rs.test) { const r = await repoSh(c.repo, rs.test, dir); w.suite = { code: r.code, out: tail(r.out, 60), ms: r.ms }; }
    await judge(c, w);
   } catch (e) { w.agent ||= { tools: [], answer: '', cost: 0, ms: 0 }; w.agent.error ||= `harness: ${e.message}`; w.diff ||= ''; w.judge ||= { error: 'not judged' }; w.verdict = verdict(w); }
   data.results[v][c.id][s] = w;
