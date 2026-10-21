@@ -26,7 +26,10 @@ export function goalSlashHost({ cfgGoalEnabled, goalCommand, formatCoarseDuratio
    return [{ name: goalCommand.name, description: goalCommand.description, input: goalCommand.inlineHint ? { hint: goalCommand.inlineHint } : undefined, subcommands: goalCommand.subcommands, source: 'builtin' }];
   },
   /** Runs one `/goal` command. Returns the objective the host submits as the goal's first prompt (`/goal <objective>`, `/goal set`). */
-  async runRpcGoalSlash(args, session, controller, ui) {
+  async runRpcGoalSlash(args, session, controller, ui, planMode) {
+   // The TUI's #enterGoalMode also refuses a paused plan session (an active one is refused by the goal controller).
+   const planPaused = () => { if (planMode?.paused) throw new Error('Plan mode is paused — run /plan again to fully exit.'); };
+   if (session.getVibeModeState?.()?.enabled) throw new Error('Exit vibe mode first.');
    if (!cfgGoalEnabled.get(session.settings)) throw new Error('Goal mode is disabled. Enable it in settings (goal.enabled).');
    const requireUi = () => { if (!ui) throw new Error('This goal command needs a dialog; provide an objective or budget explicitly.'); return ui; };
    const current = () => rpcGoalModeState(session);
@@ -45,6 +48,7 @@ export function goalSlashHost({ cfgGoalEnabled, goalCommand, formatCoarseDuratio
     if (!sub && enabled) throw new Error('Goal mode is already active. Use /goal set to replace it.');
     const objective = rest || (await requireUi().input('Goal objective'))?.trim();
     if (!objective) return {};
+    planPaused();
     if (current().enabled) await controller.replace(objective);
     else await controller.handle({ op: 'create', objective }, { hostTurn: true });
     return { objective };
@@ -66,6 +70,7 @@ export function goalSlashHost({ cfgGoalEnabled, goalCommand, formatCoarseDuratio
      await controller.handle({ op: 'pause' });
      break;
     case 'resume':
+     planPaused();
      await controller.handle({ op: 'resume' });
      break;
     case 'drop':
@@ -93,21 +98,25 @@ export function goalSlashHost({ cfgGoalEnabled, goalCommand, formatCoarseDuratio
  * handle(command, { hostTurn }), replace(objective), setBudget(budget), and hostTurnDone() once the host's prompt is
  * admitted or abandoned. The controller sees the session through a view whose settings map the profile onto the "rpc"
  * entry it reads, and which reports the host's pending objective prompt as an admitted submission so the controller's
- * own continuation never races it.
+ * own continuation never races it. `held()` true withholds continuation, as the TUI's #scheduleGoalContinuation does while
+ * loop mode is on: the controller then reads a profile with no continuation mode.
  */
 export class GoalController {
- #inner; #session; #cfgGoalEnabled; #hostTurn = false;
- constructor(RpcGoalController, session, onContinuationDropped, { cfgGoalEnabled, cfgGoalContinuationModes }, continuationMode = 'interactive') {
+ #inner; #session; #cfgGoalEnabled; #hostTurn = false; #guidedTools;
+ constructor(RpcGoalController, session, onContinuationDropped, { cfgGoalEnabled, cfgGoalContinuationModes }, continuationMode = 'interactive', held = () => false) {
   this.#session = session;
   this.#cfgGoalEnabled = cfgGoalEnabled;
-  const settings = session.settings.overlay();
+  const settings = session.settings.overlay(), withheld = session.settings.overlay();
   const follow = modes => cfgGoalContinuationModes.override(settings, modes.includes(continuationMode) ? ['rpc'] : []);
   follow(cfgGoalContinuationModes.get(session));
   cfgGoalContinuationModes.listen(session, follow);
+  cfgGoalContinuationModes.override(withheld, []);
   const view = new Proxy(session, {
    get: (target, key) => {
-    if (key === 'settings') return settings;
+    if (key === 'settings') return held() ? withheld : settings;
     if (key === 'hasAdmittedSubmission') return this.#hostTurn || target.hasAdmittedSubmission;
+    // A goal the /guided-goal interview creates ends by restoring the tools from before the interview enabled `goal`.
+    if (key === 'getEnabledToolNames' && this.#guidedTools) { const tools = this.#guidedTools; return () => [...tools]; }
     const value = Reflect.get(target, key, target);
     return typeof value === 'function' ? value.bind(target) : value;
    },
@@ -124,7 +133,10 @@ export class GoalController {
   // The host's objective prompt started: from here the session itself reports the turn.
   if (event.type === 'agent_start') this.#hostTurn = false;
   this.#inner.observe(event);
+  if (event.type === 'goal_updated' && event.state) this.#guidedTools = undefined;
  }
+ /** /guided-goal enabled `goal` for its interview: `previousTools` is the set a goal it creates restores (undefined: none). */
+ guide(previousTools) { this.#guidedTools = previousTools; }
  hostTurnDone() { this.#hostTurn = false; }
  /** `hostTurn`: the host prompts with the objective right after `create`, so the goal must not start its own turn first. */
  async handle(command, { hostTurn = false } = {}) {
@@ -152,9 +164,15 @@ export class GoalController {
   const s = this.#session;
   if (!s.getGoalModeState()?.enabled) throw new Error('No active goal.');
   await s.goalRuntime.onBudgetMutated(tokenBudget);
-  // The shipped controller re-arms and schedules continuation only when a turn ends, so an idle session gets the end of
-  // a non-goal turn, as the interactive host re-arms after a budget change.
-  if (!s.isStreaming && !s.hasAdmittedSubmission && !this.#inner.continuationPending && s.getGoalModeState()?.mode === 'active') this.#inner.observe({ type: 'agent_end', messages: [] });
+  this.#rearm();
   return this.#inner.handle({ op: 'get' });
+ }
+ /** A host's hold ended at user input (the TUI's next getUserInput schedules continuation): an idle goal continues. */
+ release() { this.#rearm(); }
+ // The shipped controller re-arms and schedules continuation only when a turn ends, so an idle session gets the end of
+ // a non-goal turn, as the interactive host re-arms after a budget change.
+ #rearm() {
+  const s = this.#session;
+  if (!s.isStreaming && !s.hasAdmittedSubmission && !this.#inner.continuationPending && s.getGoalModeState()?.mode === 'active') this.#inner.observe({ type: 'agent_end', messages: [] });
  }
 }

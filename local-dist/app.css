@@ -222,6 +222,12 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .question-actions{display:flex;gap:7px;margin-top:10px}
 .question-cancel{margin-top:8px}
 .questions:has([data-askform]){max-height:min(62vh,560px)}
+.questions:has([data-uicustom]){max-height:min(72vh,640px)}
+.custom-panel{margin:10px 0 0;padding:8px 10px;max-height:min(52vh,460px);overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;font:12px/1.35 var(--mono);color:var(--fg);white-space:pre;outline:none}
+.custom-panel:focus{border-color:var(--field)}
+.custom-keys{flex-wrap:wrap}
+.question .custom-text{display:flex;gap:7px;margin-top:8px}
+.question .custom-text input{flex:1;min-width:0;padding:6px 10px;font-size:13px}
 .ask-q{margin:0;padding:0;border:0;min-width:0}
 .ask-q+.ask-q{margin-top:14px}
 .ask-q legend{padding:0;font-size:14px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}
@@ -740,7 +746,12 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 .extras[hidden]{display:none}
 .extra-link{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid var(--accent-line);border-radius:10px;background:var(--accent-soft);font-size:13px}
 .extra-link .grow{flex:1;overflow-wrap:anywhere}
+.extra-loop{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 12px;border:1px solid var(--accent-line);border-radius:10px;background:var(--accent-soft);font-size:13px}
+.extra-loop .grow{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.extra-loop .loop-prompt{color:var(--muted)}
 .extra-widget{margin:0;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel);font:12px/1.5 var(--mono);color:var(--muted);white-space:pre-wrap;max-height:160px;overflow-y:auto}
+/* The collab room's QR code (collab-host.mjs): half-block rows must touch to scan, so no line gap, wrap or height cap. */
+.extra-widget[title="collab-qr"]{width:max-content;max-width:100%;max-height:none;overflow-x:auto;line-height:1;white-space:pre;color:var(--fg)}
 .extra-status{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;color:var(--muted)}
 .extra-status span{padding:2px 9px;border-radius:999px;background:var(--hover)}
 
@@ -870,7 +881,9 @@ body{font-feature-settings:"ss01","cv11";letter-spacing:-.005em}
 .plan-context strong,.plan-context small{display:block}
 .plan-context small{color:var(--muted);font-size:13px}
 .plan-feedback{display:block}
-.plan-feedback textarea{display:block;margin-top:6px}
+.plan-feedback :is(textarea,input){display:block;margin-top:6px}
+.plan-feedback input{width:100%;background:var(--card)}
+.plan-feedback+.plan-feedback{margin-top:12px}
 .plan-model{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:14px}
 .plan-model .model-chip{max-width:100%}
 .plan-review-error{color:var(--red);margin-top:12px!important}

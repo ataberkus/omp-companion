@@ -812,6 +812,8 @@
           ${pref('steeringMode', s.modes?.steering === 'all', 'Deliver all steers at once', 'all', 'one-at-a-time')}
           ${pref('followUpMode', (s.modes?.followUp || s.prefs?.followUpMode) === 'all', 'Send all queued follow-ups together', 'all', 'one-at-a-time')}
           ${pref('interruptMode', s.modes?.interrupt === 'wait', 'Hold steers until the turn ends', 'wait', 'immediate')}
+          ${s._slow?.supported ? pref('slowMode', s._slow.enabled, s._slow.scope === 'global' ? 'Slow mode: continue at low priority after the Claude session limit (all sessions)' : 'Slow mode: flex service tier') : ''}
+          ${s._cacheWarming ? [['off', 'Cache warming off'], ['streaming', 'Cache warming while tools run'], ['idle', 'Cache warming, also while idle']].map(([m, label]) => `<button data-pref="cacheWarming" data-value="${esc(JSON.stringify(m))}" aria-pressed="${s._cacheWarming === m}"><span class="check" aria-hidden="true">${s._cacheWarming === m ? '✓' : ''}</span>${esc(label)}</button>`).join('') : ''}
           <div class="menu-sep"></div>
           <button data-act="login">Log in to a provider…</button>
           <button data-act="accounts">Choose provider accounts…</button>
@@ -1215,7 +1217,7 @@
         : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
       const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
         : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
-      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? 'You' : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
+      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
         ${body}</div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
@@ -1719,7 +1721,8 @@
     for (const a of data.agents || []) {
       const j = jobs.find(x => x.id === a.id);
       const status = /run|pend|start|queue/i.test(a.status) ? 'running' : /fail|error|abort/i.test(a.status) ? 'error' : a.status ? 'done' : '';
-      if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
+      // A task's transcript not on this machine (a collab guest's: the host's) is the one its roster entry names.
+      if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; if (!j.transcript && a.remote && a.sessionFile) j.transcript = a.sessionFile; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
       else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: a.startedAt || firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
     }
     for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, thinking: x.thinking, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
@@ -1982,14 +1985,18 @@
     closePicker();
     ctx.apply(r.sel, thinking);
   }
-  function modelChip(sel, thinking, fallback) {
-    const levels = thinkLevels(sel);
-    const label = sel ? (levels.length ? modelName(sel) : modelLabel(sel, thinking)) : levels.length ? (S.models?.roles?.default ? 'Default · ' + modelName(splitSel(S.models.roles.default).sel) : 'OMP default') : fallback;
+  function modelChip(sel, thinking, fallback, s) {
+    const levels = thinkLevels(sel, s);
+    const label = sel ? (levels.length || (s?._thinkingLevels && sel === sessionModel(s)) ? modelName(sel) : modelLabel(sel, thinking)) : levels.length ? (S.models?.roles?.default ? 'Default · ' + modelName(splitSel(S.models.roles.default).sel) : 'OMP default') : fallback;
     return `<button class="model-chip" data-act="model" title="Choose model"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>`
       + (levels.length ? `<button class="model-chip think-chip" data-act="thinkMenu" title="Reasoning level" aria-label="Reasoning level: ${esc(thinking || 'default')}" aria-haspopup="true"><span aria-hidden="true">✦</span> <span>${esc(thinking || 'default')}</span> <span aria-hidden="true">▾</span></button>` : '');
   }
-  // Reasoning levels of a selector, or of the default role's model when no model is picked.
-  const thinkLevels = sel => { const eff = sel || splitSel(S.models?.roles?.default || '').sel; if (!S.models) return []; const m = modelInfo(eff); return m ? (m.reasoning ? m.thinking || [] : []) : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']; };
+  // Reasoning levels of a selector, or of the default role's model when no model is picked. A running session reports its
+  // live model's own levels (OMP's get_available_thinking_levels, `off` first); `off` alone means no reasoning levels.
+  const thinkLevels = (sel, s) => {
+    if (s?._thinkingLevels && (!sel || sel === sessionModel(s))) return s._thinkingLevels.length > 1 ? s._thinkingLevels : [];
+    const eff = sel || splitSel(S.models?.roles?.default || '').sel; if (!S.models) return []; const m = modelInfo(eff); return m ? (m.reasoning ? m.thinking || [] : []) : ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  };
   // Fast (priority service) toggle; only for models with a service-tier family, or the default role's model.
   const fastOk = sel => !!modelInfo(sel || splitSel(S.models?.roles?.default || '').sel)?.fast;
   const fastChip = (sel, on) => fastOk(sel) ? `<button class="model-chip fast-chip ${on ? 'on' : ''}" data-act="fastToggle" aria-pressed="${!!on}" title="Fast mode: priority service tier"><span aria-hidden="true">⚡</span> <span>Fast ${on ? 'on' : 'off'}</span></button>` : '';
@@ -1999,7 +2006,7 @@
     closeThinkMenu();
     const ctx = pickerCtx();
     if (!ctx) return;
-    const levels = thinkLevels(ctx.model);
+    const levels = thinkLevels(ctx.model, ctx.session);
     const def = splitSel(S.models?.roles?.default || '').thinking || S.models?.defaultThinking || '';
     const el = document.createElement('div');
     el.id = 'thinkMenu'; el.className = 'think-menu';
@@ -2082,7 +2089,7 @@
       <div class="question-options">${x.options.map((o, j) => `<label class="ask-opt"><input type="${x.multi ? 'checkbox' : 'radio'}" name="q${i}" value="${esc(o.label)}"><span>${esc(o.label)}${j === x.recommended ? ' <em class="ask-rec">Recommended</em>' : ''}</span>${o.description ? `<small>${esc(o.description)}</small>` : ''}${o.preview ? `<pre class="ask-preview">${esc(o.preview)}</pre>` : ''}</label>`).join('')}</div>
       <input name="c${i}" class="ask-other" maxlength="20000" placeholder="Other (type your own)" aria-label="Other answer: ${esc(x.question)}"${x.multi ? '' : ' data-single'}>
     </fieldset>`).join('')}<div class="question-actions"><button class="btn sm primary" type="submit">${q.questions.length > 1 ? 'Submit answers' : 'Submit answer'}</button></div></form>`;
-  const formKey = f => f.dataset.uiform ?? f.dataset.askform;
+  const formKey = f => f.dataset.uiform ?? f.dataset.askform ?? f.dataset.uitext;
 
   function renderQuestions(s) {
     const el = $('#questions'), questions = s?.uiRequests || [];
@@ -2095,8 +2102,9 @@
       ${q.method === 'ask' ? askForm(q) : `<strong>${esc(q.title)}</strong>`}
       ${q.method === 'select' ? `<div class="question-options">${q.options.map((option, i) => { const on = q.checked?.includes(i); return `<button type="button" data-uichoice="${esc(q.id)}" data-uivalue="${esc(option)}"${on ? ' class="checked" aria-pressed="true"' : ''}><span>${on ? '☑ ' : ''}${esc(option)}</span>${q.optionDetails?.[i]?.description ? `<small>${esc(q.optionDetails[i].description)}</small>` : ''}</button>`; }).join('')}</div>` : ''}
       ${q.method === 'confirm' ? `<p>${esc(q.message)}</p><div class="question-actions"><button type="button" class="btn sm primary" data-uiconfirm="${esc(q.id)}" data-confirmed="true">Yes</button><button type="button" class="btn sm" data-uiconfirm="${esc(q.id)}" data-confirmed="false">No</button></div>` : ''}
-      ${q.method === 'input' || q.method === 'editor' ? `<form data-uiform="${esc(q.id)}">${q.method === 'input' ? `<input name="answer" maxlength="20000" placeholder="${esc(q.placeholder || 'Your answer')}" aria-label="${esc(q.title)}">` : `<textarea name="answer" maxlength="20000" rows="3" aria-label="${esc(q.title)}">${esc(q.prefill || '')}</textarea>`}<div class="question-actions"><button class="btn sm primary" type="submit">Submit answer</button></div></form>` : ''}
-      <button type="button" class="btn sm ghost question-cancel" data-uicancel="${esc(q.id)}">Cancel question</button>
+      ${q.method === 'input' || q.method === 'editor' ? `<form data-uiform="${esc(q.id)}">${q.method === 'input' ? `<input name="answer" maxlength="20000"${q.secret ? ' type="password" autocomplete="off"' : ''} placeholder="${esc(q.placeholder || 'Your answer')}" aria-label="${esc(q.title)}">` : `<textarea name="answer" maxlength="20000" rows="3" aria-label="${esc(q.title)}">${esc(q.prefill || '')}</textarea>`}<div class="question-actions"><button class="btn sm primary" type="submit">Submit answer</button></div></form>` : ''}
+      ${q.method === 'custom' ? customPanel(q) : ''}
+      <button type="button" class="btn sm ghost question-cancel" data-uicancel="${esc(q.id)}">${q.method === 'custom' ? 'Close panel' : 'Cancel question'}</button>
     </section>`).join('');
     keepFocus(el, () => setIfChanged(el, html));
     for (const [key, values] of kept) {
@@ -2107,7 +2115,9 @@
     el.dataset.first = questions[0].id;
     // Take focus for a new question, but never from a field the user is typing in.
     const a = document.activeElement, typing = a && /INPUT|TEXTAREA/.test(a.tagName) && a.value && !el.contains(a);
-    if (first !== questions[0].id && !typing) el.querySelector('.question')?.querySelector('input,textarea,[data-uichoice],[data-uiconfirm]')?.focus();
+    if (first !== questions[0].id && !typing) el.querySelector('.question')?.querySelector('[data-uicustom],input,textarea,[data-uichoice],[data-uiconfirm]')?.focus();
+    for (const id of panelSent.keys()) if (!questions.some(q => q.id === id)) panelSent.delete(id);
+    if (questions.some(q => q.method === 'custom')) sizePanels();
   }
 
   async function answerQuestion(id, answer, control) {
@@ -2122,6 +2132,124 @@
     // A re-render replaces the section once the question clears; if it didn't, make it usable again.
     controls().forEach(el => { el.disabled = false; });
   }
+
+  // ---------- custom panels: components extensions (and the bash tool's `pty: true` terminal) show through ctx.ui.custom ----------
+  // The panel shows the component's terminal rows; focused, it takes keys as OMP's TUI would (legacy xterm encoding). The
+  // buttons and the text field send keys from touch screens.
+  const PANEL_KEYS = { Esc: '\x1b', '↑': '\x1b[A', '↓': '\x1b[B', '←': '\x1b[D', '→': '\x1b[C', Tab: '\t', Enter: '\r', 'Ctrl+C': '\x03' };
+  const customPanel = q => `<pre class="custom-panel" tabindex="0" data-uicustom="${esc(q.id)}" aria-label="Interactive panel: focus it and type to send keys">${sgrHtml(q.lines || [])}</pre>
+      <div class="question-actions custom-keys">${Object.keys(PANEL_KEYS).map(k => `<button type="button" class="btn sm" data-uikeys="${esc(q.id)}" data-key="${esc(k)}">${esc(k)}</button>`).join('')}</div>
+      <form class="custom-text" data-uitext="${esc(q.id)}"><input name="text" maxlength="5000" autocomplete="off" placeholder="Text to type into the panel" aria-label="Text to type into the panel"><button class="btn sm" type="submit">Type</button></form>`;
+  const XTERM16 = ['#1e1e1e', '#cd3131', '#0dbc79', '#e5e510', '#2472c8', '#bc3fbc', '#11a8cd', '#e5e5e5', '#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#ffffff'];
+  function xterm256(n) {
+    if (n < 16) return XTERM16[n];
+    if (n >= 232) { const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`; }
+    const c = x => x ? 55 + x * 40 : 0; n -= 16;
+    return `rgb(${c(Math.floor(n / 36))},${c(Math.floor(n / 6) % 6)},${c(n % 6)})`;
+  }
+  function sgrState(st, params) {
+    const p = (params || '0').split(/[;:]/).map(Number); st = { ...st };
+    for (let i = 0; i < p.length; i++) {
+      const n = p[i];
+      if (n === 0) st = {};
+      else if (n === 1) st.b = 1; else if (n === 2) st.d = 1; else if (n === 3) st.i = 1; else if (n === 4) st.u = 1; else if (n === 7) st.inv = 1; else if (n === 9) st.s = 1;
+      else if (n === 22) { delete st.b; delete st.d; } else if (n === 23) delete st.i; else if (n === 24) delete st.u; else if (n === 27) delete st.inv; else if (n === 29) delete st.s;
+      else if (n >= 30 && n <= 37) st.fg = XTERM16[n - 30]; else if (n >= 90 && n <= 97) st.fg = XTERM16[n - 82]; else if (n === 39) delete st.fg;
+      else if (n >= 40 && n <= 47) st.bg = XTERM16[n - 40]; else if (n >= 100 && n <= 107) st.bg = XTERM16[n - 92]; else if (n === 49) delete st.bg;
+      else if (n === 38 || n === 48) {
+        const k = n === 38 ? 'fg' : 'bg';
+        if (p[i + 1] === 5) { st[k] = xterm256(p[i + 2] || 0); i += 2; }
+        else if (p[i + 1] === 2) { st[k] = `rgb(${p[i + 2] || 0},${p[i + 3] || 0},${p[i + 4] || 0})`; i += 4; }
+      }
+    }
+    return st;
+  }
+  function sgrCss(st) {
+    let fg = st.fg, bg = st.bg;
+    if (st.inv) [fg, bg] = [bg || 'var(--bg)', fg || 'var(--fg)'];
+    return [fg && `color:${fg}`, bg && `background:${bg}`, st.b && 'font-weight:700', st.d && 'opacity:.6', st.i && 'font-style:italic', (st.u || st.s) && `text-decoration:${[st.u && 'underline', st.s && 'line-through'].filter(Boolean).join(' ')}`].filter(Boolean).join(';');
+  }
+  function sgrHtml(lines) {
+    return lines.map(line => {
+      const parts = String(line).split(/\x1b\[([0-9;:]*)m/);
+      let st = {}, out = '';
+      parts.forEach((part, i) => {
+        if (i % 2) { st = sgrState(st, part); return; }
+        if (!part) return;
+        const css = sgrCss(st);
+        out += css ? `<span style="${css}">${esc(part)}</span>` : esc(part);
+      });
+      return out;
+    }).join('\n');
+  }
+  const CSI_KEYS = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D', Home: 'H', End: 'F' };
+  const SS3_KEYS = { F1: 'P', F2: 'Q', F3: 'R', F4: 'S' };
+  const TILDE_KEYS = { Insert: 2, Delete: 3, PageUp: 5, PageDown: 6, F5: 15, F6: 17, F7: 18, F8: 19, F9: 20, F10: 21, F11: 23, F12: 24 };
+  // A browser key as the bytes a terminal sends for it; null leaves the key to the browser.
+  function termKey(e) {
+    const mod = 1 + (e.shiftKey ? 1 : 0) + (e.altKey ? 2 : 0) + (e.ctrlKey ? 4 : 0), alt = e.altKey ? '\x1b' : '';
+    if (CSI_KEYS[e.key]) return mod > 1 ? `\x1b[1;${mod}${CSI_KEYS[e.key]}` : `\x1b[${CSI_KEYS[e.key]}`;
+    if (SS3_KEYS[e.key]) return mod > 1 ? `\x1b[1;${mod}${SS3_KEYS[e.key]}` : `\x1bO${SS3_KEYS[e.key]}`;
+    if (TILDE_KEYS[e.key]) return mod > 1 ? `\x1b[${TILDE_KEYS[e.key]};${mod}~` : `\x1b[${TILDE_KEYS[e.key]}~`;
+    if (e.key === 'Enter') return alt + '\r';
+    if (e.key === 'Tab') return e.shiftKey ? '\x1b[Z' : alt + '\t';
+    if (e.key === 'Backspace') return alt + (e.ctrlKey ? '\x08' : '\x7f');
+    if (e.key === 'Escape') return '\x1b';
+    if ([...e.key].length !== 1) return null;
+    if (e.getModifierState?.('AltGraph')) return e.key; // AltGr reports Ctrl+Alt on Windows: it types a character
+    if (e.ctrlKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'v') return null; // the browser pastes; the paste handler sends it bracketed
+      if (k === ' ' || k === '@' || k === '2') return alt + '\x00';
+      return /^[a-z[\\\]^_]$/.test(k) ? alt + String.fromCharCode(k.charCodeAt(0) & 31) : null;
+    }
+    return alt + e.key;
+  }
+  // Keys go out in order; keys typed while one request is in flight follow together in the next.
+  const panelKeys = { id: null, keys: [], busy: false };
+  function panelInput(id, ...keys) {
+    if (panelKeys.id !== id) { panelKeys.id = id; panelKeys.keys = []; }
+    panelKeys.keys.push(...keys.filter(Boolean));
+    if (!panelKeys.busy) void flushPanel();
+  }
+  async function flushPanel() {
+    panelKeys.busy = true;
+    try {
+      while (panelKeys.keys.length) {
+        const c = current(), id = panelKeys.id, input = panelKeys.keys.splice(0, 500);
+        if (c.kind !== 'session') { panelKeys.keys = []; break; }
+        try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, input }); }
+        catch (e) { toast(e.message, 'err'); panelKeys.keys = []; }
+      }
+    } finally { panelKeys.busy = false; }
+    await refresh();
+  }
+  // The panel's size in cells is the terminal the component draws on: the panel's width and the height it may grow to, over
+  // the cell of its monospace font. Sent when a panel opens and once the window settles after a resize (the bridge clamps it).
+  const panelSent = new Map(); // panel id → size last sent
+  let cellCanvas;
+  function panelCells(pre) {
+    const cs = getComputedStyle(pre), ctx = (cellCanvas ??= document.createElement('canvas')).getContext('2d');
+    ctx.font = `${cs.fontSize} ${cs.fontFamily}`;
+    const cellW = ctx.measureText('M'.repeat(20)).width / 20, cellH = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.35;
+    const maxH = parseFloat(cs.maxHeight), padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight), padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    if (!cellW || !cellH || !pre.clientWidth) return null;
+    return { columns: Math.floor((pre.clientWidth - padX) / cellW), rows: Math.floor(((Number.isFinite(maxH) ? maxH : 460) - padY) / cellH) };
+  }
+  function sizePanels() {
+    const c = current();
+    if (c.kind !== 'session') return;
+    for (const pre of document.querySelectorAll('[data-uicustom]')) {
+      const id = pre.dataset.uicustom, size = panelCells(pre);
+      if (!size || size.columns < 1 || size.rows < 1) continue;
+      const key = `${size.columns}x${size.rows}`;
+      if (panelSent.get(id) === key) continue;
+      panelSent.set(id, key);
+      api(`/sessions/${c.id}/command`, { type: 'answer', id, resize: size }).then(() => refresh(), e => { panelSent.delete(id); if (!/no longer pending/.test(e.message)) toast(e.message, 'err'); });
+    }
+  }
+  let panelResizeTimer;
+  window.addEventListener('resize', () => { clearTimeout(panelResizeTimer); panelResizeTimer = setTimeout(sizePanels, 200); });
 
   function renderQueue(s) {
     const el = $('#queued'), items = s?.queuedMessages || [];
@@ -2190,7 +2318,7 @@
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
     const nAdvChip = !s && native ? `<button class="model-chip adv-chip ${nAdv ? 'on' : ''}" data-act="nativeAdv" title="Advisor for this session once it starts"><span aria-hidden="true">⚑</span> <span>Advisor ${nAdv === undefined ? 'default' : nAdv ? 'on' : 'off'}</span></button>` : '';
-    setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel()) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s) + autoChip(s)
+    setIfChanged($('#modelSlot'), s ? modelChip(sessionModel(s), s.thinking, defaultLabel(), s) + fastChip(sessionModel(s), s.fast?.enabled) + advisorChip(s) + autoChip(s)
       : (choice ? modelChip(choice.model, choice.thinking, 'Saved model') : modelChip(native?.model, native?.thinking, 'Saved model')) + nAdvChip);
     // A failed read is retried on the next render; settings saves and advisor model changes clear S.advCfg so the chips follow the new config.
     if ((s || native) && !S.advCfg && !S.advCfgLoading) { S.advCfgLoading = true; api('/advisor').then(cfg => { S.advCfg = cfg; update(); }, () => { }).finally(() => { S.advCfgLoading = false; }); }
@@ -2215,6 +2343,10 @@
       else if (s.status === 'review') status = `<span class="grow">OMP finished. Review the result, reply to keep going, or mark it done.</span>`;
       else if (s.status === 'paused' && !fresh) status = `<span class="grow">Idle. Reply to continue from where it left off.</span>`;
     }
+    // Hosted commands still working in the background (/cleanse, /omfg), during a turn or after it: each has its own Stop,
+    // the TUI's Esc on that command's panel; the turn's ■ leaves them running.
+    const runs = Object.entries(s?._commandRuns || {});
+    if (runs.length) status = `<span class="grow">${esc(runs.map(([, label]) => label).join(', '))} running…</span>` + runs.map(([key, label]) => `<button class="btn sm danger" data-act="stopCommands" data-run="${esc(key)}" title="Stop ${esc(label)}">■ Stop ${esc(label)}</button>`).join('');
     if (s?._planReview) {
       status = `<span class="grow">Plan ready for review. Approval is required before implementation.</span><button class="btn sm primary" data-plan-review="${esc(s.id)}" ${S.planBusy.has(s.id) ? 'disabled' : ''}>Review plan</button>`;
       placeholder = 'Type feedback to keep planning without approving…';
@@ -2242,6 +2374,8 @@
     const link = s?._openUrl && S.urlDismissed !== s._openUrl.id ? s._openUrl : null;
     const safeUrl = link && /^(https?:|mailto:)/i.test(link.url);
     if (link) parts.push(`<div class="extra-link"><span class="grow">${esc(link.instructions || 'OMP needs you to open this link to continue.')}</span>${safeUrl ? `<a class="btn sm primary" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">Open link</a>` : `<code>${esc(link.url)}</code>`}<button class="btn sm ghost" data-copy-text="${esc(link.url)}">Copy</button><button class="btn sm ghost" data-act="dismissUrl" data-id="${esc(link.id)}" aria-label="Dismiss link">✕</button></div>`);
+    // /loop: what it repeats and its budget; Stop pauses it (the next prompt resumes it), this turns it off.
+    if (s?._loop) parts.push(`<div class="extra-loop" role="status"><span aria-hidden="true">↻</span><span class="grow">${esc(s._loop.description)}${s._loop.prompt ? ` · <span class="loop-prompt" title="${esc(s._loop.prompt)}">${esc(s._loop.prompt)}</span>` : ''}${s._loop.state === 'paused' ? ' · send a prompt to resume' : ''}</span><button class="btn sm ghost" data-act="loopOff" title="Turn loop mode off (/loop off)">Stop loop</button></div>`);
     for (const [key, lines] of Object.entries(s?._widgets || {})) parts.push(`<pre class="extra-widget" title="${esc(key)}">${esc(plain(lines.join('\n')))}</pre>`);
     const status = Object.entries(s?._status || {});
     if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
@@ -2426,7 +2560,7 @@
       const key = id + ':' + proposal.id;
       if (S.planSubmitted.has(key)) throw new Error('This proposal has already been submitted. Wait for the next plan.');
       const returnFocus = document.activeElement;
-      modal(proposal.title || 'Review native plan', `<div class="plan-review-intro"><p>Read the plan before choosing how to continue. Closing this review does not approve or implement it.</p><p class="muted plan-review-path">${esc(proposal.planFilePath || '')}</p></div><article class="md plan-review-content" tabindex="0" aria-label="Proposed plan">${md(proposal.content || '')}</article><form data-plan-approval><fieldset><legend>Execution context</legend><label class="plan-context"><input type="radio" name="action" value="preserve" required><span><strong>Keep context</strong><small>Implement with the current conversation intact.</small></span></label><label class="plan-context"><input type="radio" name="action" value="fresh"><span><strong>Fresh context</strong><small>Start implementation in a fresh context with the plan.</small></span></label><label class="plan-context"><input type="radio" name="action" value="compact"><span><strong>Compact context</strong><small>Summarize the conversation before implementation.</small></span></label><label class="plan-context"><input type="radio" name="action" value="refine"><span><strong>Request refinement</strong><small>Stay in read-only planning and revise the plan using your feedback.</small></span></label></fieldset><label class="plan-feedback">Feedback <span class="muted">(required for refinement)</span><textarea name="feedback" rows="3" maxlength="20000" placeholder="What should change or guide implementation?"></textarea></label><div class="plan-model"><span>Execution model</span><button class="model-chip" type="button" data-plan-model>OMP default ▾</button></div><p class="plan-review-error" role="alert" hidden></p><div class="question-actions"><button class="btn" type="button" data-modal-close>Review later</button><button class="btn primary" type="submit">Confirm selected action</button></div></form>`);
+      modal(proposal.title || 'Review native plan', `<div class="plan-review-intro"><p>Read the plan before choosing how to continue. Closing this review does not approve or implement it.</p><p class="muted plan-review-path">${esc(proposal.planFilePath || '')}</p></div><article class="md plan-review-content" tabindex="0" aria-label="Proposed plan">${md(proposal.content || '')}</article><form data-plan-approval><fieldset><legend>Execution context</legend><label class="plan-context"><input type="radio" name="action" value="preserve" required><span><strong>Keep context</strong><small>Implement with the current conversation intact.</small></span></label><label class="plan-context"><input type="radio" name="action" value="fresh"><span><strong>Fresh context</strong><small>Start implementation in a fresh context with the plan.</small></span></label><label class="plan-context"><input type="radio" name="action" value="compact"><span><strong>Compact context</strong><small>Summarize the conversation before implementation.</small></span></label><label class="plan-context"><input type="radio" name="action" value="refine"><span><strong>Request refinement</strong><small>Stay in read-only planning and revise the plan using your feedback.</small></span></label><label class="plan-context"><input type="radio" name="action" value="save"><span><strong>Save and quit</strong><small>Save the plan to a project file without implementing it, leave plan mode and start a fresh session.</small></span></label></fieldset><label class="plan-feedback">Feedback <span class="muted">(required for refinement)</span><textarea name="feedback" rows="3" maxlength="20000" placeholder="What should change or guide implementation?"></textarea></label><label class="plan-feedback">Save to <span class="muted">(Save and quit; path in the project folder)</span><input name="savePath" maxlength="1000" placeholder="Default: TITLE_PLAN.md"></label><div class="plan-model"><span>Execution model</span><button class="model-chip" type="button" data-plan-model>OMP default ▾</button></div><p class="plan-review-error" role="alert" hidden></p><div class="question-actions"><button class="btn" type="button" data-modal-close>Review later</button><button class="btn primary" type="submit">Confirm selected action</button></div></form>`);
       if ($('#modal')?._planOwner) return; // modal() refused: another plan review is still submitting
       const dialog = $('#modal'), form = dialog.querySelector('[data-plan-approval]');
       dialog.classList.add('plan-review-modal');
@@ -2452,7 +2586,8 @@
         S.planBusy.add(id); error.hidden = true;
         dialog.querySelectorAll('button,input,textarea').forEach(x => x.disabled = true); update();
         try {
-          await api(`/sessions/${id}/command`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' ? { executionModel } : {}) });
+          const savePath = action === 'save' ? form.elements.savePath.value.trim() : '';
+          await api(`/sessions/${id}/command`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' && action !== 'save' ? { executionModel } : {}), ...(savePath ? { savePath } : {}) });
           S.planSubmitted.add(key);
           S.planBusy.delete(id);
           if ($('#modal') === dialog) closeModal();
@@ -2576,20 +2711,31 @@
   function renderSlash() {
     const el = $('#slash'), input = $('#homePrompt') || $('#input'), c = current();
     if (!el) return;
-    const m = (input?.value || '').match(/^\/(\S*)$/);
+    const value = input?.value || '';
+    // `/name ` + partial word: the command's subcommands (OMP's own definitions), like OMP's argument completion.
+    const m = value.match(/^\/(\S*)$/), sm = !m && value.match(/^\/(\S+) (\S*)$/);
     const key = c.kind === 'session' ? 'session=' + encodeURIComponent(c.id)
       : c.kind === 'home' && S.home.listing ? 'path=' + encodeURIComponent(S.home.listing.path) : '';
-    if (!key || !m) { S.slash = null; el.hidden = true; input?.removeAttribute('aria-activedescendant'); input?.setAttribute('aria-expanded', 'false'); return; }
+    if (!key || !(m || sm)) { S.slash = null; el.hidden = true; input?.removeAttribute('aria-activedescendant'); input?.setAttribute('aria-expanded', 'false'); return; }
     const cached = S.cmds.get(key);
     if ((!cached || Date.now() - cached.at > 30000) && !S.cmdsLoading.has(key)) {
       S.cmdsLoading.add(key); loadCommands(key);
     }
-    const q = m[1].toLowerCase();
-    const items = (cached?.list || []).filter(x => {
-      const name = x.name.toLowerCase();
-      return name.startsWith(q) || (name.startsWith('skill:') && name.startsWith(q, 6)) || x.aliases.some(a => a.toLowerCase().startsWith(q));
-    });
-    S.slash = items.length ? { items, hi: Math.min(S.slash?.hi || 0, items.length - 1) } : null;
+    let items;
+    if (sm) {
+      const name = sm[1].toLowerCase(), q = sm[2].toLowerCase();
+      const cmd = (cached?.list || []).find(x => x.name.toLowerCase() === name || x.aliases.some(a => a.toLowerCase() === name));
+      items = (cmd?.subcommands || []).filter(x => x.name.toLowerCase().startsWith(q))
+        .map(x => ({ name: cmd.name + ' ' + x.name, hint: x.usage, description: x.description, aliases: [] }));
+    } else {
+      const q = m[1].toLowerCase();
+      items = (cached?.list || []).filter(x => {
+        const name = x.name.toLowerCase();
+        return name.startsWith(q) || (name.startsWith('skill:') && name.startsWith(q, 6)) || x.aliases.some(a => a.toLowerCase().startsWith(q));
+      });
+    }
+    // bare: no subcommand typed yet, so Enter sends the bare command instead of picking one.
+    S.slash = items.length ? { items, hi: Math.min(S.slash?.hi || 0, items.length - 1), bare: !!sm && !sm[2] } : null;
     el.hidden = !S.slash && !S.cmdsLoading.has(key);
     el.innerHTML = S.slash ? items.map((x, i) => `<button type="button" id="slash-option-${i}" role="option" aria-selected="${i === S.slash.hi}" class="${i === S.slash.hi ? 'hi' : ''}" data-slash="${esc(x.name)}"><b>/${esc(x.name)}</b>${x.hint ? ` <span class="muted">${esc(x.hint)}</span>` : ''}${x.description ? `<small>${esc(x.description)}</small>` : ''}</button>`).join('') : S.cmdsLoading.has(key) ? '<div role="status">Loading commands…</div>' : '';
     if (S.slash) input.setAttribute('aria-activedescendant', 'slash-option-' + S.slash.hi);
@@ -2742,9 +2888,9 @@
       afterSend(sendView);
     }
   }
-  async function sessionCommand(type) {
+  async function sessionCommand(type, extra) {
     const c = current();
-    try { await api(`/sessions/${c.id}/command`, { type }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
+    try { await api(`/sessions/${c.id}/command`, { type, ...extra }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
     catch (e) { toast(e.message, 'err'); return false; }
   }
   async function advisorCommand(action) {
@@ -3963,7 +4109,7 @@
     try {
       if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
     } catch (e) { console.error('Refresh failed:', e); } finally { // a render that throws must not end polling for good
-      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running'));
+      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running') || s.uiRequests?.some(q => q.method === 'custom'));
       // Back off while the companion is unreachable instead of hammering it every second.
       setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
     }
@@ -4033,7 +4179,7 @@
     if (c.kind === 'session') {
       const s = S.store?.sessions.find(x => x.id === c.id);
       if (!s) return null;
-      return { model: sessionModel(s), thinking: s.thinking, allowDefault: false, apply: async (sel, th) => {
+      return { model: sessionModel(s), thinking: s.thinking, session: s, allowDefault: false, apply: async (sel, th) => {
         try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); thinkSet(sel, th); }
         catch (err) { toast(err.message, 'err'); }
         $('#input')?.focus();
@@ -4139,6 +4285,8 @@
     if (yesNo) { answerQuestion(yesNo.dataset.uiconfirm, { confirmed: yesNo.dataset.confirmed === 'true' }, yesNo); return; }
     const cancelQuestion = t.closest('[data-uicancel]');
     if (cancelQuestion) { answerQuestion(cancelQuestion.dataset.uicancel, { cancelled: true }, cancelQuestion); return; }
+    const panelKey = t.closest('[data-uikeys]');
+    if (panelKey) { panelInput(panelKey.dataset.uikeys, PANEL_KEYS[panelKey.dataset.key]); return; }
     const steerAct = t.closest('[data-steeract]');
     if (steerAct) {
       const id = steerAct.dataset.id;
@@ -4257,6 +4405,7 @@
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
     else if (act === 'abort' || act === 'complete') sessionCommand(act);
+    else if (act === 'stopCommands') sessionCommand('stop_commands', { run: a.dataset.run });
     else if (act === 'interrupt') send('interrupt');
     else if (act === 'homeLaunch') openLaunch('home');
     else if (act === 'clearTodos') { if (confirm('Clear the task plan for this session?')) editTodos(phases => { phases.length = 0; }); }
@@ -4291,6 +4440,7 @@
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
+    else if (act === 'loopOff') sessionAction({ type: 'prompt', message: '/loop off' });
     else if (act === 'toggleOverlap') { const o = S.overlapOpen ||= new Set(); o.delete(a.dataset.id) || o.add(a.dataset.id); update(); }
     else if (['rename', 'branch', 'editLast', 'regenerate', 'handoff', 'export', 'stats', 'login', 'accounts'].includes(act)) {
       closeMenu(a.closest('.menu'));
@@ -4405,6 +4555,21 @@
     if (img) { e.preventDefault(); e.stopPropagation(); openLightbox(img.src, img.alt); }
   }, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#lightbox')) { e.stopPropagation(); closeLightbox(); } }, true);
+  // A focused custom panel takes every key a terminal would get (no app shortcuts meanwhile); pastes go bracketed.
+  document.addEventListener('keydown', e => {
+    const panel = e.target.closest?.('[data-uicustom]');
+    if (!panel || e.isComposing || e.metaKey) return;
+    const key = termKey(e);
+    if (key === null) return;
+    e.preventDefault(); e.stopPropagation();
+    panelInput(panel.dataset.uicustom, key);
+  }, true);
+  document.addEventListener('paste', e => {
+    const panel = e.target.closest?.('[data-uicustom]'), text = e.clipboardData?.getData('text/plain');
+    if (!panel || !text) return;
+    e.preventDefault();
+    panelInput(panel.dataset.uicustom, `\x1b[200~${text.slice(0, 19000)}\x1b[201~`);
+  }, true);
   // Review comment box: Ctrl/⌘+Enter saves, Escape discards.
   document.addEventListener('keydown', e => {
     const f = e.target.closest?.('[data-noteform]');
@@ -4541,6 +4706,7 @@
     if (e.target.dataset.launch) { saveLaunch(e.target); return; }
     if (e.target.hasAttribute('data-toolform')) { runTool(e.target); return; }
     if (e.target.hasAttribute('data-uiform')) { answerQuestion(e.target.dataset.uiform, { value: e.target.elements.answer.value }, e.target); return; }
+    if (e.target.hasAttribute('data-uitext')) { const field = e.target.elements.text; panelInput(e.target.dataset.uitext, ...field.value); field.value = ''; return; }
     if (e.target.hasAttribute('data-askform')) {
       const answers = [...e.target.querySelectorAll('fieldset[data-qid]')].map(fs => ({ id: fs.dataset.qid, selectedOptions: [...fs.querySelectorAll('input:checked')].map(x => x.value), customInput: fs.querySelector('.ask-other').value.trim() || undefined }));
       answerQuestion(e.target.dataset.askform, { answers }, e.target);
@@ -4593,8 +4759,8 @@
     if ((t.id === 'input' || t.id === 'homePrompt') && S.slash) {
       const n = S.slash.items.length, hi = S.slash.items[S.slash.hi];
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); S.slash.hi = (S.slash.hi + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; renderSlash(); $('#slash .hi')?.scrollIntoView({ block: 'nearest' }); return; }
-      // Enter completes a partial name; on a full name it falls through and sends.
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && t.value !== '/' + hi.name)) { e.preventDefault(); pickSlash(hi.name); return; }
+      // Enter completes a partial name; on a full name (or a command with no subcommand typed) it falls through and sends.
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !S.slash.bare && t.value !== '/' + hi.name)) { e.preventDefault(); pickSlash(hi.name); return; }
       if (e.key === 'Escape') { e.preventDefault(); S.slash = null; $('#slash').hidden = true; t.removeAttribute('aria-activedescendant'); return; }
     }
     if (t.matches('[data-steerinput]')) {

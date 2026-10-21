@@ -20,6 +20,7 @@ export const RUNTIME_FILES = {
  rpc: 'modes/rpc/rpc-mode.ts', btw: 'modes/rpc/rpc-btw.ts', goal: 'modes/rpc/rpc-goal.ts', results: 'modes/rpc/rpc-prompt-results.ts',
  settle: 'modes/rpc/rpc-session-settle.ts', subagents: 'modes/rpc/rpc-subagents.ts', compat: 'modes/rpc/rpc-compat.ts',
  builtins: 'slash-commands/acp-builtins.ts', available: 'slash-commands/available-commands.ts', messages: 'session/messages.ts',
+ builtinRegistry: 'slash-commands/builtin-registry.ts', slashParse: 'slash-commands/helpers/parse.ts',
  todo: 'tools/todo.ts', tokenRate: 'utils/token-rate.ts', modeSettings: 'modes/settings.ts', predict: 'predict/client.ts',
 };
 

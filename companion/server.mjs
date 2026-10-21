@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 import { ompHost } from './omp.mjs';
+import { unhostedMessage } from './command-hosts.mjs';
 import { cliEnv, syncOmpSdk } from './omp-sdk.mjs';
 const exec=promisify(execFile);
 // Apps started from Explorer can get a PATH without the user's entries (Windows drops an oversized user Path), so the
@@ -72,6 +73,12 @@ function advisorMessage(m,id,at){
  if(m.customType!=='advisor'||m.display!==true||!Array.isArray(m.details?.notes))return null;
  const notes=m.details.notes.slice(0,32).filter(n=>typeof n?.note==='string'&&n.note.trim()).map(n=>({note:n.note.slice(0,10000),severity:['nit','concern','blocker'].includes(n.severity)?n.severity:'nit',...(typeof n.advisor==='string'?{advisor:n.advisor.slice(0,80)}:{})}));
  return notes.length?{id,role:'advisor',text:notes.map(n=>n.note).join('\n').slice(-100000),notes,at}:null;
+}
+// OMP's /tan breadcrumb (pi-tui background-tan-message.ts): one line; the system-notice content is for the model only.
+function tanMessage(m,id,at){
+ if(m.customType!=='background-tan-dispatch'||m.display!==true)return null;
+ const work=String(m.details?.work||'').replace(/\s+/g,' ').trim();
+ return {id,role:'system',text:`Tangent dispatched [task] ${String(m.details?.jobId||'unknown')}${work?` — ${work.length>56?work.slice(0,55)+'…':work}`:''}`,at};
 }
 const MAX_IMAGE_BYTES=5*1024*1024;
 const IMAGE_EXT={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif'};
@@ -222,8 +229,12 @@ const btwTurnView=t=>({question:String(t?.question||'').slice(0,20000),answer:St
 const btwView=r=>({id:String(r.id),...btwTurnView(r),followUps:(Array.isArray(r.followUps)?r.followUps:[]).slice(-50).map(btwTurnView)});
 // Keep only what the dashboard shows from OMP's subagent registry entries.
 const subagentView=e=>{const p=e?.progress||{};const pick=o=>Object.fromEntries(Object.entries(o||{}).filter(([,v])=>['string','number','boolean'].includes(typeof v)).map(([k,v])=>[k,typeof v==='string'?v.slice(0,300):v]));
- return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(e?.status||p.status||''),sessionFile:e?.sessionFile||'',parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
+ return {id:String(e?.id||p.id||''),agent:String(e?.agent||''),description:String(e?.description||p.description||'').slice(0,300),status:String(e?.status||p.status||''),sessionFile:e?.sessionFile||'',...(e?.remote===true?{remote:true}:{}),parentToolCallId:e?.parentToolCallId||'',lastUpdate:e?.lastUpdate||Date.now(),progress:pick(p)};};
 const goalView=g=>g?{objective:String(g.objective||'').slice(0,500),status:String(g.status||''),tokensUsed:g.tokensUsed,tokenBudget:g.tokenBudget}:undefined;
+// A collab guest's prompt as OMP stores it on the host (a `collab-prompt` custom message): a user message with its author.
+const collabPrompt=(m,id,at)=>{if(m?.customType!=='collab-prompt')return null;const text=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');return text||hasImage?{id,role:'user',text:text.slice(-100000)||'Image attached',hasImage,at,from:String(m.details?.from||'Guest').slice(0,80)}:null;};
+// /loop's state (loop-host.mjs): running (repeating its prompt), waiting (for the next prompt) or paused (by Stop).
+const loopView=v=>v&&['running','waiting','paused'].includes(v.state)?{state:v.state,description:String(v.description||'').slice(0,300),...(typeof v.prompt==='string'?{prompt:v.prompt.slice(0,2000)}:{})}:undefined;
 // Background jobs (async bash, task subagents) as recorded in a session transcript. Scans append-only files incrementally.
 const jobScans=new Map();
 async function scanJobs(file){
@@ -303,14 +314,17 @@ async function importMessages(file,limit=400,stash){
 // stash stores tool-result images ([{mimeType,bytes}] → [{mimeType,id}]); without it they are left out.
 function entryMessages(frames,limit=400,stash){
  const out=[];const tools=new Map(),shots=new Map();
- for(const f of frames){if(f?.type!=='message'&&f?.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
+ for(const f of frames){
+  // OMP's /clear: the model's context starts after the latest boundary, and so does the transcript (as in OMP's TUI).
+  if(f?.type==='reset_boundary'){out.length=0;tools.clear();shots.clear();out.push({id:f.id||randomUUID(),role:'system',text:'Context reset (/clear): earlier messages are no longer in the model’s context; the session file keeps them.',at:f.timestamp||now()});continue;}
+  if(f?.type!=='message'&&f?.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
   if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image'),agent=m.synthetic&&m.attribution==='agent';if(v||hasImage)out.push({id:f.id||randomUUID(),role:agent?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at,...(f.type==='message'&&f.id&&!agent?{entryId:String(f.id)}:{})});}
   else if(m.role==='assistant'){
    const th=thinkingText(m.content).trim();if(th)out.push({id:(f.id||randomUUID())+'-think',role:'thinking',text:th.slice(-40000),at,sourceTimestamp:m.timestamp});
    const v=contentText(m.content).trim();if(v)out.push({id:f.id||randomUUID(),role:'assistant',text:v.slice(-100000),at,model:m.provider&&m.model?`${m.provider}/${m.model}`:undefined});
    for(const c of Array.isArray(m.content)?m.content:[])if(c?.type==='toolCall'){const tool=toolRecord(c.name,c.arguments,c.intent);tool.status='done';const msg={id:'tool-'+c.id,role:'tool',tool,text:toolSummary(tool),at};tools.set(c.id,msg);out.push(msg);}
   }
-  else if(f.type==='custom_message'||m.role==='custom'){const card=advisorMessage(m,f.id||randomUUID(),at);if(card)out.push(card);}
+  else if(f.type==='custom_message'||m.role==='custom'){const card=collabPrompt(m,f.id||randomUUID(),at)||advisorMessage(m,f.id||randomUUID(),at)||tanMessage(m,f.id||randomUUID(),at);if(card)out.push(card);}
   else if(m.role==='toolResult'){const msg=tools.get(m.toolCallId);if(msg){msg.tool.result=clip(contentText(m.content),8000);msg.tool.status=m.isError?'error':'done';const files=editFiles(m.details);if(files)msg.tool.files=files;msg.text=toolSummary(msg.tool);if(stash)shots.set(msg,m.content);}}
   else if(m.role==='bashExecution'){const tool=shellRecord(m.command,m);out.push({id:'tool-'+(f.id||randomUUID()),role:'tool',tool,text:toolSummary(tool),at});}
  }
@@ -1070,7 +1084,8 @@ const place=(s,m)=>{let i=s.messages.length;while(i>0&&unreadSteer(s.messages[i-
 const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else{const m={id,role,text:value.slice(-100000),at:now()};if(role==='user')s.messages.push(m);else place(s,m);}s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
  // Slash commands per live session, from available_commands_update; served on demand, not in every /api/state poll.
  const commands=new Map();
- const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},{name:'btw',description:'Ask a side question about this session; the answer stays out of the conversation',aliases:[],hint:'<question>',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage'&&c.name!=='btw').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||'')}))];
+ const subcommandList=v=>Array.isArray(v)?v.slice(0,50).filter(x=>typeof x?.name==='string'&&x.name.trim()).map(x=>({name:x.name.slice(0,60),description:String(x.description||'').slice(0,300),usage:String(x.usage||'').slice(0,160)})):[];
+ const slashList=list=>[{name:'usage',description:"Show the selected model's provider quota, remaining usage and reset times",aliases:[],hint:'[show]',source:'companion'},{name:'btw',description:'Ask a side question about this session; the answer stays out of the conversation',aliases:[],hint:'<question>',source:'companion'},...list.slice(0,500).filter(c=>typeof c?.name==='string'&&c.name!=='usage'&&c.name!=='btw').map(c=>({name:c.name.slice(0,100),description:String(c.description||'').slice(0,300),aliases:Array.isArray(c.aliases)?c.aliases.filter(a=>typeof a==='string').slice(0,10):[],hint:String(c.input?.hint||'').slice(0,100),source:String(c.source||''),subcommands:subcommandList(c.subcommands)}))];
  const commandProbes=new Set();
  async function discoverCommands(dir){
   const probe=omp.start({cwd:dir,args:['--no-session'],onEvent:()=>{},onExit:()=>{}});
@@ -1122,7 +1137,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  }
  const accountsChanged=()=>{accountGen++;accountCache=undefined;refreshAccounts().catch(()=>{});};
  // Session toggles the dashboard can change; values are validated in command().
- const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],followUpMode:['one-at-a-time','all'],interruptMode:['immediate','wait']};
+ const PREF_VALUES={fast:[true,false],autoCompaction:[true,false],autoRetry:[true,false],steeringMode:['one-at-a-time','all'],followUpMode:['one-at-a-time','all'],interruptMode:['immediate','wait'],slowMode:[true,false],cacheWarming:['off','streaming','idle']};
  // Auto-approve: a run that OMP stopped on a provider 429 resumes once the provider's retry-after-ms wait is over, by
  // resending the last user message like the dashboard's Retry. The due time is persisted (rateLimitResume), so a
  // companion restart re-arms the wait instead of losing it; resumeTimers only holds the in-process timer.
@@ -1193,7 +1208,13 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(f.type==='message_update'&&f.assistantMessageEvent?.type==='text_delta'){
    s._streamId??=randomUUID();const m=s.messages.find(m=>m.id===s._streamId);append(s,'assistant',(m?.text||'')+f.assistantMessageEvent.delta,s._streamId);
   }
-  if(f.type==='message_start'&&f.message?.role==='user'){
+  if(f.type==='message_start'&&f.message?.role==='user'&&f.mirrored){
+   // A collab host's own prompt, mirrored into a guest's session: shown as it arrives. Its timestamp binds it to the
+   // replica's entry (bindEntries), as a local prompt's does.
+   const said=contentText(f.message.content).trim(),hasImage=Array.isArray(f.message.content)&&f.message.content.some(c=>c?.type==='image');
+   if((said||hasImage)&&!(f.message.synthetic&&f.message.attribution==='agent')){const msg=append(s,'user',said||'Image attached');if(msg){if(hasImage)msg.hasImage=true;if(typeof f.message.timestamp==='number')msg.ompAt=f.message.timestamp;}}
+  }
+  else if(f.type==='message_start'&&f.message?.role==='user'){
    // Steers wait for a tool/turn boundary; OMP echoes them when read, so place them where the agent actually saw them.
    const said=contentText(f.message.content).trim(),i=s.messages.findIndex(m=>m.steer&&(m.text.trim()===said||(m.hasImage&&m.text==='Image attached'&&!said)));
    if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();if(typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;place(s,m);}
@@ -1203,10 +1224,16 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   }
   // Once the prompt is in OMP's history (first assistant message of a run), ask OMP to title the session; at most once per run.
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
-  if(f.type==='message_start'&&f.message?.role==='assistant'&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;const runner=runners.get(s.id);if(runner)void runner.prompt({message:'/rename'}).catch(()=>{delete s._titling;});}
+  if(f.type==='message_start'&&f.message?.role==='assistant'&&!f.mirrored&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;const runner=runners.get(s.id);if(runner)void runner.prompt({message:'/rename'}).catch(()=>{delete s._titling;});}
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
-   if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage&&!f.mirrored){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   // A collab guest's prompt (collab-prompt): on the host, and in guests' sessions mirrored from it. A guest's own prompt,
+   // already shown when sent (and forwarded, never run here), is the one it echoes: it takes the author, nothing is added.
+   const prompt=m.role==='custom'&&collabPrompt(m,randomUUID(),now());
+   if(prompt){const own=f.mirrored&&[...s.messages].reverse().find(x=>x.role==='user'&&!x.from&&!x.entryId&&!x.ompAt&&x.text.trim()===prompt.text.trim());
+    if(own){own.from=prompt.from;if(own.steer){s.messages.splice(s.messages.indexOf(own),1);delete own.steer;own.at=now();place(s,own);}}
+    else{const msg=append(s,'user',prompt.text,prompt.id);if(msg){msg.from=prompt.from;if(prompt.hasImage)msg.hasImage=true;}}}
+   else if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}const tan=tanMessage(m,randomUUID(),now());if(tan)append(s,'system',tan.text,tan.id);}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
@@ -1242,6 +1269,8 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    }}
   if(f.type==='extension_ui_request'&&f.id){
    if(f.method==='cancel')s.uiRequests=(s.uiRequests||[]).filter(q=>q.id!==f.targetId);
+   // A component shown through ctx.ui.custom (an extension's panel, the bash tool's `pty: true` terminal): repainted under one id until withdrawn.
+   else if(f.method==='custom'){const lines=Array.isArray(f.lines)?f.lines.slice(-80).map(l=>String(l).slice(0,4000)):[];const prev=s.uiRequests?.find(q=>q.id===f.id);if(prev)prev.lines=lines;else{const q={id:f.id,method:'custom',title:'Interactive panel',lines};(s.uiRequests??=[]).push(q);attention(s,'question',q.title);}}
    else if(f.method==='ask'){
     const questions=Array.isArray(f.questions)?f.questions.map(askQuestion):[];
     if(questions.length&&!questions.includes(null)){const q={id:f.id,method:'ask',title:questions.length>1?`${questions.length} questions`:questions[0].question,questions};(s.uiRequests??=[]).push(q);attention(s,'question',q.title);}
@@ -1253,7 +1282,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
      const q={id:f.id,method:f.method,title:String(f.title||'Question').slice(0,500)};
      if(f.method==='select'){q.options=Array.isArray(f.options)?f.options.filter(x=>typeof x==='string').slice(0,100):[];q.optionDetails=Array.isArray(f.optionDetails)?f.optionDetails.slice(0,q.options.length).map(x=>({description:String(x?.description||'').slice(0,500)})):[];q.checked=Array.isArray(f.checkedIndices)?f.checkedIndices.filter(i=>Number.isInteger(i)&&i>=0&&i<q.options.length):[];}
      if(f.method==='confirm')q.message=String(f.message||'').slice(0,2000);
-     if(f.method==='input')q.placeholder=String(f.placeholder||'').slice(0,500);
+     if(f.method==='input'){q.placeholder=String(f.placeholder||'').slice(0,500);if(f.secret===true)q.secret=true;}
      if(f.method==='editor')q.prefill=String(f.prefill||'').slice(0,20000);
      // Kept so turning auto-approve on later can answer it; decided here from the untruncated title.
      if(approval)q._approval=approval;
@@ -1261,7 +1290,8 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
     }
    }else if(f.method==='notify')notice(s,f.notifyType,f.message);
    else if(f.method==='setStatus'){s._status??={};const key=String(f.statusKey||'').slice(0,80);if(f.statusText)s._status[key]=String(f.statusText).slice(0,300);else delete s._status[key];}
-   else if(f.method==='setWidget'){s._widgets??={};const key=String(f.widgetKey||'').slice(0,80);if(Array.isArray(f.widgetLines)&&f.widgetLines.length)s._widgets[key]=f.widgetLines.slice(0,40).map(l=>String(l).slice(0,500));else delete s._widgets[key];}
+   // collab-qr (collab-host.mjs) is a QR code: cut short it would not scan, and the largest one (version 40) needs 94 lines.
+   else if(f.method==='setWidget'){s._widgets??={};const key=String(f.widgetKey||'').slice(0,80);if(Array.isArray(f.widgetLines)&&f.widgetLines.length)s._widgets[key]=f.widgetLines.slice(0,key==='collab-qr'?100:40).map(l=>String(l).slice(0,500));else delete s._widgets[key];}
    else if(f.method==='set_editor_text')s._editorText={id:f.id,text:String(f.text??'').slice(0,200000)};
    // Login flows: the browser can't be opened for the user without a click, so the dashboard shows the link.
    else if(f.method==='open_url'){const url=[f.launchUrl,f.url].find(u=>typeof u==='string'&&/^https?:\/\//i.test(u));if(url)s._openUrl={id:f.id,url:url.slice(0,4000),instructions:String(f.instructions||'').slice(0,1000)};}
@@ -1270,6 +1300,16 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'){if(out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;const images=toolImages(f.partialResult?.content);if(images.length)msg.tool.images=stashImages(images);}}
   if(f.type==='extension_error')notice(s,'error',`Extension ${path.basename(String(f.extensionPath||'extension'))} failed${f.event?` in ${f.event}`:''}: ${f.error}`);
   if(f.type==='notice')notice(s,f.level,f.source?`${f.source}: ${f.message}`:f.message);
+  // A hosted command replaced the transcript outside a command (a collab room ended or resynced): show it as OMP has it.
+  if(f.type==='session_replaced')void lock(s.id,async()=>{const runner=runners.get(s.id);if(!runner?.alive)return;await reload(s,runner);if(f.note)append(s,'system',String(f.note).slice(0,2000));scheduleSave(s);}).catch(e=>notice(s,'error',`Could not reload the session: ${e.message}`));
+  if(f.type==='loop_state'){const v=loopView(f.loop);if(v)s._loop=v;else delete s._loop;}
+  // /loop re-sends its prompt as the next user message; loop.mode = reset first started a fresh (empty) OMP session.
+  if(f.type==='loop_iteration'&&typeof f.text==='string'){
+   if(f.fresh){s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;delete s._entryCursor;append(s,'system',String(f.note||'').slice(0,2000));const runner=runners.get(s.id);if(runner?.alive)void refresh(s,runner);}
+   delete s._streamId;delete s._thinkId;const msg=append(s,'user',f.text);if(msg){s._promptMsg=msg.id;if(typeof f.id==='string')s._promptId=f.id;}
+  }
+  // A hosted command still working after its run returned (/cleanse, /omfg): the dashboard offers Stop for it.
+  if(f.type==='command_run'){const key=String(f.key||'').slice(0,80);s._commandRuns??={};if(f.active)s._commandRuns[key]=String(f.label||key).slice(0,200);else delete s._commandRuns[key];}
   if(f.type==='auto_retry_start'&&s.status!=='paused'&&s.status!=='done'){s.status='running';s.error=undefined;s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};}
   if(f.type==='auto_retry_end'){delete s._retry;if(!f.success)append(s,'system',`Retries stopped after attempt ${f.attempt}${f.finalError?`: ${f.finalError}`:'.'}`);}
   if(f.type==='retry_fallback_applied')append(s,'system',`Switched from ${f.from} to fallback model ${f.to}${f.reason?` (${f.reason})`:''}.`);
@@ -1316,7 +1356,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
    const args=s.native?[...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--session-dir',sessionDir,'--continue',...pick];
-   const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_btw','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
+   const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);if(!closing&&!pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
    runners.set(s.id,runner);
    try{await runner.ready;if(!s.autoTitle)await runner.setSessionName(s.title);if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await runner.setModel(s.provider,s.model);
     // Per-session toggles live in the OMP session, so a restarted runner gets them back.
@@ -1343,7 +1383,9 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  async function refresh(s,runner){const promptId=s._promptId,run=s._run;try{const state=await runner.state();
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,...(state.followUpMode?{followUp:state.followUpMode}:{}),interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
-  if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);s._skillImages=state.skillImages===true;}
+  if(state){s._goalSupported=Object.hasOwn(state,'goalMode');s._goalAvailable=state.goalMode?.available===true;s.goal=goalView(state.goalMode?.goal);s._skillImages=state.skillImages===true;s._unhosted=Array.isArray(state.unhostedCommands)?state.unhostedCommands:[];const loop=loopView(state.loop);if(loop)s._loop=loop;else delete s._loop;}
+  // The live model's reasoning levels and its /slow and cache-warming state (OMP's get_state fields).
+  if(state){s._thinkingLevels=Array.isArray(state.thinkingLevels)?state.thinkingLevels.filter(l=>typeof l==='string').slice(0,20):undefined;s._slow=typeof state.slowModeSupported==='boolean'?{supported:state.slowModeSupported,enabled:!!state.slowModeEnabled,scope:state.slowModeScope||null}:undefined;s._cacheWarming=['off','streaming','idle'].includes(state.cacheWarming)?state.cacheWarming:undefined;}
   // Native quiescence is authoritative; unrelated events must not keep an idle run working.
   if(state?.isSettled===true&&state.isCompacting!==true&&s.status==='running')settle(s,promptId,run);
   // Likewise a streaming OMP is working whatever s.status says: a run reported aborted or failed can keep going
@@ -1353,8 +1395,8 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,runner);
   if(state?.isSettled===true&&needsBackfill(s))await backfillEntries(s,async()=>{const r=await runner.entries();return {entries:r?.entries,leafId:r?.leafId};});}catch{}}
  // A prompt recorded without OMP's entry ID: sent before the companion bound prompts, or a binding that failed.
- // Slash commands and steers OMP hasn't read are not session entries.
- const unbound=m=>m.role==='user'&&!m.entryId&&!m.ompAt&&!m.steer&&!/^\/\S/.test(m.text);
+ // Slash commands and steers OMP hasn't read are not session entries; nor are collab prompts (custom entries, `from`).
+ const unbound=m=>m.role==='user'&&!m.entryId&&!m.ompAt&&!m.steer&&!m.from&&!/^\/\S/.test(m.text);
  const needsBackfill=s=>!s._backfilled&&!s._promptMsg&&!['running','queued'].includes(s.status)&&!!s.messages?.some(unbound);
  // Such prompts can't be matched to OMP's entries by anything but their text, so the transcript is rebuilt from OMP's own
  // entries on its active path instead (once per companion run), which carry every prompt's entry ID. The companion's notes
@@ -1397,7 +1439,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','stop_commands','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -1450,6 +1492,15 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(body.type==='answer'){
    const runner=runners.get(s.id),id=text(body.id,'Question ID',200),q=s.uiRequests?.find(q=>q.id===id);
    if(!runner?.alive||!q)throw error('This question is no longer pending.');
+   // A panel takes terminal input (one key or bracketed paste per string) and its size in cells (custom-ui.mjs clamps it),
+   // and stays until its component is done; Close aborts it.
+   if(q.method==='custom'){
+    if(body.cancelled===true){runner.answer(id,{cancelled:true});s.uiRequests=s.uiRequests.filter(x=>x.id!==id);return s;}
+    if(body.resize!==undefined){const columns=body.resize?.columns,rows=body.resize?.rows;if(!Number.isFinite(columns)||!Number.isFinite(rows))throw error('Panel size must be numeric columns and rows.');runner.answer(id,{resize:{columns,rows}});return s;}
+    const keys=[].concat(body.input??[]);
+    if(!keys.length||keys.length>500||keys.some(k=>typeof k!=='string'||!k)||keys.join('').length>20000)throw error('Panel input must be keys under 20,000 characters.');
+    runner.answer(id,{input:keys});return s;
+   }
    const reply={};
    if(body.cancelled===true)reply.cancelled=true;
    else if(q.method==='ask')reply.answers=askAnswers(q,body.answers);
@@ -1502,7 +1553,11 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    return body.type==='edit_steer'?command(s,{type:'steer',message:body.message}):s;
   }
   if(body.type==='set_model'){
-   const {selector,thinking}=modelChoice(body);if(selector)s.modelSelector=selector;if(thinking)s.thinkingChoice=thinking;
+   const {selector,thinking}=modelChoice(body);
+   // The live model's own levels (OMP would otherwise clamp silently); another model is checked by OMP when it applies.
+   const live=runners.get(s.id)?.alive&&s._thinkingLevels?.length&&(!selector||selector===`${s.provider}/${s.model}`);
+   if(live&&thinking&&thinking!=='auto'&&!s._thinkingLevels.includes(thinking))throw error(`${s.model} has no ${thinking} reasoning level; it offers ${s._thinkingLevels.join(', ')}.`,409);
+   if(selector)s.modelSelector=selector;if(thinking)s.thinkingChoice=thinking;
    const runner=runners.get(s.id);if(runner?.alive){const i=selector.indexOf('/');if(selector)await runner.setModel(selector.slice(0,i),selector.slice(i+1));if(thinking)await runner.setThinking(thinking);await refresh(s,runner);}
    else{if(selector){const i=selector.indexOf('/');s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking)s.thinking=thinking;}
    await persist(s);return s;
@@ -1516,21 +1571,28 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
     call=runner=>runner.setPlanMode(body.enabled,body.workflow);
    }else if(body.type==='plan_approve'){
     const proposalId=text(body.proposalId,'Proposal ID',200);
-    if(!['preserve','fresh','compact','refine'].includes(body.action))throw error('Choose an approval action or request refinement.');
+    if(!['preserve','fresh','compact','refine','save'].includes(body.action))throw error('Choose an approval action or request refinement.');
     if(body.feedback!==undefined&&(typeof body.feedback!=='string'||body.feedback.length>20000))throw error('Feedback must be text under 20,000 characters.');
     if(body.action==='refine'&&!body.feedback?.trim())throw error('Refinement requires feedback describing what should change.');
     if(body.action!=='refine'&&body.feedback?.trim())throw error('Feedback is only supported for refinement.');
     if(body.executionModel!==undefined&&(typeof body.executionModel!=='string'||!/^[\w.~@+-]+\/[\w.~@:+\/-]+$/.test(body.executionModel)))throw error('Invalid execution model.');
     if(body.action==='refine'&&body.executionModel!==undefined)throw error('Refinement keeps the planning model; do not select an execution model.');
+    if(body.action==='save'&&body.executionModel!==undefined)throw error('Save and quit does not run the plan; do not select an execution model.');
+    if(body.savePath!==undefined&&(body.action!=='save'||typeof body.savePath!=='string'||body.savePath.length>1000))throw error('A save path is only for Save and quit, as text under 1,000 characters.');
     if(s._planReview?.id!==proposalId)throw error('This plan is no longer pending. Reopen the current plan before approving.',409);
-    const request={proposalId,action:body.action,...(body.feedback?.trim()?{feedback:body.feedback.trim()}:{}),...(body.executionModel?{executionModel:body.executionModel}:{})};
+    const request={proposalId,action:body.action,...(body.feedback?.trim()?{feedback:body.feedback.trim()}:{}),...(body.executionModel?{executionModel:body.executionModel}:{}),...(body.savePath?.trim()?{savePath:body.savePath.trim()}:{})};
     call=runner=>runner.approvePlan(request);
    }else call=runner=>runner.reviewPlan();
    busy();const runner=await start(s);
    if(!s._planSupported)throw error('This OMP build does not expose plan mode over RPC. Set OMP_BIN to an updated build or the patched checkout’s packages/coding-agent/src/cli.ts.',409);
    try{const result=await call(runner);
     if(body.type==='plan_review')s._planReview=result?.proposal;
-    if(body.type==='plan_approve'){if(s._planReview?.id===body.proposalId)delete s._planReview;if(body.action!=='refine'||body.feedback?.trim())s.status='running';}
+    if(body.type==='plan_approve'){if(s._planReview?.id===body.proposalId)delete s._planReview;if(body.action!=='refine'&&body.action!=='save'||body.feedback?.trim())s.status='running';}
+    // Save and quit (OMP's TUI): the plan was saved and OMP started a fresh session, as the ⋯ menu's new session does.
+    if(body.type==='plan_approve'&&body.action==='save'){
+     if(result?.sessionChanged){s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);}
+     append(s,'system',result?.note||'Saved the plan.');s.status='paused';await persist(s);return s;
+    }
     await refresh(s,runner);await persist(s);return body.type==='plan_review'?{proposal:s._planReview}:s;
    }catch(e){throw error(e.message,e.code==='stale_proposal'?409:400);}
   }
@@ -1538,7 +1600,8 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   if(body.type==='pref'){
    if(!Object.hasOwn(PREF_VALUES,body.key)||!PREF_VALUES[body.key].includes(body.value))throw error('Invalid session setting.');
    const runner=await start(s);try{await runner.setPref(body.key,body.value);}catch(e){throw error(e.message);}
-   (s.prefs??={})[body.key]=body.value;await refresh(s,runner);await persist(s);return s;
+   // Slow mode belongs to the live model (Anthropic's is OMP's global config), so it is not replayed on restarts.
+   if(body.key!=='slowMode')(s.prefs??={})[body.key]=body.value;await refresh(s,runner);await persist(s);return s;
   }
   if(body.type==='abort'||body.type==='abort_retry'){
    // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
@@ -1548,6 +1611,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    await persist(s);return s;
   }
   if(body.type==='abort_bash'){const runner=runners.get(s.id);if(runner?.alive)await runner.abortBash();return s;}
+  if(body.type==='stop_commands'){const runner=runners.get(s.id);if(runner?.alive)await runner.stopCommands(typeof body.run==='string'?body.run:undefined);return s;}
   if(body.type==='tree'){const runner=await start(s);return treeView(await runner.tree());}
   if(body.type==='last_reply'){const runner=await start(s);const r=await runner.lastAssistantText();return {text:typeof r?.text==='string'?r.text:''};}
   if(body.type==='cycle_model'||body.type==='cycle_thinking'){
@@ -1647,6 +1711,9 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    if(!s._goalSupported)throw error('This OMP build has no goal mode the companion can host (see the companion log); /goal was not sent to the model.',409);
    if(!s._goalAvailable)throw error('Goal mode is disabled in OMP. Enable goal.enabled in OMP settings; /goal was not sent to the model.',409);
   }
+  // OMP built-ins that only its terminal UI runs, and the companion does not host: rejected, never sent as text.
+  const slashName=prompting?body.message.match(/^\/([^\s:]+)/)?.[1]:undefined;
+  if(slashName&&!['goal','plan','plan-review'].includes(slashName)){await start(s);if(s._unhosted?.includes(slashName))throw error(unhostedMessage(slashName),409);}
   if(body.type==='follow_up'&&['running','queued'].includes(s.status)){
    const item={id:randomUUID(),text:body.message,hasImage:!!images.length,imagePreview:images.length?body.preview:undefined,at:now()};
    if(images.length){await fs.mkdir(path.dirname(queuedImageFile(item.id)),{recursive:true,mode:0o700});await fs.writeFile(queuedImageFile(item.id),JSON.stringify(images),{mode:0o600});}
@@ -1690,7 +1757,12 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    // Local commands must not replace the active turn's result correlation.
    if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
    if(kind==='prompt'&&result?.agentInvoked===false&&!slashCommand){s.status='review';delete s._promptMsg;}
-   if(slashCommand){if(result?.agentInvoked===true)s.status='running';await refresh(s,runner);}
+   if(slashCommand){
+    if(result?.agentInvoked===true)s.status='running';
+    // The command replaced the transcript (/fork, /clear): show the session as OMP now has it.
+    if(result?.sessionChanged){await reload(s,runner);if(result.note)append(s,'system',result.note);}else await refresh(s,runner);
+    if(result?.failed)throw new Error(`/${slashName} failed; see its output above.`);
+   }
    await persist(s);return s;
   }catch(e){if(slashCommand){await persist(s);throw error(e.message);}delete s._interrupt;delete s._promptMsg;s.status='error';s.error=e.message;dropSteers(s);append(s,'system',e.message);await persist(s);return s;}
  }
@@ -2350,10 +2422,16 @@ async function spend(sync){
     const s=store.sessions.find(s=>s.id===url.searchParams.get('session'));if(!s)throw error('Session not found.',404);
     await lock(s.id,async()=>{await start(s);await persist(s);});json({commands:commands.get(s.id)||[]});return;
    }
-   if(req.method==='GET'&&url.pathname==='/api/background'){const file=insideSessions(url.searchParams.get('file'),['.jsonl']);const owned=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file));const runner=owned.map(s=>runners.get(s.id)).find(Boolean);const live=!!runner;
+   // Also a session's current file outside OMP's sessions folder: a collab guest's replica of the host's transcript.
+   if(req.method==='GET'&&url.pathname==='/api/background'){const asked=path.resolve(text(url.searchParams.get('file'),'File',4000));const file=store.sessions.some(s=>runners.has(s.id)&&s.sessionFile&&samePath(s.sessionFile,asked)&&asked.endsWith('.jsonl'))?asked:insideSessions(asked,['.jsonl']);const owned=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file));const runner=owned.map(s=>runners.get(s.id)).find(Boolean);const live=!!runner;
     const own=owned[0];const bg=await background(file,runner?runner.startedAt:owned.length?Infinity:undefined,(own?.subagentList||[]).map(a=>({...a,thinking:subagentThoughts.get(own.id+':'+a.id)?.text||''})));json({...bg,live});return;}
    if(req.method==='GET'&&url.pathname==='/api/transcript'){
-    const file=insideSessions(url.searchParams.get('file'),['.jsonl']);let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}
+    // A transcript in OMP's sessions folder, or one a running session's subagent roster keeps elsewhere (a collab guest's
+    // copy of the host's), brought up to date first.
+    let file;try{file=insideSessions(url.searchParams.get('file'),['.jsonl']);}catch(e){const asked=path.resolve(text(url.searchParams.get('file'),'File',4000));
+     const owner=asked.endsWith('.jsonl')&&store.sessions.find(s=>runners.has(s.id)&&s.subagentList?.some(a=>a.sessionFile&&samePath(a.sessionFile,asked)));if(!owner)throw e;
+     let kept;try{kept=await runners.get(owner.id).subagentTranscript(asked);}catch(x){throw error(x.message,404);}if(!kept)throw e;file=asked;}
+    let head;try{head=await readSessionHead(file);}catch{throw error('Transcript not found.',404);}let result='';try{result=(await fs.readFile(file.replace(/\.jsonl$/,'.md'),'utf8')).slice(0,20000);}catch{}
     const st=await fs.stat(file),messages=await importMessages(file,600,stashImages);
     const thought=[...subagentThoughts.values()].find(t=>t.file&&samePath(t.file,file));
     const active=thought?runners.has(thought.parentId)&&thought.active:undefined;
@@ -2478,7 +2556,7 @@ async function spend(sync){
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
-   const unlocked=['answer','auto_approve','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status'];
+   const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status'];
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
