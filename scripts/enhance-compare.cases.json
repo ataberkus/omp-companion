@@ -1200,6 +1200,165 @@
   "note": "Rewrite spells out the one change: in js/game/survival.js saplingDrop, change Math.random()<.1 to <.2, leaving the .4 gate in play.js, apple/stick drops, growSapling and the godMode() check untouched; no other edits."
  },
  {
+  "id": "kulup-video-7",
+  "repo": "kulup-video",
+  "kind": "edge",
+  "lang": "tr",
+  "draft": "kulup adi tek harf olunca da form geciyor, en az 2 karakter olsun. hata kodu `too_short` olsun, missing_name gibi",
+  "keep": [
+   "`too_short`",
+   "missing_name"
+  ],
+  "refs": [
+   "server/uploads.js",
+   "validateFields",
+   "cleanText",
+   "UploadError",
+   "public/app.js",
+   "MESSAGES",
+   "test/units.test.js"
+  ],
+  "note": "Complete: in validateFields (server/uploads.js) reject club names shorter than 2 characters with UploadError('too_short'), counted on the cleaned value (after cleanText's trim, whitespace collapsing and control/zero-width stripping, so '  x  ' or 'x' plus a zero-width space is too_short), counting characters like cleanText's max does; an empty or blank name must still give missing_name, 2 characters (also Turkish letters like 'Şü') and the 100-character max keep passing, and too_long/bad_instagram keep working. The browser shows server errors through MESSAGES in public/app.js and falls back to the generic 'Form gönderilemedi' for unknown codes, so a Turkish too_short message must be added there. test/units.test.js uses the one-letter club name 'x' in its too_long and bad_instagram assertions; those must be updated (e.g. to a 2+ letter name) so npm test stays green; adding a too_short assertion is welcome. Extra (not wanted): new env/config settings or a LIMITS min, changing the max lengths or other fields, client-side redesign. Reply in Turkish."
+ },
+ {
+  "id": "kulup-video-8",
+  "repo": "kulup-video",
+  "kind": "edge",
+  "lang": "en",
+  "draft": "people paste instagr.am/<name> short links into the instagram field and get bad_instagram. make parseInstagram accept those too",
+  "keep": [
+   "instagr.am/<name>",
+   "bad_instagram",
+   "parseInstagram"
+  ],
+  "refs": [
+   "server/uploads.js",
+   "parseInstagram",
+   "validateFields",
+   "test/units.test.js"
+  ],
+  "note": "Complete: parseInstagram (server/uploads.js) treats instagr.am links exactly like the instagram.com links it already handles: optional http(s)://, case-insensitive host, trailing slash, query string (?igsh=…) and #fragment dropped, username lowercased and checked with the same 1-30 [A-Za-z0-9._] rule, and the reserved paths (p, reel, reels, explore, stories, accounts, tv) still rejected, so instagr.am/p/<code> stays null and validateFields keeps throwing bad_instagram for it. Simplest is adding instagr.am to the existing URL regex; the comment listing accepted forms should mention it; a test in test/units.test.js is welcome. All existing forms (@name, bare name, instagram.com URLs, empty -> '') must behave as before. Extra (not wanted): other hosts (threads.net, l.instagram.com redirects), resolving links over the network, UI changes."
+ },
+ {
+  "id": "kulup-video-9",
+  "repo": "kulup-video",
+  "kind": "edge",
+  "lang": "tr",
+  "draft": "cok sekme acik birakip status poll eden biri 429 alinca bir daha hic kurtulamiyor, RateLimiter.hit reddedilen istekleri de listeye ekliyor galiba. reddedilenler sayilmasin",
+  "keep": [
+   "RateLimiter.hit",
+   "429"
+  ],
+  "refs": [
+   "server/ratelimit.js",
+   "RateLimiter.hit",
+   "RateLimiter.isBlocked",
+   "RateLimiter.undo",
+   "server/index.js",
+   "readLimiter",
+   "createLimiter",
+   "test/units.test.js"
+  ],
+  "note": "Complete: in server/ratelimit.js RateLimiter.hit must not record an event that is over the limit: when the key already used its allowance it returns true without pushing a timestamp, so a client that keeps polling while blocked gets back in once its accepted hits leave the window. Edge cases a complete fix keeps: a limit of 0 still means 'disabled' (the existing convention, see the '0 disables the limit' test) so hit() never reports blocked when limit is 0; hits under the limit are still recorded and return false; isBlocked, undo and sweep keep working, including createJob's hit()+undo() slot reservation in server/index.js (there hit runs only after isBlocked was false, so it is always recorded and undo still gives the slot back). Adding a unit test in test/units.test.js is welcome. Extra (not wanted): changing the limits or windows, Retry-After headers, rewriting index.js callers, a different limiter algorithm. Reply in Turkish."
+ },
+ {
+  "id": "QuantumNetLib-7",
+  "repo": "QuantumNetLib",
+  "kind": "edge",
+  "lang": "en",
+  "draft": "QRandom.Choose(T[] array, float[] probabilities) sometimes returns the last item even when its probability is 0f, saw it with { 1f, 0f }. fix that",
+  "keep": [
+   "QRandom.Choose(T[] array, float[] probabilities)",
+   "{ 1f, 0f }",
+   "0f"
+  ],
+  "refs": [
+   "QuantumNetLib/QRandom.cs",
+   "QRandom.Choose",
+   "QRandom.NextFloat",
+   "QRandom.GetRandom",
+   "QuantumNetLib.Tests/LibraryTests.cs"
+  ],
+  "note": "Cause: NextFloat() is (float)Next() / M, and for the largest rolls the float division rounds to exactly 1f, so NextFloat(0, sum) can equal sum; then no `random < cumulative` matches and the method falls through to `return array[array.Length - 1]` whatever its weight. Complete: make that case pick an item with positive probability (e.g. the fall-through returns the last item whose probability is > 0, or the roll is kept below the sum). The identical fall-through exists in the sibling overload Choose(Vector<T> list, Vector<float> probabilities), which must be fixed too (GetRandom(T[], float[]) delegates to the array one). Existing behaviour stays: ordinary rolls pick the same items for the same seed (Choose_Weighted_RespectsWeights), and the validation throws with codes 22/23/24/27 are unchanged. The double and int overloads cannot produce a roll equal to the sum; aligning them is acceptable but not required. A regression test is welcome. Extra (not wanted): replacing the generator, changing seeds/sequences, changing error codes."
+ },
+ {
+  "id": "QuantumNetLib-8",
+  "repo": "QuantumNetLib",
+  "kind": "edge",
+  "lang": "tr",
+  "draft": "QRandom.GetRandomString(int length) sadece ascii 32-126 arasindan uretiyor, bir de GetRandomString(int length, string chars) overload'i ekle, sadece verilen karakterlerden secsin",
+  "keep": [
+   "QRandom.GetRandomString(int length)",
+   "GetRandomString(int length, string chars)"
+  ],
+  "refs": [
+   "QuantumNetLib/QRandom.cs",
+   "QRandom.GetRandomString",
+   "QException",
+   "QuantumNetLib.Tests/LibraryTests.cs"
+  ],
+  "note": "Complete: add public string GetRandomString(int length, string chars) to QRandom that builds a string of `length` characters each picked from `chars` with the instance generator (e.g. chars[Next(0, chars.Length)]). Failure paths follow the library's style, never a raw .NET exception: a negative length throws QException with code 25 like the existing overload, and a null or empty `chars` throws QException (crashing with NullReferenceException/IndexOutOfRangeException is wrong); length 0 returns an empty string. The existing GetRandomString(int length) must keep producing the same output for the same seed. A test is welcome. Extra (not wanted): changing the existing overload, new GetRandom* aliases, char[] or charset-enum variants, crypto-strength randomness. Reply in Turkish."
+ },
+ {
+  "id": "QuantumNetLib-9",
+  "repo": "QuantumNetLib",
+  "kind": "edge",
+  "lang": "en",
+  "draft": "QLinq has Sum for int/float/double/long but no Average. add Average for the same types",
+  "keep": [
+   "QLinq",
+   "Sum",
+   "Average"
+  ],
+  "refs": [
+   "QuantumNetLib/QLinq.cs",
+   "QLinq.Sum",
+   "QLinq.First",
+   "QException"
+  ],
+  "note": "Complete: four QLinq.Average overloads (int[], float[], double[], long[]) next to Sum. Edge cases that a working Average handles, in the repo's existing error style: a null array throws QException code 10 ('Array cannot be null', like Sum), an empty array throws QException code 2 ('Sequence contains no elements', like First/Last/Single) instead of returning NaN or dividing by zero; the int and long versions must not overflow while adding up (int.MaxValue twice averages to int.MaxValue, long.MaxValue twice to about 9.22e18), so accumulate in a wider type (long/double) instead of reusing Sum(int[]); integer inputs must not be truncated (2 and 3 average to 2.5, so return a floating type for int/long). Sum stays unchanged. A test is welcome. Extra (not wanted): Min/Max/other aggregates, selector overloads, generic math, changing Sum."
+ },
+ {
+  "id": "QuantumNetLib-10",
+  "repo": "QuantumNetLib",
+  "kind": "edge",
+  "lang": "en",
+  "draft": "Vector<T> has no IndexOf/Contains, add them, should behave like List<T>",
+  "keep": [
+   "Vector<T>",
+   "IndexOf",
+   "Contains",
+   "List<T>"
+  ],
+  "refs": [
+   "QuantumNetLib/Vector.cs",
+   "Vector<T>",
+   "Vector.Size"
+  ],
+  "note": "Complete: public int IndexOf(T item) and public bool Contains(T item) on Vector<T>, with List<T> semantics: first matching index or -1, equality via EqualityComparer<T>.Default (value equality for strings, works for null items and null search values without NullReferenceException). Only the first Size elements may be searched: the backing array has spare capacity filled with default(T) (new vectors start with capacity 4; PopBack/Erase/Clear reset slots to default), so IndexOf(0) on a Vector<int> holding just {5} must be -1, which Array.IndexOf(_data, item) over the whole buffer gets wrong. A test is welcome. Extra (not wanted): LastIndexOf/Remove/Find and other List<T> members, changing capacity growth, IList<T> implementation."
+ },
+ {
+  "id": "LibraryManagementSystem-7",
+  "repo": "LibraryManagementSystem",
+  "kind": "edge",
+  "lang": "en",
+  "draft": "returning an overdue book never sets a fine on the LendingTransaction model, ReturnBook flips IsReturned before it checks IsOverdue. fix it",
+  "keep": [
+   "LendingTransaction",
+   "ReturnBook",
+   "IsReturned",
+   "IsOverdue"
+  ],
+  "refs": [
+   "LibraryManagementSystem/Models/LendingTransaction.cs",
+   "LendingTransaction.ReturnBook",
+   "LendingTransaction.CalculateFine",
+   "LendingTransaction.IsOverdue",
+   "LibraryManagementSystemTests/ModelTests/LendingTransactionTests.cs"
+  ],
+  "note": "Complete: in LendingTransaction.ReturnBook compute the fine while the book still counts as not returned (call CalculateFine before setting IsReturned, or equivalent), so an overdue return stores Fine = whole days overdue × 0.50m (2 days -> 1.0m) and an on-time return keeps Fine 0; CalculateFine's whole-day truncation and rate stay as they are (less than a day late -> 0). The existing test LendingTransaction_ReturnBook_CalculatesFineWhenOverdue in LibraryManagementSystemTests/ModelTests/LendingTransactionTests.cs asserts the buggy Fine == 0; it must be updated to expect 1.0m so the LendingTransactionTests class stays green (other suites already fail before any change because they need MySQL; making them pass is not part of this). Extra (not wanted): changing the fine rate or rounding, IsOverdue semantics, LendingRepository.ReturnBook (the database path computes its own fine), schema changes."
+ },
+ {
   "id": "probe-home-config",
   "repo": "oh-my-pi",
   "kind": "probe",
