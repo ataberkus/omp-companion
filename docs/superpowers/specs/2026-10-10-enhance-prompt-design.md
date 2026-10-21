@@ -126,28 +126,30 @@ Stdout is read line by line as JSON:
 ### System prompt (`--append-system-prompt`)
 
 > You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on, so that it delivers the request completely and working.
-> - Keep the user's intent, scope and language. Do not add requirements they did not ask for.
-> - Keep what the user asked the agent to do: a question, "look at it" or "check whether" stays a question or a check, with changes only where the user's words ask for them; "fix it" stays a fix.
+> - Keep the user's intent and scope, and the names they wrote exactly as written. Do not add requirements they did not ask for.
+> - Write the whole prompt in the draft's language, even when the code, docs or conversation use another. When the agent is to explain or report, tell it to answer in that language.
+> - Keep what the user asked the agent to do: a question, "look at it" or "check whether" stays a question or a check, with changes only where the user's words ask for them (do not invite the agent to decide on changes the user did not ask for); "fix it" stays a fix.
 > - Look up only what the draft refers to: at most 6 tool calls. Name real files, symbols and commands you confirmed. Never invent paths.
 > - If images are attached, use what they show to make the prompt concrete; they stay attached to the final message, so refer to them rather than re-describing everything.
 > - When the draft asks for a code change, name the cases a complete change has to handle that you saw in the code you read: boundary or empty values, the failure path and the error style the code already uses, sibling overloads or other callers with the same logic that the change must also cover or must keep working. Name only cases the requested behaviour itself runs into; general hardening the user did not ask about (concurrency, locale, security, refactors) stays out, and where the user drew a boundary, keep it.
-> - For a code change, end with a short "Done when" list: the requested behaviour works, including those cases, and nothing beyond what the user asked for; plus the repo's own test or command you found that checks it (tests that passed before must still pass). Tell the agent to run that check before it finishes. Do not tell it how to restructure code to make it testable.
+> - For a code change, end with a short "Done when" list: the requested behaviour works, including those cases, and nothing beyond what the user asked for; plus the repo's own test or command you found that checks it (tests that passed before must still pass). The check must be one the agent can run itself in a few minutes, such as tests, a build or a short script; never a manual browser, device or network-tab check. Tell the agent to run that check before it finishes. Do not tell it how to restructure code to make it testable.
 > - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 
-Why these rules: the rewrite is judged by what the agent that follows it delivers, measured with `scripts/enhance-outcome.mjs` (a real agent in a fresh clone, then the repo tests, hidden checks the agent never sees, and a blind judge against the user's draft). The previous prompt (`7e6bb34`) had none of the "Keep what the user asked", edge-case and "Done when" rules, only "Include acceptance criteria or a verification step only when the draft implies one". On 37 drafts in 5 repos, 2 runs each plus 2 more runs of the 16 drafts where any early run failed (106 runs per prompt):
+Why these rules: the rewrite is judged by what the agent that follows it delivers, measured with `scripts/enhance-outcome.mjs` (a real agent in a fresh clone, then the repo tests, hidden checks the agent never sees, and a blind judge against the user's draft). The original prompt (`7e6bb34`) had none of the language, verb, edge-case and "Done when" rules, only "Include acceptance criteria or a verification step only when the draft implies one". On 37 drafts in 5 repos, 2 runs each plus 2 more runs of the 16 drafts where any early run failed (106 runs per prompt):
 
-| prompt | done right | runs with unasked changes |
-|---|---|---|
-| previous (`7e6bb34`) | 71 / 106 | 24 |
-| + edge cases and *Done when* | 79 / 106 | 16 |
-| + keep the user's verb (shipped) | 86 / 106 | 12 |
+| prompt | done right | runs with unasked changes | agent timeouts (20 min) | agent minutes |
+|---|---|---|---|---|
+| original (`7e6bb34`) | 71 / 106 | 24 | 1 | 249 |
+| + edge cases and *Done when* | 79 / 106 | 16 | 0 | 248 |
+| + keep the user's verb (`e84dbe4`) | 86 / 106 | 12 | 3 | 231 |
+| + draft's language, names as written, runnable check (shipped) | 88 / 106 | 10 | 0 | 136 |
 
-Against the previous prompt the shipped one did better on 9 drafts and worse on 2 (sign test p ≈ 0.03). The verb rule and the "Done when" list make agents finish what was asked (the test a chosen option included, the Turkish explanation the user asked for) and stop at it. Rejected variants show where the wording is narrow on purpose:
+Against the original prompt the shipped one did better on 12 drafts and worse on 1 (sign test p ≈ 0.002). The verb rule and the "Done when" list make agents finish what was asked (the test a chosen option included) and stop at it. The language rule fixes Turkish drafts that were rewritten in English, after which the agent also answered in English. The runnable-check rule removed the 20-minute timeouts: "watch the network tab" made agents build browser probes. Rejected variants show where the wording is narrow on purpose:
 
-- Without "only cases the requested behaviour itself runs into … keep the user's boundary", the rewrite listed general hardening (concurrency guards, locale, refactors), agents added it, and fewer runs were done right than with the previous prompt (52/74 versus 57/74 on the same drafts).
-- Adding "a complaint about a result asks for that result to be fixed" to the verb rule turned "the error is useless, can you look at it" into fixes, but agents then rewrote more than the complaint covered: 11/32 versus 19/32 on the 8 drafts it affects.
+- Without "only cases the requested behaviour itself runs into … keep the user's boundary", the rewrite listed general hardening (concurrency guards, locale, refactors), agents added it, and fewer runs were done right than with the original prompt (52/74 versus 57/74 on the same drafts).
+- A rule that a complaint about one concrete result (an unhelpful error message) asks for that result to be improved: once worded loosely, 11/32 versus 19/32 on the 8 drafts it affects; worded "improving that result is part of the ask, and nothing around it", 90/106 overall, but no better than the shipped prompt (4 drafts better, 3 worse) and it made a co-op "look at how it works" draft into a shallower answer.
 
-Known cost: a vague complaint such as "checkpoints fail on deep paths, the error is useless, can u look at it" now gets an investigation and a proposed fix rather than the fix itself.
+Known cost: a vague complaint such as "checkpoints fail on deep paths, the error is useless, can u look at it" gets an investigation and a proposed fix rather than the fix itself. Agents still sometimes reword a message they were only asked to check, and add a client-side mirror of a new server validation.
 
 The hidden checks include 8 edge-case drafts (`kind: "edge"` in `scripts/enhance-compare.cases.json`) whose checks fail a happy-path-only implementation. With the strong default model, agents passed those checks with either prompt; the gain is in completeness and staying in scope.
 
