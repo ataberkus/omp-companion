@@ -588,11 +588,13 @@ disabledProviders:
   - native
   - mcp-json
 `;
-const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on.
+const ENHANCE_SYSTEM=`You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on, so that it delivers the request completely and working.
 - Keep the user's intent, scope and language. Do not add requirements they did not ask for.
+- Keep what the user asked the agent to do: a question, "look at it" or "check whether" stays a question or a check, with changes only where the user's words ask for them; "fix it" stays a fix.
 - Look up only what the draft refers to: at most 6 tool calls. Name real files, symbols and commands you confirmed. Never invent paths.
 - If images are attached, use what they show to make the prompt concrete; they stay attached to the final message, so refer to them rather than re-describing everything.
-- Include acceptance criteria or a verification step only when the draft implies one.
+- When the draft asks for a code change, name the cases a complete change has to handle that you saw in the code you read: boundary or empty values, the failure path and the error style the code already uses, sibling overloads or other callers with the same logic that the change must also cover or must keep working. Name only cases the requested behaviour itself runs into; general hardening the user did not ask about (concurrency, locale, security, refactors) stays out, and where the user drew a boundary, keep it.
+- For a code change, end with a short "Done when" list: the requested behaviour works, including those cases, and nothing beyond what the user asked for; plus the repo's own test or command you found that checks it (tests that passed before must still pass). Tell the agent to run that check before it finishes. Do not tell it how to restructure code to make it testable.
 - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
 // Screen sharing (Windows): one helper process per viewer, Windows PowerShell compiling this C# with Add-Type (no install,

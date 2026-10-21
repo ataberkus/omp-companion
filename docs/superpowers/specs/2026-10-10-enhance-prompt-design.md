@@ -125,12 +125,31 @@ Stdout is read line by line as JSON:
 
 ### System prompt (`--append-system-prompt`)
 
-> You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on.
+> You are a prompt enhancer for a coding agent working in this repository. Rewrite the user's draft into a clear, specific prompt that agent can act on, so that it delivers the request completely and working.
 > - Keep the user's intent, scope and language. Do not add requirements they did not ask for.
+> - Keep what the user asked the agent to do: a question, "look at it" or "check whether" stays a question or a check, with changes only where the user's words ask for them; "fix it" stays a fix.
 > - Look up only what the draft refers to: at most 6 tool calls. Name real files, symbols and commands you confirmed. Never invent paths.
 > - If images are attached, use what they show to make the prompt concrete; they stay attached to the final message, so refer to them rather than re-describing everything.
-> - Include acceptance criteria or a verification step only when the draft implies one.
+> - When the draft asks for a code change, name the cases a complete change has to handle that you saw in the code you read: boundary or empty values, the failure path and the error style the code already uses, sibling overloads or other callers with the same logic that the change must also cover or must keep working. Name only cases the requested behaviour itself runs into; general hardening the user did not ask about (concurrency, locale, security, refactors) stays out, and where the user drew a boundary, keep it.
+> - For a code change, end with a short "Done when" list: the requested behaviour works, including those cases, and nothing beyond what the user asked for; plus the repo's own test or command you found that checks it (tests that passed before must still pass). Tell the agent to run that check before it finishes. Do not tell it how to restructure code to make it testable.
 > - Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
+
+Why these rules: the rewrite is judged by what the agent that follows it delivers, measured with `scripts/enhance-outcome.mjs` (a real agent in a fresh clone, then the repo tests, hidden checks the agent never sees, and a blind judge against the user's draft). The previous prompt (`7e6bb34`) had none of the "Keep what the user asked", edge-case and "Done when" rules, only "Include acceptance criteria or a verification step only when the draft implies one". On 37 drafts in 5 repos, 2 runs each plus 2 more runs of the 16 drafts where any early run failed (106 runs per prompt):
+
+| prompt | done right | runs with unasked changes |
+|---|---|---|
+| previous (`7e6bb34`) | 71 / 106 | 24 |
+| + edge cases and *Done when* | 79 / 106 | 16 |
+| + keep the user's verb (shipped) | 86 / 106 | 12 |
+
+Against the previous prompt the shipped one did better on 9 drafts and worse on 2 (sign test p ≈ 0.03). The verb rule and the "Done when" list make agents finish what was asked (the test a chosen option included, the Turkish explanation the user asked for) and stop at it. Rejected variants show where the wording is narrow on purpose:
+
+- Without "only cases the requested behaviour itself runs into … keep the user's boundary", the rewrite listed general hardening (concurrency guards, locale, refactors), agents added it, and fewer runs were done right than with the previous prompt (52/74 versus 57/74 on the same drafts).
+- Adding "a complaint about a result asks for that result to be fixed" to the verb rule turned "the error is useless, can you look at it" into fixes, but agents then rewrote more than the complaint covered: 11/32 versus 19/32 on the 8 drafts it affects.
+
+Known cost: a vague complaint such as "checkpoints fail on deep paths, the error is useless, can u look at it" now gets an investigation and a proposed fix rather than the fix itself.
+
+The hidden checks include 8 edge-case drafts (`kind: "edge"` in `scripts/enhance-compare.cases.json`) whose checks fail a happy-path-only implementation. With the strong default model, agents passed those checks with either prompt; the gain is in completeness and staying in scope.
 
 ### Stdin
 
