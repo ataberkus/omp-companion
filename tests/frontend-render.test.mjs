@@ -357,7 +357,7 @@ test('the auto-shutdown banner counts exactly the working sessions the Active fi
   const app = boot({ elements: { autoShutdown: document => document.createElement('autoShutdown') }, respond: stateOf({ ...store(sessions), archived: ['s:compact'], autoShutdown: { on: true, since: at(), firing: false, error: null } }) });
   await flush();
   app.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-filter]' ? { dataset: { filter: 'active' } } : null } });
-  const rows = [...app.els.get('list').innerHTML.matchAll(/data-key="s:([^"]+)"[\s\S]*?class="m">([^<]*)/g)].map(([, id, meta]) => [id, meta.split(' · ')[1]]);
+  const rows = [...app.els.get('list').innerHTML.matchAll(/data-key="s:([^"]+)"[\s\S]*?class="m">[\s\S]*?class="st">([^<]*)/g)].map(([, id, st]) => [id, st]);
   assert.match(app.els.get('autoShutdown').innerHTML, / · 2 sessions working</);
   assert.deepEqual(rows.filter(([id]) => id !== 'done'), [['run', 'Working'], ['compact', 'Compacting context…']]);
   assert.ok(rows.some(([id]) => id === 'done'), 'sessions to review stay Active without counting as work');

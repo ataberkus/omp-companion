@@ -271,6 +271,11 @@
   // or shell command in progress. Queued messages of a stopped session wait for the user's next message, so they don't.
   const isWorking = s => s.status === 'running' || s.status === 'queued' || !!s._task || !!s._bash;
   const projectOf = s => S.store?.projects.find(p => p.id === s.projectId);
+  const projectAt = cwd => S.store?.projects.find(p => norm(p.path) === norm(cwd));
+  // The companion's palette (server.mjs `colors`), offered in the workspace menu.
+  const WS_COLORS = ['oklch(.74 .14 50)', 'oklch(.72 .13 265)', 'oklch(.74 .12 165)', 'oklch(.7 .15 310)', 'oklch(.78 .13 95)', 'oklch(.7 .14 20)', 'oklch(.74 .11 215)', 'oklch(.72 .15 135)', 'oklch(.7 .14 345)', 'oklch(.74 .1 240)'];
+  // A folder known only from OMP's history has no project record: a stable colour from its path.
+  const pathColor = p => { let h = 0; for (const c of norm(p)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `oklch(.72 .12 ${h % 360})`; };
   const sessionModel = s => s.modelSelector || (s.provider && s.model && s.model !== 'OMP default' ? s.provider + '/' + s.model : '');
   const modelInfo = sel => S.models?.models.find(m => m.selector === sel);
   const modelName = sel => { if (!sel) return ''; const m = modelInfo(sel); return m ? m.name : sel.slice(sel.indexOf('/') + 1); };
@@ -286,22 +291,27 @@
     return rank.get(k).at;
   };
   function items() {
-    const panel = panelSessions();
+    const panel = panelSessions(), sel = selKey();
     const out = panel.map(s => {
       const p = projectOf(s);
-      const model = sessionModel(s);
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd: p?.path || s.cwd, status: s.status, working: isWorking(s), task: s._task || (s._bash ? 'Running a shell command' : ''), needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), isolated: !!s.isolated, branch: s.branch, text: (s.title + ' ' + (p?.path || s.cwd) + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      const model = sessionModel(s), cwd = p?.path || s.cwd;
+      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd, color: p?.color || pathColor(cwd), hiddenWs: !!p?.hidden, unseen: ('s:' + s.id !== sel && attn.unseen.get(s.id)) || '', status: s.status, working: isWorking(s), task: s._task || (s._bash ? 'Running a shell command' : ''), needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), isolated: !!s.isolated, branch: s.branch, text: (s.title + ' ' + cwd + ' ' + (p?.name || '') + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
     });
     const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
       if (n.managedId && ids.has(n.managedId)) continue;
-      out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: base(n.cwd), cwd: n.cwd, status: 'history', updatedAt: n.updatedAt, at: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
+      const p = projectAt(n.cwd);
+      out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: p?.name || base(n.cwd), cwd: n.cwd, color: p?.color || pathColor(n.cwd), hiddenWs: !!p?.hidden, unseen: '', status: 'history', updatedAt: n.updatedAt, at: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + (p?.name || '') + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
     }
     const arch = archivedKeys(), pins = pinnedKeys();
     for (const it of out) { it.archived = arch.has(it.key); it.pinned = pins.has(it.key); }
     const live = it => it.needsReview || it.working || ['review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
     return out.sort((a, b) => live(a) - live(b) || new Date(b.at) - new Date(a.at));
   }
+  const reviewish = it => it.needsReview || it.status === 'review' || it.status === 'error';
+  // Waits for you: a question, a failure, finished work to review, or news since you last looked. Archived sessions and
+  // hidden workspaces count only while a question is open, as in the sidebar.
+  const needsYou = it => (reviewish(it) || !!it.unseen) && (!(it.archived || it.hiddenWs) || it.needsReview);
   function current() {
     let h = location.hash.slice(1);
     try { h = decodeURIComponent(h); } catch { /* malformed %-escape: route on the raw hash */ }
@@ -331,51 +341,124 @@
   }
 
   // ---------- sidebar ----------
-  // Project-group order, persisted as group keys (`cwd || label`). Matched case/slash-insensitively like the grouping.
-  const loadGroupOrder = () => { try { const a = JSON.parse(localStorage.getItem('omp-group-order') || '[]'); return Array.isArray(a) ? a.filter(k => typeof k === 'string') : []; } catch { return []; } };
-  const saveGroupOrder = order => { try { localStorage.setItem('omp-group-order', JSON.stringify(order)); } catch {} };
-  // Rank (normalized key -> index) for `keys`; keys not saved yet go on top, in the order given, and are persisted.
-  function groupOrder(keys) {
-    const saved = loadGroupOrder(), known = new Set(saved.map(norm)), fresh = [];
+  // Sidebar layout (project-group order, collapsed groups) lives in workspace.json (store.ui), so every device shares it.
+  // A change shows at once from S.uiLocal until the companion's state carries it. Until a companion has saved one, this
+  // browser's earlier copy (omp-group-order / omp-collapsed) applies, and the first dashboard to load uploads it.
+  const UI_LS = { groupOrder: 'omp-group-order', collapsed: 'omp-collapsed' };
+  const lsList = k => { try { const a = JSON.parse(localStorage.getItem(UI_LS[k]) || '[]'); return Array.isArray(a) ? a.filter(x => typeof x === 'string') : []; } catch { return []; } };
+  S.uiLocal = {};
+  const uiGet = k => { const l = S.uiLocal[k]; if (l) return l.v; const v = S.store?.ui?.[k]; return Array.isArray(v) ? v : lsList(k); };
+  function uiSet(k, v) {
+    S.uiLocal[k] = { v, at: Date.now() };
+    api('/ui', { [k]: v }).catch(e => toast(e.message, 'err'));
+  }
+  // After each state: drop local overrides the companion now reflects (or that are stale), and migrate this browser's layout once.
+  function syncUi() {
+    const ui = S.store?.ui;
+    if (!ui) return;
+    for (const k of Object.keys(S.uiLocal)) { const l = S.uiLocal[k]; if (JSON.stringify(ui[k]) === JSON.stringify(l.v) || Date.now() - l.at > 15000) delete S.uiLocal[k]; }
+    for (const k of Object.keys(UI_LS)) if (ui[k] === null && !S.uiLocal[k]) uiSet(k, lsList(k));
+  }
+  // Rank (normalized key -> index) for `keys`; keys not saved yet go on top, in the order given, and are saved. Once OMP's
+  // history has loaded, folders with no session left anywhere (`present`) leave the saved order.
+  function groupOrder(keys, present) {
+    const saved = uiGet('groupOrder'), kept = S.nativeReady ? saved.filter(k => present.has(norm(k))) : saved;
+    const known = new Set(kept.map(norm)), fresh = [];
     for (const k of keys) if (!known.has(norm(k))) { known.add(norm(k)); fresh.push(k); }
-    const order = [...fresh, ...saved], rank = new Map();
-    if (fresh.length) saveGroupOrder(order);
+    const order = [...fresh, ...kept], rank = new Map();
+    if (fresh.length || kept.length !== saved.length) uiSet('groupOrder', order);
     order.forEach(k => rank.has(norm(k)) || rank.set(norm(k), rank.size));
     return rank;
   }
   // Move group `key` in front of group `beforeKey` (null: to the end).
   function moveGroup(key, beforeKey) {
-    const order = loadGroupOrder().filter(k => norm(k) !== norm(key));
+    const order = uiGet('groupOrder').filter(k => norm(k) !== norm(key));
     const i = beforeKey == null ? -1 : order.findIndex(k => norm(k) === norm(beforeKey));
     order.splice(i < 0 ? order.length : i, 0, key);
-    saveGroupOrder(order);
+    uiSet('groupOrder', order);
     renderList();
+  }
+  function toggleCollapsed(key) {
+    const c = new Set(uiGet('collapsed'));
+    c.has(key) ? c.delete(key) : c.add(key);
+    uiSet('collapsed', [...c]);
+    renderList();
+  }
+  // Focus: the sidebar shows one workspace (normalized folder), until cleared. Saved in this browser.
+  try { S.focus = localStorage.getItem('omp-focus') || ''; } catch { S.focus = ''; }
+  function setFocus(cwd) {
+    S.focus = cwd ? norm(cwd) : '';
+    try { localStorage.setItem('omp-focus', S.focus); } catch {}
+    renderList();
+  }
+  function setGroupBy(v) {
+    S.groupBy = v === 'project' ? 'project' : 'time';
+    try { localStorage.setItem('omp-group-by', S.groupBy); } catch {}
+    renderList();
+  }
+
+  const CHEV = '<svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  // A project header's live counts: working, waiting for you, new since you looked.
+  function groupStats(arr) {
+    const w = arr.filter(it => it.working && !it.needsReview).length, r = arr.filter(reviewish).length, u = arr.filter(it => it.unseen).length;
+    return (w ? `<span class="gs working" title="${w} working">${w}</span>` : '') + (r ? `<span class="gs review" title="${r} waiting for you">${r}</span>` : '') + (u ? `<span class="gs unseen" title="${u} new since you looked">${u}</span>` : '');
+  }
+  function groupHead(g, shut) {
+    const proj = g.kind === 'project', branch = g.project?.branch && g.project.branch !== 'workspace' ? g.project.branch : '';
+    const tip = proj ? g.cwd + (branch ? '\n⎇ ' + branch : '') : '';
+    const focused = proj && S.focus === norm(g.cwd);
+    return `<div class="group-head${proj ? ' project' : ''}${g.kind === 'attention' ? ' attention' : ''}"${proj ? ` draggable="true" style="--pc:${esc(g.color)}"` : ''}><button type="button" class="group-label" data-group="${esc(g.key)}" aria-expanded="${!shut}"${tip ? ` title="${esc(tip)}"` : ''}>${CHEV}${proj ? '<span class="swatch" aria-hidden="true"></span>' : ''}<span class="group-name">${esc(g.label)}</span>${proj ? groupStats(g.arr) : ''}<span class="gcount">${g.arr.length}</span></button>${proj ? `<span class="group-acts"><button type="button" class="btn sm ghost group-act${focused ? ' on' : ''}" data-focus="${esc(focused ? '' : g.cwd)}" aria-pressed="${focused}" title="${focused ? 'Show all workspaces' : 'Show only this workspace'}" aria-label="${focused ? 'Show all workspaces' : 'Show only ' + esc(g.label)}">${ICON_FOCUS}</button><button type="button" class="btn sm ghost group-act group-new" data-new-session="${esc(g.cwd)}" title="New session in ${esc(g.cwd)}" aria-label="New session in ${esc(g.label)}">${ICON_PLUS}</button><button type="button" class="btn sm ghost group-act" data-wsmenu="${esc(g.cwd)}" aria-haspopup="menu" title="Workspace options" aria-label="Workspace options: ${esc(g.label)}">${ICON_MORE}</button></span>` : ''}</div>`;
+  }
+  // One session row. The meta line leads with what the session is doing; the folder only where the group doesn't say it.
+  function rowHtml(it, sel, prefix, showFolder) {
+    const status = it.status === 'history' ? '' : it.needsReview ? 'Waiting for answer' : it.task || STATUS[it.status] || it.status;
+    const meta = [
+      showFolder ? `<span class="pf" style="--pc:${esc(it.color)}">${esc(it.folder)}</span>` : '',
+      status ? `<span class="st">${esc(status)}</span>` : '',
+      it.isolated ? `<span class="wt" title="${esc('Isolated git worktree' + (it.branch ? ' on branch ' + it.branch : ''))}">⎇ worktree</span>` : '',
+      it.overlap?.length ? `<span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : '',
+      it.model ? `<span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : '',
+    ].filter(Boolean).join(' · ');
+    return [prefix + ':' + it.key, `<div class="item-row">
+      <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}${it.unseen ? ' unseen' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
+        <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}${it.unseen ? '<span class="sr-only"> (new)</span>' : ''}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
+        <span></span><span class="m">${meta}</span>${workTime(it)}
+      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`];
   }
 
   function renderList() {
     const list = $('#list');
     if (S.groupDrag) return; // a header drag in progress: moving rows under the pointer would break it; dragend re-renders
     if (!S.store) { setKeyed(list, []); return; }
-    const q = S.search.trim().toLowerCase();
-    let all = items().filter(it => !q || q.split(/\s+/).every(w => it.text.includes(w)));
+    // `in:<text>` words limit the search to workspaces whose name or folder contains <text>.
+    const words = S.search.trim().toLowerCase().split(/\s+/).filter(Boolean), isIn = w => w.length > 3 && w.startsWith('in:');
+    const scope = words.filter(isIn).map(w => w.slice(3)), terms = words.filter(w => !isIn(w)), q = words.join(' ');
+    const every = items();
+    let all = every.filter(it => terms.every(w => it.text.includes(w)) && (!scope.length || scope.some(s => it.folder.toLowerCase().includes(s) || norm(it.cwd).includes(norm(s)))) && (!S.focus || norm(it.cwd) === S.focus));
     if (S.filter === 'active') all = all.filter(it => it.needsReview || it.working || ['review', 'error'].includes(it.status));
     if (S.filter === 'panel') all = all.filter(it => it.panel);
-    all = S.filter === 'archived' ? all.filter(it => it.archived) : all.filter(it => !it.archived || it.needsReview || it.working);
+    // Hidden workspaces are shelved like archived sessions: under Archived, or while they work or wait for an answer.
+    const shelved = it => it.archived || it.hiddenWs;
+    all = S.filter === 'archived' ? all.filter(shelved) : all.filter(it => !shelved(it) || it.needsReview || it.working);
     const groups = [];
-    const add = (label, arr) => arr.length && groups.push([label, arr]);
+    const add = (label, arr) => arr.length && groups.push({ key: label, label, arr, kind: 'time' });
     // Pinned sessions get their own group on top and are left out of the status/date groups.
     const pinned = all.filter(it => it.pinned), unpinned = all.filter(it => !it.pinned);
     const working = unpinned.filter(it => !it.needsReview && it.working);
-    const review = unpinned.filter(it => !working.includes(it) && (it.needsReview || it.status === 'review' || it.status === 'error'));
+    const review = unpinned.filter(it => !working.includes(it) && reviewish(it));
     const rest = unpinned.filter(it => !working.includes(it) && !review.includes(it));
     if (S.groupBy === 'project') {
+      // Above the projects: everything that waits for you, from every workspace, so grouping by project loses nothing.
+      const needs = S.filter === 'archived' ? [] : all.filter(needsYou);
+      if (needs.length) groups.push({ key: '@attention', label: 'Needs you', arr: needs, kind: 'attention' });
       const by = new Map();
       for (const it of all) { const k = norm(it.cwd); (by.get(k) || by.set(k, []).get(k)).push(it); }
-      for (const arr of by.values()) groups.push([arr[0].folder, arr.sort((a, b) => b.pinned - a.pinned), arr[0].cwd]); // stable: pinned first, order otherwise kept
-      // Folder order is the user's (dragged headers, `omp-group-order`), never activity: a header must not jump when a
+      for (const arr of by.values()) groups.push({ key: arr[0].cwd, label: arr[0].folder, arr: arr.sort((a, b) => b.pinned - a.pinned), cwd: arr[0].cwd, color: arr[0].color, project: projectAt(arr[0].cwd), kind: 'project' }); // stable: pinned first, order otherwise kept
+      // Folder order is the user's (dragged headers, store.ui.groupOrder), never activity: a header must not jump when a
       // session in it updates. Folders seen for the first time go on top once, then keep their place like the others.
-      const rank = groupOrder(groups.map(g => g[2] || g[0]));
-      groups.sort((a, b) => rank.get(norm(a[2] || a[0])) - rank.get(norm(b[2] || b[0])));
+      const rank = groupOrder(groups.filter(g => g.kind === 'project').map(g => g.cwd), new Set(every.map(it => norm(it.cwd))));
+      const pos = g => g.kind === 'attention' ? -1 : rank.get(norm(g.cwd));
+      groups.sort((a, b) => pos(a) - pos(b));
     } else {
       add('Pinned', pinned);
       add('Working now', working);
@@ -386,23 +469,26 @@
       add('Previous 7 days', rest.filter(it => { const t = new Date(it.updatedAt); return t < startToday - day && t >= startToday - 7 * day; }));
       add('Older', rest.filter(it => new Date(it.updatedAt) < startToday - 7 * day));
     }
-    const sel = selKey();
-    let collapsed;
-    try { collapsed = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { collapsed = new Set(); }
-    const parts = groups.flatMap(([label, arr, cwd]) => { const gk = cwd || label, shut = !q && collapsed.has(gk); return [['g:' + gk, `<div class="group-head"${S.groupBy === 'project' ? ' draggable="true"' : ''}><button type="button" class="group-label" data-group="${esc(gk)}" aria-expanded="${!shut}"${cwd ? ` title="${esc(cwd)}"` : ''}><svg class="chev" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="group-name">${esc(label)}</span><span class="gcount">${arr.length}</span></button>${cwd ? `<button type="button" class="btn sm ghost group-new" data-new-session="${esc(cwd)}" title="New session in ${esc(cwd)}" aria-label="New session in ${esc(label)}"><span aria-hidden="true">＋</span></button>` : ''}</div>`], ...(shut ? [] : arr).map(it => ['r:' + it.key, `<div class="item-row">
-      <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
-        <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
-        <span></span><span class="m">${esc(it.folder)}${it.isolated ? ` · <span class="wt" title="${esc('Isolated git worktree' + (it.branch ? ' on branch ' + it.branch : ''))}">⎇ worktree</span>` : ''}${it.status !== 'history' ? ' · ' + esc(it.needsReview ? 'Waiting for answer' : it.task || STATUS[it.status] || it.status) : ''}${it.overlap?.length ? ` · <span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : ''}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span>
-        ${workTime(it)}
-      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`])]; });
-    if (!parts.length) parts.push(['empty', `<div class="empty-list">${q ? 'No sessions match your search.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`]);
+    const sel = selKey(), collapsed = new Set(uiGet('collapsed'));
+    // Rows of "Needs you" repeat a project's rows, so they get their own keys (a:) next to the project's (r:).
+    const parts = groups.flatMap(g => { const shut = !q && collapsed.has(g.key); return [['g:' + g.key, groupHead(g, shut)], ...(shut ? [] : g.arr).map(it => rowHtml(it, sel, g.kind === 'attention' ? 'a' : 'r', g.kind !== 'project'))]; });
+    if (!parts.length) parts.push(['empty', `<div class="empty-list">${q ? 'No sessions match your search.' : S.focus ? 'No sessions in this workspace.' : S.filter === 'archived' ? 'No archived sessions.' : 'No sessions yet. Start one with “New session”.'}</div>`]);
     setKeyed(list, parts); // only rows whose markup changed are rebuilt: hover, focus, scroll and running animations survive polls
     document.querySelectorAll('#filters [data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === S.filter)));
-    $('#groupBy')?.setAttribute('aria-pressed', String(S.groupBy === 'project'));
+    document.querySelectorAll('[data-groupby]').forEach(b => { b.setAttribute('aria-pressed', String(b.dataset.groupby === S.groupBy)); b.classList.toggle('on', b.dataset.groupby === S.groupBy); });
+    const fc = $('#focusChip');
+    if (fc) {
+      const f = S.focus && every.find(it => norm(it.cwd) === S.focus), p = S.focus && !f && S.store.projects.find(x => norm(x.path) === S.focus);
+      fc.hidden = !S.focus;
+      setIfChanged(fc, S.focus ? `<span class="swatch" style="--pc:${esc(f?.color || p?.color || pathColor(S.focus))}" aria-hidden="true"></span><span class="fc-name" title="${esc(f?.cwd || p?.path || '')}">${esc(f?.folder || p?.name || base(S.focus))}</span><button type="button" class="btn-reset fc-x" data-focus="" aria-label="Show all workspaces" title="Show all workspaces">✕</button>` : '');
+    }
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
     $('#conn').title = S.online ? 'Connected to the local companion' : 'Companion not reachable';
     $('#conn').setAttribute('aria-label', $('#conn').title);
   }
+  const ICON_FOCUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>';
+  const ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+  const ICON_MORE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
 
   const ICON_ARCHIVE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>';
   const ICON_RESTORE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
@@ -712,7 +798,7 @@
     api('/commands?session=' + encodeURIComponent(s.id)).catch(() => {}); // starts OMP in the picked folder
     const view = 'session:' + s.id, moved = attached();
     for (const a of moved) a.view = view;
-    drafts.set(view, draft); S.home.prompt = ''; S.sending.delete(home);
+    drafts.set(view, draft); S.home.prompt = ''; S.sending.delete(home); rememberWsDefaults(l.path);
     await refresh();
     location.hash = '#/s/' + s.id; route(); // build the session view now so the enhance renders there
     startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft);
@@ -758,8 +844,12 @@
     const tip = `Context: ${tokens ? fmtTokens(tokens) : '?'}${win ? ' of ' + fmtTokens(win) : ''} tokens`;
     return `<span class="ctx ${p >= 85 ? 'hot' : p >= 65 ? 'warm' : ''}" title="${tip}">${p != null ? `<i><b style="width:${p.toFixed(1)}%"></b></i>${Math.round(p)}%` : 'context'} ${tokens ? fmtTokens(tokens) : ''}${win ? ' / ' + fmtTokens(win) : ''}</span>`;
   }
-  function metaHtml(cwd, extra) {
-    return `<div class="meta"><button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}" aria-label="Copy path ${esc(cwd)}">${esc(cwd)}</button>${extra}</div>`;
+  // Long paths keep their first and last two folders: C:\…\GitHub\omp-companion. The full path is the tooltip and the copy.
+  const midPath = p => { const s = String(p || ''), sep = s.includes('\\') ? '\\' : '/', parts = s.split(/[\\/]/).filter(Boolean); return parts.length > 4 ? (s.startsWith(sep) ? sep : '') + parts[0] + sep + '…' + sep + parts.slice(-2).join(sep) : s; };
+  // `cwd` belongs to a workspace: its colour and name lead the meta line, so you know which project this is at a glance.
+  function metaHtml(cwd, extra, ws) {
+    const p = ws === false || !cwd ? null : projectAt(cwd), name = p?.name || (ws === false || !cwd ? '' : base(cwd));
+    return `<div class="meta">${name ? `<span class="ws-chip" style="--pc:${esc(p?.color || pathColor(cwd))}" title="${esc('Workspace ' + name)}">${esc(name)}</span>` : ''}<button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}" aria-label="Copy path ${esc(cwd)}">${esc(midPath(cwd))}</button>${extra}</div>`;
   }
   function renderTopbarSession(s) {
     const p = projectOf(s);
@@ -1804,7 +1894,7 @@
     const active = !advisor && d && (d.active ?? Date.now() - new Date(d.updatedAt).getTime() < 120000);
     setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
       <div class="title-block"><div class="crumb">${parent ? `<a href="${esc(parent.hash)}">← ${esc(parent.title)}</a>` : '<a href="#/new">← Home</a>'} <span>/ ${advisor ? 'advisor' : 'subagent'}</span></div>
-        <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(agoText(d.updatedAt))}</span>` : ''}${offlinePill()}${autoShutdownPill()}`)}</div>
+        <h1 title="${esc(name)}">◈ ${esc(advisor ? 'Advisor · ' + (name === '__advisor' ? 'Default' : name.slice('__advisor.'.length)) : name)}</h1>${metaHtml(d?.cwd || '', `<span class="pill ${active ? 'running' : ''}">${active ? 'Active' : advisor ? 'Advisor' : 'Subagent'}</span>${d?.model ? `<span>◆ ${esc(modelLabel(d.model, d.thinking))}</span>` : ''}${d ? `<span>updated ${esc(agoText(d.updatedAt))}</span>` : ''}${offlinePill()}${autoShutdownPill()}`, false)}</div>
       <div class="actions"><div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More">⋯</button><div class="menu-pop">
         <button data-copy-text="${esc(file)}">Copy transcript path</button>
         <button data-act="expandAll">${S.expandAll ? 'Collapse' : 'Expand'} tool activity by default</button></div></div></div>`);
@@ -1857,7 +1947,7 @@
   const keyName = k => { k = KEY_ALIAS[k] || k; return /^[a-z0-9]$|^f([1-9]|1[0-2])$|^[-=[\]\\;',./`]$/.test(k) || NAMED_KEYS.has(k) ? k : null; };
   const normCombo = s => { const p = s.toLowerCase().split('+').map(x => x.trim()), key = keyName(p.pop() || ''); if (!key || p.some(x => !MODS[x])) return null; const m = new Set(p.map(x => MODS[x])); return m.has('ctrl') || m.has('alt') || m.has('meta') ? [...['ctrl', 'alt', 'shift', 'meta'].filter(x => m.has(x)), key].join('+') : null; };
   // The dashboard's own shortcuts always win, so they can't be saved as composer hotkeys.
-  const RESERVED_KEYS = new Set(['ctrl+p', 'ctrl+shift+p', 'meta+p', 'meta+shift+p', 'alt+shift+p', 'alt+arrowup', 'alt+arrowdown', 'alt+n', 'alt+shift+n', 'ctrl+shift+e', 'meta+shift+e']);
+  const RESERVED_KEYS = new Set(['ctrl+p', 'ctrl+shift+p', 'meta+p', 'meta+shift+p', 'alt+shift+p', 'alt+arrowup', 'alt+arrowdown', 'alt+n', 'alt+shift+n', 'ctrl+shift+e', 'meta+shift+e', 'ctrl+k', 'meta+k', 'alt+j', 'alt+k']);
   // The typed character wins when it is an ASCII letter or digit (AZERTY Ctrl+A stays select-all); otherwise fall back to
   // the physical key, so Option+Q on a Mac ('œ'), Cyrillic layouts and Shift+1 ('!') still match.
   const keyChar = e => { const k = e.key.toLowerCase(); return /^[a-z0-9]$/.test(k) ? k : /^(?:Key|Digit)(.)$/.exec(e.code || '')?.[1].toLowerCase() || k; };
@@ -3976,23 +4066,37 @@
   // Typing in the filter only redraws the list, so the input (and any IME composition) stays intact.
   function renderFolderList() { const el = $('.folder-list'); if (el && S.home.listing) setIfChanged(el, folderListHtml()); }
   const homeRecentHtml = () => {
-    const recent = items().filter(it => !it.archived).slice(0, 5);
+    const recent = items().filter(it => !it.archived && !it.hiddenWs).slice(0, 5);
     return recent.length ? `<div class="section-label">Pick up where you left off</div><div class="session-list" style="margin:0">${recent.map(it => `
-        <button class="item ${it.status === 'history' ? 'history' : ''}" data-key="${esc(it.key)}"><span class="dot ${it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span><span></span><span class="m">${esc(it.folder)}${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span></button>`).join('')}</div>` : '';
+        <button class="item ${it.status === 'history' ? 'history' : ''}" data-key="${esc(it.key)}"><span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}</span><span class="ago">${esc(ago(it.updatedAt))}</span><span></span><span class="m"><span class="pf" style="--pc:${esc(it.color)}">${esc(it.folder)}</span>${it.model ? ` · <span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : ''}</span></button>`).join('')}</div>` : '';
   };
-  // Polls call this on the home view so the recent sessions' status stays current.
-  function renderHomeRecent() { const el = $('#homeRecent'); if (el) setIfChanged(el, homeRecentHtml()); }
+  // Registered workspaces as cards (live branch, what works, what waits for you), most recently used first; folders known
+  // only from OMP's history stay chips below.
+  function homeWsHtml() {
+    const h = S.home, l = h.listing, all = items();
+    const ws = (S.store?.projects || []).filter(p => !p.hidden).map(p => { const mine = all.filter(it => norm(it.cwd) === norm(p.path)); return { p, mine, at: mine.reduce((a, it) => it.updatedAt > a ? it.updatedAt : a, '') }; }).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 9);
+    const cards = ws.map(({ p, mine, at }) => {
+      const w = mine.filter(it => it.working && !it.needsReview).length, r = mine.filter(needsYou).length, branch = p.branch && p.branch !== 'workspace' ? p.branch : '';
+      const sel = l && norm(l.path) === norm(p.path);
+      return `<button type="button" class="ws-card${sel ? ' sel' : ''}" data-go="${esc(p.path)}" style="--pc:${esc(p.color)}" title="${esc(p.path)}"${sel ? ' aria-current="true"' : ''}><span class="ws-card-head"><span class="swatch" aria-hidden="true"></span><b>${esc(p.name)}</b></span><span class="ws-card-meta">${branch ? '⎇ ' + esc(branch) : 'Folder'}${at ? ' · ' + esc(ago(at)) : ''}</span><span class="ws-card-stats">${w ? `<span class="gs working">${w}</span> working` : ''}${w && r ? ' · ' : ''}${r ? `<span class="gs review">${r}</span> waiting for you` : ''}${!w && !r ? plural(mine.length, '1 session', 'sessions') : ''}</span></button>`;
+    });
+    const known = new Set((S.store?.projects || []).map(p => norm(p.path)));
+    const others = (h.recent || []).filter(r => !r.project && !known.has(norm(r.path)));
+    const chips = others.map(r => `<button class="chip ${l && norm(l.path) === norm(r.path) ? 'sel' : ''}" data-go="${esc(r.path)}" title="${esc(r.path)}">${esc(r.name)} <small>${esc(ago(r.lastUsed))}</small></button>`).join('');
+    const fallback = h.roots ? '<span class="sub flush">None yet</span>' : h.browseError ? `<span class="sub flush">Could not list folders: ${esc(h.browseError)}</span> <button type="button" class="btn sm" data-act="homeRetry">Retry</button>` : '<span class="spinner"></span>';
+    return (cards.length ? `<div class="section-label">Your workspaces</div><div class="ws-cards">${cards.join('')}</div>` : '')
+      + (chips || !cards.length ? `<div class="section-label">${cards.length ? 'Other recent folders' : 'Recent folders'}</div><div class="chips">${chips || fallback}</div>` : '');
+  }
+  // Polls call this on the home view so the recent sessions' and workspaces' status stays current.
+  function renderHomeRecent() { const el = $('#homeRecent'); if (el) setIfChanged(el, homeRecentHtml()); const ws = $('#homeWs'); if (ws) setIfChanged(ws, homeWsHtml()); }
   function renderHome() {
     const el = $('#home');
     if (!el) return;
     const h = S.home, l = h.listing;
     const html = `
-      <div><h2>Where do you want to work?</h2></div>
-      <p class="sub">Pick a folder, say what to do, press Enter. Earlier sessions are in the sidebar.</p>
-      <div>
-        <div class="section-label">Recent folders</div>
-        <div class="chips">${(h.recent || []).map(r => `<button class="chip ${l && norm(l.path) === norm(r.path) ? 'sel' : ''}" data-go="${esc(r.path)}" title="${esc(r.path)}">${esc(r.name)} <small>${esc(ago(r.lastUsed))}</small></button>`).join('') || (h.roots ? '<span class="sub" style="margin:0">None yet</span>' : h.browseError ? `<span class="sub" style="margin:0">Could not list folders: ${esc(h.browseError)}</span> <button type="button" class="btn sm" data-act="homeRetry">Retry</button>` : '<span class="spinner"></span>')}</div>
-      </div>
+      <div><h2>Where do you want to <em>work</em>?</h2></div>
+      <p class="sub">Pick a workspace, say what to do, press Enter. <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</p>
+      <div id="homeWs">${homeWsHtml()}</div>
       <div class="folder-box">
         <form class="folder-head" id="pathForm">
           ${l?.parent ? `<button type="button" class="btn sm" data-go="${esc(l.parent)}" title="Parent folder">↑</button>` : ''}
@@ -4042,7 +4146,7 @@
     try {
       const listing = await api('/browse?path=' + encodeURIComponent(dir));
       if (seq !== S.home.seq) return; // a later click won
-      S.home.listing = listing; S.home.path = undefined;
+      S.home.listing = listing; S.home.path = undefined; applyWsDefaults(listing.path);
       S.home.filter = '';
       renderHome();
       $('#homePrompt')?.focus();
@@ -4056,7 +4160,7 @@
     S.attachments = S.attachments.filter(a => a.view !== view);
     try {
       const s = await api('/quick-start', { ...homeStartBody(l), prompt: S.home.prompt, ...imagePayload(attachment) });
-      S.home.prompt = '';
+      S.home.prompt = ''; rememberWsDefaults(l.path);
       await refresh();
       location.hash = '#/s/' + s.id;
     } catch (e) {
@@ -4065,6 +4169,19 @@
     }
     S.sending.delete(view);
     if (current().kind === 'home') renderHome();
+  }
+  // New-session choices per folder (worktree, launch options, model), so a workspace starts the way it did last time.
+  // Kept in this browser; a folder with nothing saved keeps the current choices.
+  function rememberWsDefaults(path) {
+    const all = loadLS('omp-ws-defaults', {}), k = norm(path);
+    delete all[k];
+    all[k] = { isolate: !!S.home.isolate, launch: S.home.launch || null, model: S.home.model || '', thinking: S.home.thinking || '' };
+    trimObj(all, 100); saveLS('omp-ws-defaults', all);
+  }
+  function applyWsDefaults(path) {
+    const d = loadLS('omp-ws-defaults', {})[norm(path)];
+    if (!d) return;
+    S.home.isolate = !!d.isolate; S.home.launch = d.launch || undefined; S.home.model = d.model || ''; S.home.thinking = d.thinking || '';
   }
   function newSession(dir) {
     if (dir) { S.home.listing = null; goFolder(dir); }
@@ -4097,11 +4214,13 @@
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
     if (Date.now() - S.nativeAt > 20000) {
       S.nativeAt = Date.now();
-      try { S.native = (await api('/omp-sessions')).sessions; } catch {}
+      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; } catch {}
     }
+    syncUi();
+    checkAttention(); // first: the sidebar marks what checkAttention finds new
     renderList(); renderAutoShutdown();
     update();
-    checkAttention(); void pullDraft();
+    void pullDraft();
     if (current().kind === 'home') renderHomeRecent();
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
@@ -4363,11 +4482,19 @@
     const ct = t.closest('[data-copy-text]');
     if (ct) { copy(ct.dataset.copyText); closeMenu(ct.closest('.menu')); return; }
     const ns = t.closest('[data-new-session]');
-    if (ns) { newSession(ns.dataset.newSession); return; }
+    if (ns) { closeCtx(); newSession(ns.dataset.newSession); return; }
+    const fo = t.closest('[data-focus]');
+    if (fo) { setFocus(fo.dataset.focus); return; }
+    const wm = t.closest('[data-wsmenu]');
+    if (wm) { const open = $('#ctxMenu')?._ws === wm.dataset.wsmenu; closeCtx(); if (!open) openWsMenu(wm); return; }
+    const wsa = t.closest('[data-wsact]');
+    if (wsa) { closeCtx(); wsAction(wsa.dataset.wsact, wsa.dataset.path, wsa.dataset.color); return; }
+    const swi = t.closest('[data-swi]');
+    if (swi) { pickSwitcher(Number(swi.dataset.swi)); return; }
     const gl = t.closest('[data-group]');
     if (gl) {
       if (Date.now() - S.groupDragEnd < 400) return; // the click that may trail a header drag is not a collapse
-      let c; try { c = new Set(JSON.parse(localStorage.getItem('omp-collapsed') || '[]')); } catch { c = new Set(); } c.has(gl.dataset.group) ? c.delete(gl.dataset.group) : c.add(gl.dataset.group); try { localStorage.setItem('omp-collapsed', JSON.stringify([...c])); } catch {} renderList(); return;
+      toggleCollapsed(gl.dataset.group); return;
     }
     const ar = t.closest('[data-archive]');
     if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
@@ -4522,6 +4649,123 @@
   addEventListener('resize', closeCtx);
   document.addEventListener('scroll', closeCtx, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ctxMenu')) { const item = $('#ctxMenu')._item; closeCtx(); if (item?.isConnected) item.focus(); } });
+  // ---------- workspaces: header menu, quick switcher, attention stepping ----------
+  // The ⋯ on a project header: focus, start, rename, colour, branch, terminal, hide. A folder known only from OMP's
+  // history becomes a registered workspace on its first change (the server's /projects/update takes its path).
+  function openWsMenu(btn) {
+    const cwd = btn.dataset.wsmenu, p = projectAt(cwd), name = p?.name || base(cwd), color = p?.color || pathColor(cwd);
+    const branch = p?.branch && p.branch !== 'workspace' ? p.branch : '', focused = S.focus === norm(cwd), a = `data-path="${esc(cwd)}"`;
+    const m = document.createElement('div');
+    m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu ws-menu'; m._item = btn; m._ws = cwd; m.setAttribute('role', 'menu'); m.setAttribute('aria-label', 'Workspace ' + name);
+    m.innerHTML = `<div class="ws-menu-head" style="--pc:${esc(color)}"><span class="swatch" aria-hidden="true"></span><b>${esc(name)}</b><small title="${esc(cwd)}">${esc(midPath(cwd))}${branch ? ' · ⎇ ' + esc(branch) : ''}</small></div>
+      <button role="menuitem" data-wsact="focus" ${a}>${focused ? 'Show all workspaces' : 'Show only this workspace'}</button>
+      <button role="menuitem" data-wsact="new" ${a}>New session here</button>
+      <button role="menuitem" data-wsact="rename" ${a}>Rename…</button>
+      <div class="ws-colors" role="group" aria-label="Colour">${WS_COLORS.map((c, i) => `<button type="button" role="menuitemradio" data-wsact="color" data-color="${c}" ${a} style="--pc:${c}" aria-checked="${c === color}" aria-label="Colour ${i + 1}" title="Colour ${i + 1}"></button>`).join('')}</div>
+      <button role="menuitem" data-wsact="branch" ${a}>Refresh branch</button>
+      <button role="menuitem" data-wsact="terminal" ${a}>Open terminal here</button>
+      <button role="menuitem" data-wsact="copy" ${a}>Copy path</button>
+      <div class="menu-sep"></div>
+      <button role="menuitem" data-wsact="hide" ${a}>${p?.hidden ? 'Show workspace' : 'Hide workspace'}</button>`;
+    document.body.appendChild(m);
+    const r = btn.getBoundingClientRect();
+    m.style.left = Math.max(4, Math.min(r.left, innerWidth - m.offsetWidth - 4)) + 'px';
+    m.style.top = Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 4) + 'px';
+    m.querySelector('[data-wsact]').focus({ preventScroll: true });
+  }
+  async function wsAction(act, cwd, color) {
+    const p = projectAt(cwd), name = p?.name || base(cwd);
+    const upd = async body => { try { await api('/projects/update', { ...(p ? { id: p.id } : { path: cwd }), ...body }); await refresh(); return true; } catch (e) { toast(e.message, 'err'); return false; } };
+    if (act === 'focus') setFocus(S.focus === norm(cwd) ? '' : cwd);
+    else if (act === 'new') newSession(cwd);
+    else if (act === 'rename') { const v = prompt('Workspace name', name)?.trim(); if (v && v !== name && await upd({ name: v })) toast('Workspace renamed'); }
+    else if (act === 'color') await upd({ color });
+    else if (act === 'branch') { if (await upd({ refreshBranch: true })) { const b = projectAt(cwd)?.branch; toast(b && b !== 'workspace' ? `On branch ${b}` : 'Not a Git repository'); } }
+    else if (act === 'terminal') api('/terminal', { path: cwd }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err'));
+    else if (act === 'copy') copy(cwd);
+    else if (act === 'hide') {
+      const on = !p?.hidden;
+      if (await upd({ hidden: on })) { if (on && S.focus === norm(cwd)) setFocus(''); toast(on ? `${name} hidden. Its sessions are under Archived; open its ⋯ there to show it again.` : `${name} shown`); }
+    }
+  }
+  // Alt+J / Alt+K: the next / previous session that needs you, across every workspace, in sidebar priority order.
+  function stepAttention(dir) {
+    const list = items().filter(needsYou), sel = selKey();
+    if (!list.length) { toast('Nothing needs you right now'); return; }
+    const i = list.findIndex(it => it.key === sel);
+    openItem(list[i < 0 ? (dir > 0 ? 0 : list.length - 1) : (i + dir + list.length) % list.length].key);
+  }
+  // Ctrl/⌘+K: jump to a session or start one in a workspace by typing part of its title, folder, prompt or model.
+  function switcherRows(query) {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean), hit = s => words.every(w => s.includes(w));
+    const all = items(), ws = new Map();
+    for (const p of S.store?.projects || []) if (!p.hidden) ws.set(norm(p.path), { cwd: p.path, folder: p.name, color: p.color });
+    for (const it of all) if (!ws.has(norm(it.cwd)) && !it.hiddenWs) ws.set(norm(it.cwd), { cwd: it.cwd, folder: it.folder, color: it.color });
+    const sessions = all.filter(it => (!(it.archived || it.hiddenWs) || it.needsReview || it.working) && hit(it.text + ' ' + it.folder.toLowerCase())).slice(0, words.length ? 12 : 8).map(it => ({ it }));
+    const folders = [...ws.values()].filter(w => hit((w.folder + ' ' + w.cwd).toLowerCase())).slice(0, 8).map(w => ({ w }));
+    return [...sessions, ...folders];
+  }
+  function openSwitcher() {
+    modal('Go to', `<input id="swInput" class="sw-input" placeholder="Session or workspace…" aria-label="Session or workspace" role="combobox" aria-controls="swList" aria-expanded="true" aria-autocomplete="list" autocomplete="off" spellcheck="false"><div id="swList" class="sw-list" role="listbox" aria-label="Results"></div><div class="sw-foot"><kbd>↑</kbd><kbd>↓</kbd> select · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close</div>`);
+    const m = $('#modal');
+    if (!m) return;
+    m.classList.add('switcher'); m._switcher = { hi: 0, rows: [] };
+    renderSwitcher();
+    $('#swInput').focus();
+  }
+  function renderSwitcher() {
+    const m = $('#modal'), sw = m?._switcher, input = $('#swInput');
+    if (!sw || !input) return;
+    sw.rows = switcherRows(input.value); sw.hi = Math.max(0, Math.min(sw.hi, sw.rows.length - 1));
+    $('#swList').innerHTML = sw.rows.map((r, i) => `<button type="button" class="sw-row${i === sw.hi ? ' hi' : ''}" role="option" id="sw-${i}" aria-selected="${i === sw.hi}" data-swi="${i}" tabindex="-1">${r.it
+      ? `<span class="dot ${r.it.needsReview ? 'review' : r.it.status}"></span><span class="sw-t">${esc(r.it.title)}</span><span class="sw-ws" style="--pc:${esc(r.it.color)}">${esc(r.it.folder)}</span><span class="sw-ago">${esc(ago(r.it.updatedAt))}</span>`
+      : `<span class="sw-plus" aria-hidden="true">${ICON_PLUS}</span><span class="sw-t">New session in <b>${esc(r.w.folder)}</b></span><span class="sw-ws sw-path" style="--pc:${esc(r.w.color)}" title="${esc(r.w.cwd)}">${esc(midPath(r.w.cwd))}</span><span></span>`}</button>`).join('') || '<div class="sw-empty">No session or workspace matches.</div>';
+    input.setAttribute('aria-activedescendant', sw.rows.length ? 'sw-' + sw.hi : '');
+    $('#sw-' + sw.hi)?.scrollIntoView({ block: 'nearest' });
+  }
+  function pickSwitcher(i) {
+    const r = $('#modal')?._switcher?.rows[i];
+    if (!r) return;
+    closeModal();
+    if (r.it) openItem(r.it.key); else newSession(r.w.cwd);
+  }
+  // Theme: follow the system, or always light / dark. Saved in this browser; boot.js applies it before the first paint.
+  const THEMES = { system: ['Theme: system', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>'], light: ['Theme: light', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>'], dark: ['Theme: dark', '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>'] };
+  function applyTheme(t) {
+    if (!THEMES[t]) t = 'system';
+    const root = document.documentElement;
+    if (root?.dataset) { if (t === 'system') delete root.dataset.theme; else root.dataset.theme = t; }
+    const b = $('#themeBtn');
+    if (b) { b.innerHTML = THEMES[t][1]; b.title = THEMES[t][0] + ' (click to change)'; b.setAttribute('aria-label', THEMES[t][0]); }
+    return t;
+  }
+  let theme = 'system'; try { theme = localStorage.getItem('omp-theme') || 'system'; } catch {}
+  theme = applyTheme(theme);
+  $('#themeBtn')?.addEventListener('click', () => { const order = Object.keys(THEMES); theme = applyTheme(order[(order.indexOf(theme) + 1) % order.length]); try { localStorage.setItem('omp-theme', theme); } catch {} toast(THEMES[theme][0]); });
+  // Sidebar width: drag the right edge (or focus it and press ←/→); double-click resets. Saved in this browser.
+  const SIDE_MIN = 220, SIDE_MAX = 520, SIDE_DEFAULT = 300;
+  function setSideWidth(w, save) {
+    w = Math.round(Math.max(SIDE_MIN, Math.min(SIDE_MAX, w)));
+    document.documentElement?.style?.setProperty('--side-w', w + 'px');
+    $('#sideResize')?.setAttribute('aria-valuenow', String(w));
+    if (save) try { localStorage.setItem('omp-side-w', String(w)); } catch {}
+    return w;
+  }
+  const sideWidth = () => $('#sidebar')?.getBoundingClientRect?.().width || SIDE_DEFAULT;
+  {
+    const h = $('#sideResize');
+    h?.setAttribute?.('aria-valuenow', String(Math.round(sideWidth())));
+    h?.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      e.preventDefault(); h.setPointerCapture(e.pointerId); h.classList.add('dragging');
+      const left = $('#sidebar').getBoundingClientRect().left;
+      const move = ev => setSideWidth(ev.clientX - left);
+      const up = ev => { h.releasePointerCapture(ev.pointerId); h.classList.remove('dragging'); h.removeEventListener('pointermove', move); h.removeEventListener('pointerup', up); h.removeEventListener('pointercancel', up); setSideWidth(ev.clientX - left, true); };
+      h.addEventListener('pointermove', move); h.addEventListener('pointerup', up); h.addEventListener('pointercancel', up);
+    });
+    h?.addEventListener('dblclick', () => setSideWidth(SIDE_DEFAULT, true));
+    h?.addEventListener('keydown', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setSideWidth(sideWidth() + (e.key === 'ArrowRight' ? 16 : -16), true); } });
+  }
   // On-screen keyboards shrink only the visual viewport: iOS keeps 100dvh at full height and scrolls the whole page up to
   // reveal the focused field, then often leaves that offset behind when the keyboard closes, stranding the composer
   // mid-screen under a black gap. The app scrolls inside its own panes, so once the visible area is full height again the
@@ -4598,6 +4842,7 @@
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
     else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
     else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
+    else if (t.id === 'swInput') { $('#modal')._switcher.hi = 0; renderSwitcher(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
     else if (t.id === 'homeAutoApprove') S.home.autoApprove = t.checked;
@@ -4745,7 +4990,14 @@
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && keyIs(e, 'e') && (e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); enhanceCurrent(); return; }
     // Ctrl+P cycles model roles from the composer (and closes the picker); elsewhere it stays the browser's Print.
     if ((e.ctrlKey || e.metaKey) && keyIs(e, 'p') && (S.picker || e.target.id === 'input' || e.target.id === 'homePrompt')) { e.preventDefault(); if (S.picker) { closePicker(); return; } cycleRole(e.shiftKey ? -1 : 1); return; }
+    // Ctrl/⌘+K opens the quick switcher; again closes it.
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && keyIs(e, 'k')) { e.preventDefault(); if ($('#modal')?._switcher) closeModal(); else if (!overlayOpen()) openSwitcher(); return; }
     if (e.key === 'Escape' && $('#modal') && !S.picker) { e.stopPropagation(); closeModal(); return; }
+    if (e.target.id === 'swInput') {
+      const sw = $('#modal')._switcher;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); sw.hi = Math.max(0, Math.min(sw.rows.length - 1, sw.hi + (e.key === 'ArrowDown' ? 1 : -1))); renderSwitcher(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); pickSwitcher(sw.hi); return; }
+    }
     if (e.key === 'Escape' && ($('#thinkMenu') || $('#advMenu'))) { closeThinkMenu(); return; }
     if (e.key === 'Escape' && $('#usagePanel')) { const b = $('#usagePanel')._btn; closeUsage(); if (b?.isConnected) b.focus(); return; }
     const t = e.target;
@@ -4770,6 +5022,8 @@
     // On a Mac, Option+↑/↓ moves the caret inside text fields: leave it alone there.
     const macField = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform || '') && /INPUT|TEXTAREA/.test(t.tagName);
     if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !macField && !$('#modal') && stepPrompt(e.key === 'ArrowUp' ? -1 : 1)) { e.preventDefault(); return; }
+    // Alt+J / Alt+K: next / previous session that needs you, in any workspace.
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (keyIs(e, 'j') || keyIs(e, 'k')) && !macField && !overlayOpen()) { e.preventDefault(); stepAttention(keyIs(e, 'j') ? 1 : -1); return; }
     if (t.id === 'input') {
       // Tab takes the ghost-text completion; without one it moves focus as usual.
       if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && acceptGhost(t)) { e.preventDefault(); return; }
@@ -4794,13 +5048,7 @@
     if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(t.tagName) && !overlayOpen()) { e.preventDefault(); $('#search').focus(); }
   });
   $('#newBtn').addEventListener('click', () => newSession());
-  $('#groupBy').addEventListener('click', e => {
-    S.groupBy = S.groupBy === 'project' ? 'time' : 'project';
-    try { localStorage.setItem('omp-group-by', S.groupBy); } catch {}
-    e.currentTarget.classList.toggle('on', S.groupBy === 'project');
-    renderList();
-  });
-  $('#groupBy').classList.toggle('on', S.groupBy === 'project');
+  document.querySelectorAll('[data-groupby]').forEach(b => b.addEventListener('click', () => setGroupBy(b.dataset.groupby)));
   $('#scrim').addEventListener('click', () => setNav(false, true));
   $('#disconnect').addEventListener('click', () => setToken(''));
   window.addEventListener('hashchange', () => {

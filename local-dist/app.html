@@ -6,6 +6,7 @@
 <title>OMP Control Room</title>
 <link rel="icon" href="/favicon.svg?v=2"/>
 <link rel="stylesheet" href="/app.css"/>
+<script src="/boot.js"></script>
 </head>
 <body>
 <div id="app" class="app">
@@ -27,16 +28,22 @@
       <button data-filter="active" aria-pressed="false">Active</button>
       <button data-filter="panel" aria-pressed="false">In panel</button>
       <button data-filter="archived" aria-pressed="false">Archived</button>
-      <button id="groupBy" class="gb" title="Group by project" aria-label="Group by project" aria-pressed="false">▤</button>
+    </div>
+    <div class="list-bar">
+      <span class="list-bar-label" id="groupByLabel">Group by</span>
+      <span class="seg sm" role="group" aria-labelledby="groupByLabel"><button type="button" data-groupby="time" aria-pressed="true">Status</button><button type="button" data-groupby="project" aria-pressed="false">Project</button></span>
+      <span class="focus-chip" id="focusChip" hidden></span>
     </div>
     <div class="session-list" id="list"></div>
     <div class="sidebar-foot">
-      <a href="#/settings" title="Every OMP setting, editable"><span aria-hidden="true">⚙</span> Settings</a>
-      <a href="#/tools" title="OMP command-line tools: commit, worktrees, stats, sharing, skills, plugins…"><span aria-hidden="true">🧰</span> Tools</a>
-      <a href="#/spend" title="Dollar spend per model: today, this month, all time"><span aria-hidden="true">$</span> Spend</a>
-      <a href="#/screen" title="See and control this PC's screen from another device"><span aria-hidden="true">🖥</span> Screen</a>
+      <a href="#/settings" title="Every OMP setting, editable"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg> Settings</a>
+      <a href="#/tools" title="OMP command-line tools: commit, worktrees, stats, sharing, skills, plugins…"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg> Tools</a>
+      <a href="#/spend" title="Dollar spend per model: today, this month, all time"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .8-3 2s1.3 1.7 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6.5v11"/></svg> Spend</a>
+      <a href="#/screen" title="See and control this PC's screen from another device"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg> Screen</a>
+      <button type="button" class="link theme-btn" id="themeBtn" title="Theme" aria-label="Theme"></button>
       <button class="link" id="disconnect">Disconnect</button>
     </div>
+    <div class="side-resize" id="sideResize" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuemin="220" aria-valuemax="520" tabindex="0"></div>
   </aside>
   <div class="scrim" id="scrim" aria-hidden="true"></div>
   <main class="main" id="main"></main>

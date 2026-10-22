@@ -30,7 +30,9 @@ const now=()=>new Date().toISOString();
 // One work interval spans steering, questions, retries and queued continuations.
 const startWork=s=>{if(!s.workStartedAt||s.workFinishedAt){s.workStartedAt=now();delete s.workFinishedAt;}};
 const finishWork=(s,at=now())=>{if(s.workStartedAt&&!s.workFinishedAt)s.workFinishedAt=at;};
-const colors=['#e8a16a','#93a9ee','#80bca4','#b59bd6'];
+// Project colours: hues spread around the wheel at one lightness/chroma, readable on dark and light surfaces.
+const colors=['oklch(.74 .14 50)','oklch(.72 .13 265)','oklch(.74 .12 165)','oklch(.7 .15 310)','oklch(.78 .13 95)','oklch(.7 .14 20)','oklch(.74 .11 215)','oklch(.72 .15 135)','oklch(.7 .14 345)','oklch(.74 .1 240)'];
+const projectColor=v=>typeof v==='string'&&(/^#[0-9a-f]{6}$/i.test(v)||/^oklch\(\s*[\d.]+%?\s+[\d.]+\s+[\d.]+\s*\)$/.test(v))?v:null;
 const error=(message,status=400)=>Object.assign(new Error(message),{status});
 function text(value,name,max=10000){if(typeof value!=='string'||!value.trim()||value.length>max)throw error(`${name} is required (maximum ${max} characters).`);return value.trim();}
 // One `ask` dialog question from OMP; null when malformed, since replies must echo its ids and labels exactly.
@@ -994,6 +996,11 @@ export async function createCompanion(options={}){
  store.drafts=Object.fromEntries(Object.entries(store.drafts&&typeof store.drafts==='object'?store.drafts:{}).filter(([k,v])=>/^(session|native):./.test(k)&&typeof v?.text==='string'&&v.text&&typeof v.at==='number'));
  // Where "Open in editor" opens files (Settings › Open in editor).
  if(!EDITOR_CHOICES.includes(store.editor))store.editor='auto';
+ // Sidebar layout shared by every device: project-group order and collapsed group keys (`cwd || label`). null = not saved
+ // yet, so the first dashboard to load uploads the order its browser kept before this was synced.
+ const uiKeys=v=>Array.isArray(v)?[...new Set(v.filter(k=>typeof k==='string'&&k&&k.length<=4096))].slice(0,500):null;
+ store.ui={groupOrder:uiKeys(store.ui?.groupOrder),collapsed:uiKeys(store.ui?.collapsed)};
+ for(const p of store.projects){if(!projectColor(p.color))p.color=colors[store.projects.indexOf(p)%colors.length];if(p.hidden!==true)delete p.hidden;}
  for(const s of store.sessions){finishWork(s,s.updatedAt||now());delete s._streamId;delete s._thinkId;delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){s.status='paused';s.error=undefined;}for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';}
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  // Event saves are batched: within 300 ms when a session's status changed, else within 5 s (streamed text, tool output,
@@ -1914,10 +1921,29 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const {roles,defaultThinking}=await modelRoles();
   modelCache={at:Date.now(),data:{models,roles,defaultThinking,thinkingLevels:THINKING}};return modelCache.data;
  }
+ const currentBranch=async dir=>{try{return await git(dir,['branch','--show-current'])||'detached';}catch{return 'workspace';}};
  async function ensureProject(dir,name){
   let p=store.projects.find(p=>samePath(p.path,dir));if(p)return p;
-  let branch='workspace';try{branch=await git(dir,['branch','--show-current'])||'detached';}catch{}
-  p={id:randomUUID(),name:String(name||'').trim().slice(0,80)||path.basename(dir)||dir,path:dir,description:'',branch,color:colors[store.projects.length%colors.length]};store.projects.push(p);activity(null,`Added project ${p.name}`);return p;
+  const branch=await currentBranch(dir);
+  // The least-used colour, first in palette order on ties, so neighbours in the sidebar rarely share one.
+  const used=c=>store.projects.filter(x=>x.color===c).length,color=colors.reduce((a,c)=>used(c)<used(a)?c:a,colors[0]);
+  p={id:randomUUID(),name:String(name||'').trim().slice(0,80)||path.basename(dir)||dir,path:dir,description:'',branch,color};store.projects.push(p);activity(null,`Added project ${p.name}`);return p;
+ }
+ // The branch checked out in a project folder, read again from git: `git checkout` outside the panel changes it. Sessions
+ // working directly in the folder (not in their own worktree) carry the same branch. True when anything changed.
+ async function refreshBranch(p){
+  if(!await exists(p.path))return false;
+  const branch=await currentBranch(p.path);let changed=false;
+  if(p.branch!==branch){p.branch=branch;changed=true;}
+  for(const s of store.sessions)if(s.projectId===p.id&&!s.isolated&&s.branch!==branch){s.branch=branch;changed=true;}
+  return changed;
+ }
+ // At most every 15 s, from dashboard polls; never blocks the poll, and saves only when a branch changed.
+ // close() awaits the run in flight: a git child still sitting in a project folder holds it open on Windows.
+ let branchesAt=0,branchRun=null;
+ function refreshBranches(){
+  if(closing||Date.now()-branchesAt<15000)return;branchesAt=Date.now();
+  branchRun=Promise.all(store.projects.filter(p=>!p.hidden).map(p=>refreshBranch(p).catch(()=>false))).then(r=>{if(r.some(Boolean)&&!closing)scheduleSave([],true);});
  }
  // Checking out a whole repo can outlast git()'s 15 s on Windows: the same 746-file checkout measured 1-20 s from run to run.
  // A timeout kills only the git.exe wrapper, so git finished the worktree anyway while the session reported it as skipped.
@@ -2235,7 +2261,13 @@ async function spend(sync){
    const roots=[];const add=async(p,label)=>{if(p&&!roots.some(r=>samePath(r.path,p))&&await exists(p))roots.push({path:p,name:label||path.basename(p)||p});};
    await add(os.homedir(),'Home');for(const d of ['Documents/GitHub','Documents','Desktop','projects','code','src'])await add(path.join(os.homedir(),d));
    if(process.platform==='win32')for(const l of 'CDEFGHIJ')await add(l+':\\',l+':');else await add('/','/');
-   const recent=[];for(const s of await listNativeSessions(120)){if(s.cwd&&!recent.some(r=>samePath(r.path,s.cwd))&&await exists(s.cwd))recent.push({path:s.cwd,name:path.basename(s.cwd)||s.cwd,lastUsed:s.updatedAt});if(recent.length>=12)break;}
+   // Registered workspaces first (most recently used first), then folders from OMP's history. Worktrees the panel made for
+   // isolated sessions are not folders anyone picks; their sessions belong to the project they were made from.
+   const wtRoot=path.join(dataDir,'worktrees'),inWorktrees=p=>{const r=path.relative(wtRoot,p);return r===''||(!!r&&!r.startsWith('..')&&!path.isAbsolute(r));};
+   const lastUse=p=>store.sessions.filter(s=>s.projectId===p.id).reduce((a,s)=>s.updatedAt>a?s.updatedAt:a,'');
+   const recent=[];const addRecent=async(p,name,lastUsed,projectId)=>{if(p&&!inWorktrees(p)&&!recent.some(r=>samePath(r.path,p))&&await exists(p))recent.push({path:p,name:name||path.basename(p)||p,lastUsed,...(projectId?{project:projectId}:{})});};
+   for(const p of store.projects.filter(p=>!p.hidden).map(p=>({p,at:lastUse(p)})).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,8).map(x=>x.p))await addRecent(p.path,p.name,lastUse(p)||undefined,p.id);
+   for(const s of await listNativeSessions(120)){if(recent.length>=12)break;await addRecent(s.cwd,'',s.updatedAt);}
    return {path:'',parent:null,roots,recent,dirs:[]};
   }
   const dir=await resolveDir(value);const entries=await fs.readdir(dir,{withFileTypes:true}).catch(e=>{throw error(`Cannot read directory: ${e.message}`);});
@@ -2367,7 +2399,7 @@ async function spend(sync){
     if(url.pathname==='/')file=path.join(root,'app.html');
     let data,hash;try{({data,hash}=await staticFile(file));}catch{throw error('Dashboard files not found. Build with npm run build:local or use the prebuilt companion download.',404);}
     const ext=path.extname(file);
-    if(ext==='.html'){const v={};for(const n of ['app.css','app.js'])v[n]=(await staticFile(path.join(root,n)).catch(()=>null))?.hash;let html=data.toString('utf8').replace(/(href|src)="\/(app\.(?:css|js))"/g,(m,a,n)=>v[n]?`${a}="/${n}?v=${v[n]}"`:m);if(exposeToken)html=html.replace('</head>',`<meta name="omp-token" content="${token}"/>\n</head>`);
+    if(ext==='.html'){const v={};for(const n of ['app.css','app.js','boot.js'])v[n]=(await staticFile(path.join(root,n)).catch(()=>null))?.hash;let html=data.toString('utf8').replace(/(href|src)="\/(app\.(?:css|js)|boot\.js)"/g,(m,a,n)=>v[n]?`${a}="/${n}?v=${v[n]}"`:m);if(exposeToken)html=html.replace('</head>',`<meta name="omp-token" content="${token}"/>\n</head>`);
      // The desktop app shows native notifications for this machine, so pages opened here skip the browser's own.
      if(options.desktop&&['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress))html=html.replace('</head>','<meta name="omp-desktop" content="1"/>\n</head>');
      data=Buffer.from(html);hash=digest(data);}
@@ -2379,7 +2411,7 @@ async function spend(sync){
    const provided=Buffer.from(req.headers.authorization||'');const expected=Buffer.from('Bearer '+token);
    if(provided.length!==expected.length||!timingSafeEqual(provided,expected))throw error(password?'Wrong password.':'Invalid connection token.',401);
    if(req.method==='GET'&&url.pathname==='/api/state'){
-    markOverlaps();
+    markOverlaps();refreshBranches();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
     if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView()});return;}
@@ -2449,6 +2481,23 @@ async function spend(sync){
    if(url.pathname==='/api/projects'){
     const dir=await resolveDir(body.path);if(store.projects.some(p=>samePath(p.path,dir)))throw error('This directory is already registered.');
     const p=await ensureProject(dir,typeof body.name==='string'?body.name:'');p.description=String(body.description||'');await persist([]);json(p,201);return;
+   }
+   // Workspace settings from the sidebar: rename, colour, hide/show, re-read the branch. `path` registers a folder known
+   // only from OMP's history first. Hiding never touches sessions or files; hidden workspaces show under Archived.
+   if(url.pathname==='/api/projects/update'){
+    let p=typeof body.id==='string'?store.projects.find(p=>p.id===body.id):null;
+    if(!p&&typeof body.path==='string'){const dir=await resolveDir(body.path);p=await ensureProject(dir);}
+    if(!p)throw error('Project not found.',404);
+    if(body.name!==undefined)p.name=text(body.name,'Workspace name',80);
+    if(body.color!==undefined){const c=projectColor(body.color);if(!c)throw error('Unknown colour.');p.color=c;}
+    if(body.hidden!==undefined){if(typeof body.hidden!=='boolean')throw error('hidden must be true or false.');if(body.hidden)p.hidden=true;else delete p.hidden;}
+    if(body.refreshBranch===true)await refreshBranch(p);
+    await persist([]);json(p);return;
+   }
+   // Sidebar layout (project order, collapsed groups), shared by every device; each field replaces the saved list.
+   if(url.pathname==='/api/ui'){
+    for(const k of ['groupOrder','collapsed'])if(body[k]!==undefined){const v=uiKeys(body[k]);if(!v)throw error(`${k} must be a list of group keys.`);store.ui[k]=v;}
+    scheduleSave([]);json(store.ui);return;
    }
    if(url.pathname==='/api/sessions'){
     const p=store.projects.find(p=>p.id===body.projectId);if(!p)throw error('Project not found.');const title=text(body.title,'Session title',120);const prompt=text(body.prompt,'Initial prompt',200000);
@@ -2598,7 +2647,7 @@ async function spend(sync){
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
- const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));await sessionStops;await Promise.all(probeStops);await enhanceStops;};
+ const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));await sessionStops;await Promise.all(probeStops);await enhanceStops;await branchRun;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
