@@ -64,9 +64,10 @@ async function guestString(host, request, signal) {
 }
 // The QR code widget's caption (server.mjs lets `collab-qr` through taller than other widgets).
 const QR_CAPTION = 'Scan to open the collab room in a browser:';
-// A host subagent transcript's first fetch is its tail, as much as the host serves in one reply (collab/host.ts
-// TRANSCRIPT_READ_CAP); later fetches add what was written since. Agent IDs name the copies, so only file-safe ones.
-const TRANSCRIPT_TAIL = 4 * 1024 * 1024, NO_TRANSCRIPT = 'The collab host has no transcript for this subagent.', FILE_SAFE = /^(?!\.+$)[\w.-]+$/;
+// A host subagent transcript's first fetch starts at its last 12 MiB, the most the dashboard reads of any transcript
+// (server.mjs importMessages); the host serves at most TRANSCRIPT_READ_CAP per reply (collab/host.ts), so a copy
+// takes several replies, and later fetches add what was written since. Agent IDs name the copies, so only file-safe ones.
+const TRANSCRIPT_TAIL = 12 * 1024 * 1024, READ_CAP = 4 * 1024 * 1024, NO_TRANSCRIPT = 'The collab host has no transcript for this subagent.', FILE_SAFE = /^(?!\.+$)[\w.-]+$/;
 const samePath = (a, b) => process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
 
 class Collab {
@@ -323,7 +324,7 @@ class Collab {
    if (copy.cut && text) { const nl = text.indexOf('\n'); if (nl >= 0) copy.cut = false; text = nl >= 0 ? text.slice(nl + 1) : ''; }
    if (text) await fs.appendFile(file, text);
    copy.offset = r.newSize;
-   more = Buffer.byteLength(r.text) >= TRANSCRIPT_TAIL / 2;
+   more = Buffer.byteLength(r.text) >= READ_CAP / 2;
   }
  }
  // Leaving the room: the copies go with it (the replica they sit beside is OMP's to collect).

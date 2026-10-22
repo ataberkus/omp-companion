@@ -80,7 +80,8 @@ async function autoCompanion(t, sessions, shutdownHost) {
   return { store: app.app.store, call, finishTurn, until };
 }
 
-test('Shut down PC when all work is done waits for running turns and queued messages, then shuts down once', async t => {
+// These two wait out background refresh ticks (5–9 s); bun's test runner otherwise stops a test after 5 s.
+test('Shut down PC when all work is done waits for running turns and queued messages, then shuts down once', { timeout: 30000 }, async t => {
   let calls = 0;
   const { store, call, finishTurn, until } = await autoCompanion(t, ['a', 'b'], async () => { calls++; });
   const a = store.sessions.find(s => s.id === 'a'), b = store.sessions.find(s => s.id === 'b');
@@ -108,7 +109,7 @@ test('Shut down PC when all work is done waits for running turns and queued mess
 
 // A stopped session's queued message only goes out with the user's next message there, so it must not hold the
 // shutdown forever; it stays queued and is saved for later.
-test('a stopped session with a queued message does not hold the automatic shutdown', async t => {
+test('a stopped session with a queued message does not hold the automatic shutdown', { timeout: 30000 }, async t => {
   let saved;
   const { store, call, until } = await autoCompanion(t, ['a', 'b'], async () => { saved = structuredClone(store.sessions.find(s => s.id === 'a').queuedMessages); });
   const a = store.sessions.find(s => s.id === 'a'), b = store.sessions.find(s => s.id === 'b');

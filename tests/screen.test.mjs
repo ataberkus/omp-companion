@@ -118,7 +118,8 @@ test('a viewer gets frames for its acks, drives the helper, and is cut off when 
   ws.send(JSON.stringify({ t: 'key', code: 'KeyA', down: true }));
   ws.send(JSON.stringify({ t: 'key', code: 'Nope', down: true }));
   ws.send(JSON.stringify({ t: 'ack' }));
-  await until(() => lines.includes('f 1'));
+  // The helper echoes `f 1` before it sends that frame; the frame can arrive in a later read.
+  await until(() => lines.includes('f 1') && frames.length === 2);
   assert.deepEqual(lines, ['c -1 1280 60', 'f 2', 'k 65 0 1', 'f 1']);
   assert.equal(frames.length, 2);
   assert.deepEqual([...frames[0]], [1, 0, 0, 0, 0, 2, 0, 2, 0, 2, 0, 2, 0, ...Buffer.from('jpeg')]);

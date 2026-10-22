@@ -11,12 +11,16 @@ test('one update runs in the background, reports CLI output and failure, and req
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
   const log = join(dir, 'updates.txt'), fail = join(dir, 'fail');
-  await writeFile(join(dir, 'update'), `const fs = require('node:fs');
+  const script = `const fs = require('node:fs');
 fs.appendFileSync(${JSON.stringify(log)}, 'update\\n');
 if (fs.existsSync(${JSON.stringify(fail)})) { console.error('\\x1b[31mUpdate failed: test\\x1b[0m'); process.exitCode = 17; }
 else { console.log('Current version: 18.4.2'); setTimeout(() => console.log('New version available: 18.4.3'), 300); }
-`);
-  app = await createCompanion({ dataDir: dir, ompCommand: process.execPath });
+`;
+  // The companion runs `<omp> update` in its data folder: under Node that runs the `update` file there. Bun reads
+  // `bun update` as its package manager's command, so under Bun the script is an OMP_BIN-style .ts entry instead.
+  await writeFile(join(dir, 'update'), script);
+  await writeFile(join(dir, 'fake-omp.ts'), script);
+  app = await createCompanion({ dataDir: dir, ompCommand: process.versions.bun ? join(dir, 'fake-omp.ts') : process.execPath });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const url = `http://127.0.0.1:${app.server.address().port}/api/omp-update`;

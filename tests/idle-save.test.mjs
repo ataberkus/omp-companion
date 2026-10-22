@@ -9,7 +9,8 @@ import { fakeOmp } from './fake-omp.mjs';
 
 // workspace.json holds every session's transcript (tens of MB in real use); the 4 s background refresh of an idle
 // live session must not rewrite it.
-test('an idle live session does not rewrite workspace.json on background refresh', async t => {
+// Runs about 13 s (three refresh ticks); bun's test runner otherwise stops a test after 5 s.
+test('an idle live session does not rewrite workspace.json on background refresh', { timeout: 30000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-idle-save-'));
   let app;
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
