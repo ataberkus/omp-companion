@@ -307,9 +307,11 @@ class OmpSession {
   try { return await Promise.race([work(), this.#dead, ...(limit ? [limit] : [])]); }
   finally { clearTimeout(timer); }
  }
- // Ordinary commands run one at a time in call order, as OMP's own hosts serialize them.
+ // Ordinary commands run one at a time in call order, as OMP's own hosts serialize them, and only once the session is
+ // open: a command sent right after start() (a --no-session probe's commands()) waits for #open instead of running first.
  #serial(type, timeout, work) {
-  const run = this.#tail.then(work, work);
+  const next = () => this.ready.then(work);
+  const run = this.#tail.then(next, next);
   this.#tail = run.then(() => this.#maybeShutdown(), () => this.#maybeShutdown());
   return this.#call(type, timeout, () => run);
  }
