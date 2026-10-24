@@ -32,7 +32,7 @@ async function boot({ hash = '#/s/a', sessions = [], routes = {}, home } = {}) {
     // Class selectors the view builders hide (Changes, subagent views); everything else stays unresolved.
     querySelector: s => /^#[\w-]+$/.test(s) ? elements.get(s.slice(1)) || null : ['.composer', '.composer-wrap'].includes(s) ? node() : null,
     querySelectorAll: () => [],
-    createElement: tag => { const n = node('', { tagName: tag.toUpperCase() }); created.push(n); return n; },
+    createElement: tag => { const n = node('', { tagName: tag.toUpperCase(), ...(tag === 'canvas' ? { getContext: () => ({ fillRect() {}, drawImage() {} }), toDataURL: () => 'data:image/jpeg;base64,UFJF' } : {}) }); created.push(n); return n; },
     addEventListener: (type, fn) => listeners.push([type, fn]),
   });
   const reply = (url, body) => {
@@ -48,6 +48,9 @@ async function boot({ hash = '#/s/a', sessions = [], routes = {}, home } = {}) {
     history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) },
     localStorage: { getItem: () => null, setItem() {} }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
+    // Pasted images: a 10×10 bitmap read as base64 "ABC" (see attachImage).
+    createImageBitmap: async () => ({ width: 10, height: 10, close() {} }),
+    FileReader: class { readAsDataURL() { this.result = 'data:image/png;base64,QUJD'; Promise.resolve().then(() => this.onload()); } },
     fetch: async (url, opts) => {
       const body = opts?.body ? JSON.parse(opts.body) : undefined;
       calls.push({ url, body });
@@ -69,7 +72,8 @@ async function boot({ hash = '#/s/a', sessions = [], routes = {}, home } = {}) {
   const toasts = () => created.filter(n => /\btoast\b/.test(n.className || ''));
   const toastAction = label => { const b = created.find(n => n.className === 'toast-act' && n.textContent === label); assert.ok(b, `toast action "${label}"`); b.onclick(); };
   const posts = path => calls.filter(c => c.url.split('?')[0] === '/api' + path && c.body).map(c => c.body);
-  return { elements, calls, fire, act, key, go, type, input, runPolls, timers, toasts, toastAction, posts, location, target, node };
+  const paste = file => fire('paste', { target: input, clipboardData: { getData: () => '', items: [{ type: file.type, getAsFile: () => file }] } });
+  return { elements, calls, fire, act, key, go, type, paste, input, runPolls, timers, toasts, toastAction, posts, location, target, node };
 }
 const idle = (id, extra = {}) => ({ id, title: id, cwd: '/p', status: 'paused', messages: [], queuedMessages: [], updatedAt: new Date().toISOString(), ...extra });
 
@@ -174,7 +178,7 @@ test('a failed draft-session start leaves New session untouched', async () => {
   assert.equal(d.toasts().filter(t => /\berr\b/.test(t.className)).length, 1);
 });
 
-test('leaving a draft for New session or another session discards it; its own Changes view does not', async () => {
+test('leaving an idle draft for New session or another session discards it; its own Changes view does not', async () => {
   const d = await boot({ hash: '#/s/d', sessions: [idle('d', { draft: true }), idle('b')] });
   const discards = () => d.calls.filter(c => c.body?.type === 'discard').map(c => c.url);
   await d.go('#/changes/s:d');
@@ -200,4 +204,53 @@ for (const outcome of ['fails', 'succeeds']) test(`a send in flight defers disca
   if (outcome === 'fails') pending.reject(new Error('down')); else pending.resolve({ id: 'd', status: 'review' });
   for (let i = 0; i < 16; i++) await new Promise(setImmediate);
   assert.equal(discards(), 1, 'the server decides once the send settled');
+});
+
+// Leaving while the enhance runs keeps the draft session: no discard, no stop; text, images and the enhance state stay,
+// and a result that lands meanwhile is in the composer on return. Leaving again once nothing runs discards it.
+for (const outcome of ['done', 'error']) test(`a draft left while its enhance runs is kept; on return the ${outcome === 'done' ? 'result' : 'original after a failure'} is there`, async () => {
+  let status = { status: 'running', step: 'reading src/a.js' };
+  const d = await boot({ hash: '#/s/d', sessions: [idle('d', { draft: true }), idle('b')], routes: {
+    '/enhance': body => body ? { id: 'j', model: 'p/m' } : status,
+    '/sessions/d/command': () => ({ discarded: true }),
+  } });
+  const discards = () => d.calls.filter(c => c.body?.type === 'discard').length;
+  await d.paste({ type: 'image/png', size: 3, name: 'shot.png' });
+  await d.type('fix it');
+  await d.fire('click', { target: d.act('enhance') });
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'd', text: 'fix it', images: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }], preview: ['data:image/jpeg;base64,UFJF'] }]);
+  await d.runPolls();
+  await d.go('#/new');
+  await d.runPolls();
+  assert.equal(discards(), 0, 'no discard while the enhance runs');
+  assert.deepEqual(d.posts('/enhance/stop'), [], 'the enhance keeps running');
+  await d.go('#/s/d');
+  assert.equal(d.input.value, 'fix it');
+  assert.equal(d.input.readOnly, true, 'still enhancing on return');
+  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing with m · reading src\/a\.js… · Draft kept if you leave/);
+  assert.match(d.elements.get('imagePreview').innerHTML, /src="data:image\/jpeg;base64,UFJF"/);
+  await d.go('#/s/b');
+  status = outcome === 'done' ? { status: 'done', text: 'Better' } : { status: 'error', error: 'model down' };
+  await d.runPolls();
+  assert.equal(discards(), 0);
+  await d.go('#/s/d');
+  assert.equal(d.input.value, outcome === 'done' ? 'Better' : 'fix it');
+  assert.equal(d.input.readOnly, false);
+  assert.match(d.elements.get('statusLine').innerHTML, /Draft · discarded if you leave without sending/);
+  assert.match(d.elements.get('imagePreview').innerHTML, /src="data:image\/jpeg;base64,UFJF"/);
+  await d.go('#/new');
+  assert.equal(discards(), 1, 'an unsent draft with nothing running is discarded as before');
+});
+
+test('cancelling the enhance with ✕ makes the draft discardable again', async () => {
+  const d = await boot({ hash: '#/s/d', sessions: [idle('d', { draft: true })], routes: {
+    '/enhance': body => body ? { id: 'j', model: 'p/m' } : { status: 'running', step: '' },
+    '/enhance/stop': () => ({ status: 'cancelled' }),
+  } });
+  await d.type('fix it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.fire('click', { target: d.act('enhance') });
+  assert.deepEqual(d.posts('/enhance/stop'), [{ id: 'j' }]);
+  await d.go('#/new');
+  assert.equal(d.calls.filter(c => c.body?.type === 'discard').length, 1);
 });

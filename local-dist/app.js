@@ -786,7 +786,7 @@
     drafts.set(S.view, input.value); autosize(input); updateComposer();
   }
   // Enhance on New session: create the session in the picked folder as a draft (no prompt yet), start its OMP,
-  // carry the draft and images over, and enhance there. Leaving it unsent discards it (leaveDraft).
+  // carry the draft and images over, and enhance there. Leaving it unsent discards it unless the enhance still runs (leaveDraft).
   const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
     const l = S.home.listing, draft = S.home.prompt, home = S.view;
@@ -805,10 +805,13 @@
   }
   // A draft session left for New session, another session or history is discarded; its own sub-views and
   // Settings/Tools/Spend keep it. A send still in flight decides first (the server would otherwise race it).
+  // An enhance still running keeps it as is: job, text and images stay, the result lands in its draft, and the
+  // session stays listed. Leaving it again once nothing runs (enhance done, failed or cancelled with ✕) discards it.
   function leaveDraft(prev, c) {
     if (!prev.startsWith('session:') || !['home', 'session', 'native'].includes(c.kind)) return;
     if (!S.store?.sessions.find(x => 'session:' + x.id === prev)?.draft) return;
     if (S.sending.has(prev) || S.sendingBash.has(prev)) { S.discardAfterSend.add(prev); return; }
+    if (S.enhance.has(prev)) return;
     discardView(prev);
   }
   function discardView(view) {
@@ -2441,7 +2444,7 @@
       status = `<span class="grow">Plan ready for review. Approval is required before implementation.</span><button class="btn sm primary" data-plan-review="${esc(s.id)}" ${S.planBusy.has(s.id) ? 'disabled' : ''}>Review plan</button>`;
       placeholder = 'Type feedback to keep planning without approving…';
     }
-    if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…</span>`; }
+    if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…${s?.draft ? ' · Draft kept if you leave' : ''}</span>`; }
     else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
