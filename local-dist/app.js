@@ -3812,7 +3812,7 @@
   const fmtVal = v => v === undefined ? 'not set' : typeof v === 'string' ? v : JSON.stringify(v);
   const stringList = v => Array.isArray(v) && v.every(x => typeof x === 'string');
   // saving/pluginSaving: in-flight keys and plugin ids, so any re-render keeps their rows locked.
-  S.set = { data: null, q: '', group: '', changed: false, error: '', plugins: null, pluginError: '', saving: new Set(), pluginSaving: new Set(), descOpen: new Set() };
+  S.set = { data: null, q: '', group: '', changed: false, error: '', plugins: null, pluginError: '', saving: new Set(), pluginSaving: new Set(), descOpen: new Set(), mcp: null, mcpError: '', mcpSaving: new Set() };
   const setId = key => 'set-' + String(key).replace(/[^\w-]/g, '_');
   // Focus-preserving re-renders: keepFocus(), next to swapHtml().
   // Re-render one setting row by key, never a captured node: a full re-render may have replaced it meanwhile.
@@ -3861,6 +3861,8 @@
 
   // Settings and plugins render as soon as they arrive; the slow model list (`omp models --json`) only fills in chip labels afterwards.
   async function loadSettings() {
+    // MCP servers load on their own: the first read imports OMP's SDK, which must not hold up the rest of the page.
+    api('/mcp').then(m => { S.set.mcp = m; S.set.mcpError = ''; }, e => { S.set.mcpError = e.message; }).then(() => { if (current().kind === 'settings') renderSettings(); });
     const [d, p] = await Promise.all([api('/settings').catch(e => ({ _error: e.message })), api('/plugins').catch(e => ({ _error: e.message }))]);
     if (d._error) { S.set.error = d._error; if (S.set.data) toast(d._error, 'err'); } else { S.set.data = placeSettings(d); S.set.error = ''; }
     if (p._error) S.set.pluginError = p._error; else { S.set.plugins = p; S.set.pluginError = ''; }
@@ -3879,7 +3881,8 @@
     const shown = d ? settingsView() : [];
     const changed = d ? d.settings.filter(x => x.modified).length : 0;
     $('#setMeta').innerHTML = `${d ? `<span>${d.settings.length} settings · ${changed} changed</span>${d.file ? `<button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(d.file)}" title="Copy path" aria-label="Copy path ${esc(d.file)}">${esc(d.file)}</button>` : ''}` : ''}${S.set.plugins ? `<span>${plug.length} plugins</span>` : ''}`;
-    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-dashboard" data-setgroup="dashboard">Notifications &amp; editor</a><a href="#sg-enhance" data-setgroup="enhance">Enhance</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
+    const mcp = S.set.mcp?.servers || [];
+    $('#setNav').innerHTML = `<a href="#sg-hotkeys" data-setgroup="hotkeys">Hotkeys</a><a href="#sg-dashboard" data-setgroup="dashboard">Notifications &amp; editor</a><a href="#sg-enhance" data-setgroup="enhance">Enhance</a><a href="#sg-plugins" data-setgroup="plugins">Plugins<span>${plug.filter(x => x.enabled).length}/${plug.length}</span></a><a href="#sg-mcp-servers" data-setgroup="mcp-servers">MCP servers<span>${mcp.filter(x => x.state === 'active').length}/${mcp.length}</span></a>` + (d ? settingGroups(d).filter(g => d.settings.some(x => x.group === g)).map(g => {
       const n = shown.filter(x => x.group === g).length, m = d.settings.filter(x => x.group === g && x.modified).length;
       return `<a href="#" data-setgroup="${esc(g)}" class="${n ? '' : 'dim'}">${esc(groupLabel(g))}<span>${m ? `<i title="${m} changed">●</i>` : ''}${n}</span></a>`;
     }).join('') : '');
@@ -3889,7 +3892,7 @@
     if (!d && !S.set.plugins) { keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + dashboardSection() + (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : ''); }); return; }
     renderSettingsChrome();
     const groups = d ? (() => { const by = new Map(settingGroups(d).map(g => [g, []])); for (const x of settingsView()) (by.get(x.group) || by.set(x.group, []).get(x.group)).push(x); return [...by].filter(([, list]) => list.length).map(([g, list]) => `<section class="set-group" id="sg-${esc(g)}"><h2>${esc(groupLabel(g))}${g === 'internal' ? ' <small>used by OMP itself; change with care</small>' : ''}</h2>${list.map(settingRow).join('')}</section>`).join(''); })() : (S.set.error ? `<div class="msg system err"><div class="bubble">${esc(S.set.error)}</div></div>` : '');
-    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + dashboardSection() + enhanceSection() + pluginsSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
+    keepFocus($('#setList'), () => { $('#setList').innerHTML = hotkeysSection() + dashboardSection() + enhanceSection() + pluginsSection() + mcpSection() + (groups || (d ? '<div class="history-note">No settings match.</div>' : '')); });
   }
   function hotkeysSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean), h = hotkeys();
@@ -4051,6 +4054,58 @@
       toast(action === 'install' ? `Installed ${id}` : action === 'uninstall' ? `Removed ${id}` : action === 'enable' ? `Enabled ${id}` : `Disabled ${id}`);
     } catch (e) { toast(e.message, 'err'); }
     S.set.pluginSaving.delete(id);
+    if (current().kind === 'settings') renderSettings();
+  }
+  // ---------- settings: MCP servers ----------
+  // A server is keyed by project id (empty for user-level configs) and name: a project can define a name the user config has too.
+  const mcpKey = x => `${x.project?.id || ''}|${x.name}`;
+  function mcpSection() {
+    const m = S.set.mcp;
+    let inner;
+    if (!m) inner = S.set.mcpError ? `<div class="msg system err"><div class="bubble">${esc(S.set.mcpError)}</div></div>` : '<div class="working"><span class="spinner"></span> Reading OMP MCP servers…</div>';
+    else if (!m.servers.length) inner = `<div class="history-note"><span>No MCP servers configured. Add one with <code>/mcp add</code> in a session, or in <code>${esc(m.userFile || '~/.omp/agent/mcp.json')}</code> or a project's <code>.mcp.json</code>.</span></div>`;
+    else {
+      const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const match = x => !q.length || q.every(w => [x.name, x.command, ...(x.args || []), x.url, x.source.path, x.source.providerName, x.project?.name].filter(Boolean).join(' ').toLowerCase().includes(w));
+      const groups = new Map();
+      for (const x of m.servers.filter(match)) { const g = x.project ? `Project ${x.project.name}` : 'User'; (groups.get(g) || groups.set(g, []).get(g)).push(x); }
+      inner = [...groups].map(([g, list]) => `<div class="section-label" style="margin-top:10px">${esc(g)}</div>${list.map(x => mcpRow(x, m)).join('')}`).join('') || '<div class="history-note">No MCP servers match.</div>';
+      if (!m.projectConfig && m.servers.some(x => x.project)) inner = '<p class="set-desc"><code>mcp.enableProjectConfig</code> is off, so OMP does not load the project servers below.</p>' + inner;
+    }
+    const warn = m?.warnings?.length ? `<div class="set-desc">${m.warnings.map(w => esc(w)).join('<br>')}</div>` : '';
+    return `<section class="set-group" id="sg-mcp-servers"><h2>MCP servers</h2><p class="set-desc">Servers OMP finds in its own <code>mcp.json</code> files, a project's <code>.mcp.json</code> and configs of other tools it imports. Each shows the file it comes from. Switching one off or on writes that file when it is OMP's own (<code>mcp.json</code>, <code>.omp/mcp.json</code>, <code>.mcp.json</code>); for another tool's file it goes to the <code>disabledServers</code> / <code>enabledServers</code> lists in the user <code>mcp.json</code>. Changes apply to new or restarted sessions.</p>${warn}${inner}</section>`;
+  }
+  function mcpRow(x, m) {
+    const key = mcpKey(x), id = setId(key) + '-mcp';
+    const tag = x.state === 'active' ? '' : `<span class="tag mod" title="${esc(x.reason)}">${x.state === 'shadowed' ? 'overridden' : x.enabled ? 'not loaded' : 'disabled'}</span>`;
+    const target = x.writable ? x.source.path : (m.userFile || 'the user mcp.json');
+    const conn = x.transport === 'stdio' ? [x.command, ...(x.args || [])].filter(Boolean).join(' ') : x.url || '';
+    const facts = [
+      x.cwd && `cwd ${x.cwd}`,
+      x.env && `env: ${x.env.join(', ')}`,
+      x.headers && `headers: ${x.headers.join(', ')}`,
+      x.timeout !== undefined && `timeout ${x.timeout} ms`,
+      x.auth && `auth: ${x.auth}`,
+      x.oauth && 'OAuth client settings',
+      x.requestIdFormat && `request ids: ${x.requestIdFormat}`,
+      x.instructions === false && 'server instructions off',
+    ].filter(Boolean);
+    const ctl = x.state === 'shadowed'
+      ? '<span class="set-desc">overridden</span>'
+      : `<label class="switch" title="${x.enabled ? 'Disable' : 'Enable'} (saved to ${esc(target)})"><input type="checkbox" data-mcp-toggle="${esc(key)}" aria-labelledby="${id}" ${x.enabled ? 'checked' : ''}><span></span></label>`;
+    return `<div class="set-row${x.state === 'active' ? '' : ' mod'}${S.set.mcpSaving.has(key) ? ' saving' : ''}" data-mcp="${esc(key)}"><div class="set-info"><div class="set-name" id="${id}">${esc(x.name)}${tag}</div><button type="button" class="btn-reset" data-copy-text="${esc(x.source.path)}" title="Copy config path" aria-label="Copy config path ${esc(x.source.path)}"><code class="set-key">${esc(x.source.providerName)} · ${esc(x.source.path)}</code></button><div class="set-desc"><code>${esc(x.transport)}</code> ${esc(conn)}</div>${facts.length ? `<div class="set-desc">${esc(facts.join(' · '))}</div>` : ''}${x.reason ? `<div class="set-desc">${x.state === 'shadowed' ? 'Overridden: ' : 'Not loaded: '}${esc(x.reason)}</div>` : ''}${x.writable || x.state === 'shadowed' ? '' : `<div class="set-desc">Another tool's file: on/off is saved to <code>${esc(target)}</code></div>`}</div><div class="set-ctl">${ctl}</div></div>`;
+  }
+  async function saveMcp(key, enabled) {
+    const x = S.set.mcp?.servers.find(s => mcpKey(s) === key);
+    if (!x || S.set.mcpSaving.has(key)) return;
+    S.set.mcpSaving.add(key);
+    document.querySelector(`[data-mcp="${CSS.escape(key)}"]`)?.classList.add('saving');
+    try {
+      S.set.mcp = await api('/mcp', { action: enabled ? 'enable' : 'disable', name: x.name, ...(x.project ? { project: x.project.id } : {}) });
+      S.set.mcpError = '';
+      toast(`${enabled ? 'Enabled' : 'Disabled'} ${x.name} · applies to new or restarted sessions`);
+    } catch (e) { toast(e.message, 'err'); }
+    S.set.mcpSaving.delete(key);
     if (current().kind === 'settings') renderSettings();
   }
 
@@ -4862,6 +4917,7 @@
     if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
     else if (e.target.matches?.('.ask-q input[type=radio]')) e.target.closest('fieldset').querySelector('.ask-other').value = '';
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
+    else if (e.target.dataset?.mcpToggle) saveMcp(e.target.dataset.mcpToggle, e.target.checked);
     else if (e.target.dataset?.set) settingInput(e.target);
     else if (e.target.matches?.('[data-enhthinking]')) saveEnhanceThinking(e.target.value);
     else if (e.target.matches?.('[data-editor]')) saveEditor(e.target.value);

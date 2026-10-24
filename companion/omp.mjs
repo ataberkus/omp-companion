@@ -15,6 +15,7 @@ import { loadPlanMode } from './plan-host.mjs';
 import { loadCommandHosts, unhostedMessage } from './command-hosts.mjs';
 import { RUNTIME_FILES, ompSources } from './omp-sdk.mjs';
 import { loadCustomUI, customUI } from './custom-ui.mjs';
+import { loadMcpConfig } from './mcp-config.mjs';
 
 export const NOT_RUNNING = 'OMP process is not running.';
 const READY_MS = 30000;
@@ -74,7 +75,10 @@ async function loadRuntime(src) {
  // it, custom() resolves undefined as in OMP's RPC host, and bash runs without a PTY as OMP's headless hosts do.
  const custom = await loadCustomUI(pkg).catch(e => { console.error(`Custom extension UI is unavailable with this OMP build: ${e.message}`); return null; });
  if (!custom) process.env.PI_NO_PTY = '1';
- return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, commandHosts, custom, settings, authStorage, modelRegistry };
+ // Settings › MCP servers: OMP's MCP config modules, loaded on first use so a build that moved them still runs sessions.
+ let mcp;
+ const mcpConfig = () => mcp ??= loadMcpConfig({ at, pkg, settings }).catch(e => { mcp = undefined; throw e; });
+ return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
 }
 
 // The companion's /goal host for OMP builds without modes/rpc/rpc-goal-slash.ts. Without the pieces it needs, /goal stays
@@ -107,6 +111,10 @@ export function ompHost(entry, { dataDir } = {}) {
   warm() { if (process.versions.bun) load().catch(() => {}); },
   /** Returns the session at once; `ready` settles when it can take commands. */
   start({ cwd, args, onEvent, onExit }) { return new OmpSession(load, cwd, args, onEvent, onExit); },
+  /** Configured MCP servers (mcp-config.mjs `list`): scopes [{ cwd, project? }]. */
+  async mcpServers(scopes) { return (await (await load()).mcpConfig()).list(scopes); },
+  /** Turns one MCP server on or off in OMP's config: { cwd, project, name, enabled }. */
+  async setMcpEnabled(options) { return (await (await load()).mcpConfig()).setEnabled(options); },
  };
 }
 

@@ -127,6 +127,7 @@ async function settings(extra = {}) {
   const routes = {
     '/settings': body => { if (!body) { const g = deferred(); gets.push(g); return g.promise; } const p = deferred(); posts.push({ body, ...p }); return p.promise; },
     '/plugins': () => ({ plugins: [{ id: 'pl@1', enabled: true }], available: [] }),
+    '/mcp': () => ({ servers: [{ name: 'gh', enabled: true, state: 'active', reason: '', transport: 'stdio', command: 'gh-mcp', source: { provider: 'native', providerName: 'OMP', path: 'mcp.json', level: 'user' }, writable: true }], userFile: 'mcp.json', projectConfig: true, warnings: [] }),
     '/models': () => models.promise,
     ...extra,
   };
@@ -181,7 +182,8 @@ test('every settings control is named by its visible label', async () => {
   const { gets, list } = await settings();
   gets[0].resolve(SETTINGS()); await flush();
   const html = list();
-  const controls = [...html.matchAll(/<(?:input|select|textarea)\b[^>]*>/g)].map(m => m[0]).filter(t => /data-(set|hotkey|plugin-toggle)=/.test(t));
+  const controls = [...html.matchAll(/<(?:input|select|textarea)\b[^>]*>/g)].map(m => m[0]).filter(t => /data-(set|hotkey|plugin-toggle|mcp-toggle)=/.test(t));
+  assert.ok(controls.some(t => t.includes('data-mcp-toggle')), 'the MCP server switch is rendered');
   assert.ok(controls.length >= 6);
   for (const tag of controls) {
     const id = tag.match(/aria-labelledby="([^"]+)"/)?.[1];

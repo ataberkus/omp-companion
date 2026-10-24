@@ -1891,6 +1891,21 @@ async function pluginAction(body){
  catch(err){throw error(cleanUpdateOutput(err.stderr,err.stdout,err.killed?'Plugin action timed out.':err.message)||`Could not ${action} the plugin.`);}
  return listPlugins();
 }
+// MCP servers from OMP's own discovery and config writer (mcp-config.mjs, through the OMP host). User-level configs are
+// read once; project configs (.omp/mcp.json, .mcp.json, ...) depend on the folder, so each visible project adds its own.
+const mcpScopes=()=>[{cwd:os.homedir()},...store.projects.filter(p=>!p.hidden).map(p=>({cwd:p.path,project:{id:p.id,name:p.name,path:p.path}}))];
+async function listMcp(){if(!omp.mcpServers)throw new Error('this OMP build cannot list them.');return omp.mcpServers(mcpScopes());}
+async function mcpAction(body){
+ const action=text(body.action,'Action',20).toLowerCase();
+ if(action!=='enable'&&action!=='disable')throw error('Unknown MCP server action.');
+ const name=text(body.name,'Server',100);
+ let cwd=os.homedir(),project=false;
+ if(body.project!==undefined&&body.project!==null){const p=store.projects.find(p=>p.id===body.project&&!p.hidden);if(!p)throw error('Project not found.',404);cwd=p.path;project=true;}
+ if(!omp.setMcpEnabled)throw error('This OMP build cannot change MCP servers.',502);
+ try{await omp.setMcpEnabled({cwd,project,name,enabled:action==='enable'});}
+ catch(e){throw error(e.status?e.message:`Could not ${action} the MCP server: ${e.message}`,e.status||400);}
+ try{return await listMcp();}catch(e){throw error(`Could not read OMP MCP servers: ${e.message}`,502);}
+}
  // Advisors come from WATCHDOG.yml (advisors[].model); without one OMP falls back to the 'advisor' model role.
  const agentDir=()=>process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent');
  async function watchdogFile(){for(const n of ['WATCHDOG.yml','WATCHDOG.yaml']){const f=path.join(agentDir(),n);try{return {file:f,text:await fs.readFile(f,'utf8')};}catch{}}return null;}
@@ -2434,6 +2449,7 @@ async function spend(sync){
     res.writeHead(200,{'Content-Type':type,'Content-Length':data.length,'Cache-Control':'private, max-age=31536000, immutable','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'"});res.end(data);return;}
    if(req.method==='GET'&&url.pathname==='/api/settings'){try{json(await listSettings());}catch(e){throw error(`Could not read OMP settings: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/plugins'){try{json(await listPlugins());}catch(e){throw error(`Could not read OMP plugins: ${e.message}`,502);}return;}
+   if(req.method==='GET'&&url.pathname==='/api/mcp'){try{json(await listMcp());}catch(e){throw error(`Could not read OMP MCP servers: ${e.message}`,502);}return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-update'){json(updateState);return;}
    if(req.method==='GET'&&url.pathname==='/api/advisor'){json(await advisorConfig());return;}
    if(req.method==='GET'&&url.pathname==='/api/cli'){json({tools:cliCatalog(),jobs:cliJobs});return;}
@@ -2507,6 +2523,7 @@ async function spend(sync){
    if(url.pathname==='/api/settings'){json(await changeSetting(body,false));return;}
    if(url.pathname==='/api/settings/reset'){json(await changeSetting(body,true));return;}
    if(url.pathname==='/api/plugins'){json(await pluginAction(body));return;}
+   if(url.pathname==='/api/mcp'){json(await mcpAction(body));return;}
    if(url.pathname==='/api/cli'){json(await runCli(body),202);return;}
    if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
    if(url.pathname==='/api/enhance'){json(await startEnhance(body),202);return;}
