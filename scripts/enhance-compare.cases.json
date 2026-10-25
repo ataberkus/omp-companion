@@ -1739,6 +1739,20 @@
   "note": "Change request: implement options 1 (F3 overlay shows door, seconds waited, bash count) and 4 (extract door timing decision into a Core class with xUnit tests); do NOT do option 2 (DoorGiveUpSeconds stays 6); 'retry delay' means BlockedDoorSeconds, which must stay at 15 (option 3 not applied either)."
  },
  {
+  "id": "yuva-prealpha-7",
+  "repo": "yuva-prealpha",
+  "kind": "vague",
+  "lang": "en",
+  "draft": "starting video is not sync",
+  "refs": [
+   "src/lib/yuva/watch-sync.ts",
+   "decide",
+   "expectedTime"
+  ],
+  "keep": [],
+  "note": "Bug report about watch together (Birlikte izle): when the host starts the video, followers do not start in sync. A good rewrite asks for the fix and has the agent also check pause, resume, seek and a late joiner, which run through the same decide/expectedTime path in watch-sync.ts."
+ },
+ {
   "id": "probe-home-config",
   "repo": "oh-my-pi",
   "kind": "probe",
