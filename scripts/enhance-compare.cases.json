@@ -1359,6 +1359,386 @@
   "note": "Complete: in LendingTransaction.ReturnBook compute the fine while the book still counts as not returned (call CalculateFine before setting IsReturned, or equivalent), so an overdue return stores Fine = whole days overdue × 0.50m (2 days -> 1.0m) and an on-time return keeps Fine 0; CalculateFine's whole-day truncation and rate stay as they are (less than a day late -> 0). The existing test LendingTransaction_ReturnBook_CalculatesFineWhenOverdue in LibraryManagementSystemTests/ModelTests/LendingTransactionTests.cs asserts the buggy Fine == 0; it must be updated to expect 1.0m so the LendingTransactionTests class stays green (other suites already fail before any change because they need MySQL; making them pass is not part of this). Extra (not wanted): changing the fine rate or rounding, IsOverdue semantics, LendingRepository.ReturnBook (the database path computes its own fine), schema changes."
  },
  {
+  "id": "Hospital-Management-8",
+  "repo": "Hospital-Management",
+  "kind": "vague",
+  "lang": "en",
+  "draft": "look into how the nurse storage thing handles running out of materials",
+  "keep": [],
+  "refs": [
+   "Hospital Management/NurseInterface.cs",
+   "UseMaterial",
+   "GetMaterials",
+   "Hospital Management/Functions.cs",
+   "GetInventory",
+   "Account Management/InventoryList.cs"
+  ],
+  "note": "Look-into/investigate (not fix): examine NurseInterface.UseMaterial, which shows a 'There is no material enough.' warning when stock is insufficient, plus GetMaterials and InventoryList/GetInventory. Report how it behaves; make no changes."
+ },
+ {
+  "id": "Hospital-Management-9",
+  "repo": "Hospital-Management",
+  "kind": "question",
+  "lang": "en",
+  "draft": "does GeneratePassword actually make a random password or is it predictable? and is the hash salted",
+  "keep": [
+   "GeneratePassword"
+  ],
+  "refs": [
+   "Hospital Management/Functions.cs",
+   "GeneratePassword",
+   "ComputeSha256Hash"
+  ],
+  "note": "Pure question: read Functions.GeneratePassword and ComputeSha256Hash and explain randomness source and whether SHA-256 is salted. Do not change code or propose a fix."
+ },
+ {
+  "id": "Hospital-Management-10",
+  "repo": "Hospital-Management",
+  "kind": "tricky",
+  "lang": "tr",
+  "draft": "@Hospital Management/Login.cs dosyasında btn_login_Click içindeki \"TC or Password is wrong.\" mesajını Türkçeye çevir, Register.cs'e dokunma",
+  "keep": [
+   "@Hospital Management/Login.cs",
+   "\"TC or Password is wrong.\""
+  ],
+  "refs": [
+   "Hospital Management/Login.cs",
+   "btn_login_Click",
+   "Hospital Management/Register.cs"
+  ],
+  "note": "Change request in Turkish: only translate the \"TC or Password is wrong.\" string in btn_login_Click in Login.cs to Turkish; leave Register.cs (and other messages) untouched. Reply in Turkish."
+ },
+ {
+  "id": "Hospital-Management-11",
+  "repo": "Hospital-Management",
+  "kind": "followup",
+  "lang": "en",
+  "draft": "do 1 and 3, skip the nullcheck one. but keep the limit at 3",
+  "conversation": [
+   {
+    "role": "user",
+    "text": "the register screen accepts basically anything, can you check what validation it does and what is missing"
+   },
+   {
+    "role": "assistant",
+    "text": "I read Hospital Management/Register.cs (btn_register_Click) and Hospital Management/Login.cs for comparison. Current validation in btn_register_Click, in order:\n\n- name.Text.Length < 3 -> Functions.MessageBox.Warn(\"Name length must be higher than 2.\")\n- surname.Text.Length < 3 -> Warn(\"Surname length must be higher than 2.\")\n- mailbox.Text is parsed with new System.Net.Mail.MailAddress(...); FormatException -> Error(\"Wrong e-mail.\"), ArgumentException -> Error(\"Email can't be empty.\")\n- tcbox.Text.Length != 11 -> Warn(\"TC length must be 11 digits.\")\n- sectionbox.SelectedItem == null -> Error(\"You have to select section.\")\n\nAfter that it calls Functions.sendMailCheck() and Functions.MySQL.check_connection(), generates a password with Functions.GeneratePassword(), inserts the row via Functions.MySQL.Add(\"users\", ...) with approve_status \"0\", and mails the password with Functions.sendPassword. A duplicate row is reported through MySqlException number 1062 (\"Already registered with this information!\").\n\nWhat is missing or weak:\n\n- tcbox only blocks non-digit keys in tcbox_KeyPress; pasting letters bypasses it, and there is no check at submit that the 11 characters are digits (and no TC checksum algorithm; a leading 0 is also accepted).\n- name and surname are only length-checked: digits, symbols and whitespace-only strings of 3+ chars pass. Surrounding whitespace is not trimmed before insert.\n- No upper length limit on name/surname/mail, while the DB columns may be limited.\n- sectionbox.SelectedItem.ToString() is inserted straight into the department column; the allowed values are not checked against the roles Login.cs switches on (nurse, doctor, admin, staff).\n- The mail address is validated only by MailAddress, which accepts things like \"a@b\" with no domain dot.\n- The SmtpException / MySqlException handlers show raw exception.Message to the user, which can leak server details.\n- mailbox.Text may be null-ish in edge cases; there is no explicit null check before the MailAddress ctor (ArgumentNullException is an ArgumentException subclass so it is caught, but the message says 'empty').\n\nI have not changed anything. Which of these do you want me to do?\n\n1. Add a digits-only check for TC in btn_register_Click (keep the length 11 check).\n2. Trim name/surname/mail and reject whitespace-only or digit-containing names.\n3. Add a maximum length for name and surname (suggest 30) and mail (suggest 100).\n4. Add an explicit null check for mailbox.Text before the MailAddress constructor.\n5. Replace raw exception.Message in the Mysql/Smtp catch blocks with a generic message.\n\nTell me the numbers and any constraints."
+   }
+  ],
+  "keep": [],
+  "refs": [
+   "Hospital Management/Register.cs",
+   "btn_register_Click",
+   "Hospital Management/Login.cs"
+  ],
+  "note": "Change request: implement options 1 (digits-only TC check in btn_register_Click, keeping the length-11 check) and 3 (maximum lengths for name/surname/mail); skip option 4 (the mailbox.Text null check). 'keep the limit at 3' is ambiguous: it most plausibly means the existing 3-character minimum for name/surname (Length < 3) stays; a rewrite may resolve it that way or keep the wording, but must not turn the option-3 maximum into 3."
+ },
+ {
+  "id": "LibraryManagementSystem-8",
+  "repo": "LibraryManagementSystem",
+  "kind": "vague",
+  "lang": "en",
+  "draft": "look into how fines get handled when ppl return books late, something feels off",
+  "keep": [],
+  "refs": [
+   "LibraryManagementSystem/Data/LendingRepository.cs",
+   "LendingRepository.ReturnBook",
+   "MemberRepository.UpdateMemberFines",
+   "LendingRepository.BorrowBook"
+  ],
+  "note": "Look-into/investigate only (mode: investigation, NOT fix): examine the late-return fine flow in LendingRepository.ReturnBook (days overdue x 0.50m, UpdateMemberFines) and the OutstandingFines check in BorrowBook (returns -3); report findings without changing code."
+ },
+ {
+  "id": "LibraryManagementSystem-9",
+  "repo": "LibraryManagementSystem",
+  "kind": "question",
+  "lang": "en",
+  "draft": "what happens in RecommendationService.TrainModel if there are only a few borrowing records? does it just crash or fall back to something",
+  "keep": [
+   "RecommendationService.TrainModel"
+  ],
+  "refs": [
+   "LibraryManagementSystem/Services/RecommendationService.cs",
+   "RecommendationService.TrainModel",
+   "RecommendationService.GenerateRecommendationsForMember",
+   "MIN_TRAINING_DATA_THRESHOLD"
+  ],
+  "note": "Pure question, no code change: explain that TrainModel returns false when data is empty or below MIN_TRAINING_DATA_THRESHOLD (20) rather than throwing, and GenerateRecommendationsForMember then falls back to GenerateContentBasedRecommendations."
+ },
+ {
+  "id": "LibraryManagementSystem-10",
+  "repo": "LibraryManagementSystem",
+  "kind": "tricky",
+  "lang": "en",
+  "draft": "run `dotnet test LibraryManagementSystemTests/LibraryManagementSystemTests.csproj --filter FullyQualifiedName~LendingProcessTests` and tell me which ones fail. also check if GenerateRecomendationsForMember is covered by any test in there, dont change anything",
+  "keep": [
+   "dotnet test LibraryManagementSystemTests/LibraryManagementSystemTests.csproj --filter FullyQualifiedName~LendingProcessTests"
+  ],
+  "refs": [
+   "LibraryManagementSystemTests/LibraryManagementSystemTests.csproj",
+   "LibraryManagementSystemTests/IntegrationTests/LendingProcessTests.cs",
+   "LibraryManagementSystemTests/ServiceTests/RecommendationServiceTests.cs",
+   "RecommendationService.GenerateRecommendationsForMember",
+   "RunTests.bat"
+  ],
+  "note": "Read-only/run task: run the given dotnet test command verbatim and report failures; separately check test coverage of the real method GenerateRecommendationsForMember (user misspelled it as 'GenerateRecomendationsForMember' - rewrite must use the correct spelling); no code changes."
+ },
+ {
+  "id": "LibraryManagementSystem-11",
+  "repo": "LibraryManagementSystem",
+  "kind": "followup",
+  "lang": "en",
+  "draft": "do 1 and 3, skip the audit log stuff. keep the interval at the same value tho",
+  "conversation": [
+   {
+    "role": "user",
+    "text": "the recommendations seem stale, members keep seeing the same books. can you check how RecommendationService decides when to retrain?"
+   },
+   {
+    "role": "assistant",
+    "text": "I read LibraryManagementSystem/Services/RecommendationService.cs and the retraining logic is as follows.\n\nHow it works:\n- GenerateRecommendationsForMember computes `needTraining = _model == null || DateTime.Now - _lastModelTrainingTime > _modelRefreshInterval`. The interval is a readonly field set to TimeSpan.FromHours(24).\n- TrainModel pulls data from RecommendationRepository.GetMemberBorrowingHistory(). If it returns fewer than MIN_TRAINING_DATA_THRESHOLD (20) rows it returns false and the service falls back to GenerateContentBasedRecommendations.\n- The model and _lastModelTrainingTime live only in the service instance (private ITransformer? _model), so every new RecommendationService() starts untrained and retrains from scratch.\n- Results are capped by MAX_RECOMMENDATIONS (10) and are stored/read via RecommendationRepository (GetRecommendationsForMember / RefreshRecommendations).\n\nPossible reasons for staleness: the 24h interval is long relative to how often members borrow, and a stored recommendation set can be returned from GetRecommendationsForMember without a refresh being triggered by new lending activity. MLContext uses a fixed seed (new MLContext(0)), so with identical data the output is deterministic.\n\nOptions:\n1. Trigger RecommendationService.RefreshRecommendations(memberId) after a successful LendingRepository.BorrowBook or ReturnBook so new activity shows up right away.\n2. Shorten _modelRefreshInterval from 24 hours to something like 6 hours.\n3. Add a Refresh button to RecommendationsForm that calls RefreshRecommendations for the current member.\n4. Write audit log entries (AuditLogRepository) whenever the model is retrained, so staleness can be diagnosed later.\n\nWhich of these should I do?"
+   }
+  ],
+  "keep": [],
+  "refs": [
+   "LibraryManagementSystem/Services/RecommendationService.cs",
+   "RecommendationService.RefreshRecommendations",
+   "LibraryManagementSystem/Forms/RecommendationsForm.cs",
+   "LibraryManagementSystem/Data/AuditLogRepository.cs"
+  ],
+  "note": "Change request: implement options 1 (call RecommendationService.RefreshRecommendations after a successful LendingRepository.BorrowBook/ReturnBook) and 3 (a Refresh button in RecommendationsForm calling RefreshRecommendations for the current member); skip option 4 (audit log entries via AuditLogRepository); 'keep the interval at the same value' means _modelRefreshInterval stays TimeSpan.FromHours(24), so option 2 is not done."
+ },
+ {
+  "id": "disk-analyzer-1",
+  "repo": "disk-analyzer",
+  "kind": "vague",
+  "lang": "en",
+  "draft": "look into how the cleanup tab decides what counts as old temp files, something feels off",
+  "keep": [],
+  "refs": [
+   "src/cleanup.rs",
+   "min_age_days",
+   "cutoff",
+   "FILETIME_DAY",
+   "platform::now_filetime"
+  ],
+  "note": "Look-into/investigate request (not a fix): examine how the cleanup logic in src/cleanup.rs applies min_age_days via cutoff() and FILETIME_DAY (the 'Temporary files' and 'Windows temporary files' defs use 7 days) and report findings. Must not become 'fix the age check'."
+ },
+ {
+  "id": "disk-analyzer-2",
+  "repo": "disk-analyzer",
+  "kind": "question",
+  "lang": "en",
+  "draft": "does scan_pool in scan.rs cap how many threads it spawns on a machine with lots of cores?",
+  "keep": [
+   "scan_pool"
+  ],
+  "refs": [
+   "src/scan.rs",
+   "scan_pool"
+  ],
+  "note": "Pure question: scan_pool sets num_threads to (cores*2).clamp(8, 64), so yes it is capped at 64 (min 8). Answer only; no change requested."
+ },
+ {
+  "id": "disk-analyzer-3",
+  "repo": "disk-analyzer",
+  "kind": "tricky",
+  "lang": "tr",
+  "draft": "@src/treemap.rs içindeki squarify fonksiyonunu oku, sonra `cargo clippy -- -D warnings` çalıştır ve çıkan uyarıları listele ama hiçbir şeyi düzeltme, sadece raporla",
+  "keep": [
+   "@src/treemap.rs",
+   "squarify",
+   "cargo clippy -- -D warnings"
+  ],
+  "refs": [
+   "src/treemap.rs",
+   "squarify",
+   "Cargo.toml"
+  ],
+  "note": "Turkish, change-free request: read squarify in src/treemap.rs, run `cargo clippy -- -D warnings`, and report the warnings/errors found without fixing anything. Keep Turkish and the exact command and path."
+ },
+ {
+  "id": "disk-analyzer-4",
+  "repo": "disk-analyzer",
+  "kind": "followup",
+  "lang": "en",
+  "draft": "do 1 and 3, skip the recycle bin one. but keep the age at 7 days",
+  "conversation": [
+   {
+    "role": "user",
+    "text": "the temp cleanup in the cleanup tab leaves a lot of stuff behind, can you check why"
+   },
+   {
+    "role": "assistant",
+    "text": "I looked at src/cleanup.rs and the cleanup path in src/platform.rs. Findings:\n\n- `definitions()` registers two temp categories through the `sys(...)` helper: \"Temporary files\" (`dir(Temp, \"\")`, `min_age_days` 7, `default_on` false) and \"Windows temporary files\" (`dir(Windir, \"Temp\")`, `min_age_days` 7, `default_on` true).\n- `cutoff(min_age_days)` turns the age into a FILETIME threshold using `FILETIME_DAY` and `platform::now_filetime()`. Anything touched within the last 7 days is skipped by the walk in `run(...)`, so a fresh build or installer extraction directory survives the clean.\n- Files that cannot be deleted are counted in `Stats::failed` (see `AddAssign for Stats`) and `platform::delete_file(path, attrs)` just returns false when the file is in use, so running programs keep their temp files and the user only sees a failed count.\n- \"Windows temporary files\" needs administrator rights. Without them the target is reported as inaccessible and nothing is freed, yet it is the one that is pre-selected by default (`default_on: true`), which is probably surprising.\n- The Recycle Bin category (`Kind::RecycleBin`) is handled separately through `platform::empty_recycle_bin()` (SHEmptyRecycleBinW) and does not use the age rule at all, so it is not related to the leftover temp files.\n- The `Excluded` set built by `Excluded::from_items` only applies to `Kind::Files` items, so exclusions are not the cause either.\n\nI have not changed anything. Options:\n\n1. Make the \"Windows temporary files\" category not pre-selected (`default_on: false`) so a non-admin run does not look like a silent failure.\n2. Lower `min_age_days` for both temp categories from 7 to 1, so the walk catches recent leftovers.\n3. Show the failed-file count next to the freed bytes in the cleanup result so locked files are visible instead of silently skipped.\n4. Also include the Recycle Bin in the default selection when temp files are cleaned.\n\nTell me which ones you want."
+   }
+  ],
+  "keep": [],
+  "refs": [
+   "src/cleanup.rs",
+   "definitions",
+   "cutoff",
+   "min_age_days",
+   "default_on",
+   "Kind::RecycleBin",
+   "Stats",
+   "src/platform.rs",
+   "delete_file",
+   "empty_recycle_bin"
+  ],
+  "note": "Change request: implement options 1 (set default_on false for 'Windows temporary files') and 3 (surface Stats::failed count in the cleanup result UI); exclude option 4 (Recycle Bin); 'keep the age at 7 days' means do NOT apply option 2, leave min_age_days = 7."
+ },
+ {
+  "id": "deepseek-harness-1",
+  "repo": "deepseek-harness",
+  "kind": "vague",
+  "lang": "en",
+  "draft": "look into the cursor provider, seems like the connect/streaming side does something weird with big responses",
+  "keep": [],
+  "refs": [
+   "packages/llm/llm-pi-ai/src/cursor/connect.ts",
+   "MAX_STREAM_BYTES",
+   "MAX_UNARY_BYTES"
+  ],
+  "note": "Look-into (investigate, report findings) on the Cursor provider's Connect transport in packages/llm/llm-pi-ai/src/cursor/connect.ts, specifically response size handling (MAX_STREAM_BYTES / MAX_UNARY_BYTES, readAll). Do not turn it into a fix."
+ },
+ {
+  "id": "deepseek-harness-2",
+  "repo": "deepseek-harness",
+  "kind": "question",
+  "lang": "en",
+  "draft": "how does pollCursorAuth decide when to give up? is the timeout fixed or does it depend on the server response",
+  "keep": [
+   "pollCursorAuth"
+  ],
+  "refs": [
+   "packages/llm/llm-pi-ai/src/cursor/oauth.ts",
+   "pollCursorAuth"
+  ],
+  "note": "Pure question: explain how pollCursorAuth in packages/llm/llm-pi-ai/src/cursor/oauth.ts ends polling (the 'Cursor authentication polling timeout' throw, sleepMs, abort signal). No change requested."
+ },
+ {
+  "id": "deepseek-harness-3",
+  "repo": "deepseek-harness",
+  "kind": "tricky",
+  "lang": "en",
+  "draft": "where does \"Cursor AgentService stream exceeded the response size limit\" come from and why would it fire? just explain, dont touch packages/llm/llm-deepseek at all",
+  "keep": [
+   "\"Cursor AgentService stream exceeded the response size limit\"",
+   "packages/llm/llm-deepseek"
+  ],
+  "refs": [
+   "packages/llm/llm-pi-ai/src/cursor/connect.ts",
+   "MAX_STREAM_BYTES",
+   "packages/llm/llm-deepseek"
+  ],
+  "note": "Question only: the string is thrown in packages/llm/llm-pi-ai/src/cursor/connect.ts (~line 147) when the accumulated pending bytes plus the next chunk exceed MAX_STREAM_BYTES (32 MiB) in the streaming reader. Explain the origin and trigger conditions. No edits; packages/llm/llm-deepseek is explicitly excluded (not even to be edited or touched)."
+ },
+ {
+  "id": "deepseek-harness-4",
+  "repo": "deepseek-harness",
+  "kind": "followup",
+  "lang": "en",
+  "draft": "do 1 and 2, skip the docs thing. but keep the cap where it is for the stream one",
+  "conversation": [
+   {
+    "role": "user",
+    "text": "why did my cursor agent session die with \"Cursor AgentService stream exceeded the response size limit\"?"
+   },
+   {
+    "role": "assistant",
+    "text": "That error is thrown from packages/llm/llm-pi-ai/src/cursor/connect.ts, in the streaming reader (around line 146). Each time a chunk arrives from cursorConnectInternals.request(request), the code checks whether pending.byteLength + chunk.byteLength is greater than MAX_STREAM_BYTES. That constant is 32 * 1024 * 1024 (32 MiB). If the check trips, it throws instead of growing the buffer.\n\nA few related details I found:\n\n- The buffer is `pending`, a Uint8Array. For every incoming chunk the code allocates a new Uint8Array of the combined size (`next`), copies `pending` into it, and then appends the chunk. So the cost of each chunk is proportional to everything buffered so far, and the buffer only drains as complete Connect frames are decoded and consumed.\n- If the server sends one huge frame, or frames faster than they are decoded, `pending` never gets small enough and the limit trips. A single long agent turn with large tool output could plausibly hit this.\n- The unary path is separate: connectUnary calls readAll with MAX_UNARY_BYTES (4 MiB) and throws 'Cursor AgentService reply exceeded the response size limit' instead. Model listing in packages/llm/llm-pi-ai/src/cursor/models.ts goes through that unary path, so it has the tighter 4 MiB cap.\n- decodeConnectFrames in the same file parses the 5-byte frame header (flag + big-endian length) and returns the data frames; I did not see anything that drops already-decoded bytes from `pending` other than slicing after decode.\n- The error message does not include the byte count or the limit, so from the logs alone you cannot tell how far over the limit the stream was.\n\nI haven't changed anything. Options:\n1. Include the observed byte count and the MAX_STREAM_BYTES limit in the error message so the failure is diagnosable.\n2. Replace the copy-on-every-chunk concatenation in the streaming reader with a list of chunks (or a growable buffer) to avoid quadratic copying.\n3. Raise MAX_STREAM_BYTES above 32 MiB.\n4. Add a unit test in packages/llm/llm-pi-ai/tests that feeds oversized chunks through the streaming reader and asserts the throw.\n5. Document the two size limits in the llm-pi-ai README.\n\nWhich should I do?"
+   }
+  ],
+  "keep": [],
+  "refs": [
+   "packages/llm/llm-pi-ai/src/cursor/connect.ts",
+   "MAX_STREAM_BYTES",
+   "MAX_UNARY_BYTES",
+   "connectUnary",
+   "decodeConnectFrames",
+   "packages/llm/llm-pi-ai/tests"
+  ],
+  "note": "Change request: do option 1 (observed byte count and the MAX_STREAM_BYTES limit in the stream error message) and option 2 (replace the copy-on-every-chunk concatenation in the streaming reader of packages/llm/llm-pi-ai/src/cursor/connect.ts); skip option 5 (documenting the limits in the llm-pi-ai README); 'keep the cap where it is for the stream one' means MAX_STREAM_BYTES stays at 32 MiB (option 3 not done, MAX_UNARY_BYTES untouched); option 4 not requested."
+ },
+ {
+  "id": "self-admitted-1",
+  "repo": "self-admitted",
+  "kind": "vague",
+  "lang": "en",
+  "draft": "stalker sometimes seems to just stand around at doors for ages, can you look into whats going on there",
+  "keep": [],
+  "refs": [
+   "game/src/Stalker/Stalker.cs",
+   "HoldForDoor",
+   "GiveUpDoor",
+   "src/SelfAdmitted.Core/Stalker/StallWatch.cs"
+  ],
+  "note": "Look-into/investigate (not fix): examine the stalker's door handling (HoldForDoor, GiveUpDoor, DoorGiveUpSeconds, BlockedDoorSeconds in Stalker.cs, plus StallWatch) to explain why it can idle at doors, and report findings only without changing code."
+ },
+ {
+  "id": "self-admitted-2",
+  "repo": "self-admitted",
+  "kind": "question",
+  "lang": "en",
+  "draft": "if i die and the checkpoint reloads, do the catches still count toward AdaptiveAssist or does it reset?",
+  "keep": [
+   "AdaptiveAssist"
+  ],
+  "refs": [
+   "src/SelfAdmitted.Core/Stalker/AdaptiveAssist.cs",
+   "game/src/Story/GameSession.cs",
+   "AdaptiveAssist",
+   "GameSession.Assist"
+  ],
+  "note": "Pure question, no change: explain that GameSession keeps the existing Assist across the reload path ('a death is not a new game'), while NewGame creates a fresh AdaptiveAssist; do not propose changes."
+ },
+ {
+  "id": "self-admitted-3",
+  "repo": "self-admitted",
+  "kind": "tricky",
+  "lang": "tr",
+  "draft": "@game/src/Stalker/Stalker.cs icindeki DoorBashSeconds'i sadece ilk vurusa kadar bekleme icin 1.5'ten 1'e indir, vurular arasi aralik 1.5 kalsin. DoorGiveUpSeconds a dokunma",
+  "keep": [
+   "@game/src/Stalker/Stalker.cs",
+   "DoorBashSeconds",
+   "DoorGiveUpSeconds"
+  ],
+  "refs": [
+   "game/src/Stalker/Stalker.cs",
+   "DoorBashSeconds",
+   "DoorGiveUpSeconds",
+   "HoldForDoor"
+  ],
+  "note": "Change request in Turkish: DoorBashSeconds is used twice in HoldForDoor (`waited >= DoorBashSeconds` for the first bash and `now - _lastBash >= DoorBashSeconds` for the repeat interval). Lower it to 1 only for the first-bash wait (e.g. a separate constant), keep the repeat interval at 1.5, leave DoorGiveUpSeconds (6) unchanged."
+ },
+ {
+  "id": "self-admitted-4",
+  "repo": "self-admitted",
+  "kind": "followup",
+  "lang": "en",
+  "draft": "do 1 and 4, skip 2. and keep the retry delay like it is now",
+  "conversation": [
+   {
+    "role": "user",
+    "text": "why does the stalker sometimes stand at a door for so long before doing anything? look at the door code in Stalker.cs"
+   },
+   {
+    "role": "assistant",
+    "text": "I read the door handling in `game/src/Stalker/Stalker.cs` (`HoldForDoor`, `ClosedDoorAhead`, `GiveUpDoor`) and the stall rule in `src/SelfAdmitted.Core/Stalker/StallWatch.cs`. Here is what happens.\n\nWhen a closed door crosses the next 3 m of the nav path (`DoorLookAhead`) and the stalker is within `DoorStandOff` (1.2 m) of the door line, `HoldForDoor` takes over: it sets `_door`, records `_doorSince`, and calls `Stalls.Decided(...)` so StallWatch's clock restarts. From then on the stalker faces the door centre and drives it open with `door.DriveTo(door.OpenAngleRad, ...)`, at 2 speed normally and 3 in a chase.\n\nThe waiting you see has three layers:\n- `DoorBashSeconds` (1.5 s): after this the stalker starts bashing the door, then repeats every 1.5 s. Each bash calls `Stalls.Decided` again, so the stall watch never fires while it bashes.\n- `DoorGiveUpSeconds` (6 s): if the door is still not open (angle under `DoorOpenEnough`, 70 degrees) it either gives up (`GiveUpDoor(door, now, \"seen\")`) when `VisibleToPlayer()` is true, or calls `StepThrough`.\n- `BlockedDoorSeconds` (15 s): after a give-up the door is stored in `_blockedUntil`, so for 15 s any path through it is treated as 'still blocked' and the stalker gives up again at once.\n\nSo the longest idle is roughly 6 s at the door, then it picks another goal. A door the player is holding shut (`door.IsHeld`) is the worst case, because every bash restarts the stall clock, and a locked door is only skipped via `ahead.Locked`. The only trace is the `STALKER BASHES DOOR` / `STALKER GIVES UP DOOR` GD.Print lines, so it is hard to see how long a wait really was in a playtest.\n\nNothing has been changed. Options:\n1. Show the current door, seconds waited and bash count in the F3 overlay, so waits are visible in playtests.\n2. Lower `DoorGiveUpSeconds` from 6 to 4 so the stalker leaves a stuck door sooner.\n3. Lower `BlockedDoorSeconds` from 15 to 8 so a given-up door is retried sooner.\n4. Move the door timing decision (bash, give up, step through) into a pure class in SelfAdmitted.Core with xUnit tests, leaving Stalker.cs to apply the result.\n\nTell me which ones you want."
+   }
+  ],
+  "keep": [],
+  "refs": [
+   "game/src/Stalker/Stalker.cs",
+   "HoldForDoor",
+   "GiveUpDoor",
+   "DoorGiveUpSeconds",
+   "BlockedDoorSeconds",
+   "src/SelfAdmitted.Core/Stalker/StallWatch.cs"
+  ],
+  "note": "Change request: implement options 1 (F3 overlay shows door, seconds waited, bash count) and 4 (extract door timing decision into a Core class with xUnit tests); do NOT do option 2 (DoorGiveUpSeconds stays 6); 'retry delay' means BlockedDoorSeconds, which must stay at 15 (option 3 not applied either)."
+ },
+ {
   "id": "probe-home-config",
   "repo": "oh-my-pi",
   "kind": "probe",
