@@ -567,7 +567,7 @@ function enhanceModel(roles,selector,thinking='low'){
 // --system-prompt replaces OMP's coding-agent prompt; the guard extension (-e loads even under --no-extensions) confines
 // lookups to the repository and the lookup budget.
 function enhanceArgs({model,thinking,overlay,system,guard,images}){
- return ['-p','--mode','json','--no-session','--no-title','--no-skills','--no-extensions','--no-rules','--no-lsp','--tools=read,grep,glob','--approval-mode=always-ask','--max-time=120',
+ return ['-p','--mode','json','--no-session','--no-title','--no-skills','--no-extensions','--no-rules','--no-lsp','--tools=read,grep,glob','--approval-mode=always-ask','--max-time=240',
   `--config=${overlay}`,`-e`,guard,...(model?[`--model=${model}`]:[]),...(thinking?[`--thinking=${thinking}`]:[]),`--system-prompt=${system}`,...images.map(f=>'@'+f)];
 }
 // The last 6 turns, each run of assistant messages reduced to its last (the reply the user saw). Clips keep both ends: the
@@ -2282,7 +2282,7 @@ async function spend(sync){
   createInterface({input:child.stdout,crlfDelay:Infinity}).on('line',line=>{let f;try{f=JSON.parse(line);}catch{return;}
    if(f.type==='tool_execution_start')job.step=stepLabel(f.toolName,f.args,cwd);
    else if(f.type==='message_end'&&f.message?.role==='assistant')answer=contentText(f.message.content);});
-  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},150000);timer.unref();
+  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},270000);timer.unref();
   job.closed=new Promise(resolve=>{let done=false;const finish=async(code,err)=>{if(done)return;done=true;clearTimeout(timer);
    const out=cleanEnhanced(answer);
    if(job.timedOut)Object.assign(job,{status:'error',error:'Enhance timed out.'});

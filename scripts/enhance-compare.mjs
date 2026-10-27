@@ -33,7 +33,7 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BUDGET = 12, ALLOWED_TOOLS = new Set(['read', 'grep', 'glob']), RUN_TIMEOUT_MS = 150000;
+const BUDGET = 12, ALLOWED_TOOLS = new Set(['read', 'grep', 'glob']), RUN_TIMEOUT_MS = 270000;
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'build', 'dist', '.dart_tool', '.venv', 'venv', '__pycache__', 'bin', 'obj', '.next', '.output', '.vercel', '.tanstack', '.cache', '.worktrees', 'out']);
 const die = msg => { console.error(msg); process.exit(1); };
 const sha = s => createHash('sha256').update(s).digest('hex').slice(0, 16);

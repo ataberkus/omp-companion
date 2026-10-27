@@ -63,7 +63,7 @@ The response and `GET` report the model actually used, for the status line.
 
 ```
 omp -p --mode json --no-session --no-title --no-skills --no-extensions --no-rules --no-lsp
-    --tools=read,grep,glob --approval-mode=always-ask --max-time=120
+    --tools=read,grep,glob --approval-mode=always-ask --max-time=240
     --config=<overlay.yml>          # lockdown overlay, see below
     -e <enhance-guard.mjs>          # lookup guard, see below
     --model=… [--thinking=…]
@@ -279,7 +279,7 @@ A session created by Enhance is a **draft session** until its first message goes
 | Empty draft, `/…` or `!…` | Button disabled |
 | `@enhance` role set to an unknown model | Error toast with OMP's message; draft unchanged |
 | No provider auth, network error | Error toast (last stderr line) |
-| Over 120 s / 150 s | Error toast `Enhance timed out.` |
+| Over 240 s / 270 s | Error toast `Enhance timed out.` |
 | A fourth job while three are running | 409 toast `Wait for the running enhance to finish.` |
 | Draft edited while running | Not applied; info toast with `Use enhanced prompt` action |
 | Companion shutdown | Processes killed; images directory removed |
