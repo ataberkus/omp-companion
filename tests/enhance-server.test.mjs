@@ -159,7 +159,7 @@ test('lockdown overlay pins every write-capable feature off and turns off every 
   for (const p of ['agents-md', 'claude', 'claude-md', 'codex', 'cursor', 'gemini', 'github', 'mcp-json', 'native', 'vscode', 'windsurf']) assert.ok(providers.includes(p), p);
 });
 
-test('lookup guard keeps the enhancer inside the repository and within 6 lookups', async t => {
+test('lookup guard keeps the enhancer inside the repository and within 12 lookups', async t => {
   const root = await mkdtemp(join(tmpdir(), 'enh-guard-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'repo');
@@ -173,8 +173,8 @@ test('lookup guard keeps the enhancer inside the repository and within 6 lookups
   for (const [tool, input] of [['read', { path: 'src/a.ts:10-20' }], ['glob', { path: 'src/**/*.ts' }], ['grep', { pattern: 'x' }], ['read', { path: '.env.example' }]]) assert.equal(await decide(tool, input), 'allow', JSON.stringify(input));
   for (const [tool, input] of [['read', { path: '../other/a.ts' }], ['read', { path: 'src/../../x' }], ['read', { path: join(root, 'guard.mjs') }], ['read', { path: '~/.ssh/id_rsa' }], ['read', { path: 'https://example.com' }], ['read', { path: 'skill://x' }], ['glob', { path: 'src;../*' }], ['grep', { pattern: 'x', path: '..' }], ['grep', { pattern: 'x', gitignore: false }], ['read', { path: '.env' }], ['read', { path: 'src/.env.local' }], ['edit', { path: 'src/a.ts' }], ['bash', { command: 'ls' }]]) assert.equal(await decide(tool, input), 'block', `${tool} ${JSON.stringify(input)}`);
   let handler; guard({ on: (_, h) => { handler = h; } });
-  const run = []; for (let i = 0; i < 8; i++) run.push(await decide('read', { path: 'src/a.ts' }, handler));
-  assert.deepEqual(run, [...Array(6).fill('allow'), 'block', 'block']);
+  const run = []; for (let i = 0; i < 14; i++) run.push(await decide('read', { path: 'src/a.ts' }, handler));
+  assert.deepEqual(run, [...Array(12).fill('allow'), 'block', 'block']);
 });
 
 test('stdin round trip: draft and images reach the enhancer, never argv', async t => {
