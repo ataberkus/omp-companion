@@ -568,7 +568,7 @@
     // Mobile scrolls the chips sideways; browsers skip focus-scrolling for half-visible chips, so scroll them fully in.
     $('.bar-tools')?.addEventListener('focusin', e => e.target.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
     input.value = drafts.get(S.view) || '';
-    autosize(input);
+    fitComposer(input);
     railObserver.disconnect(); railObserver.observe($('#scroller')); railObserver.observe($('#thread'));
     ghostObserver.disconnect(); ghostObserver.observe(input);
     if (c.kind === 'native') loadPreview(c.file);
@@ -613,6 +613,12 @@
   class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
   const drafts = new Drafts();
   const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'; };
+  // Typing is not the only thing that changes how tall a draft is: re-fit the composer when its width changes (sidebar,
+  // side panels, rotation, shown again after being hidden) and when the window height changes the 40% cap.
+  const fitWidths = new WeakMap();
+  const fitObserver = new ResizeObserver(entries => { for (const e of entries) { const w = Math.round(e.contentRect.width); if (fitWidths.get(e.target) !== w) { fitWidths.set(e.target, w); autosize(e.target); } } });
+  const fitComposer = el => { autosize(el); fitObserver.disconnect(); fitObserver.observe(el); };
+  addEventListener('resize', () => { for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); });
 
   const previewLoading = new Set();
   async function loadPreview(file) {
@@ -4184,6 +4190,7 @@
       <div id="homeRecent">${homeRecentHtml()}</div>`;
     // Late /browse or /models results re-render home: keep the typed path, the prompt's focus and its caret.
     keepFocus(el, () => { el.innerHTML = html; });
+    const prompt = $('#homePrompt'); if (prompt) fitComposer(prompt);
     renderAttachments();
     renderSlash();
     if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
@@ -4896,7 +4903,7 @@
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
     else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
-    else if (t.id === 'homePrompt') { S.home.prompt = t.value; S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
+    else if (t.id === 'homePrompt') { S.home.prompt = t.value; autosize(t); S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
     else if (t.id === 'swInput') { $('#modal')._switcher.hi = 0; renderSwitcher(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
