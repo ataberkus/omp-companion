@@ -558,10 +558,11 @@ const cliCatalog=()=>Object.fromEntries(Object.entries(CLI_TOOLS).map(([id,t])=>
 // Enhance prompt: a one-shot read-only `omp -p` that rewrites a composer draft.
 // `enhance` role (model[:thinking], set in Settings) wins; otherwise the composer's model at the Settings reasoning level
 // (default low) so an xhigh session doesn't make every enhance slow.
-function enhanceModel(roles,selector,thinking='low'){
+// Without an `enhance` role the enhancer runs on the composer's model at the composer's reasoning level (none: OMP's default).
+function enhanceModel(roles,selector,thinking=''){
  if(roles?.enhance)return {model:'@enhance',thinking:null,label:roles.enhance};
- if(selector)return {model:selector,thinking,label:selector};
- return {model:null,thinking,label:roles?.default||'OMP default'};
+ if(selector)return {model:selector,thinking:thinking||null,label:selector};
+ return {model:null,thinking:thinking||null,label:roles?.default||'OMP default'};
 }
 // The draft never goes in argv (stdin only): no quoting hazards and no Windows 32K command-line limit.
 // --system-prompt replaces OMP's coding-agent prompt; the guard extension (-e loads even under --no-extensions) confines
@@ -1068,8 +1069,8 @@ export async function createCompanion(options={}){
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
  // Sidebar keys the user pinned to the top; a key is never both pinned and archived.
  store.pinned=Array.isArray(store.pinned)?store.pinned.filter(k=>typeof k==='string'&&!store.archived.includes(k)):[];
- // Enhance reasoning level when no `enhance` role is set (Settings page); the role carries its own level.
- if(!THINKING.includes(store.enhanceThinking))store.enhanceThinking='low';
+ // Enhance follows the composer's reasoning level now; drop the old Settings-page level.
+ delete store.enhanceThinking;
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
  store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
  // Composer drafts per dashboard view ('session:<id>' or 'native:<file>'), shared by every device using this companion.
@@ -2268,8 +2269,9 @@ async function spend(sync){
   const cwd=s?s.cwd:await resolveDir(body.path);
   const images=chatImages(body);
   if([...enhanceJobs.values()].filter(j=>j.status==='running').length>=3)throw error('Wait for the running enhance to finish.',409);
-  const selector=s?(s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'')):modelChoice(body).selector;
-  const pick=enhanceModel((await modelRoles()).roles,selector,store.enhanceThinking);
+  const choice=s?null:modelChoice(body);
+  const selector=s?(s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'')):choice.selector;
+  const pick=enhanceModel((await modelRoles()).roles,selector,s?(s.thinking||s.thinkingChoice||''):choice.thinking);
   const id=randomUUID(),dir=path.join(dataDir,'enhance',id);
   const files=[];
   if(images.length){await fs.mkdir(dir,{recursive:true,mode:0o700});for(const [i,img] of images.entries()){const f=path.join(dir,`image-${i+1}.${IMAGE_EXT[img.mimeType]||'png'}`);await fs.writeFile(f,Buffer.from(img.data,'base64'),{mode:0o600});files.push(f);}}
@@ -2607,7 +2609,6 @@ async function spend(sync){
    if(url.pathname==='/api/cli'){json(await runCli(body),202);return;}
    if(url.pathname==='/api/cli/stop'){const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;child.kill();}json(job);return;}
    if(url.pathname==='/api/enhance'){json(await startEnhance(body),202);return;}
-   if(url.pathname==='/api/enhance/settings'){if(!THINKING.includes(body.thinking))throw error('Unknown reasoning level.');store.enhanceThinking=body.thinking;await persist([]);json({thinking:store.enhanceThinking});return;}
    // The label is OMP's own account label from GET /api/accounts; OMP matches it when the next prompt pins the session.
    if(url.pathname==='/api/accounts'){const provider=text(body.provider,'Provider',100),account=text(body.account,'Account',300);if(/[\r\n]/.test(account))throw error('Invalid account.');store.accountChoices[provider]=account;await persist([]);json({provider,account});return;}
    if(url.pathname==='/api/terminal'){const dir=await resolveDir(body.path);await openTerminal(dir);json({path:dir});return;}

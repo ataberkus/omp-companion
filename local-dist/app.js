@@ -3907,22 +3907,22 @@
     renderSettings(); toast('Saved hotkeys');
   }
   // ✨ Enhance: the model is OMP's `enhance` role (same entry as the Model roles row, picked with its own level);
-  // without one it follows the composer's model at the dashboard-saved reasoning level.
+  // without one it follows the composer's model and reasoning level.
   function enhanceSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (q.length && !q.every(w => 'enhance prompt enhancer model reasoning thinking level'.includes(w))) return '';
-    const roles = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = roles?.value?.enhance || '', th = S.store?.enhanceThinking || 'low';
-    if (S.set.changed && !role && th === 'low') return '';
+    const roles = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = roles?.value?.enhance || '';
+    if (S.set.changed && !role) return '';
     const r = splitSel(role), label = role ? modelLabel(r.sel, r.thinking) || role : "Composer's model";
     const levels = S.models?.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
     // With a role, the row edits the role's `:level` suffix; no suffix means OMP's default level (shown, not offered).
-    const lv = role ? r.thinking : th, mod = !role && th !== 'low';
-    const opts = role && !lv ? [['', 'OMP default'], ...levels.map(l => [l, l])] : (levels.includes(lv) ? levels : [lv, ...levels]).map(l => [l, l]);
+    const lv = r.thinking;
+    const opts = !lv ? [['', 'OMP default'], ...levels.map(l => [l, l])] : (levels.includes(lv) ? levels : [lv, ...levels]).map(l => [l, l]);
     return `<section class="set-group" id="sg-enhance"><h2>✨ Enhance <small>prompt enhancer</small></h2>
       <div class="set-row ${role ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-model-name">Model${role ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Composer's model: the model of the session (or New session) you enhance in. A picked model is saved as OMP's <code>enhance</code> model role, together with its reasoning level.</div></div>
         <div class="set-ctl">${roles ? `<button class="model-chip" data-mmkey="modelRoles" data-mmname="enhance" title="${esc(role || "Composer's model")}" aria-label="Enhance model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>${role ? `<button class="btn sm ghost" data-mmdel="modelRoles" data-mmname="enhance">Use composer's model</button>` : ''}` : '<span class="muted">Needs OMP settings</span>'}</div></div>
-      <div class="set-row ${mod ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level${mod ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${role ? `Saved with the <code>enhance</code> model role${lv ? '' : '. None set: OMP\'s default level applies, which may be slow. Pick one'}.` : "Applied to the composer's model for enhancing only. Saved by the dashboard."}</div>${mod ? '<div class="set-def">Default: <code>low</code></div>' : ''}</div>
-        <div class="set-ctl"><select data-enhthinking aria-labelledby="enh-think-name">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === lv ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div></section>`;
+      <div class="set-row"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level</div><div class="set-desc">${role ? `Saved with the <code>enhance</code> model role${lv ? '' : '. None set: OMP\'s default level applies, which may be slow. Pick one'}.` : "The composer's reasoning level: the level picked for the session (or New session) you enhance in."}</div></div>
+        <div class="set-ctl">${role ? `<select data-enhthinking aria-labelledby="enh-think-name">${opts.map(([v, t]) => `<option value="${esc(v)}" ${v === lv ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : '<span class="muted">Composer\'s level</span>'}</div></div></section>`;
   }
   // Notifications (this browser's permission) and the editor "Open in editor" uses (saved by the companion).
   const EDITOR_LABELS = [['auto', 'Automatic (first found: VS Code, Cursor, Windsurf)'], ['vscode', 'VS Code'], ['vscode-insiders', 'VS Code Insiders'], ['cursor', 'Cursor'], ['windsurf', 'Windsurf'], ['reveal', 'Show in folder']];
@@ -3944,12 +3944,9 @@
     catch (e) { toast(e.message, 'err'); }
     if (current().kind === 'settings') renderSettings();
   }
-  async function saveEnhanceThinking(thinking) {
+  function saveEnhanceThinking(thinking) {
     const x = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = x?.value?.enhance;
-    if (role) { if (thinking) saveSetting('modelRoles', { ...x.value, enhance: splitSel(role).sel + ':' + thinking }); return; }
-    try { await api('/enhance/settings', { thinking }); if (S.store) S.store.enhanceThinking = thinking; toast('Saved enhance reasoning level'); }
-    catch (e) { toast(e.message, 'err'); }
-    if (current().kind === 'settings') renderSettings();
+    if (role && thinking) saveSetting('modelRoles', { ...x.value, enhance: splitSel(role).sel + ':' + thinking });
   }
   function settingRow(x) {
     const id = setId(x.key), long = x.description?.length > 220, open = S.set.descOpen.has(x.key);

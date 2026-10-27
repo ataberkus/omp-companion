@@ -54,7 +54,7 @@ Follows the existing CLI-job pattern (`runCli`, `cliJobs`, `cliProcs`).
 ### Model resolution
 
 1. If `modelRoles.enhance` is set (read through the cached `listModels()` roles), use `--model=@enhance`. The role's own `:thinking` suffix applies.
-2. Otherwise use the session's model selector (or `model` from the client on the history view) with `--thinking=low`. This keeps an Opus-xhigh composer from making every enhance take minutes.
+2. Otherwise use the session's model selector (or `model` from the client on the history view) at the composer's reasoning level (the session's level, or `thinking` from the client), passed as `--thinking`. With no level picked, no `--thinking` is passed and OMP's default level applies. An xhigh composer makes enhances slower; set an `enhance` role to keep them fast.
 3. If there is no model at all (OMP default), pass nothing: OMP uses its own default role.
 
 The response and `GET` report the model actually used, for the status line.
@@ -304,7 +304,7 @@ A session created by Enhance is a **draft session** until its first message goes
   - Leaving a draft session for New session or another session sends `discard`; leaving for Settings does not; a session that has sent a message is never discarded (server no-op).
   - Leaving a draft session while its Send (or `!cmd`) request is still pending sends no `discard`. If that request then fails, `discard` is sent once it settles.
   - Server (with a fake `omp` via the existing `ompCommand` option): a `prompt` and a `discard` sent back to back for a draft session leave the session in the store with its message, and a lone `discard` removes it only after the fake process has exited.
-  - Server: model resolution order (`@enhance` → session model with `--thinking=low` → none) and the argument list never contains the draft text. Tested by exporting the argument builder for unit use.
+  - Server: model resolution order (`@enhance` → session model at the session's reasoning level → none) and the argument list never contains the draft text. Tested by exporting the argument builder for unit use.
   - Server: the lookup guard allows in-repo read/grep/glob and blocks `..`, absolute, `~`, `scheme:` and `.env` paths, other tools and the 7th lookup; the overlay turns every discovery provider off; quoted `<draft>`/`<conversation>` tags cannot break out of the request.
 
 ## Out of scope

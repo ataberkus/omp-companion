@@ -94,10 +94,10 @@ test('enhance model resolution order', () => {
   const { enhanceModel } = internals;
   assert.deepEqual(enhanceModel({ enhance: 'x/y:low', default: 'a/b' }, 'p/m'), { model: '@enhance', thinking: null, label: 'x/y:low' });
   assert.deepEqual(enhanceModel({ enhance: 'x/y:low' }, 'p/m', 'high'), { model: '@enhance', thinking: null, label: 'x/y:low' });
-  assert.deepEqual(enhanceModel({ default: 'a/b' }, 'p/m'), { model: 'p/m', thinking: 'low', label: 'p/m' });
+  assert.deepEqual(enhanceModel({ default: 'a/b' }, 'p/m'), { model: 'p/m', thinking: null, label: 'p/m' });
   assert.deepEqual(enhanceModel({ default: 'a/b' }, 'p/m', 'high'), { model: 'p/m', thinking: 'high', label: 'p/m' });
   assert.deepEqual(enhanceModel({ default: 'a/b' }, '', 'medium'), { model: null, thinking: 'medium', label: 'a/b' });
-  assert.deepEqual(enhanceModel({}, ''), { model: null, thinking: 'low', label: 'OMP default' });
+  assert.deepEqual(enhanceModel({}, ''), { model: null, thinking: null, label: 'OMP default' });
 });
 
 test('enhancer argv is fixed, read-only, and never carries the draft', () => {
@@ -268,16 +268,16 @@ test('a configured enhance role is used and reported', async t => {
   assert.ok(argv.includes('--model=@enhance') && !argv.some(a => a.startsWith('--thinking')));
 });
 
-test('the Settings reasoning level reaches the enhancer and survives a restart', async t => {
-  const { dir, call, settle, restart } = await boot(t);
-  assert.equal((await call('/enhance/settings', { thinking: 'nope' })).status, 400);
-  assert.deepEqual((await call('/enhance/settings', { thinking: 'high' })).body, { thinking: 'high' });
-  await restart();
-  assert.equal((await call('/state')).body.enhanceThinking, 'high');
-  const { body } = await call('/enhance', { session: 'session', text: 'go' });
-  await settle(body.id);
-  const argv = JSON.parse(await readFile(join(dir, 'argv.json'), 'utf8'));
-  assert.ok(argv.includes('--thinking=high') && !argv.some(a => a.startsWith('--model')));
+test("the composer's reasoning level reaches the enhancer; none set means OMP's default", async t => {
+  const { dir, call, settle } = await boot(t, { session: { thinking: 'high' } });
+  const argv = async req => { const { body } = await call('/enhance', req); await settle(body.id); return JSON.parse(await readFile(join(dir, 'argv.json'), 'utf8')); };
+  const a = await argv({ session: 'session', text: 'go' });
+  assert.ok(a.includes('--thinking=high') && !a.some(x => x.startsWith('--model')));
+  const b = await argv({ path: dir, model: 'p/m', thinking: 'xhigh', text: 'go' });
+  assert.ok(b.includes('--model=p/m') && b.includes('--thinking=xhigh'));
+  const c = await argv({ path: dir, model: 'p/m', text: 'go' });
+  assert.ok(c.includes('--model=p/m') && !c.some(x => x.startsWith('--thinking')));
+  assert.equal((await call('/state')).body.enhanceThinking, undefined);
 });
 
 test('discard sent while the first prompt holds the lock keeps the session', async t => {
