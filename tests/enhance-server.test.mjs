@@ -98,6 +98,10 @@ test('enhance model resolution order', () => {
   assert.deepEqual(enhanceModel({ default: 'a/b' }, 'p/m', 'high'), { model: 'p/m', thinking: 'high', label: 'p/m' });
   assert.deepEqual(enhanceModel({ default: 'a/b' }, '', 'medium'), { model: null, thinking: 'medium', label: 'a/b' });
   assert.deepEqual(enhanceModel({}, ''), { model: null, thinking: null, label: 'OMP default' });
+  // A listed role model is used; an exact provider/id missing from the cached list falls back; patterns/aliases go to OMP.
+  assert.equal(enhanceModel({ enhance: 'x/y:low' }, 'p/m', '', ['x/y']).model, '@enhance');
+  assert.deepEqual(enhanceModel({ enhance: 'x/y:low' }, 'p/m', 'high', ['p/m']), { model: 'p/m', thinking: 'high', label: 'p/m' });
+  assert.equal(enhanceModel({ enhance: 'sonnet' }, 'p/m', '', ['p/m']).model, '@enhance');
 });
 
 test('enhancer argv is fixed, read-only, and never carries the draft', () => {
