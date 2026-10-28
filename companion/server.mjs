@@ -1017,7 +1017,8 @@ export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10
  const sdk=await Promise.race([sync,new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,deadline-Date.now()),null);})]).finally(()=>clearTimeout(timer));
  if(sdk){if(sdk.output)log(sdk.output);}
  else{late=true;log('Installing the matching OMP SDK continues in the background; sessions use it from the next start.');sync.then(r=>r.output&&log(r.output));}
- return result;
+ // sdkLate: a caller that can restart does so once it resolves installed (sessions loaded the older SDK meanwhile).
+ return late?{...result,sdkLate:sync}:result;
 }
 // Leaves an already-current file untouched (opening it for write can fail with EPERM on Windows, e.g. under a
 // restricted token); otherwise replaces it atomically so it is never missing or half-written. Errors propagate:
@@ -1905,7 +1906,8 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   const result=await updateOmp(ompEntry,{cwd:dataDir});
   // `omp update` replaced only the CLI: install the matching SDK for sessions, which load OMP once per companion start.
   const sdk=result.status==='done'&&!ompSource?await syncOmpSdk({entry:ompEntry,dataDir}):null;
-  const note=sdk?.status==='installed'?`${sdk.output} Restart the companion to run new sessions on it.`:sdk?.status==='error'?sdk.output:'';
+  if(sdk?.status==='installed')restartWhenIdle();
+  const note=sdk?.status==='installed'?`${sdk.output} ${canRestart?'The companion restarts by itself once no session is working.':'Restart the companion to run new sessions on it.'}`:sdk?.status==='error'?sdk.output:'';
   updateState={...result,output:cleanUpdateOutput(result.output,note),startedAt,finishedAt:now()};
   if(result.status==='done'){modelCache=undefined;configDefaults=undefined;}
  }
@@ -2378,7 +2380,7 @@ async function spend(sync){
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
  let refreshBusy=false;
  // Refreshed state (todos, context use, model) is saved lazily; a status change it causes (settle) saves on its own.
- const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{const live=[...runners].filter(([,r])=>r.alive).map(([id,r])=>[store.sessions.find(s=>s.id===id),r]).filter(([s])=>s);await Promise.all(live.map(([s,r])=>refresh(s,r)));scheduleSave(live.map(([s])=>s),true);}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();},4000);refreshTimer.unref();
+ const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{const live=[...runners].filter(([,r])=>r.alive).map(([id,r])=>[store.sessions.find(s=>s.id===id),r]).filter(([s])=>s);await Promise.all(live.map(([s,r])=>refresh(s,r)));scheduleSave(live.map(([s])=>s),true);}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
  // Fill the account cache shortly after startup, so the first Choose provider accounts… opens instantly.
  const accountTimer=setTimeout(()=>refreshAccounts().catch(()=>{}),1000);accountTimer.unref();
  // The page's own host as a ws: source too: older Safari doesn't count ws: under 'self' (the Screen page's WebSocket).
@@ -2748,6 +2750,14 @@ async function spend(sync){
   autoShutdown.firing=true;
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
+ // A newly installed OMP SDK loads only in a new process: restart (start.bat's loop) once no work is running, so nothing is cut off.
+ let restartPending=false;
+ function restartWhenIdle(){if(canRestart){restartPending=true;checkAutoRestart();}}
+ function checkAutoRestart(){
+  if(!restartPending||autoShutdown.firing||closing||pausing||locks.size||launches.size||workPending())return;
+  restartPending=false;console.log('Restarting the companion to run the updated OMP.');
+  void (async()=>{await pauseSessions();const relaunch=await options.restart();await relaunch?.();})().catch(e=>console.error('Automatic restart failed:',e.message));
+ }
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
  const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));await sessionStops;await Promise.all(probeStops);await enhanceStops;await branchRun;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
@@ -2756,7 +2766,7 @@ async function spend(sync){
  for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
 // closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
-await persist();return {server,serve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
+await persist();return {server,serve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
 const mainEntry=process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url);
 // Sessions run OMP's SDK, which needs Bun: started by Node, the companion runs itself under Bun with the same arguments
@@ -2778,7 +2788,7 @@ if(mainEntry&&process.versions.bun){
  let handoff=null;
  if(restartExit){handoff=restartHandoff(await fs.readFile(handoffFile,'utf8').catch(()=>''),Date.now());await fs.rm(handoffFile,{force:true});}
  // A restart skips the OMP update check (Settings has one-click omp update) and keeps the token, so open panels reconnect.
- if(!handoff)await startupUpdate();
+ const update=handoff?null:await startupUpdate();
  const app=await createCompanion({
   ...(handoff?.token&&!process.env.OMP_WEB_PASSWORD?{token:handoff.token}:{}),
   ...(restartExit?{restart:async()=>{
@@ -2791,6 +2801,7 @@ if(mainEntry&&process.versions.bun){
   // Remote control should never be silent on the PC itself.
   onScreen:v=>console.log(v?`Screen: ${v.address} is now viewing and controlling this PC.`:'Screen: the viewer disconnected.'),
  });
+ update?.sdkLate?.then(r=>r.status==='installed'&&app.restartWhenIdle());
  app.server.listen(port,host,async()=>{
   // The token travels in the URL fragment, which browsers never send to the server or in Referer headers. A password is never printed.
   const frag=process.env.OMP_WEB_NO_TOKEN==='1'||app.password?'':`#token=${app.token}`;

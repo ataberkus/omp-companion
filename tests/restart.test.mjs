@@ -69,3 +69,16 @@ test('without a launcher that starts it again, Restart companion is refused and 
   assert.equal(code, 409);
   assert.match(body.error, /start\.bat/);
 });
+
+test('after an OMP update the companion restarts by itself, but only once no session is working', async t => {
+  const events = [];
+  const c = await start(t, () => ({ restart: async () => { events.push('prepare'); return async () => { events.push('relaunch'); }; } }));
+  const s = c.app.store.sessions.find(x => x.id === 'run');
+  s.status = 'running';
+  c.app.restartWhenIdle();
+  await new Promise(r => setTimeout(r, 100));
+  assert.deepEqual(events, [], 'a running session holds the restart');
+  s.status = 'review';
+  await new Promise(r => setTimeout(r, 4500)); // the 4 s background refresh re-checks
+  assert.deepEqual(events, ['prepare', 'relaunch']);
+});
