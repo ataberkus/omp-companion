@@ -1526,8 +1526,15 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   const byTime=new Map();for(const e of entries){const p=entryPrompt(e),t=e.message?.timestamp;if(p&&typeof t==='number')byTime.set(t,byTime.has(t)?null:p.entryId);}
   for(const m of s.messages)if(m.ompAt){const id=byTime.get(m.ompAt);if(id)m.entryId=id;delete m.ompAt;}
  }
- // branch and handoff move OMP to a new session file; show that transcript instead of the old one.
- async function reload(s,runner){await refresh(s,runner);if(s.sessionFile)s.messages=await importMessages(s.sessionFile,400,stashImages).catch(()=>s.messages);delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
+ // branch and handoff move OMP to a new session file; show that transcript instead of the old one. The file comes from
+ // get_state directly: refresh() swallows errors, and re-importing the old file would keep the replaced thread on screen.
+ async function reload(s,runner){
+  const file=(await runner.state().catch(e=>{throw error(`OMP switched sessions but could not report its new session file: ${e.message}`);}))?.sessionFile;
+  if(!file)throw error('OMP switched sessions but did not report its new session file.');
+  s.sessionFile=file;await refresh(s,runner);
+  // OMP writes a new session's file lazily (after its first reply): none yet is an empty transcript.
+  s.messages=await importMessages(file,400,stashImages).catch(e=>{if(e.code==='ENOENT')return [];throw error(`Could not read OMP's new session file: ${e.message}`);});
+  delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  // `omp usage` for every logged-in provider (session's first), parsed once for both the /usage chat snapshot and GET /api/usage.
  async function providerUsage(s){
   const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');

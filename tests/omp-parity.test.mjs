@@ -48,16 +48,16 @@ async function fixture(t) {
   await mkdir(join(nativeDir, 'proj'), { recursive: true });
   const other = join(nativeDir, 'proj', 'other.jsonl');
   await writeFile(other, [{ type: 'session', id: 'other', cwd: dir }, { type: 'title', title: 'Other work' }].map(l => JSON.stringify(l)).join('\n') + '\n');
-  let todos = [], model = 'a';
+  let todos = [], model = 'a', sessionFile = join(nativeDir, 'proj', 'first.jsonl');
   const omp = fakeOmp({
-    state: () => ({ model: { provider: 'test', id: model }, thinkingLevel: 'low', todoPhases: todos, isSettled: true }),
+    state: () => ({ model: { provider: 'test', id: model }, thinkingLevel: 'low', todoPhases: todos, isSettled: true, sessionFile }),
     tree: () => ({ leafId: 'a', tree: [{ entry: { id: 'u', type: 'message', message: { role: 'user', content: 'hello' } }, children: [{ entry: { id: 'a', parentId: 'u', type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }, children: [] }] }] }),
     lastAssistantText: () => ({ text: 'last words' }),
     setTodos(phases) { todos = phases; return { todoPhases: todos }; },
     cycleModel() { model = 'b'; return { model: { provider: 'test', id: model }, thinkingLevel: 'high', isScoped: true }; },
     cycleThinking: () => null,
-    newSession() { todos = []; return { cancelled: false }; },
-    switchSession() { todos = []; return { cancelled: false }; },
+    newSession() { todos = []; sessionFile = join(nativeDir, 'proj', 'fresh.jsonl'); return { cancelled: false }; },
+    switchSession(path) { todos = []; sessionFile = path; return { cancelled: false }; },
     prompt() { this.emit({ type: 'agent_start' }); return {}; },
     interrupt() { this.emit({ type: 'agent_start' }); return {}; },
   });
@@ -96,6 +96,7 @@ test('session RPC parity: tree, last reply, todos, cycling, new and switched ses
   const [status, switched] = await f.command({ type: 'switch_session', file: f.other });
   assert.equal(status, 200);
   assert.equal(switched.title, 'Other work');
+  assert.equal(f.session().sessionFile, f.other);
   assert.ok(f.omp.sent('newSession').length > 0);
   assert.ok(f.omp.sent('switchSession').some(([path]) => path === f.other));
 });

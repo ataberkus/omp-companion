@@ -65,6 +65,56 @@ for (const type of ['edit_last', 'regenerate']) {
   });
 }
 
+// Runs a companion on one session whose OMP moves from original.jsonl to branched.jsonl on branch; `state` sees the file.
+async function rewindApp(t, state) {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-rewind-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const original = join(dir, 'original.jsonl'), branched = join(dir, 'branched.jsonl');
+  await writeFile(original, entries.slice(0, 6).map(e => JSON.stringify(e)).join('\n') + '\n');
+  await writeFile(branched, [entries[0], entries[1]].map(e => JSON.stringify(e)).join('\n') + '\n');
+  const omp = fakeOmp(() => {
+    let file = original;
+    return {
+      state: () => state(file === branched, file),
+      entries: () => ({ entries, leafId: 'a3' }),
+      branch() { file = branched; return { text: 'second', cancelled: false }; },
+      prompt: () => ({ agentInvoked: false }),
+    };
+  });
+  const now = new Date().toISOString();
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', branch: 'main' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'review', cwd: dir, model: 'OMP default', native: false, sessionFile: original, messages: [], todos: [], createdAt: now, updatedAt: now }], activity: [] }));
+  app = await createCompanion({ dataDir: dir, ompSessionsDir: join(dir, 'native'), omp });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const post = async body => { const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/session/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return { status: res.status, body: await res.json() }; };
+  return { app, omp, post, original, branched };
+}
+
+test('edit_last then send replaces the last prompt: the thread is the rewound one plus only the edited prompt', async t => {
+  const { app, omp, post, branched } = await rewindApp(t, (_, sessionFile) => ({ todoPhases: [], sessionFile }));
+  const edit = await post({ type: 'edit_last' });
+  assert.equal(edit.status, 200, edit.body.error);
+  const sent = await post({ type: 'prompt', message: 'second, edited' });
+  assert.equal(sent.status, 200, sent.body.error);
+  const s = app.store.sessions[0];
+  assert.equal(s.sessionFile, branched);
+  assert.deepEqual(omp.sent('prompt').map(([p]) => p.message), ['second, edited']);
+  const thread = s.messages.filter(m => m.role !== 'system').map(m => m.text);
+  for (const old of ['second', 'two', 'advisor note', 'three']) assert.ok(!thread.includes(old), `${old} is gone`);
+  assert.deepEqual(thread, ['first', 'one', 'second, edited']);
+});
+
+// OMP 18.13 broke get_state for the companion; background refresh swallowed it, so the rewind re-read the old file and
+// the edited prompt was sent after the old one.
+test('edit_last reports a session file OMP cannot report instead of keeping the old thread', async t => {
+  const { app, post, original } = await rewindApp(t, moved => { if (moved) throw new Error('isRpcSessionSettled is not a function'); return { todoPhases: [], sessionFile: original }; });
+  const edit = await post({ type: 'edit_last' });
+  assert.notEqual(edit.status, 200);
+  assert.match(edit.body.error, /new session file: isRpcSessionSettled is not a function/);
+  assert.ok(!app.store.sessions[0].messages.some(m => m.text === 'two'), 'the old thread is not re-imported as the rewound one');
+});
+
 test('a prompt typed in the panel learns its OMP entry ID from the echoed timestamp, not its text', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-bind-'));
   let app;

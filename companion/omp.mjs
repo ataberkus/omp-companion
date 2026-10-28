@@ -44,13 +44,15 @@ async function loadRuntime(src) {
  const optional = rel => existsSync(path.join(src, rel)) ? at(rel) : null;
  const pkg = spec => import(pathToFileURL(Bun.resolveSync(spec, src)).href);
  const names = Object.keys(RUNTIME_FILES);
- const [modules, oauth, tuiTheme, words, forkPlan, goalSlash, mcpReauth] = await Promise.all([
+ const [modules, oauth, tuiTheme, words, forkPlan, goalSlash, mcpReauth, sessionSettle] = await Promise.all([
   Promise.all(names.map(name => at(RUNTIME_FILES[name]))),
   pkg('@oh-my-pi/pi-ai/oauth'), pkg('@oh-my-pi/pi-tui/theme'), pkg('@oh-my-pi/pi-tui/prompt/word-completion'),
   // Plan-mode and /goal hosting ship only in some OMP builds; state() reports plan mode only when it does.
   optional('modes/rpc/rpc-plan-mode.ts'), optional('modes/rpc/rpc-goal-slash.ts'),
   // OMP 18.12.6+: `/mcp reauth` reconnects the server in the running session.
   optional('mcp/oauth-reauth.ts'),
+  // OMP 18.13+ moved rpc-session-settle's isRpcSessionSettled here as isSessionSettled.
+  optional('session/session-settle.ts'),
  ]);
  const m = Object.fromEntries(names.map((name, i) => [name, modules[i]]));
  // Builds without OMP's RPC plan mode get the companion's (plan-host.mjs); without its pieces plan mode stays unsupported.
@@ -78,7 +80,9 @@ async function loadRuntime(src) {
  // Settings › MCP servers: OMP's MCP config modules, loaded on first use so a build that moved them still runs sessions.
  let mcp;
  const mcpConfig = () => mcp ??= loadMcpConfig({ at, pkg, settings }).catch(e => { mcp = undefined; throw e; });
- return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
+ const isSettled = m.settle.isRpcSessionSettled ?? sessionSettle?.isSessionSettled;
+ if (!isSettled) throw new Error(`This OMP build has no session settle check (${src}). Update the companion.`);
+ return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, isSettled, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
 }
 
 // The companion's /goal host for OMP builds without modes/rpc/rpc-goal-slash.ts. Without the pieces it needs, /goal stays
@@ -575,7 +579,7 @@ class OmpSession {
     steeringMode: s.steeringMode, followUpMode: s.followUpMode, interruptMode: s.interruptMode,
     sessionFile: s.sessionFile, sessionId: s.sessionId, sessionName: s.sessionName, autoCompactionEnabled: s.autoCompactionEnabled,
     queuedMessageCount: s.queuedMessageCount, hasPendingAsyncWork: s.hasPendingAsyncWork(),
-    isSettled: this.#rt.settle.isRpcSessionSettled(s, this.#scheduled),
+    isSettled: this.#rt.isSettled(s, this.#scheduled),
     queuedMessages: { steering: [...q.steering], followUp: [...q.followUp], liveSteered: q.liveSteered },
     todoPhases: s.getTodoPhases(), fastModeEnabled: s.isFastModeEnabled(), fastModeActive: s.isFastModeActive(),
     tokensPerSecond: this.#rt.tokenRate.calculateTokensPerSecond(s.messages, s.isStreaming),
