@@ -148,14 +148,17 @@ function runAgent(cwd, input, cfg) {
 // ---------- blind outcome judge ----------
 const JUDGE_SYSTEM = `You review the result of a coding agent's work for a user. You get the user's own draft request (and the earlier conversation it refers to), an expert's note on what the request means, the diff the agent produced, the repository's test results before and after, hidden acceptance checks run afterwards, and the agent's final message. You do not see the prompt the agent was given. Judge only the outcome against what the user wanted.
 Reply with ONLY one JSON object, no prose and no code fence:
-{"complete":2|1|0,"missing":[],"extra":[],"broken":[],"works":true|false|null,"quality":1-5,"notes":"one sentence"}
-- complete: 2 = every ask in the request is done, correctly and in every place it applies; 1 = partly done or done with a mistake; 0 = not done, or a different change.
-- missing: short phrases for each ask that is not done, done wrong, or done in only some of the places it applies.
-- extra: short phrases for each change the user did not ask for and the request does not need (a test for the requested change is fine unless the user excluded tests; edits to things the user said to leave alone count here; so does restructuring code just to test it: extracting or exporting internals, adding interfaces, injection or virtual members). Leave out what the change itself needs (imports, a helper the change uses, the test's own setup).
-- broken: short phrases for each thing that now fails or behaves differently when it should not (tests that passed before and fail now, build errors, changed behaviour outside the request). Tests that already failed before the change, for reasons the request does not cover, count against nothing.
+{"complete":2|1|0,"missing":[],"extra":[],"violated":[],"broken":[],"works":true|false|null,"quality":1-5,"notes":"one sentence"}
+The user wants a senior architect's delivery: the request done completely and working on the first try, including everything a complete solution needs that they did not say. Extra work is fine as long as it breaks nothing and keeps their limits.
+- needed: what a complete, working delivery of the request needs even when the user did not say it: the edge cases and failure paths the requested behaviour runs into, every place the same logic applies (overloads, other callers, the client side of a server rule the user sees), integration with the modules and flows it touches, setup and cleanup of what it adds, a test for the new or fixed behaviour when the repo already has tests (unless the user excluded tests), and docs that describe the changed behaviour. Use the repository and the expert's note to decide.
+- complete: 2 = every ask in the request is done, correctly and in every place it applies, and nothing needed is missing; 1 = partly done, done with a mistake, or something needed is missing; 0 = not done, or a different change.
+- missing: short phrases for each ask, or needed piece, that is not done, done wrong, or done in only some of the places it applies.
+- extra: short phrases for work beyond the ask and what it needs (hardening, refactors, extra tests or features). This is information, not a fault.
+- violated: short phrases for each limit of the user's that the agent broke: edits to things the user said to leave alone or skip, a change the user excluded, or code changes when the user asked only a question, an explanation or a check.
+- broken: short phrases for each thing that now fails or behaves differently when it should not (tests that passed before and fail now, build errors, behaviour users see changed outside the request, such as amounts, limits or formats the user did not ask to change). Tests that already failed before the change, for reasons the request does not cover, count against nothing.
 - works: whether the requested behaviour works as far as the evidence shows (tests, hidden checks, reading the diff); null when no code change was asked for.
 - quality: would the user accept this as is, without asking for any fix? 5 = yes; 1 = unusable.
-For a question, an explanation or an investigation, the outcome is mostly the agent's final message: complete = it answers exactly what was asked, correctly and grounded in the actual code, in the language the user wrote in; any file change the user did not ask for is extra. When the request leaves it open whether to explain or to fix, either is complete if correct and the user's limits are kept.`;
+For a question, an explanation or an investigation, the outcome is mostly the agent's final message: complete = it answers exactly what was asked, correctly and grounded in the actual code, in the language the user wrote in; any file change the user did not ask for is violated. When the request leaves it open whether to explain or to fix, either is complete if correct and the user's limits are kept.`;
 function judgeInput(c, w) {
  const conv = (c.conversation || []).map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n\n');
  const diff = w.diff.length > 60000 ? w.diff.slice(0, 60000) + '\n[diff cut at 60000 chars]' : w.diff;
@@ -183,7 +186,7 @@ function verdict(w) {
  if (j.error) problems.push(`judge: ${j.error}`);
  else {
   if (j.complete !== 2) problems.push(`complete ${j.complete}/2${j.missing?.length ? `: ${j.missing.join('; ')}` : ''}`);
-  if (j.extra?.length) problems.push(`extra: ${j.extra.join('; ')}`);
+  if (j.violated?.length) problems.push(`violated: ${j.violated.join('; ')}`);
   if (j.broken?.length) problems.push(`broken: ${j.broken.join('; ')}`);
   if (j.works === false) problems.push('does not work');
  }
@@ -196,15 +199,15 @@ async function writeReport(outDir, data) {
   const xs = data.cases.flatMap(c => runsOf(data, v, c.id)), judged = xs.filter(x => x.judge && !x.judge.error);
   const mean = (a, f) => a.length ? a.reduce((s, x) => s + f(x), 0) / a.length : NaN;
   let better = 0, worse = 0; for (const c of data.cases) { const a = rate(v, c.id), b = rate(names[0], c.id); if (a == null || b == null) continue; if (a > b) better++; else if (a < b) worse++; }
-  return { v, runs: xs.length, better, worse, success: xs.filter(x => x.verdict.success).length, complete2: judged.filter(x => x.judge.complete === 2).length, extra: judged.filter(x => x.judge.extra?.length).length, broken: judged.filter(x => x.judge.broken?.length).length, hiddenFail: xs.filter(x => (x.checks || []).some(k => !k.pass)).length, testsBroke: xs.filter(x => x.suiteBefore?.code === 0 && x.suite && x.suite.code !== 0).length, quality: mean(judged, x => x.judge.quality), q5: judged.filter(x => x.judge.quality === 5).length, minutes: mean(xs, x => x.agent.ms / 60000), cost: xs.reduce((s, x) => s + x.agent.cost, 0) };
+  return { v, runs: xs.length, better, worse, success: xs.filter(x => x.verdict.success).length, complete2: judged.filter(x => x.judge.complete === 2).length, extra: judged.filter(x => x.judge.extra?.length).length, violated: judged.filter(x => x.judge.violated?.length).length, broken: judged.filter(x => x.judge.broken?.length).length, hiddenFail: xs.filter(x => (x.checks || []).some(k => !k.pass)).length, testsBroke: xs.filter(x => x.suiteBefore?.code === 0 && x.suite && x.suite.code !== 0).length, quality: mean(judged, x => x.judge.quality), q5: judged.filter(x => x.judge.quality === 5).length, minutes: mean(xs, x => x.agent.ms / 60000), cost: xs.reduce((s, x) => s + x.agent.cost, 0) };
  });
  const f1 = x => Number.isFinite(x) ? x.toFixed(1) : '–';
  const md = ['# Enhance outcome check', '', `${data.cases.length} drafts × ${data.samples || 1} run(s) · agent ${data.agentModel || 'default model'}${data.thinking ? ` · thinking ${data.thinking}` : ''} · ${data.ompVersion}`, '', `| | ${names.join(' | ')} |`, `|---|${names.map(() => '---').join('|')}|`];
  const line = (label, f) => md.push(`| ${label} | ${rows.map(f).join(' | ')} |`);
- line('**done right** (complete, nothing extra or broken, checks pass)', r => `**${r.success} / ${r.runs}**`);
+ line('**done right** (complete with what it needs, working, user limits kept, nothing broken, checks pass)', r => `**${r.success} / ${r.runs}**`);
  line(`drafts better / worse than ${names[0]} (done-right rate)`, r => r.v === names[0] ? '–' : `${r.better} / ${r.worse}`);
  line('every ask done (judge)', r => r.complete2);
- line('unasked changes / broken behaviour', r => `${r.extra} / ${r.broken}`);
+ line('limits violated / broken behaviour / extra work (allowed)', r => `${r.violated} / ${r.broken} / ${r.extra}`);
  line('hidden check failed / tests newly failing', r => `${r.hiddenFail} / ${r.testsBroke}`);
  line('outcome quality (mean / rated 5)', r => `${f1(r.quality)} / ${r.q5}`);
  line('agent minutes (mean) / agent cost', r => `${f1(r.minutes)} / $${r.cost.toFixed(2)}`);

@@ -4,7 +4,7 @@ Status: approved in chat 2026-10-10, pending written-spec review.
 
 ## Goal
 
-A **✨ Enhance** button in the composer rewrites the user's draft into a clearer, more specific prompt for the coding agent. It works like Augment Code's prompt enhancer: before rewriting, it reads the project and names the real files and symbols the draft refers to. The rewrite replaces the draft, and the user can undo it. Nothing is ever sent automatically.
+A **✨ Enhance** button in the composer rewrites the user's draft into a complete engineering specification for the coding agent, the way a senior architect would hand over a task: before rewriting, it reads the project, names the real files and symbols the draft refers to, and adds what a complete, working solution needs that the user did not say (edge cases, the other places the same logic runs, tests, the text and docs that describe the behaviour), each tied to code it read. The aim is that the agent delivers the request completely and working on the first try; extra work is acceptable, breaking something or overriding a limit the user set is not. The rewrite replaces the draft, and the user can undo it. Nothing is ever sent automatically.
 
 ## Decisions (from brainstorming)
 
@@ -216,6 +216,16 @@ The locked prompt still answered questions itself (suspected causes, line number
 | lean: mode-first, "add no constraint", self-check | 77 – 16 | 8 | 2 | 57 / 74 (6 drafts worse, 0 better) |
 
 The lean variants gave the shortest, most faithful rewrites, so the rewrite judge preferred them, but agents did worse after them: they dropped a test a chosen option included and missed cases of the requested change. Detail that names the cases to handle and the check to run is what makes agents deliver, so the shipped prompt keeps it and only stops the enhancer from answering questions or inventing names.
+
+The architect-style specification prompt above (`72371d7`, `1584333`) was measured afterwards against the goal it serves. Its outcome judge counts a run as done right when every ask and everything a complete solution needs is done and works (edge cases, every place the same logic applies, a test where the repo has tests, docs of the changed behaviour), nothing breaks and the user's limits hold (an excluded change, a "leave X alone", a question answered without edits); extra work beyond that is recorded but allowed. Same 37 drafts and 106 runs per prompt, OMP 18.13.3; apex-2 and apex-6 are left out of the rates because their hidden checks could not pass in that run (the repo's tests now need Bun, and apex-2's own test file fails on the untouched repo):
+
+| prompt | done right (100 runs) | limits broken | behaviour broken | runs with extra work | agent minutes |
+|---|---|---|---|---|---|
+| `7f20aeb` (lean, "nothing beyond the ask") | 83 | 0 | 1 | 51 | 136 |
+| **architect spec (shipped)** | **90** | 0 | 1 | 60 | 180 |
+| + "a complaint about a bad result is a bug report", "update the text, docs and mocks of the changed behaviour, match neighbouring conventions" | 88 | 0 | 5 | 73 | 253 |
+
+The shipped prompt did better than `7f20aeb` on 8 drafts and worse on 4 (sign-flip permutation p ≈ 0.06): agents now add the permanent test and the overloads a complete change needs, which the lean prompt's "nothing beyond the ask" left out. The third variant was rejected: it turned "the error is useless, can u look at it" into a real fix (3/4 versus 0/4) but tied with the shipped prompt overall (5 drafts better, 5 worse) and changed behaviour nobody asked to change (seeded random sequences, overdue counts, a notice users relied on). Known cost of the shipped prompt: that vague complaint still gets an investigation instead of the fix, and a few agents restructure code (an interface, `virtual` members, an exported helper) to make it testable.
 
 ### Stdin
 
