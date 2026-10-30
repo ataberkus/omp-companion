@@ -1850,5 +1850,278 @@
    "buildListView"
   ],
   "note": "Keep the skill:// reference; do not read it (outside the repo)."
+ },
+ {
+  "id": "QuantumNetLib-11",
+  "repo": "QuantumNetLib",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "add NextLong(long min, long max) to QRandom, same rules as Next(min, max)",
+  "keep": [
+   "NextLong(long min, long max)",
+   "QRandom",
+   "Next(min, max)"
+  ],
+  "refs": [
+   "QuantumNetLib/QRandom.cs",
+   "QRandom.Next",
+   "QRandom.GetRandom",
+   "QException"
+  ],
+  "note": "Complete: public long NextLong(long min, long max) on QRandom returning a value in [min, max) like Next(int, int): max < min throws QException code 20 with the same message, max == min returns min, seeded instances give the same sequence. Unsaid but needed for it to work: Next() yields only 31 bits (values 1..M-1, M = 2^31-1), so copying `Next() % range + min` never produces values above ~2^31 for wide ranges; several draws must be combined (or equivalent) so NextLong(0, 1L << 40) covers the whole range. max - min overflows long for ranges wider than long.MaxValue (NextLong(long.MinValue, long.MaxValue)); Next(int, int) already widens to long for the same reason, so compute the width unsigned/wider. QRandom mirrors every Next* overload with a GetRandom alias (GetRandom(int,int)/(float,float)/(double,double)), so add public long GetRandom(long min, long max) => NextLong(min, max); without it GetRandom(5L, 10L) silently binds to the float overload. Must NOT change Next(), Next(int, int), NextFloat/NextDouble, their seeded outputs, or existing QException codes. A test is welcome. Extra (not wanted): parameterless NextLong(), NextULong, a different generator."
+ },
+ {
+  "id": "QuantumNetLib-12",
+  "repo": "QuantumNetLib",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "Vector<T> needs a Resize(int newSize) like std::vector::resize",
+  "keep": [
+   "Vector<T>",
+   "Resize(int newSize)",
+   "std::vector::resize"
+  ],
+  "refs": [
+   "QuantumNetLib/Vector.cs",
+   "Vector.EnsureCapacity",
+   "Vector.PopBack",
+   "Vector.Clear",
+   "Vector.Erase",
+   "QException"
+  ],
+  "note": "Complete: public void Resize(int newSize) on Vector<T>: shrinking drops the tail, growing keeps the existing elements and appends default(T) items, growing past Capacity goes through EnsureCapacity. Unsaid but needed: the backing array keeps spare capacity and the class keeps unused slots at default(T) (PopBack, Erase and Clear reset them), so shrinking must clear the dropped slots (Array.Clear) or growing must overwrite them; just setting Size makes Resize(1) then Resize(3) on {1, 2, 3} return {1, 2, 3} instead of {1, 0, 0} (and keeps dropped references alive). A negative size throws a QException (the capacity constructor uses code 3 for 'must be non-negative') and leaves the vector unchanged, not Size = -1 or a raw .NET exception. Existing members and behaviour unchanged. An extra Resize(int, T value) fill overload is acceptable but optional. A test is welcome. Extra (not wanted): Reserve/ShrinkToFit, changing the growth policy, IList<T>."
+ },
+ {
+  "id": "QuantumNetLib-13",
+  "repo": "QuantumNetLib",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "QLinq.Sum(new[] { int.MaxValue, 1 }) returns -2147483648, it should throw when the sum overflows",
+  "keep": [
+   "QLinq.Sum",
+   "new[] { int.MaxValue, 1 }",
+   "-2147483648"
+  ],
+  "refs": [
+   "QuantumNetLib/QLinq.cs",
+   "QLinq.Sum",
+   "QRandom.Choose",
+   "QException"
+  ],
+  "note": "Complete: Sum(int[]) detects overflow (in either direction) and throws a QException, following the library convention that every failure is a QException with an ErrorCode (e.g. a new QLinq code; wrapping the OverflowException as inner exception via the existing 3-arg constructor is fine), NOT a bare System.OverflowException from checked arithmetic. Unsaid: Sum(long[]) wraps silently the same way (long.MaxValue + 1) and needs the same fix; QRandom.Choose(T[], int[]) sums its weights with QLinq.Sum, so weights like { int.MaxValue, 1 } must still fail with a QException (today code 24 via the negative sum) instead of leaking OverflowException to Choose callers. Must keep: float/double Sum unchanged (overflow gives Infinity, no throw), normal sums including negatives, empty array -> 0, null -> QException code 10, Choose codes 24/27 and its seeded picks. A test is welcome. Extra (not wanted): changing Sum return types to long, Average, rewriting Choose(Vector<T>, Vector<int>) (making it consistent is optional)."
+ },
+ {
+  "id": "LibraryManagementSystem-12",
+  "repo": "LibraryManagementSystem",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "2 weeks is way too long for loans, ppl sit on the new releases forever. make the loan period 10 days",
+  "keep": [
+   "10 days"
+  ],
+  "refs": [
+   "LibraryManagementSystem/Forms/LendingForm.cs",
+   "LendingForm_Load",
+   "LibraryManagementSystem/Models/LendingTransaction.cs",
+   "LibraryManagementSystemTests/ModelTests/LendingTransactionTests.cs",
+   "LendingTransaction_Constructor_SetsDefaultValues"
+  ],
+  "note": "Complete: the default loan period becomes 10 days everywhere it is defined: LendingForm_Load (dtpDueDate.Value = DateTime.Now.AddDays(14) plus its \"14 days\" comment) AND the LendingTransaction constructor (DueDate = DateTime.Now.AddDays(14) with its \"14 days\" comment); a shared constant is fine. The existing test LendingTransaction_Constructor_SetsDefaultValues in LibraryManagementSystemTests/ModelTests/LendingTransactionTests.cs asserts a due date at least 14 days out and must be updated to the 10-day period so LendingTransactionTests stays green. Must NOT change: the fine rate/CalculateFine/IsOverdue logic, LendingRepository.BorrowBook (it still takes the due date from the caller), the historical seed rows in DatabaseInitializer, or the repository/integration tests that pass DateTime.Now.AddDays(14) explicitly (other suites already fail without MySQL; making them pass is not part of this)."
+ },
+ {
+  "id": "LibraryManagementSystem-13",
+  "repo": "LibraryManagementSystem",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "signup lets people pick a 6 char password which is way too weak, bump the minimum to 8",
+  "keep": [
+   "8"
+  ],
+  "refs": [
+   "LibraryManagementSystem/Forms/RegistrationForm.cs",
+   "RegistrationForm.ValidateInput",
+   "LibraryManagementSystem/Forms/UserProfileForm.cs",
+   "UserProfileForm.btnChangePassword_Click"
+  ],
+  "note": "Complete: the 8-character minimum applies wherever a user sets a password: RegistrationForm.ValidateInput (txtPassword.Text.Length < 6 and the \"Password must be at least 6 characters long.\" message) AND UserProfileForm.btnChangePassword_Click (txtNewPassword.Text.Length < 6 and \"New password must be at least 6 characters long.\"), otherwise a member signs up with 8 and changes it to a 6-character password right after; both MessageBox texts must state 8 (a shared constant is fine). Must NOT change: the username minimum of 4 characters and its message, the other validation messages, the hashing/salt code, or existing users (no forced reset; login does not check length). UserManagementForm.GenerateTemporaryPassword already produces 8 characters, so admin resets stay compliant and need no change. Optional, not required: also enforcing the minimum in AuthManager."
+ },
+ {
+  "id": "LibraryManagementSystem-14",
+  "repo": "LibraryManagementSystem",
+  "kind": "architect",
+  "lang": "tr",
+  "draft": "audit log ekraninda basarisiz giris denemeleri hic gorunmuyor, FailedLogin ile filtreleyince de bos liste geliyor. normal loginler gorunuyor ama, bi bakip duzeltir misin",
+  "keep": [
+   "FailedLogin"
+  ],
+  "refs": [
+   "LibraryManagementSystem/Models/AuditLog.cs",
+   "AuditLog.GetEventTypeString",
+   "LibraryManagementSystem/Data/AuditLogRepository.cs",
+   "AuditLogRepository.GetAuditLogsByEventType",
+   "AuditLogRepository.GetFilteredAuditLogs",
+   "AuditLogRepository.MapRowToAuditLog",
+   "LibraryManagementSystem/Data/DatabaseInitializer.cs",
+   "LibraryManagementSystem/Forms/AuditLogViewerForm.cs"
+  ],
+  "note": "Reply in Turkish. Root cause: the auth_audit_logs.event_type column is ENUM('LOGIN','LOGOUT','FAILED_LOGIN','PASSWORD_CHANGE','REGISTRATION','SESSION_EXPIRED') (DatabaseInitializer) but AuditLog.GetEventTypeString writes EventType.ToString().ToUpper() = 'FAILEDLOGIN'; single-word types match, which is why normal logins show. The same mismatch hits PasswordChange and SessionExpired. Complete fix, all three paths: (1) writing produces the snake_case ENUM values (FAILED_LOGIN, PASSWORD_CHANGE, SESSION_EXPIRED; LOGIN/LOGOUT/REGISTRATION unchanged); (2) both filter queries, GetAuditLogsByEventType and GetFilteredAuditLogs, build their own eventType.ToString().ToUpper() parameter and must use the same mapping; (3) reading back, MapRowToAuditLog's Enum.TryParse fails on 'FAILED_LOGIN' and silently yields Login, so stored rows must map back to FailedLogin etc. Must NOT change: the DB schema ENUM (existing databases already use it), the AuditEventType member names (AuditLogViewerForm fills its filter combo from the enum names and parses them back; UserProfileForm shows EventType.ToString()), or other audit behaviour."
+ },
+ {
+  "id": "kulup-video-10",
+  "repo": "kulup-video",
+  "kind": "architect",
+  "lang": "tr",
+  "draft": "gif yukleyince videoda zaten oynamiyor, ilk karesi donuk kaliyo. artik gif kabul etmeyelim",
+  "refs": [
+   "server/uploads.js",
+   "ALLOWED_FORMATS",
+   "sanitiseImage",
+   "public/index.html",
+   "public/app.js",
+   "addFiles",
+   "MESSAGES",
+   "test/units.test.js"
+  ],
+  "keep": [],
+  "note": "Complete: GIF is refused everywhere a file can enter. Server (the trust boundary): drop 'gif' from ALLOWED_FORMATS in server/uploads.js so sanitiseImage throws UploadError('not_image') for a GIF (POST /api/jobs answers 400 {error:'not_image'}), while JPEG, PNG and WebP keep being accepted and re-encoded exactly as before. Browser: the #images picker's accept attribute in public/index.html lists image/gif and must stop doing so; and because files can also be dragged onto the picker (README, the drop handler in public/app.js), which bypasses accept, addFiles in public/app.js must refuse a GIF itself (today it lets any image/* through) and show the existing not_image message (it already says JPG, PNG veya WebP), so the user learns before a long upload instead of after it. A GIF unit test next to the 'uploads are judged by content' test in test/units.test.js is welcome. Must not change: other image handling (resize, EXIF stripping, alpha -> PNG), size/count limits, the hint texts, error codes. Not wanted: converting GIFs, accepting animated WebP changes, new error codes."
+ },
+ {
+  "id": "kulup-video-11",
+  "repo": "kulup-video",
+  "kind": "architect",
+  "lang": "tr",
+  "draft": "sadece kulup adini yazip gonderen var, video bombos alakasiz bisey cikiyor. en az bir gorsel ya da kulup hakkinda birkac cumle zorunlu olsun",
+  "refs": [
+   "server/index.js",
+   "createJob",
+   "validateFields",
+   "UploadError",
+   "server/uploads.js",
+   "cleanText",
+   "public/app.js",
+   "MESSAGES",
+   "public/index.html"
+  ],
+  "keep": [],
+  "note": "Complete: the server refuses a form that has neither an uploaded image nor about text; the user asked for \"a few sentences\", so a minimum length for the about text (for example 40 characters) is a faithful reading, and so is any non-empty text. The rule belongs in createJob (server/index.js) after parseMultipart/validateFields, because only there are both the files and the fields known (validateFields never sees files); a browser-only check is bypassable. Throw an UploadError with a new snake_case code (e.g. missing_content) so the existing catch answers 400 {error: code} and gives the rate-limit slot back via createLimiter.undo (refused forms must not use up RATE_LIMIT_PER_HOUR). The about text must be judged on the cleaned value from validateFields (cleanText trims and strips zero-width/control characters), so an about of only spaces or zero-width characters still counts as empty; empty file inputs are already skipped by parseMultipart. The browser maps error codes through MESSAGES in public/app.js and shows the generic 'Form gönderilemedi' for unknown codes, so a Turkish message for the new code must be added there (a matching client-side pre-check is fine too). The about and images fields are labelled 'isteğe bağlı' in public/index.html; that label is now misleading and should say one of them is needed. Must not change: missing_name for an empty club name, the other error codes, a form with a few sentences of about text or with one image is accepted (201) as before; links or Instagram alone counting as content is a judgment call either way."
+ },
+ {
+  "id": "kulup-video-12",
+  "repo": "kulup-video",
+  "kind": "architect",
+  "lang": "tr",
+  "draft": "telefondan erisim kodunu kopyalayip yapistirinca sonunda bosluk kaliyor, sonra 'erisim kodu hatali' diyor. basinda sonunda bosluk olsa da kabul etsin",
+  "refs": [
+   "server/index.js",
+   "createJob",
+   "badCodeLimiter",
+   "safeEqual",
+   "server/config.js",
+   "public/app.js",
+   "submit",
+   "CODE_KEY"
+  ],
+  "keep": [],
+  "note": "Complete: leading/trailing whitespace (spaces, tabs, newlines, non-breaking space) around the access code is ignored, and nothing else is relaxed. Server: createJob in server/index.js compares the decoded X-Access-Code header to config.accessCode; trim the decoded value there (config.js's str() already trims ACCESS_CODE itself, so this is the same convention) so every client is covered, while a wrong code, a different case or a missing character still gets 403 bad_code and still counts toward the 10-per-hour wrong-code lockout (badCodeLimiter, README). Browser: submit() in public/app.js uses code.value three times: the emptiness check (a code of only spaces must be treated as empty and get the local 'Erişim kodunu yazın.' error without sending a request, since every sent wrong code counts toward the lockout), the header, and localStorage (CODE_KEY) so the remembered code that is prefilled next time has no spaces. Must not change: the constant-time comparison, the lockout and rate limits, other form behaviour; do not strip inner whitespace or change case."
+ },
+ {
+  "id": "Loamrift-7",
+  "repo": "Loamrift",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "enemies on hard barely scratch me once i have iron armor. make them deal 40% more damage instead of 30%, their health can stay as is",
+  "keep": [
+   "40%"
+  ],
+  "refs": [
+   "js/game/play.js",
+   "enemyScale",
+   "js/ui/journal.js",
+   "DIFF_HINT",
+   "js/lang/tr.js"
+  ],
+  "note": "Complete delivery: in enemyScale (js/game/play.js) the flags.diff>=1 damage factor goes 1.3 -> 1.4 (this also covers old Hardcore worlds, diff 2); the 1.5 health factor stays. Unsaid: the Hard difficulty hint on the title screen (DIFF_HINT[1] in js/ui/journal.js) says 'deal 30% more damage' and must say 40%; and because Turkish is the default language and js/lang/tr.js maps exact English text to Turkish, the tr.js entry for that hint must get the new English key and a Turkish value with %40, otherwise Turkish players see the hint in English (or with the old number). Must NOT change: Easy (hp .8, dmg .7) and its hint/translation ('30% less damage'), Normal, the post-ending hardmode (1.8/1.5, skipped for bosses) and blood moon (1.25) factors, Hard health (+50%)."
+ },
+ {
+  "id": "Loamrift-8",
+  "repo": "Loamrift",
+  "kind": "architect",
+  "lang": "tr",
+  "draft": "dünya kurallarına yağmur ve fırtınayı kapatmak için bir seçenek ekle, kapalıyken hiç yağmur fırtına olmasın. inşaat yaparken fırtına çok sinir bozucu oluyor",
+  "keep": [],
+  "refs": [
+   "js/game/play.js",
+   "RULE_DEFAULTS",
+   "rule",
+   "js/ui/journal.js",
+   "RULE_NAMES",
+   "renderRules",
+   "js/game/survival.js",
+   "updateWeather",
+   "js/lang/tr.js"
+  ],
+  "note": "Add a new world rule the existing way: a key in RULE_DEFAULTS (js/game/play.js) defaulting to true, so new worlds and worlds saved before the rule existed (rule() falls back to RULE_DEFAULTS) keep their weather; a RULE_NAMES entry (js/ui/journal.js) so renderRules shows the toggle in the title-screen world rules list (host-only toggle and save are already generic); a Turkish translation of the new rule name in js/lang/tr.js next to the other rule names (Turkish is the default language, otherwise the toggle shows in English). In updateWeather (js/game/survival.js) with the rule off no rain/storm may start AND a rain or storm already going on (or loaded from a save) must end, so the sky, lightning, campfire dousing and snow stop; when turned back on, weather resumes. Co-op guests get weather from the host's env message, so no guest change. Must NOT change: the other seven rules, their defaults and labels, weather behaviour while the rule is on. Answer in Turkish."
+ },
+ {
+  "id": "Loamrift-9",
+  "repo": "Loamrift",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "new worlds should start you with a wooden pickaxe too, punching through the first stone by hand takes forever",
+  "keep": [
+   "wooden pickaxe"
+  ],
+  "refs": [
+   "js/game/play.js",
+   "newWorld",
+   "js/game/net.js",
+   "applyGuestChar",
+   "IT[100]"
+  ],
+  "note": "Add a Wooden Pickaxe (IT[100]) to the survival start kit in newWorld (js/game/play.js), keeping the Wooden Sword in the selected slot, 8 torches and 3 glowcaps. Unsaid: the start kit is duplicated in applyGuestChar (js/game/net.js), commented 'first visit: the same start kit as a new world'; a friend joining a co-op world for the first time must get the same pickaxe. Must NOT change: the creative/spectator kit (godMode branch, 8 building blocks x99) in both places, a returning co-op friend's saved bag, nothing else added to the kit."
+ },
+ {
+  "id": "apex-7",
+  "repo": "apex",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "time budget tops out at 86400 sec (24h), some of my runs go overnight and longer. let it go up to 48h",
+  "keep": [
+   "86400",
+   "48h"
+  ],
+  "refs": [
+   "extensions/apex-core/config.mjs",
+   "parseTimeBudget",
+   "extensions/apex-core/control.mjs",
+   "createTimeTracker",
+   "extensions/apex-core/index.mjs",
+   "dashboard/server.mjs",
+   "launchArguments",
+   "dashboard/app.js",
+   "tests/core-config.test.mjs",
+   "tests/core-integration.test.mjs"
+  ],
+  "note": "Complete: raise the time-budget maximum from 86400 to 172800 seconds (48 h) in parseTimeBudget (extensions/apex-core/config.mjs; used by bin/apex's --time-budget via lib/launcher.mjs and by the core extension's apex-time-budget flag), keeping the rest of its validation (positive decimal seconds such as '300.5' accepted; '0', '-2', '1e5', '3s', 'Infinity', '' and non-strings refused; 172801 refused) and naming the new limit in its message. The 86400 cap is duplicated and every copy must move: the dashboard server's own check in launchArguments (dashboard/server.mjs, 'Set a time budget between 1 and 86400 seconds') and the New session dialog's number input max (dashboard/app.js, n.max = 86400), so a 48 h budget can be started from the dashboard; createTimeTracker (extensions/apex-core/control.mjs) refuses restored elapsedSeconds above 86400, and extensions/apex-core/index.mjs clamps both the saved timeElapsedSeconds (saveMeta) and the resumed elapsedBase to 86400, so unless they change, a session saved or reloaded more than 24 h into a 48 h budget loses elapsed time (its 75%/90% notes come hours late) or throws. tests/core-config.test.mjs lists 86401 as invalid: move it to the new bound, and add a regression test (for example a reload past 24 h in tests/core-integration.test.mjs). Must not change: the 50/75/90% thresholds and note text, --time-budget still requiring the time core feature, decimal budgets, the autocompact and other launch options."
+ },
+ {
+  "id": "apex-8",
+  "repo": "apex",
+  "kind": "architect",
+  "lang": "en",
+  "draft": "the remember tool refuses anything over 1024, way too short for real build notes. raise it to 2000",
+  "keep": [
+   "remember",
+   "1024",
+   "2000"
+  ],
+  "refs": [
+   "extensions/apex-features/learnings.mjs",
+   "createLearnings",
+   "MAX_FACT_BYTES",
+   "tool()",
+   "tests/features-learnings.test.mjs"
+  ],
+  "note": "Complete: in extensions/apex-features/learnings.mjs raise MAX_FACT_BYTES from 1024 to 2000, still counting UTF-8 bytes as the cap does today (Buffer.byteLength; the 'fact count/UTF8 byte caps' test relies on it), so a 2000-byte fact is stored and 2001 bytes, or 1001 'é' (2002 bytes), are refused. The limit is written twice more in the same file and both must say 2000: the remember tool's JSON schema maxLength:1024 in tool() (Pi validates tool arguments against it with validateToolArguments before execute runs, so without this the model still cannot send a fact over 1024 characters and the raise does nothing for the tool) and the hard-coded refusal 'Fact must be nonempty text of at most 1024 bytes without NUL.'. tests/features-learnings.test.mjs appends 'é'.repeat(513) (1026 bytes) expecting a refusal, which now fits: update it past 2000 bytes and add a test for the new limit. Must not change: the 32 KiB LEARNINGS.md cap, the 128-fact cap and their messages, refusal of empty/NUL facts, duplicate detection, eval-mode denial, the tool's name, exposure and annotations."
  }
 ]

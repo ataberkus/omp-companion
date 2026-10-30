@@ -12,8 +12,10 @@
 //        [--only id,..] [--samples N] [--out DIR] [--concurrency 4] [--model provider/id] [--thinking level]
 //        [--reuse DIR]... [--judge-model provider/id] [--keep-workspaces]
 //   node scripts/enhance-outcome.mjs --report DIR    rebuild summary.md from DIR/results.json
-// --samples runs every draft/variant pair N times (agents vary run to run). --reuse takes earlier agent runs whose input
-// and setup match and only re-judges them when the judge changed. The first --variant is the reference in the summary.
+// --samples runs every draft/variant pair N times (agents vary run to run). A variant found in several --from dirs has one
+// rewrite per dir, and sample s uses rewrite s mod R, so the samples also cover the enhancer's own run-to-run variance.
+// --reuse takes earlier agent runs whose input and setup match and only re-judges them when the judge changed. The first
+// --variant is the reference in the summary.
 //
 // The agent runs with OMP's normal coding prompt and tools except MCP, skills, extensions, memory, autolearn and context
 // files (the same for every variant), --approval-mode=yolo, in the workspace only. The source repos are only read; their
@@ -228,7 +230,7 @@ async function main() {
  if (opt.only) cases = cases.filter(c => opt.only.includes(c.id));
  if (!cases.length) die('No drafts selected.');
  const froms = []; for (const d of opt.from) froms.push(JSON.parse(await fs.readFile(path.join(path.resolve(d), 'results.json'), 'utf8')));
- const promptOf = (v, c) => { if (v === 'draft') return c.draft; for (const f of froms) { const x = f.results?.[v]?.[c.id]; if (x && !x.run.error && x.run.text) return x.run.text; } return null; };
+ const promptsOf = (v, c) => v === 'draft' ? [c.draft] : froms.map(f => f.results?.[v]?.[c.id]).filter(x => x && !x.run.error && x.run.text).map(x => x.run.text);
  const outDir = path.resolve(opt.out || path.join(os.tmpdir(), 'omp-enhance-outcome', new Date().toISOString().replace(/[:.]/g, '-')));
  const work = path.join(os.tmpdir(), 'omp-enhance-outcome-work', path.basename(outDir));
  await fs.mkdir(outDir, { recursive: true });
@@ -259,13 +261,17 @@ async function main() {
  const judgeModel = opt.judgeModel || opt.model || null, JUDGE_KEY = sha(JUDGE_SYSTEM + (judgeModel || '') + 'medium');
  const jobs = [], rejudge = [];
  for (const c of cases) for (const v of opt.variants) {
-  const prompt = promptOf(v, c); if (prompt == null) { console.log(`skip ${v}/${c.id}: no rewrite in --from results`); continue; }
+  const prompts = promptsOf(v, c); if (!prompts.length) { console.log(`skip ${v}/${c.id}: no rewrite in --from results`); continue; }
   const rs = spec.repos[c.repo] || {};
-  const key = sha(JSON.stringify([agentInput(c, prompt), opt.model || '', opt.thinking || '', AGENT_OVERLAY, c.checks || [], { test: rs.test, copy: rs.copy }]));
-  const olds = prevs.flatMap(p => runsOf(p, v, c.id)).filter(o => o.key === key && !o.agent.error).slice(0, opt.samples);
+  const olds = prevs.flatMap(p => runsOf(p, v, c.id)).filter(o => !o.agent.error);
   const slots = (data.results[v] ||= {})[c.id] = [];
-  olds.forEach((o, s) => { slots[s] = o; if (o.judgeKey !== JUDGE_KEY || !o.judge || o.judge.error || o.note !== c.note) rejudge.push({ c, w: o }); });
-  for (let s = olds.length; s < opt.samples; s++) jobs.push({ c, v, s, prompt, key });
+  for (let s = 0; s < opt.samples; s++) {
+   const prompt = prompts[s % prompts.length], key = sha(JSON.stringify([agentInput(c, prompt), opt.model || '', opt.thinking || '', AGENT_OVERLAY, c.checks || [], { test: rs.test, copy: rs.copy }]));
+   const i = olds.findIndex(o => o.key === key);
+   if (i < 0) { jobs.push({ c, v, s, prompt, key }); continue; }
+   const o = slots[s] = olds.splice(i, 1)[0];
+   if (o.judgeKey !== JUDGE_KEY || !o.judge || o.judge.error || o.note !== c.note) rejudge.push({ c, w: o });
+  }
  }
  console.log(`${jobs.length} agent runs and ${rejudge.length} re-judged (${opt.variants.join(', ')}) on ${cases.length} drafts → ${outDir}`);
  const judgeCfg = { overlay, system: path.join(jdir, 'system.md'), model: judgeModel, cwd: jdir };

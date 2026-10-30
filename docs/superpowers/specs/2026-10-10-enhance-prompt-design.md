@@ -217,15 +217,28 @@ The locked prompt still answered questions itself (suspected causes, line number
 
 The lean variants gave the shortest, most faithful rewrites, so the rewrite judge preferred them, but agents did worse after them: they dropped a test a chosen option included and missed cases of the requested change. Detail that names the cases to handle and the check to run is what makes agents deliver, so the shipped prompt keeps it and only stops the enhancer from answering questions or inventing names.
 
-The architect-style specification prompt above (`72371d7`, `1584333`) was measured afterwards against the goal it serves. Its outcome judge counts a run as done right when every ask and everything a complete solution needs is done and works (edge cases, every place the same logic applies, a test where the repo has tests, docs of the changed behaviour), nothing breaks and the user's limits hold (an excluded change, a "leave X alone", a question answered without edits); extra work beyond that is recorded but allowed. Same 37 drafts and 106 runs per prompt, OMP 18.13.3; apex-2 and apex-6 are left out of the rates because their hidden checks could not pass in that run (the repo's tests now need Bun, and apex-2's own test file fails on the untouched repo):
+The architect-style specification prompt above (`72371d7`, `1584333`) was measured afterwards against the goal it serves. Its outcome judge counts a run as done right when every ask and everything a complete solution needs is done and works (edge cases, every place the same logic applies, a test where the repo has tests, docs of the changed behaviour), nothing breaks and the user's limits hold (an excluded change, a "leave X alone", a question answered without edits); extra work beyond that is recorded but allowed. 36 of the 37 drafts, 104 runs per prompt, OMP 18.13.3–18.14.0; apex-2 is left out because its own test file fails on the untouched repo. *Raw draft* sends the draft without enhancing it:
 
-| prompt | done right (100 runs) | limits broken | behaviour broken | runs with extra work | agent minutes |
+| prompt | done right (104 runs) | limits broken | behaviour broken | runs with extra work | agent minutes |
 |---|---|---|---|---|---|
-| `7f20aeb` (lean, "nothing beyond the ask") | 83 | 0 | 1 | 51 | 136 |
-| **architect spec (shipped)** | **90** | 0 | 1 | 60 | 180 |
-| + "a complaint about a bad result is a bug report", "update the text, docs and mocks of the changed behaviour, match neighbouring conventions" | 88 | 0 | 5 | 73 | 253 |
+| raw draft (no Enhance) | 86 | 0 | 0 | 61 | 153 |
+| `7f20aeb` (lean, "nothing beyond the ask") | 87 | 0 | 1 | 50 | 136 |
+| **architect spec (shipped)** | **94** | 0 | 1 | 59 | 178 |
+| + "a complaint about a bad result is a bug report", "update the text, docs and mocks of the changed behaviour, match neighbouring conventions" | 92 | 0 | 5 | 71 | 249 |
 
-The shipped prompt did better than `7f20aeb` on 8 drafts and worse on 4 (sign-flip permutation p ≈ 0.06): agents now add the permanent test and the overloads a complete change needs, which the lean prompt's "nothing beyond the ask" left out. The third variant was rejected: it turned "the error is useless, can u look at it" into a real fix (3/4 versus 0/4) but tied with the shipped prompt overall (5 drafts better, 5 worse) and changed behaviour nobody asked to change (seeded random sequences, overdue counts, a notice users relied on). Known cost of the shipped prompt: that vague complaint still gets an investigation instead of the fix, and a few agents restructure code (an interface, `virtual` members, an exported helper) to make it testable.
+Per draft, the shipped prompt did better than the raw draft on 9 drafts and worse on 4, and better than `7f20aeb` on 8 and worse on 4 (two-sided sign-flip permutation p ≈ 0.17 and 0.12): agents now add the permanent test and the overloads a complete change needs, which the lean prompt's "nothing beyond the ask" left out. A second rewrite of every draft by the shipped prompt also gave 94/104 (2 drafts better, 2 worse), which is the noise between two samples of one prompt. The third variant was rejected: it turned "the error is useless, can u look at it" into a real fix (3/4 versus 0/4) but tied with the shipped prompt overall (5 drafts better, 5 worse) and changed behaviour nobody asked to change (seeded random sequences, overdue counts, a notice users relied on).
+
+Most of those drafts need little the user did not say, so 14 harder drafts (`kind: "architect"`) were added, each with an unsaid part a complete change needs: the same value set in a second place, a translation keyed by the old English text, a schema limit the tool runtime checks before the tool runs, an alias every sibling overload has. Their hidden checks fail on the untouched repo and on a plausible change that does only what the draft says, and pass on a reference change. Every prompt rewrote each draft twice and the four runs alternated between the two rewrites (`--from` given twice). Two drafts are left out of these rates because their checks were fixed after the run: kulup-video-11 took a one-sentence about text as enough although the user asked for "a few sentences", and LibraryManagementSystem-13 recognised the new password minimum only when written inline in the form:
+
+| prompt | done right (48 runs) | limits broken | behaviour broken | runs with extra work | agent minutes |
+|---|---|---|---|---|---|
+| raw draft (no Enhance) | 29 | 0 | 4 | 26 | 40 |
+| **architect spec (shipped)** | **37** | 0 | 2 | 34 | 59 |
+| + look up callers, overloads, tests and the text that states the current value | 38 | 0 | 0 | 35 | 61 |
+| + "existing behaviour stays exactly as it was" | 37 | 0 | 2 | 31 | 80 |
+| + "text and tests that state the changed value change with it; where the code already does the same thing, follow it instead of assuming" | 39 | 2 | 2 | 37 | 69 |
+
+Over all 48 drafts the shipped prompt was done right in 131 of 152 runs against 115 for the raw draft, better on 13 drafts and worse on 5 or 6 (p ≈ 0.05). None of the three variants beat it beyond noise (the last one: 4 drafts better, 2 worse, p ≈ 0.8, and it broke two limits by editing tests and a schema the drafts' context said to keep), so the prompt is unchanged. The lookup rule did not change how much the enhancer read (2.2 lookups per draft either way, 4 on the hard drafts). Known costs of the shipped prompt, both on drafts where the raw draft does better: a failure report that ends in "can u look at it" gets an investigation instead of the fix (apex-1, 0/4 versus 4/4), and the enhancer writes its own assumption against the code's convention ("count with `.length`" where the code counts code points; kulup-video-7, 2/4 versus 4/4). A few agents also restructure code (an interface, `virtual` members, an exported helper) to make it testable.
 
 ### Stdin
 
