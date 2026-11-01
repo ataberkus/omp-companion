@@ -66,6 +66,12 @@ jobs:
       # parallel test files competing for the runner's few cores can exceed.
       - run: node --test --test-concurrency=1 "tests/*.test.mjs"
 
+      # Spotlight indexes the disk image tauri build mounts to make the .dmg; on the slower Intel runner that kept the
+      # image busy past hdiutil's detach timeout ("timeout for DiskArbitration expired").
+      - name: Keep Spotlight off disk images
+        if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
