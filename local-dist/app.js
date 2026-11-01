@@ -171,6 +171,7 @@
   const KEY = 'omp-web-token';
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
+    tx: null, // the viewed transcript as last merged: { session, epoch, rev, messages } (see mergeTx)
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     attachments: [], editQueue: null, queueOpen: null, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
@@ -224,7 +225,7 @@
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; leaveScreen(); }
+    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -4265,14 +4266,34 @@
   // ---------- polling ----------
   // /state?session=<id> sends messages only for the viewed session (for a Changes page, its parent); the rest stay summaries.
   const stateSession = () => { const c = current(); return c.kind === 'session' ? c.id : c.kind === 'changes' && c.parent.startsWith('s:') ? c.parent.slice(2) : ''; };
+  // Once this page holds the viewed transcript, polls ask only for what changed (since=<epoch>.<rev>): the reply's tx lists
+  // the messages changed after that rev, and the message order when it changed; the rest are the objects already held.
+  // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it.
+  // False when the delta doesn't fit what is held: the caller drops the reply and polls the full transcript instead.
+  function mergeTx(st, view) {
+    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null;
+    if (!t || !s || t.session !== view) { S.tx = null; return true; }
+    if (s.messages) { S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages: s.messages }; return true; }
+    const base = S.tx?.session === view && S.tx.epoch === t.epoch ? S.tx.messages : null;
+    const byId = base && new Map(base.map(m => [m.id, m]));
+    if (byId) for (const m of t.changed || []) byId.set(m.id, m);
+    const messages = byId && (t.order || base.map(m => m.id)).map(id => byId.get(id));
+    if (!messages || messages.some(m => !m)) { S.tx = null; return false; }
+    s.messages = messages; S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages };
+    return true;
+  }
   let stateSeq = 0, stateShown = 0;
   async function refresh() {
-    const seq = ++stateSeq, etag = { tag: S.stateTag };
+    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null;
     try {
-      const st = await api('/state?session=' + encodeURIComponent(stateSession()), undefined, { etag });
+      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : ''), undefined, { etag });
       S.online = true; S.fails = 0;
       // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
-      if (seq > stateShown) { stateShown = seq; if (st) { S.store = st; S.stateTag = etag.tag; } }
+      if (seq > stateShown) {
+        stateShown = seq;
+        if (st && mergeTx(st, view)) { S.store = st; S.stateTag = etag.tag; }
+        else if (st) { S.stateTag = ''; void refresh(); return; }
+      }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
     if (Date.now() - S.nativeAt > 20000) {
       S.nativeAt = Date.now();

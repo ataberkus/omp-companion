@@ -1442,7 +1442,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
  function dropSteers(s){for(const m of s.messages)if(m.steer==='pending')m.steer='dropped';}
  // Info toasts in the dashboard; warnings and errors also stay in the chat.
  function notice(s,level,message){const text=String(message||'').trim().slice(0,2000);if(!text)return;level=['warning','error'].includes(level)?level:'info';
-  s._notices=[...(s._notices||[]),{id:randomUUID(),level,text,at:now()}].slice(-20);if(level!=='info')append(s,'system',text);if(level==='error')activity(s,`${s.title}: ${text}`,'error');}
+  s._notices=[...(s._notices||[]),{id:randomUUID(),level,text,at:now()}].slice(-20);if(level!=='info'){append(s,'system',text);scheduleSave(s,true);}if(level==='error')activity(s,`${s.title}: ${text}`,'error');}
  async function start(s){
   if(runners.get(s.id)?.alive)return runners.get(s.id);
   if(launches.has(s.id))return launches.get(s.id);
@@ -1488,7 +1488,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   // (e.g. Stop & send's own prompt_result reporting the interrupted run), and OMP rejects prompts while it streams.
   if(state?.isStreaming===true&&!['running','queued','done'].includes(s.status)){startWork(s);s.status='running';s.error=undefined;delete s._settled;}
   if(state?.isSettled===true&&!s._advisorChecked&&s.status!=='running'){s._advisorChecked=true;await advisorStatus(s,runner);}if(state?.model){s.model=state.model.id;s.provider=state.model.provider;}if(state?.thinkingLevel)s.thinking=state.thinkingLevel;if(typeof state?.isCompacting==='boolean')s._compacting=state.isCompacting;s.todos=Array.isArray(state?.todoPhases)?state.todoPhases:[];if(state?.sessionFile)s.sessionFile=state.sessionFile;const cu=state?.contextUsage;s.contextPercent=typeof cu?.percent==='number'?cu.percent:undefined;if(typeof cu?.tokens==='number')s.contextTokens=cu.tokens;if(typeof cu?.contextWindow==='number')s.contextWindow=cu.contextWindow;const subs=await runner.subagents();const list=Array.isArray(subs?.subagents)?subs.subagents:[];s.subagents=list.length;s.subagentList=list.slice(-50).map(subagentView);
-  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt))await bindEntries(s,runner);
+  if(state?.isSettled===true&&s.messages?.some(m=>m.ompAt)){await bindEntries(s,runner);scheduleSave(s,true);}
   if(state?.isSettled===true&&needsBackfill(s))await backfillEntries(s,async()=>{const r=await runner.entries();return {entries:r?.entries,leafId:r?.leafId};});}catch{}}
  // A prompt recorded without OMP's entry ID: sent before the companion bound prompts, or a binding that failed.
  // Slash commands and steers OMP hasn't read are not session entries; nor are collab prompts (custom entries, `from`).
@@ -2221,10 +2221,39 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
    (a.s._overlaps??=[]).push({id:b.s.id,title:b.s.title,files:shared.slice(0,20),count:shared.length});(b.s._overlaps??=[]).push({id:a.s.id,title:a.s.title,files:shared.slice(0,20),count:shared.length});
   }
  }
+ // A viewed transcript (up to 600 messages, megabytes) changes on almost every poll while its session streams, and the
+ // poll's ETag covers the whole store, so any session streaming anywhere made every dashboard download the transcript it
+ // views again, every 1.2 s. Dashboards that send since=<epoch>.<rev> get only the messages that changed after that rev,
+ // plus the message order when it changed, and merge them into their copy. Each poll serializes the viewed session's
+ // messages one by one and compares them with the previous poll of that session (by any dashboard): changed and new
+ // messages take the next rev. Comparing content means no change slips by, wherever in the companion it was made.
+ // An unknown epoch (first poll, an evicted entry, a restarted companion) gets the full transcript. Null when message IDs
+ // are missing or repeated: that transcript is sent whole.
+ const txSync=new Map();
+ function transcriptDelta(s,since){
+  const list=s.messages||[],ids=new Set();
+  for(const m of list){if(typeof m?.id!=='string'||ids.has(m.id)){txSync.delete(s.id);return null;}ids.add(m.id);}
+  const c=txSync.get(s.id)||{epoch:randomBytes(6).toString('base64url'),rev:0,orderRev:0,order:[],entries:new Map()};
+  txSync.delete(s.id);txSync.set(s.id,c);if(txSync.size>8)txSync.delete(txSync.keys().next().value);
+  const entries=new Map(),next=c.rev+1;let changed=false,reordered=list.length!==c.order.length;
+  for(let i=0;i<list.length;i++){const m=list[i],json=JSON.stringify(m),prev=c.entries.get(m.id);
+   if(prev?.json===json)entries.set(m.id,prev);else{entries.set(m.id,{json,rev:next});changed=true;}
+   if(c.order[i]!==m.id)reordered=true;}
+  if(changed||reordered)c.rev=next;
+  if(reordered){c.orderRev=next;c.order=[...ids];}
+  c.entries=entries;
+  const held=/^([\w-]{1,32})\.(\d{1,15})$/.exec(since||''),rev=held?.[1]===c.epoch?Number(held[2]):-1;
+  if(!(rev>=0&&rev<=c.rev))return {delta:false,tx:{session:s.id,epoch:c.epoch,rev:c.rev}};
+  return {delta:true,tx:{session:s.id,epoch:c.epoch,rev:c.rev,...(c.orderRev>rev?{order:c.order}:{}),changed:list.filter(m=>entries.get(m.id).rev>rev)}};
+ }
  // Unknown (git failed) counts as still listed, so the worktree is retried rather than abandoned.
  async function worktreeListed(root,dir){try{return (await git(root,['worktree','list','--porcelain'])).split(/\r?\n/).some(l=>l.startsWith('worktree ')&&samePath(l.slice(9),dir));}catch{return true;}}
  const ompSessionsDir=path.resolve(options.ompSessionsDir||process.env.OMP_SESSIONS_DIR||path.join(process.env.PI_CODING_AGENT_DIR||path.join(os.homedir(),'.omp','agent'),'sessions'));
+ // Heads of OMP's session files by path, read again when a file's mtime or size moves. By path, not path+mtime: a transcript
+ // that keeps growing replaces its entry instead of adding one per listing (every dashboard lists every 20 s, so a
+ // long-running companion grew this without bound); files that left the folder drop theirs.
  const headCache=new Map();
+ const pathKey=p=>{const r=path.resolve(p);return process.platform==='win32'?r.toLowerCase():r;};
  const insideSessions=(value,exts)=>{const file=path.resolve(text(value,'File',4000));const rel=path.relative(ompSessionsDir,file);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!exts.some(x=>file.endsWith(x)))throw error('Not an OMP session file.');return file;};
 // Keyed by path so a growing transcript replaces its entry instead of adding one per poll.
 const costCache=new Map();
@@ -2362,11 +2391,14 @@ async function spend(sync){
   const files=[];let dirs=[];try{dirs=await fs.readdir(ompSessionsDir,{withFileTypes:true});}catch{return [];}
   await Promise.all(dirs.filter(d=>d.isDirectory()).map(async d=>{const dir=path.join(ompSessionsDir,d.name);let entries=[];try{entries=await fs.readdir(dir);}catch{return;}
    await Promise.all(entries.filter(n=>n.endsWith('.jsonl')).map(async n=>{const file=path.join(dir,n);try{const st=await fs.stat(file);if(st.size>0)files.push({file,mtime:st.mtimeMs,size:st.size});}catch{}}));}));
+  const found=new Set(files.map(f=>f.file));for(const f of headCache.keys())if(!found.has(f))headCache.delete(f);
   files.sort((a,b)=>b.mtime-a.mtime);
+  // Panel sessions by file, built once: matching each of up to 200 files against every session cost files × sessions path resolutions.
+  const managed=new Map();for(const s of store.sessions)if(s.sessionFile){const k=pathKey(s.sessionFile);if(!managed.has(k))managed.set(k,s);}
   return (await Promise.all(files.slice(0,limit).map(async f=>{
-   const key=f.file+'|'+f.mtime;let head=headCache.get(key);if(!head){try{head=await readSessionHead(f.file);}catch{return null;}headCache.set(key,head);}
-   const managed=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,f.file));
-   return {file:f.file,title:head.title||head.preview.split('\n')[0].slice(0,80)||'Untitled session',cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managed?.id,model:head.model,thinking:head.thinking};
+   let c=headCache.get(f.file);if(c?.mtime!==f.mtime||c.size!==f.size){try{c={mtime:f.mtime,size:f.size,head:await readSessionHead(f.file)};}catch{return null;}headCache.set(f.file,c);}
+   const head=c.head,managedSession=managed.get(pathKey(f.file));
+   return {file:f.file,title:head.title||head.preview.split('\n')[0].slice(0,80)||'Untitled session',cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
   }))).filter(Boolean);
  }
  async function browse(value){
@@ -2388,9 +2420,17 @@ async function spend(sync){
   const parent=path.dirname(dir);return {path:dir,parent:parent===dir?null:parent,isGit:await exists(path.join(dir,'.git')),project:store.projects.find(p=>samePath(p.path,dir))?.id,dirs};
  }
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
- let refreshBusy=false;
- // Refreshed state (todos, context use, model) is saved lazily; a status change it causes (settle) saves on its own.
- const refreshTimer=setInterval(async()=>{if(refreshBusy||closing)return;refreshBusy=true;try{const live=[...runners].filter(([,r])=>r.alive).map(([id,r])=>[store.sessions.find(s=>s.id===id),r]).filter(([s])=>s);await Promise.all(live.map(([s,r])=>refresh(s,r)));scheduleSave(live.map(([s])=>s),true);}catch(e){console.error('Background refresh failed:',e.message);}finally{refreshBusy=false;}checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
+ // Each live session refreshes on its own: one whose OMP holds its command queue (/compact, a handoff, a login waiting
+ // for the user) answers get_state only once that ends, and must not hold back every other session's todos, context
+ // use and settle check meanwhile. A session keeps at most one refresh in flight.
+ const refreshing=new Set();
+ // Refreshed state (todos, context use, model) lives in workspace.json and is saved lazily. A transcript change it makes
+ // (bindEntries, a settle, a rebuilt history) schedules its own session: naming every live session here made each save
+ // serialize every live transcript (megabytes each) just to find most of them unchanged, every 5 s.
+ const refreshTimer=setInterval(()=>{if(closing)return;
+  for(const [id,r] of runners){const s=r.alive&&!refreshing.has(id)&&store.sessions.find(x=>x.id===id);if(!s)continue;
+   refreshing.add(id);void refresh(s,r).then(()=>{if(!closing)scheduleSave([],true);},e=>console.error('Background refresh failed:',e.message)).finally(()=>{refreshing.delete(id);checkAutoShutdown();checkAutoRestart();});}
+  checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
  // Fill the account cache shortly after startup, so the first Choose provider accounts… opens instantly.
  const accountTimer=setTimeout(()=>refreshAccounts().catch(()=>{}),1000);accountTimer.unref();
  // The page's own host as a ws: source too: older Safari doesn't count ws: under 'self' (the Screen page's WebSocket).
@@ -2531,7 +2571,9 @@ async function spend(sync){
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
     // A viewed session with no OMP process running gets its prompts' entry IDs from the session file (live ones from refresh).
     {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive&&needsBackfill(s))void lock(s.id,async()=>{if(!runners.get(s.id)?.alive&&needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));}).catch(()=>{});}
-    const id=url.searchParams.get('session'),body=JSON.stringify({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined,sessions:store.sessions.map(s=>s.id===id?s:{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
+    // since=<epoch>.<rev>, or empty while it holds none: the dashboard merges the viewed transcript from deltas (transcriptDelta).
+    const id=url.searchParams.get('session'),since=url.searchParams.get('since'),viewed=since!==null&&store.sessions.find(s=>s.id===id),tx=viewed?transcriptDelta(viewed,since):null;
+    const body=JSON.stringify({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined,...(tx?{tx:tx.tx}:{}),sessions:store.sessions.map(s=>s.id===id?(tx?.delta?{...s,messages:undefined}:s):{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
    }

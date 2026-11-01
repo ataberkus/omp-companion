@@ -8,7 +8,7 @@ import { createCompanion } from '../companion/server.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 // workspace.json holds every session's transcript (tens of MB in real use); the 4 s background refresh of an idle
-// live session must not rewrite it.
+// live session must not rewrite it, nor serialize its transcript (megabytes) to check.
 // Runs about 13 s (three refresh ticks); bun's test runner otherwise stops a test after 5 s.
 test('an idle live session does not rewrite workspace.json on background refresh', { timeout: 30000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-idle-save-'));
@@ -17,7 +17,7 @@ test('an idle live session does not rewrite workspace.json on background refresh
   const omp = fakeOmp({ state: () => ({ todoPhases: [], isSettled: true }) });
   const at = new Date().toISOString();
   const file = join(dir, 'workspace.json');
-  await writeFile(file, JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
+  await writeFile(file, JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [{ id: 'session', projectId: 'project', title: 'Chat', status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [{ id: 'm1', role: 'assistant', text: 'Earlier reply', at }], todos: [], createdAt: at, updatedAt: at }], activity: [] }));
   app = await createCompanion({ dataDir: dir, omp });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
@@ -27,9 +27,13 @@ test('an idle live session does not rewrite workspace.json on background refresh
   await new Promise(r => setTimeout(r, 4500));
   await app.flush();
   const before = (await stat(file)).mtimeMs;
+  // Nor serialize its transcript only to find it unchanged: an enumerable getter counts each serialization.
+  let serialized = 0;
+  Object.defineProperty(app.store.sessions[0].messages[0], 'probe', { get() { serialized++; return undefined; }, enumerable: true, configurable: true });
   await new Promise(r => setTimeout(r, 8500));
   await app.flush();
   assert.equal((await stat(file)).mtimeMs, before);
+  assert.equal(serialized, 0, 'the idle transcript was not serialized by background refreshes');
 });
 
 // Each session's transcript is its own file, so a streaming session rewrites only its own; a workspace.json that still

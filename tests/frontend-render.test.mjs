@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { createCompanion } from '../companion/server.mjs';
+import { fakeOmp } from './fake-omp.mjs';
 
 const source = await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8');
 const flush = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise(setImmediate); };
@@ -137,11 +138,11 @@ test('/state is asked for the viewed session only, switching sessions fetches at
     return { body: slim(id), headers: { ETag: '"v1"' } };
   } });
   await flush();
-  assert.ok(app.calls.some(c => c.url === '/api/state?session=s1'));
+  assert.ok(app.calls.some(c => c.url === '/api/state?session=s1&since='), 'nothing held yet: since is empty');
   assert.match(app.thread(), /first session reply/);
   const n = app.calls.length;
   await app.go('#/s/s2');
-  assert.ok(app.calls.slice(n).some(c => c.url === '/api/state?session=s2'), 'no wait for the next poll');
+  assert.ok(app.calls.slice(n).some(c => c.url === '/api/state?session=s2&since='), 'no wait for the next poll');
   assert.match(app.thread(), /Loading…/);
   assert.match(app.els.get('topbar').innerHTML, /Chat s2/, 'the top bar shows the new session at once');
   assert.match(app.els.get('buttons').innerHTML, /data-act="follow_up"/, 'the composer already has the running session’s buttons');
@@ -157,6 +158,79 @@ test('/state is asked for the viewed session only, switching sessions fetches at
   assert.equal(conditional.inm, '"v1"');
   assert.equal(conditional.read, true, 'the empty 304 body is read, or Chrome cancels the request (ERR_ABORTED)');
   assert.match(app2.thread(), /first session reply/);
+});
+
+test('the viewed transcript is merged from deltas; a delta that does not fit what is held refetches it whole at once', async () => {
+  const tx = (rev, extra = {}) => ({ session: 's1', epoch: 'e1', rev, ...extra });
+  const replies = {
+    '': () => ({ body: { ...store([session('s1', [reply('m1', 'first reply', 1), reply('m2', 'second reply', 2)], { status: 'running' })]), tx: tx(1) } }),
+    'e1.1': () => ({ body: { ...store([session('s1', undefined, { status: 'running' })]), tx: tx(2, { changed: [reply('m2', 'second reply, streamed further', 2)] }) } }),
+    'e1.2': () => ({ body: { ...store([session('s1', undefined, { status: 'running' })]), tx: tx(3, { order: ['m1', 'm9'], changed: [] }) } }),
+  };
+  let broken = false;
+  const app = boot({ respond: url => {
+    if (!url.startsWith('/api/state')) return;
+    const since = new URL(url, 'http://x').searchParams.get('since');
+    if (since === '' && broken) return { body: { ...store([session('s1', [reply('m5', 'refetched whole', 5)], { status: 'running' })]), tx: { session: 's1', epoch: 'e2', rev: 1 } } };
+    return replies[since]?.();
+  } });
+  await flush();
+  const asked = () => app.calls.filter(c => c.url.startsWith('/api/state')).map(c => new URL(c.url, 'http://x').searchParams.get('since'));
+  assert.deepEqual(asked(), ['']);
+  assert.match(app.thread(), /first reply/);
+  await app.poll();
+  assert.equal(asked().at(-1), 'e1.1', 'the next poll names the rev it holds');
+  assert.match(app.thread(), /second reply, streamed further/);
+  assert.match(app.thread(), /first reply/, 'messages the delta leaves out are kept');
+  broken = true;
+  const n = asked().length;
+  await app.poll();
+  assert.deepEqual(asked().slice(n), ['e1.2', ''], 'an order naming a message it never got: refetched whole right away');
+  assert.match(app.thread(), /refetched whole/);
+  assert.doesNotMatch(app.thread(), /first reply/);
+  await app.poll();
+  assert.equal(asked().at(-1), 'e2.1', 'deltas resume from the refetched transcript');
+});
+
+test('end to end: a dashboard merging deltas from the companion shows what a fresh full load shows', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'omp-delta-e2e-'));
+  const messages = [];
+  for (let i = 0; i < 30; i++) messages.push(i % 3 === 0 ? { id: 'u' + i, role: 'user', text: 'question ' + i, at: at(i) } : i % 3 === 1 ? reply('a' + i, 'answer **' + i + '**', i) : { id: 't' + i, role: 'tool', text: 'Done · read', at: at(i), tool: { name: 'read', intent: 'look ' + i, args: '{}', status: 'done', result: 'line ' + i } });
+  await writeFile(join(dataDir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [session('s1', messages, { status: 'review' })], activity: [], archived: [] }));
+  const app = await createCompanion({ dataDir, omp: fakeOmp() });
+  t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const sizes = [];
+  const forward = async (url, opts) => {
+    const res = await fetch(`http://127.0.0.1:${app.server.address().port}${url}`, { method: opts.method, headers: opts.headers, body: opts.body });
+    if (res.status === 304) return { status: 304 };
+    const text = await res.text();
+    if (url.startsWith('/api/state')) sizes.push(text.length);
+    return { status: res.status, body: JSON.parse(text || '{}'), headers: { ETag: res.headers.get('etag') } };
+  };
+  // Real requests take longer than a flush: a page has finished its first poll once it schedules the next one.
+  const ready = async page => { for (let i = 0; i < 400 && !page.loops().length; i++) await new Promise(r => setTimeout(r, 5)); await flush(); return page; };
+  const live = await ready(boot({ token: app.token, respond: forward }));
+  const s = app.store.sessions[0];
+  const shown = async () => { await live.go('#/'); await live.go('#/s/s1'); const fresh = await ready(boot({ token: app.token, respond: forward })); return [live.thread(), fresh.thread()]; };
+  const steps = [
+    () => { s.messages.at(-1).text += ' and more'; },
+    () => { s.messages.push(reply('n1', 'a new reply', 40)); },
+    () => { s.messages[4].text = 'answer edited in the middle'; },
+    () => { s.messages.shift(); s.messages.shift(); },
+    () => { const [m] = s.messages.splice(3, 1); s.messages.push(m); },
+    () => { s.messages = [reply('r1', 'a rebuilt transcript', 50)]; },
+  ];
+  for (const [i, step] of steps.entries()) {
+    step();
+    const before = sizes.length;
+    await live.poll();
+    assert.ok(live.calls.filter(c => c.url.startsWith('/api/state')).at(-1).url.match(/since=[\w-]+\.\d+$/), `step ${i}: polled with the rev it holds`);
+    if (i < 5) assert.ok(sizes[before] < 4000, `step ${i}: a delta, not the transcript (${sizes[before]} bytes)`);
+    const [merged, full] = await shown();
+    assert.equal(merged, full, `step ${i}: the merged transcript renders exactly like a full load`);
+  }
 });
 
 test('a visible tab refreshes at once; offline polls say so in the view and in the status dot label', async () => {
