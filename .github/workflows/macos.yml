@@ -83,8 +83,9 @@ jobs:
 
       - run: npm ci
 
-      # Ad-hoc signed (bundle.macOS.signingIdentity "-"), with the hardened runtime and src-tauri/Entitlements.plist.
-      - run: npm run build
+      # The app first, ad-hoc signed (bundle.macOS.signingIdentity "-") with the hardened runtime and
+      # src-tauri/Entitlements.plist: the checks below need nothing more, and a disk image problem must not hide them.
+      - run: npm run build -- --bundles app
 
       - name: Inspect the app
         run: |
@@ -93,10 +94,17 @@ jobs:
           main="$APP/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")"
           for bin in "$main" "$APP/Contents/MacOS/bun"; do echo "$(basename "$bin"): $(lipo -archs "$bin")"; done
           plutil -p "$APP/Contents/Info.plist"
-          du -sh "$APP" src-tauri/target/release/bundle/dmg/*.dmg
+          du -sh "$APP"
 
       - name: Smoke test
         run: node scripts/smoke-app.mjs "$APP"
+
+      # Then the disk image from the built binary. Verbose, because hdiutil's own errors only show in the debug log.
+      - name: Disk image
+        timeout-minutes: 20
+        run: |
+          npx tauri bundle --bundles dmg --verbose
+          du -sh src-tauri/target/release/bundle/dmg/*.dmg
 
       - uses: actions/upload-artifact@v4
         with:
