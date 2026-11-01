@@ -159,13 +159,18 @@ function shutdownHost(){
  const child=spawn(cmd,args,{stdio:['ignore','ignore','pipe'],windowsHide:true});let stderr='';child.stderr.on('data',d=>{stderr+=d;});
  return new Promise((resolve,reject)=>{child.once('error',e=>reject(error(`Could not shut down this PC: ${e.message}`,500)));child.once('close',code=>code===0?resolve():reject(error(`Could not shut down this PC: ${stderr.trim().slice(-500)||`${cmd} exited with code ${code}.`}`,500)));});
 }
-// The note a restarting companion leaves for the next one (start.bat's loop): fresh for maxAgeMs, with its random token, if any.
+// The note a restarting companion leaves for the next one (start.bat's loop): fresh for maxAgeMs, with its random token, if any,
+// and the IDs of the sessions that were working (resume), which the next companion continues. A malformed list resumes nothing.
 // Anything else (missing, stale, malformed) means a normal start.
 function restartHandoff(text,nowMs,maxAgeMs=2*60*1000){
  let v;try{v=JSON.parse(text);}catch{return null;}
  if(!v||typeof v!=='object'||!Number.isFinite(v.at)||v.at>nowMs||nowMs-v.at>maxAgeMs)return null;
- return typeof v.token==='string'&&/^[0-9a-f]{64}$/.test(v.token)?{token:v.token}:{};
+ const out=typeof v.token==='string'&&/^[0-9a-f]{64}$/.test(v.token)?{token:v.token}:{};
+ if(Array.isArray(v.resume)&&v.resume.length&&v.resume.length<=1000&&v.resume.every(id=>typeof id==='string'&&id&&id.length<=200))out.resume=[...new Set(v.resume)];
+ return out;
 }
+// What a session resumed after a restart is told: its interrupted turn is in OMP's session file, so it carries on from there.
+const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
 // Git runs for the Changes working-tree view and worktree finishing: errors carry git's own stderr.
 async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
 // `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
@@ -1286,6 +1291,21 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    if(last.hasImage)return cancelResume(s,'the last message had an image; reattach it and send it again');
    cancelResume(s);append(s,'system','Rate limit wait is over; resuming automatically.');
    try{await command(s,{type:'prompt',message:last.text});}catch(e){notice(s,'error',`Automatic resume failed: ${e.message}`);}
+  });
+ }
+ // A restart (Restart companion, or the automatic one after an OMP update) ended the turns of the sessions that were
+ // working: OMP is relaunched on each one's session file and asked to carry on. Queued at once, so the reloaded panel
+ // shows them working while OMP starts; a session that cannot resume stays paused with a note.
+ function resumeAfterRestart(s){
+  s.status='queued';s.error=undefined;append(s,'system','Companion restarted; resuming this session.');
+  return lock(s.id,async()=>{
+   if(closing||s.status!=='queued')return;
+   try{
+    await start(s);if(closing)return;
+    // command() reports a failed send as the session's error instead of throwing.
+    const r=await command(s,{type:'prompt',message:RESTART_PROMPT});
+    if(r?.status==='error')throw new Error(r.error||'OMP did not accept the prompt.');
+   }catch(e){if(closing)return;finishWork(s);s.status='paused';s.error=undefined;notice(s,'error',`Automatic resume failed: ${e.message}`);await persist(s);}
   });
  }
  function settle(s,promptId=s._promptId,run=s._run){
@@ -2761,10 +2781,11 @@ async function spend(sync){
     checkAutoShutdown();json(autoShutdownView());return;
    }
    // options.restart (start.bat's loop, see the entry point below) prepares the relaunch and returns the step that stops
-   // this process; it runs once the reply is sent. Sessions are paused and saved first, as on quit.
+   // this process; it runs once the reply is sent. Sessions are paused and saved first, as on quit; the IDs of those that
+   // were working go to options.restart, so the next companion resumes them.
    if(url.pathname==='/api/restart'){
     if(!options.restart)throw error('Restart works when the companion runs from start.bat, which starts it again. Stop it and start it yourself.',409);
-    await pauseSessions();const relaunch=await options.restart();json({ok:true});if(relaunch)res.once('finish',()=>void relaunch());return;
+    const resume=await pauseSessions();const relaunch=await options.restart(resume);json({ok:true});if(relaunch)res.once('finish',()=>void relaunch());return;
    }
    // Composer drafts (debounced from every device); an empty text clears the view's draft.
    if(url.pathname==='/api/draft'){
@@ -2862,8 +2883,9 @@ async function spend(sync){
  const servers=new Set();
  const serve=()=>{const srv=createServer((req,res)=>onRequest(req,res,srv));srv.on('upgrade',(req,socket,head)=>onUpgrade(req,socket,head,srv));servers.add(srv);return srv;};
  const server=serve();
- // Every session stops as on quit: running ones become paused, the rest keep their status; workspace.json is saved.
- const pauseSessions=async()=>{pausing++;try{const stops=[...runners.values()].map(r=>r.kill());for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(s.status==='running')s.status='paused';}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);}finally{pausing--;}};
+ // Every session stops as on quit: running (or queued) ones become paused, the rest keep their status; workspace.json is saved.
+ // Resolves with the IDs of the visible sessions it paused: the ones a restart resumes. Shutdown and quit ignore them.
+ const pauseSessions=async()=>{pausing++;try{const paused=[];const stops=[...runners.values()].map(r=>r.kill());for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);return paused;}finally{pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
  // Work left: a running or queued turn, or a compaction/handoff/shell command in progress. Queued messages of a running
  // session are covered by its status (and by the session lock while settle() dispatches them); those of a stopped session
@@ -2882,7 +2904,7 @@ async function spend(sync){
  function checkAutoRestart(){
   if(!restartPending||autoShutdown.firing||closing||pausing||locks.size||launches.size||workPending())return;
   restartPending=false;console.log('Restarting the companion to run the updated OMP.');
-  void (async()=>{await pauseSessions();const relaunch=await options.restart();await relaunch?.();})().catch(e=>console.error('Automatic restart failed:',e.message));
+  void (async()=>{const resume=await pauseSessions();const relaunch=await options.restart(resume);await relaunch?.();})().catch(e=>console.error('Automatic restart failed:',e.message));
  }
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
  const close=async()=>{closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));await sessionStops;await Promise.all(probeStops);await enhanceStops;await branchRun;};
@@ -2890,6 +2912,10 @@ async function spend(sync){
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
  for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
+ // Sessions that were working when the last companion restarted (options.resume, from its restart note) carry on; a
+ // rate-limit wait is re-armed above instead. Normal starts, quits and crash recovery pass none, so they stay paused.
+ {const resume=new Set(Array.isArray(options.resume)?options.resume:[]);
+  for(const s of store.sessions)if(resume.has(s.id)&&s.status==='paused'&&!s.hidden&&!s.rateLimitResume)void resumeAfterRestart(s).catch(e=>console.error('Automatic resume failed:',e.message));}
 // closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
 await persist();return {server,serve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
@@ -2917,10 +2943,12 @@ if(mainEntry&&process.versions.bun){
  const update=handoff?null:await startupUpdate();
  const app=await createCompanion({
   ...(handoff?.token&&!process.env.OMP_WEB_PASSWORD?{token:handoff.token}:{}),
-  ...(restartExit?{restart:async()=>{
+  // Sessions that were working when the restart began; createCompanion resumes those it still has.
+  ...(handoff?.resume?{resume:handoff.resume}:{}),
+  ...(restartExit?{restart:async resume=>{
    // A password is the token, so only a random per-launch token is handed over; it never outlives the restart.
    await fs.mkdir(path.dirname(handoffFile),{recursive:true,mode:0o700});
-   await fs.writeFile(handoffFile,JSON.stringify({at:Date.now(),...(app.password?{}:{token:app.token})}),{mode:0o600});
+   await fs.writeFile(handoffFile,JSON.stringify({at:Date.now(),...(app.password?{}:{token:app.token}),...(resume?.length?{resume}:{})}),{mode:0o600});
    // Exit with the restart code even if close() fails, so start.bat still starts the companion again.
    return async()=>{try{await app.close();}finally{process.exit(restartExit);}};
   }}:{}),
