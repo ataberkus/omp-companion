@@ -891,15 +891,16 @@
     startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft, job);
   }
   // A draft session left for New session, another session or history is discarded; its own sub-views and
-  // Settings/Tools/Spend keep it. A send still in flight decides first (the server would otherwise race it), and so does
-  // a New-session Enhance still starting (the draft session left may be the one it created).
-  // An enhance still running keeps it as is: job, text and images stay, the result lands in its draft, and the
-  // session stays listed. Leaving it again once nothing runs (enhance done, failed or cancelled with ✕) discards it.
+  // Settings/Tools/Spend keep it. An enhance still running keeps it as is, checked first so no deferral below can queue it:
+  // job, text and images stay, the result lands in its draft, and the session stays listed. Leaving it again once nothing
+  // runs (enhance done, failed or cancelled with ✕) discards it. Otherwise a send still in flight decides first (the server
+  // would otherwise race it), and so does a New-session Enhance still starting (the draft session left may be the one it
+  // created, which has no enhance job until the start ends).
   function leaveDraft(prev, c) {
     if (!prev.startsWith('session:') || !['home', 'session', 'native'].includes(c.kind)) return;
     if (!S.store?.sessions.find(x => 'session:' + x.id === prev)?.draft) return;
-    if (S.sending.has(prev) || S.sendingBash.has(prev) || S.homeStarts) { S.discardAfterSend.add(prev); return; }
     if (S.enhance.has(prev)) return;
+    if (S.sending.has(prev) || S.sendingBash.has(prev) || S.homeStarts) { S.discardAfterSend.add(prev); return; }
     discardView(prev);
   }
   function discardView(view) {
@@ -907,8 +908,9 @@
     api(`/sessions/${encodeURIComponent(view.slice('session:'.length))}/command`, { type: 'discard' }).then(() => refresh()).catch(() => {});
   }
   // After a send settles: if the user left its draft session meanwhile, let the server decide (no-op once sent).
-  // A New-session Enhance still starting holds it until it ends (flushDiscards).
-  function afterSend(view) { if (!S.homeStarts && S.discardAfterSend.delete(view) && S.view !== view) discardView(view); }
+  // A New-session Enhance still starting holds it until it ends (flushDiscards). A draft whose enhance started after it
+  // was queued (opened again, enhanced, left) leaves the queue kept; leaving it once the enhance ends discards it.
+  function afterSend(view) { if (!S.homeStarts && S.discardAfterSend.delete(view) && S.view !== view && !S.enhance.has(view)) discardView(view); }
   const flushDiscards = () => { for (const view of [...S.discardAfterSend]) if (!S.sending.has(view) && !S.sendingBash.has(view)) afterSend(view); };
   // A draft session New-session Enhance made, removed by someone else (another dashboard left it, a companion restart
   // cleaned it up): its text and images go back to New session instead of staying in a view that no longer exists.
