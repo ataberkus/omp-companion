@@ -424,7 +424,7 @@
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}${it.unseen ? ' unseen' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}${it.unseen ? '<span class="sr-only"> (new)</span>' : ''}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${meta}</span>${workTime(it)}
-      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`];
+      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}<button type="button" class="row-more${it.pinned ? ' on' : ''}" data-rowmenu="${esc(it.key)}" aria-haspopup="menu" title="Session actions" aria-label="Session actions: ${esc(it.title)}${it.pinned ? ' (pinned)' : ''}">${it.pinned ? ICON_PIN : ICON_MORE}</button></span></div>`];
   }
 
   function renderList() {
@@ -613,13 +613,18 @@
   }
   class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
   const drafts = new Drafts();
-  const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'; };
+  // The composer grows with its text up to 40% of the window. On touch screens the cap is a third of what is visible,
+  // which shrinks while the on-screen keyboard is up, so a long paste never covers the conversation and the toolbar.
+  const composerMax = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches ? (window.visualViewport?.height || window.innerHeight) / 3 : window.innerHeight * 0.4;
+  const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, composerMax()) + 'px'; };
   // Typing is not the only thing that changes how tall a draft is: re-fit the composer when its width changes (sidebar,
-  // side panels, rotation, shown again after being hidden) and when the window height changes the 40% cap.
+  // side panels, rotation, shown again after being hidden) and when the window or the visible area (keyboard) changes the cap.
   const fitWidths = new WeakMap();
   const fitObserver = new ResizeObserver(entries => { for (const e of entries) { const w = Math.round(e.contentRect.width); if (fitWidths.get(e.target) !== w) { fitWidths.set(e.target, w); autosize(e.target); } } });
   const fitComposer = el => { autosize(el); fitObserver.disconnect(); fitObserver.observe(el); };
-  addEventListener('resize', () => { for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); });
+  const refit = () => { for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); };
+  addEventListener('resize', refit);
+  window.visualViewport?.addEventListener('resize', refit);
 
   const previewLoading = new Set();
   async function loadPreview(file) {
@@ -3267,10 +3272,10 @@
     const monthName = new Date().toLocaleDateString('en', { month: 'long', year: 'numeric' });
     el.innerHTML = `${note}<div class="spend-cards">${[['Today', total.today], [monthName, total.month], ['All time', total.all]].map(([k, v]) => `<div><span>${esc(k)}</span><b>${usd(v)}</b></div>`).join('')}</div>
       <section class="set-group"><h2>By model</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Today</th><th class="num">This month</th><th class="num">All time</th></tr></thead><tbody>
-        ${sorted.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
+        ${sorted.map(([k, v]) => `<tr><td class="model">${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
       </tbody></table></div></div></section>
       <section class="set-group"><h2>${esc(monthName)} by day</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Day</th><th class="num">Total</th><th>Models</th></tr></thead><tbody>
-        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
+        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted model">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
       </tbody></table></div></div></section>`;
   }
 
@@ -4643,10 +4648,12 @@
       if (Date.now() - S.groupDragEnd < 400) return; // the click that may trail a header drag is not a collapse
       toggleCollapsed(gl.dataset.group); return;
     }
+    const rm = t.closest('[data-rowmenu]');
+    if (rm) { e.preventDefault(); const open = $('#ctxMenu')?._row === rm.dataset.rowmenu; closeCtx(); if (!open) openRowMenu(rm); return; }
     const ar = t.closest('[data-archive]');
-    if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
+    if (ar) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const pn = t.closest('[data-pin]');
-    if (pn) { e.preventDefault(); setPinned(pn.dataset.pin, !pn.dataset.unpin); return; }
+    if (pn) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); setPinned(pn.dataset.pin, !pn.dataset.unpin); return; }
     const nt = t.closest('[data-newtab]');
     if (nt) { closeCtx(); openItemTab(nt.dataset.newtab); return; }
     closeCtx();
@@ -4796,6 +4803,20 @@
   addEventListener('resize', closeCtx);
   document.addEventListener('scroll', closeCtx, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ctxMenu')) { const item = $('#ctxMenu')._item; closeCtx(); if (item?.isConnected) item.focus(); } });
+  // Touch screens cannot hover a row to reveal its pin and archive buttons: the row's ⋯ (a pin when pinned) lists them.
+  function openRowMenu(btn) {
+    const key = btn.dataset.rowmenu, row = btn.closest('.item-row'), pin = row?.querySelector('[data-pin]'), arch = row?.querySelector('[data-archive]');
+    const m = document.createElement('div');
+    m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu row-menu'; m._item = btn; m._row = key; m.setAttribute('role', 'menu'); m.setAttribute('aria-label', btn.getAttribute('aria-label'));
+    m.innerHTML = (pin ? `<button role="menuitem" data-pin="${esc(key)}" data-unpin="${esc(pin.dataset.unpin)}">${esc(pin.title)}</button>` : '')
+      + (arch ? `<button role="menuitem" data-archive="${esc(key)}" data-restore="${esc(arch.dataset.restore)}">${esc(arch.title)}</button>` : '')
+      + `<button role="menuitem" data-newtab="${esc(key)}">Open in new tab</button>`;
+    document.body.appendChild(m);
+    const r = btn.getBoundingClientRect(), h = m.offsetHeight;
+    m.style.left = Math.max(4, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 4)) + 'px';
+    m.style.top = (r.bottom + 4 + h <= innerHeight - 4 ? r.bottom + 4 : Math.max(4, r.top - 4 - h)) + 'px';
+    m.querySelector('button').focus({ preventScroll: true });
+  }
   // ---------- workspaces: header menu, quick switcher, attention stepping ----------
   // The ⋯ on a project header: focus, start, rename, colour, branch, terminal, hide. A folder known only from OMP's
   // history becomes a registered workspace on its first change (the server's /projects/update takes its path).

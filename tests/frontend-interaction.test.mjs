@@ -414,3 +414,90 @@ test('Commit related changes in one session is not blocked by one still sending 
   slow.resolve(idle('a'));
   await flush();
 });
+
+test('on touch a session row\'s ⋯ lists pin and archive; choosing one closes the menu and applies it', async () => {
+  const d = await boot({ coarse: true, sessions: [idle('a'), idle('b')], size: { width: 390, height: 844 } });
+  const list = d.elements.get('list').innerHTML;
+  const key = list.match(/data-rowmenu="([^"]+)"/)?.[1];
+  assert.ok(key, 'each row renders its ⋯');
+  assert.match(list, /data-pin="[^"]+"[^>]*>/, 'the hover buttons stay in the markup for pointers that can hover');
+  const row = d.node('', { querySelector: s => s === '[data-pin]' ? d.node('', { title: 'Pin to top', dataset: { unpin: '' } }) : s === '[data-archive]' ? d.node('', { title: 'Archive', dataset: { restore: '' } }) : null });
+  const btn = d.node('', { dataset: { rowmenu: key }, getAttribute: k => k === 'aria-label' ? 'Session actions: a' : undefined, closest: s => s === '.item-row' ? row : null,
+    getBoundingClientRect: () => ({ left: 330, right: 360, top: 806, bottom: 836 }) });
+  await d.fire('click', { target: d.target({ '[data-rowmenu]': btn }) });
+  const menu = d.elements.get('ctxMenu');
+  assert.ok(menu, 'the ⋯ opens a menu');
+  assert.deepEqual([...menu.innerHTML.matchAll(/<button[^>]*>([^<]+)</g)].map(m => m[1]), ['Pin to top', 'Archive', 'Open in new tab']);
+  assert.equal(menu.style.top, '792px', 'near the bottom of the screen it opens above its ⋯');
+  assert.equal(menu.style.left, '350px', 'right-aligned to the ⋯');
+
+  await d.fire('click', { target: d.target({ '[data-rowmenu]': btn }) });
+  assert.ok(!d.elements.has('ctxMenu'), 'a second tap on the same ⋯ closes it');
+  await d.fire('click', { target: d.target({ '[data-rowmenu]': btn }) });
+  const menu2 = d.elements.get('ctxMenu');
+  const pin = d.node('', { dataset: { pin: key, unpin: '' } });
+  await d.fire('click', { target: d.target({ '[data-pin]': pin, '#ctxMenu': menu2 }) });
+  assert.ok(!d.elements.has('ctxMenu'), 'choosing an action closes the menu');
+  assert.deepEqual(d.calls.filter(c => c.url.startsWith('/api/pin')).map(c => c.body), [{ key, pinned: true }]);
+});
+
+// The stylesheet as top-level rules and @media blocks (one level deep, as app.css is written).
+const css = await readFile(new URL('../local-dist/app.css', import.meta.url), 'utf8');
+const cssRules = (() => {
+  const out = [], text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let i = 0;
+  const block = (media, end) => {
+    while (i < end) {
+      const open = text.indexOf('{', i);
+      if (open < 0 || open >= end) return;
+      const head = text.slice(i, open).trim();
+      if (head.startsWith('@media')) {
+        let depth = 1, j = open + 1;
+        for (; depth; j++) depth += text[j] === '{' ? 1 : text[j] === '}' ? -1 : 0;
+        i = open + 1; block(head.slice(6).trim(), j - 1); i = j;
+      } else {
+        const close = text.indexOf('}', open);
+        out.push({ media, selector: head, body: text.slice(open + 1, close) });
+        i = close + 1;
+      }
+    }
+  };
+  block('', text.length);
+  return out;
+})();
+const rulesFor = (pattern, media) => cssRules.filter(r => pattern.test(r.selector) && (media === undefined || media(r.media)));
+const TOUCH = m => m.includes('max-width:820px') && m.includes('pointer:coarse');
+
+test('phones: markdown table cells wrap between words and keep a minimum width; desktop table rules are unchanged', () => {
+  const top = m => m === '';
+  assert.ok(rulesFor(/^\.md :is\(th,td\)$/, TOUCH).some(r => /overflow-wrap:break-word/.test(r.body)), 'cells no longer inherit overflow-wrap:anywhere on phones');
+  assert.ok(rulesFor(/^\.md :is\(th,td\):not\(\.num\)$/, TOUCH).some(r => /min-width:7em/.test(r.body)), 'a column cannot shrink below a readable width');
+  assert.deepEqual(rulesFor(/\.md (:is\()?(th|td)/, top).map(r => r.selector + '{' + r.body + '}'), [
+    '.md th,.md td{padding:7px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}',
+    '.md th{background:var(--card);font-weight:650}',
+  ], 'desktop cells keep their rules and get no wrapping override');
+  assert.deepEqual(rulesFor(/^\.md table$/, top).map(r => r.body), ['border-collapse:collapse;width:100%;font-size:13.5px']);
+});
+
+test('the compact touch sidebar and plan bar live only inside touch/narrow media queries', () => {
+  const compact = [/^\.filters button::after$/, /^\.list-bar \.seg button::after$/, /^\.sidebar \.sidebar-foot$/, /^\.sidebar-foot a svg$/, /^\.sidebar \.theme-btn$/,
+    /\.group-act,\.group-new\)::after$/, /^\.chat-plan \.chat-plan-link::after/];
+  for (const p of compact) {
+    const rules = rulesFor(p);
+    assert.ok(rules.length, `${p} exists`);
+    for (const r of rules) assert.ok(TOUCH(r.media), `${r.selector} is inside a touch/narrow query, not "${r.media || 'top level'}"`);
+  }
+  assert.deepEqual(rulesFor(/^\.item-row \.row-acts \.row-more$/).map(r => [r.media, /display:(none|grid)/.exec(r.body)?.[1]]), [['', 'none'], ['(hover:none)', 'grid']],
+    'the row ⋯ is hidden wherever rows can be hovered (desktop keeps its hover-revealed pin and archive)');
+  for (const r of rulesFor(/^\.item-row \.row-acts :is\(\.pin,\.arch\)$/)) assert.equal(r.media, '(hover:none)', 'pin and archive buttons hide only without hover');
+});
+
+test('a long draft grows the composer to a third of the screen on touch, 40% of the window on desktop as before', async () => {
+  for (const [opts, cap] of [[{ coarse: true, size: { width: 393, height: 659 } }, 659 / 3], [{}, 900 * 0.4]]) {
+    const d = await boot({ sessions: [idle('a')], ...opts });
+    const input = d.elements.get('input');
+    Object.assign(input, { value: 'a long paste\n'.repeat(80), scrollHeight: 2000 });
+    await d.fire('input', { target: input });
+    assert.equal(input.style.height, cap + 'px', opts.coarse ? 'touch' : 'desktop');
+  }
+});
