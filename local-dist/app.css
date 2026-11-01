@@ -421,8 +421,12 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
   .composer-wrap .composer-bar{flex-wrap:nowrap}
   .composer-wrap .bar-tools{display:flex;align-items:center;gap:6px;flex:1 1 auto;min-width:0;overflow-x:auto;scrollbar-width:none;padding:4px 16px 4px 4px;margin:-4px 0 -4px -4px;scroll-padding-inline:4px 16px;mask-image:linear-gradient(to left,transparent,#000 16px)}
   .composer-wrap .bar-tools::-webkit-scrollbar{display:none}
-  .composer-wrap .bar-tools #modelSlot{flex-wrap:nowrap;flex-shrink:0}
+  /* display:contents lets the pinned model chip (below) stick across the whole scrolling row, not just #modelSlot's box. */
+  .composer-wrap .bar-tools #modelSlot{display:contents}
   .composer-wrap .bar-tools :is(.btn,.model-chip){flex-shrink:0;white-space:nowrap}
+  /* The model chip stays pinned at the start of the sideways-scrolling tools, so it is never scrolled off-screen. */
+  .composer-wrap .bar-tools #modelSlot>[data-act=model]{position:sticky;left:0;z-index:var(--z-raised);background:var(--card);max-width:min(52vw,220px)}
+  .composer-wrap .bar-tools #modelSlot>[data-act=model]>span[aria-hidden]:first-child{display:none}
   .composer-wrap .bar-end{flex:none}
   /* Busy state (Queue/Steer/Stop & send/Abort) would squeeze the chips to nothing: actions take their own row, chips the full width above. */
   .composer-wrap .composer-bar:has(#buttons>:nth-child(2)){flex-wrap:wrap}
@@ -541,17 +545,26 @@ details.side-sec[open]>summary::after{transform:rotate(90deg)}
 .model-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-chip:hover{border-color:var(--accent);color:var(--fg)}
 #modelSlot{display:flex;min-width:0;flex-shrink:1}
-.picker-wrap{position:fixed;inset:0;z-index:var(--z-picker);background:var(--overlay-picker);display:flex;align-items:flex-start;justify-content:center;padding:10vh 16px 16px}
+.picker-wrap{position:fixed;inset:0;z-index:var(--z-picker);background:var(--overlay-picker);display:flex;align-items:flex-start;justify-content:center;padding:10vh 16px 16px;padding-top:10dvh}
 .picker-wrap[hidden]{display:none}
-.picker{width:min(680px,100%);max-height:78vh;display:flex;flex-direction:column;border:1px solid var(--input);border-radius:14px;background:var(--panel);box-shadow:0 20px 60px -10px var(--shadow);overflow:hidden}
-.picker-search,.picker-provs,.picker-think,.picker-foot{flex-shrink:0}
+.picker{width:min(680px,100%);max-height:78vh;max-height:78dvh;display:flex;flex-direction:column;border:1px solid var(--input);border-radius:14px;background:var(--panel);box-shadow:0 20px 60px -10px var(--shadow);overflow:hidden}
+.picker-search,.picker-quick,.picker-provs,.picker-think,.picker-foot{flex-shrink:0}
 .picker-search{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border)}
 .picker-search input{flex:1;padding:0;background:none;border:0;outline:0;color:var(--fg);font:15px var(--sans)}
 .picker-search kbd{font:11px var(--mono);color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
+/* Visible close for touch (no Esc key, and kbd hints are hidden there) and phone widths. */
+.picker-close{display:none;align-items:center;justify-content:center;flex-shrink:0;width:44px;height:44px;margin:-10px -10px -10px 0;border:0;border-radius:10px;background:none;color:var(--muted);font-size:16px;cursor:pointer}
+.picker-close:hover{background:var(--hover);color:var(--fg)}
+@media (max-width:820px),(hover:none),(pointer:coarse){.picker-close{display:inline-flex}}
+/* Touch quick switch: roles, favorites and recent models on one scrolling line. */
+.picker-quick{display:flex;align-items:center;gap:6px;padding:8px 32px 8px 14px;border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;mask-image:linear-gradient(90deg,#000 calc(100% - 32px),transparent);font-size:12px}
+.picker-quick[hidden]{display:none}
+.picker-quick::-webkit-scrollbar{display:none}
+.picker-quick>.muted{flex-shrink:0}
 /* Providers on one scrolling line; the right fade says there is more. */
 .picker-provs{display:flex;gap:6px;padding:8px 32px 8px 14px;border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;mask-image:linear-gradient(90deg,#000 calc(100% - 32px),transparent)}
 .picker-provs::-webkit-scrollbar{display:none}
-.picker-provs .chip,.picker-think .chip{padding:3px 10px;font-size:12px;flex-shrink:0;white-space:nowrap}
+.picker-provs .chip,.picker-think .chip,.picker-quick .chip{padding:3px 10px;font-size:12px;flex-shrink:0;white-space:nowrap}
 .picker-think{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 14px;border-bottom:1px solid var(--border);font-size:12px;min-height:38px}
 /* One grid for the whole list; lines and rows are subgrids, so every column starts at the same x in every section.
    Columns: name · role/reasoning tag · provider or id · context · favorite. */
@@ -570,7 +583,26 @@ details.side-sec[open]>summary::after{transform:rotate(90deg)}
 .picker-row .pm{font:11px var(--mono);color:var(--faint);white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
 .picker-row .tag{justify-self:start;max-width:100%;min-width:0;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .picker-foot{padding:7px 14px;border-top:1px solid var(--border);font-size:11.5px;color:var(--faint)}
-@media (max-width:820px){.picker-wrap{padding-top:16px}.picker-list{grid-template-columns:minmax(0,1fr) auto auto;column-gap:8px}.picker-row{grid-column:1/3}.picker-row .pp,.picker-row>:empty{display:none}.picker-row .tag{grid-column:1;grid-row:2;margin-top:3px}.model-chip{max-width:150px}.row-body{padding-left:14px}}
+/* Touch footer: the selected model and level, and the button that applies them. */
+.picker.touch .picker-foot{display:flex;align-items:center;gap:10px;padding:8px 14px;font-size:13px;color:var(--fg-soft)}
+.picker-foot .pf-sel{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.picker.touch .picker-foot .btn{flex-shrink:0;min-height:40px;padding:0 16px}
+@media (max-width:820px){.picker-list{grid-template-columns:minmax(0,1fr) auto auto;column-gap:8px}.picker-row{grid-column:1/3}.picker-row .pp,.picker-row>:empty{display:none}.picker-row .tag{grid-column:1;grid-row:2;margin-top:3px}.model-chip{max-width:150px}.row-body{padding-left:14px}}
+/* Phones: a bottom sheet over the visible area (--pick-top/--pick-h follow the visual viewport, so an open keyboard
+   shrinks it), with the reasoning levels and footer next to the thumb. */
+@media (max-width:820px){
+  .picker-wrap{inset:auto 0 auto 0;top:var(--pick-top,0px);height:var(--pick-h,100dvh);align-items:flex-end;padding:max(12px,env(safe-area-inset-top,0px)) 0 0}
+  .picker{width:100%;height:min(100%,760px);max-height:none;border-width:1px 0 0;border-radius:16px 16px 0 0;padding:0 env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+  .picker-search kbd{display:none}
+  .picker-search{padding:10px 14px}
+  .picker-quick{order:1}.picker-provs{order:2}.picker-list{order:3}.picker-think{order:4;border-bottom:0;border-top:1px solid var(--border)}.picker-foot{order:5}
+}
+/* Comfortable touch targets; the row and ★ stay grid items, so the subgrid columns keep lining up. */
+@media (max-width:820px),(pointer:coarse){
+  .picker-row{min-height:44px;padding-top:9px;padding-bottom:9px}
+  .picker-line .fav{align-self:stretch;min-width:44px;min-height:44px;padding:0 14px 0 8px;font-size:17px}
+  .picker-provs .chip,.picker-think .chip,.picker-quick .chip{min-height:34px;padding:6px 12px;font-size:13px}
+}
 a.btn{text-decoration:none}
 
 /* diffs */
@@ -687,12 +719,13 @@ details.raw>*:not(summary){margin-top:6px}
 @media (max-width:820px){.set-ctl{flex-wrap:wrap}.set-tools{flex-wrap:wrap;gap:8px}.set-tools input#setSearch{min-width:0;width:100%}.set-main{min-width:0}}
 @media (max-width:820px){.set-ctl .model-map{flex-basis:100%}}
 .think-chip{flex-shrink:0}
-.think-menu{position:fixed;z-index:var(--z-menu);display:flex;flex-direction:column;min-width:150px;padding:5px;border:1px solid var(--input);border-radius:10px;background:var(--raised);box-shadow:0 20px 60px -10px var(--shadow)}
+.think-menu{position:fixed;z-index:var(--z-menu);display:flex;flex-direction:column;min-width:150px;max-height:calc(100dvh - 16px);overflow-y:auto;padding:5px;border:1px solid var(--input);border-radius:10px;background:var(--raised);box-shadow:0 20px 60px -10px var(--shadow)}
 .think-menu .tm-head{padding:4px 9px 6px;font:600 12px/1.4 var(--sans);color:var(--muted);letter-spacing:0}
 .think-menu button{display:flex;justify-content:space-between;gap:10px;padding:6px 9px;border:0;border-radius:7px;background:none;color:var(--fg);text-align:left;cursor:pointer;font-size:13px}
 .think-menu button:hover{background:var(--hover)}
 .think-menu button.sel{color:var(--accent);font-weight:600}
 .think-menu small{color:var(--faint)}
+@media (pointer:coarse){.think-menu button{min-height:44px;align-items:center;padding:0 12px;font-size:14px}}
 .usage-panel{position:fixed;z-index:var(--z-menu);width:min(420px,calc(100vw - 16px));max-height:min(70vh,560px);overflow-y:auto;padding:12px 14px;border:1px solid var(--input);border-radius:10px;background:var(--raised);box-shadow:0 20px 60px -10px var(--shadow);font-size:13px}
 .ul-top{display:flex;justify-content:space-between;gap:10px;color:var(--muted);margin-bottom:4px}
 .ul-top button{color:var(--muted);font-size:12px}.ul-top button:hover{color:var(--fg)}
