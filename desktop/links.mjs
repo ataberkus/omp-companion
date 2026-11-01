@@ -17,3 +17,12 @@ export function phoneLinks(interfaces, port, token, tailscale = null) {
   if (tailscale?.name && connected) links.push({ label: `Tailscale — ${tailscale.name}`, url: `http://${tailscale.name}:${port}/${fragment}`, rank: 2 });
   return links.sort((a, b) => a.rank - b.rank).map(({ label, url }) => ({ label, url }));
 }
+
+// The address the desktop app's tailnet listener binds. OMP_WEB_HOST naming a tailnet address wins; any other OMP_WEB_HOST
+// (127.0.0.1, 0.0.0.0, a LAN address) turns the listener off; unset means this PC's own Tailscale address, IPv4 first.
+// tailscale: tailscaleSelf() result ({ name, ips } with ips already tailnet-only) or null. '' means no listener.
+export function pickTailnetHost(envHost, tailscale) {
+  if (envHost) return tailnetAddress(envHost) ? envHost : '';
+  const ips = tailscale?.ips || [];
+  return ips.find(ip => !ip.includes(':')) || ips[0] || '';
+}

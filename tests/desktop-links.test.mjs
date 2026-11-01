@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneLinks } from '../desktop/links.mjs';
+import { phoneLinks, pickTailnetHost } from '../desktop/links.mjs';
 
 // Windows often lists WSL/Hyper-V (172.x) or VPN adapters first; the Wi-Fi address a phone can reach must lead.
 test('phone links put home/office ranges first and skip loopback and IPv6', () => {
@@ -38,4 +38,19 @@ test('phone links label tailnet addresses and add the MagicDNS name while Tailsc
 
 test('no network adapters gives no phone links', () => {
   assert.deepEqual(phoneLinks({}, 4545, 'abc'), []);
+});
+
+test('the tailnet listener follows OMP_WEB_HOST when it names a tailnet address, else this PC\'s Tailscale address', () => {
+  const tailscale = { name: 'my-pc.tail1234.ts.net', ips: ['fd7a:115c:a1e0::482b:7523', '100.114.117.34'] };
+  // A pinned tailnet address wins over whatever Tailscale reports.
+  assert.equal(pickTailnetHost('100.100.1.2', tailscale), '100.100.1.2');
+  assert.equal(pickTailnetHost('fd7a:115c:a1e0::1', null), 'fd7a:115c:a1e0::1');
+  // Any other OMP_WEB_HOST is the opt-out: no tailnet listener at all.
+  assert.equal(pickTailnetHost('127.0.0.1', tailscale), '');
+  assert.equal(pickTailnetHost('0.0.0.0', tailscale), '');
+  // Unset: IPv4 first, IPv6 only when there is no IPv4, nothing while Tailscale is off.
+  assert.equal(pickTailnetHost('', tailscale), '100.114.117.34');
+  assert.equal(pickTailnetHost('', { name: '', ips: ['fd7a:115c:a1e0::482b:7523'] }), 'fd7a:115c:a1e0::482b:7523');
+  assert.equal(pickTailnetHost('', { name: 'my-pc.tail1234.ts.net', ips: [] }), '');
+  assert.equal(pickTailnetHost('', null), '');
 });
