@@ -1786,9 +1786,7 @@
       <button data-advact="status"><span aria-hidden="true">↻</span> Refresh status</button>
       ${files.map(f => `<button data-sub="${esc(f.file)}"><span aria-hidden="true">▸</span> Open ${esc(f.name === '__advisor' ? 'advisor' : f.name.slice(10))} transcript</button>`).join('')}
       <div class="adv-note">Changing the model updates ${S.advCfg?.source === 'WATCHDOG.yml' ? 'your <code>WATCHDOG.yml</code>' : 'the <code>advisor</code> model role'} (all sessions) and restarts this session's OMP while it is idle.</div>`;
-    const r = btn.getBoundingClientRect();
-    el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
-    el.style.top = (r.top < el.offsetHeight + 12 ? r.bottom + 6 : r.top - el.offsetHeight - 6) + 'px';
+    placeMenu(el, btn);
     el.style.visibility = '';
     el.querySelector('input,button')?.focus();
   }
@@ -2153,15 +2151,19 @@
     el.innerHTML = `<div class="tm-head">Reasoning</div><button data-thinkset="" class="${!ctx.thinking ? 'sel' : ''}">Default${def ? ` <small>${esc(def)}</small>` : ''}</button>`
       + levels.map(l => `<button data-thinkset="${esc(l)}" class="${ctx.thinking === l ? 'sel' : ''}">${esc(l)}</button>`).join('');
     document.body.appendChild(el);
-    // Keep the menu inside the visible area: narrow phones, and an open touch keyboard (the visual viewport) too.
+    placeMenu(el, btn);
+    el._ctx = ctx; el._btn = btn;
+    (el.querySelector('.sel') || el.querySelector('button'))?.focus();
+  }
+  // ✦ and ⚑ menus: beside the chip, above it when there is room, and always inside the visible area, so a landscape phone
+  // (or an open touch keyboard, which shrinks the visual viewport) never pushes the menu off-screen; taller menus scroll.
+  function placeMenu(el, btn) {
     const vv = window.visualViewport, vw = vv?.width ?? innerWidth, vh = vv?.height ?? innerHeight, ox = vv?.offsetLeft ?? 0, oy = vv?.offsetTop ?? 0;
     el.style.maxHeight = Math.max(120, vh - 16) + 'px';
     const r = btn.getBoundingClientRect();
     el.style.left = Math.max(ox + 8, Math.min(r.left, ox + vw - el.offsetWidth - 8)) + 'px';
     const below = r.top - oy < el.offsetHeight + 12;
     el.style.top = Math.max(oy + 8, Math.min(below ? r.bottom + 6 : r.top - el.offsetHeight - 6, oy + vh - el.offsetHeight - 8)) + 'px';
-    el._ctx = ctx; el._btn = btn;
-    (el.querySelector('.sel') || el.querySelector('button'))?.focus();
   }
   // ✦ and ⚑ menus; closing hands focus back to the chip when it was inside the menu.
   const closeThinkMenu = () => document.querySelectorAll('#thinkMenu, #advMenu').forEach(m => { const back = m.contains(document.activeElement) && m._btn; m.remove(); if (back?.isConnected) back.focus(); });
@@ -4200,7 +4202,7 @@
     const h = S.home, l = h.listing;
     const html = `
       <div><h2>Where do you want to <em>work</em>?</h2></div>
-      <p class="sub">Pick a workspace, say what to do, press Enter. <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</p>
+      <p class="sub">Pick a workspace, say what to do, press Enter.<span class="kbd-hint"> <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</span></p>
       <div id="homeWs">${homeWsHtml()}</div>
       <div class="folder-box">
         <form class="folder-head" id="pathForm">
@@ -4408,11 +4410,11 @@
   const closeMenus = () => document.querySelectorAll('.menu.open').forEach(closeMenu);
   const overlayOpen = () => !!(S.picker || $('#modal') || $('#lightbox'));
   const keyIs = (e, k) => keyChar(e) === k;
-  // The phone drawer (≤820 px) covers the page, so the page is inert while it is open.
+  // The phone drawer (≤820 px, and landscape phones) covers the page, so the page is inert while it is open.
   function setNav(open, moveFocus) {
     $('#app').classList.toggle('nav-open', open);
     const m = main();
-    // Drawer layouts (narrow, or landscape phones on Screen) cover the page: keep it out of reach while open.
+    // Drawer layouts (narrow, or landscape phones) cover the page: keep it out of reach while open.
     if (m) m.inert = open && getComputedStyle($('#sidebar')).position === 'fixed';
     document.querySelectorAll('[data-act="nav"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
     // Back to the ☰ that is showing: on a landscape phone's Screen page that's the toolbar's, not the hidden header's.
