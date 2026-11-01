@@ -22,6 +22,7 @@ export const RUNTIME_FILES = {
  builtins: 'slash-commands/acp-builtins.ts', available: 'slash-commands/available-commands.ts', messages: 'session/messages.ts',
  builtinRegistry: 'slash-commands/builtin-registry.ts', slashParse: 'slash-commands/helpers/parse.ts',
  todo: 'tools/todo.ts', tokenRate: 'utils/token-rate.ts', modeSettings: 'modes/settings.ts', predict: 'predict/client.ts',
+ sessionMod: 'session/session-manager.ts', agentRegistry: 'registry/agent-registry.ts', ircBus: 'irc/bus.ts',
 };
 
 export function compareVersions(a, b) {
