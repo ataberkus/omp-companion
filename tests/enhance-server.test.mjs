@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -62,7 +62,8 @@ const FAKE_OMP = (dir, { fail = false } = {}) => {
 };
 
 async function boot(t, { config = '', omp = {}, session = {} } = {}) {
-  const dir = await mkdtemp(join(tmpdir(), 'omp-enhance-'));
+  // realpath expands 8.3 short names (CI's TEMP is C:\Users\RUNNER~1\...) to the long form the companion reports.
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'omp-enhance-')));
   const state = { app: null, base: '' };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
   // Role lookup reads <agent dir>/config.yml: point it at this test's own copy, never the developer's.

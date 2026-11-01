@@ -10,11 +10,11 @@ import { fakeOmp } from './fake-omp.mjs';
 const at = new Date().toISOString();
 const session = (id, dir, extra = {}) => ({ id, projectId: 'project', title: id, status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at, ...extra });
 
-async function start(t, sessions, omp, options = {}) {
+async function start(t, sessions, omp, options = {}, project = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-multi-'));
   const c = { dir, app: null };
   t.after(async () => { if (c.app) await c.app.close(); await rm(dir, { recursive: true, force: true }); });
-  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: sessions(dir), activity: [] }));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', ...project }], sessions: sessions(dir), activity: [] }));
   c.app = await createCompanion({ dataDir: dir, omp, ...options });
   c.app.server.listen(0, '127.0.0.1');
   await once(c.app.server, 'listening');
@@ -115,7 +115,9 @@ test('polls send the viewed transcript as deltas: changed messages, the order wh
 test('an unchanged delta poll is answered 304, and a delta stays small however long the transcript is', async t => {
   const omp = fakeOmp();
   const long = Array.from({ length: 500 }, (_, i) => msg('m' + i, 'x'.repeat(2000) + i));
-  const c = await start(t, dir => [session('a', dir, { messages: long })], omp);
+  // The first poll starts a background branch probe; a temp folder outside any repo is 'workspace'. Starting with that
+  // branch keeps the probe from changing the reply (and its ETag) between the polls below.
+  const c = await start(t, dir => [session('a', dir, { messages: long, branch: 'workspace' })], omp, {}, { branch: 'workspace' });
   const a = c.app.store.sessions.find(s => s.id === 'a');
   const [, full, fullRes] = await c.get('/state?session=a&since=');
   assert.ok(Number(fullRes.headers.get('content-length') || JSON.stringify(full).length) > 900000);
