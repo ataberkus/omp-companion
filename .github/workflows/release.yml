@@ -1,5 +1,5 @@
-# Pushing a tag vX.Y.Z builds the signed Windows installer and publishes it as a GitHub release with latest.json,
-# which installed apps poll for updates. Needs repo secrets TAURI_SIGNING_PRIVATE_KEY and
+# Pushing a tag vX.Y.Z builds the Windows installer and the macOS apps (Apple silicon and Intel), and publishes them as a
+# GitHub release with latest.json, which installed apps poll for updates. Needs repo secrets TAURI_SIGNING_PRIVATE_KEY and
 # TAURI_SIGNING_PRIVATE_KEY_PASSWORD (the updater key pair; the public half is in src-tauri/tauri.conf.json).
 name: Release
 
@@ -15,8 +15,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  release:
+    name: ${{ matrix.name }}
+    strategy:
+      # One platform at a time: each job creates the release if it is missing and adds its platform to latest.json, so
+      # jobs running side by side could create two releases or overwrite each other's latest.json.
+      max-parallel: 1
+      matrix:
+        include:
+          - { name: Windows, runner: windows-latest }
+          # Each Mac build runs on its own CPU: build.rs bundles the runner's Bun, and npm ci installs OMP's native
+          # modules for the runner's architecture.
+          - { name: macOS Apple silicon, runner: macos-latest }
+          - { name: macOS Intel, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +37,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      # build.rs copies this Bun into the installer: it is the runtime the app ships with.
+      # build.rs copies this Bun into the app: it is the runtime the app ships with.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14

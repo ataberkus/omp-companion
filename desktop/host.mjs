@@ -4,8 +4,15 @@
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 import * as os from 'node:os';
 import * as readline from 'node:readline';
-import { createCompanion, portBusy, startupUpdate, tailnetAddress, tailscaleSelf } from '../companion/server.mjs';
-import { phoneLinks } from './links.mjs';
+import { adoptLoginShellEnv } from './shell-env.mjs';
+
+// A macOS app opened from Finder or the Dock gets launchd's bare environment: take the login shell's (PATH, API keys,
+// OMP_* settings) first. The companion's modules are imported only afterwards because they read the environment as they load.
+const shellEnv = await adoptLoginShellEnv();
+// stdout carries the protocol, so this goes to stderr (the shell keeps its tail for crash reports).
+if (shellEnv.error) console.error(`Could not read your login shell's environment (${shellEnv.error}); added to PATH: ${shellEnv.added.join(', ') || 'nothing'}.`);
+const { createCompanion, portBusy, startupUpdate, tailnetAddress, tailscaleSelf } = await import('../companion/server.mjs');
+const { phoneLinks } = await import('./links.mjs');
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
 const alreadyRunning = `The companion is already running on port ${port}, probably node companion/server.mjs or another OMP Control Room. Close it and try again.`;
@@ -118,11 +125,11 @@ async function main() {
   listen();
   // Before createCompanion: it pauses running sessions and saves workspace.json, which would clobber a live companion.
   if (await portBusy(port)) return fatal(alreadyRunning);
-  // The shell gives up on a host that is not ready within 60 s; an update cut short starts with the installed OMP.
-  // stdout carries the protocol, so update progress goes to stderr.
-  await startupUpdate({ timeout: 45000, log: m => console.error(m) });
+  // The shell gives up on a host that is not ready within 60 s, reading the login shell included; an update cut short
+  // starts with the installed OMP. stdout carries the protocol, so update progress goes to stderr.
+  await startupUpdate({ timeout: 45000 - (shellEnv.ms || 0), log: m => console.error(m) });
   // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
-  // Attention events become Windows notifications in the shell; it skips them while the main window has focus.
+  // Attention events become native notifications in the shell; it skips them while the main window has focus.
   const verbs = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
   const onAttention = a => send({ event: 'attention', title: `${a.title} ${verbs[a.kind] || 'needs you'}`.slice(0, 200), body: a.detail || 'Open OMP Control Room to continue.' });
   // Screen sharing starts off at every launch, like network access; only the tray turns it on (OMP_WEB_SCREEN doesn't apply here).

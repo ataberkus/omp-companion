@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged by the Tauri CLI into the macOS app's Info.plist. OMP sessions run inside the app's Bun, so macOS attributes
+  their file and network access to the app and asks with these texts: projects often live in Documents or on the Desktop.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Shut down PC in the dashboard asks System Events to shut down this Mac.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>OMP sessions read and edit the projects you open in OMP Control Room, including ones on your Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>OMP sessions read and edit the projects you open in OMP Control Room, including ones in Documents.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>OMP sessions read and edit the projects you open in OMP Control Room, including ones in Downloads.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>OMP sessions read and edit the projects you open in OMP Control Room, including ones on external drives.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>OMP sessions read and edit the projects you open in OMP Control Room, including ones on network drives.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>OMP sessions and the tools they run can connect to devices on your local network.</string>
+    <!-- Sessions keep working while the window is hidden; App Nap would throttle the app that runs them. -->
+    <key>LSAppNapIsDisabled</key>
+    <true/>
+</dict>
+</plist>
