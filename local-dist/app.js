@@ -183,7 +183,9 @@
     // view → its in-flight send: { text, imagePreview, queued, at } for a composer message, {} for other prompts. Keyed by
     // view, so a send still going out to one session never blocks another session's composer.
     sending: new Map(),
-    sendingBash: new Set(), discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send
+    sendingBash: new Set(), discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send or start
+    homeStarts: 0, // New-session Enhances between their click and their enhance request (enhanceFromHome)
+    ownDrafts: new Map(), // draft-session view → { home, seq } for those New-session Enhance moved a draft into
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -805,12 +807,21 @@
     return `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="${why || 'Rewrite this draft with project context (Ctrl+Shift+E)'}" ${why ? 'disabled' : ''}>✨</button>`;
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
-  async function startEnhance(view, body, original) {
+  // An enhance counts as running from here (✕, read-only composer, no draft pull or discard), before its request goes out.
+  function enhanceJob(view, original) {
     const job = { id: null, original, model: '', step: '' };
     S.enhance.set(view, job); refreshComposer();
+    return job;
+  }
+  async function startEnhance(view, body, original, job = enhanceJob(view, original)) {
     let r;
     try { r = await api('/enhance', body, { timeout: 60000 }); }
-    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); } toast(e.message, 'err'); return; }
+    catch (e) {
+      if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); }
+      // The draft session New-session Enhance made is gone (another dashboard left it): its draft goes back to New session.
+      if (e.status === 404 && S.ownDrafts.has(view)) return rescueDraft(view);
+      toast(e.message, 'err'); return;
+    }
     // Cancelled while the request was in flight: stop the job it just created.
     if (S.enhance.get(view) !== job) { api('/enhance/stop', { id: r.id }).catch(() => {}); return; }
     Object.assign(job, { id: r.id, model: r.model }); refreshComposer();
@@ -845,39 +856,82 @@
   }
   // Enhance on New session: create the session in the picked folder as a draft (no prompt yet), start its OMP,
   // carry the draft and images over, and enhance there. Leaving it unsent discards it unless the enhance still runs (leaveDraft).
+  // From the click until the enhance runs, New session takes no second Enhance or Start and no draft session is discarded
+  // (S.homeStarts): the panel lists the new session before /quick-start answers, and opening and leaving it meanwhile must
+  // not remove the session the enhance is about to use. The draft moves only when the enhance starts there, so a start
+  // given up (failed, or New session left for another view meanwhile) leaves it on New session.
   const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
-    const l = S.home.listing, draft = S.home.prompt, home = S.view;
-    if (!l || S.sending.has(home) || enhanceBlocked(draft, attached().length)) return;
-    S.sending.set(home, {}); renderHome();
+    const l = S.home.listing, home = S.view;
+    if (!l || S.sending.has(home) || enhanceBlocked(S.home.prompt, attached().length)) return;
+    S.sending.set(home, {}); S.homeStarts++; renderHome();
+    const end = () => { S.sending.delete(home); S.homeStarts--; flushDiscards(); if (current().kind === 'home') renderHome(); };
     let s;
     try { s = await api('/quick-start', { ...homeStartBody(l), draft: true }); }
-    catch (e) { S.sending.delete(home); if (current().kind === 'home') renderHome(); toast(e.message, 'err'); return; }
+    catch (e) { end(); toast(e.message, 'err'); return; }
     api('/commands?session=' + encodeURIComponent(s.id)).catch(() => {}); // starts OMP in the picked folder
-    const view = 'session:' + s.id, moved = attached();
+    await refresh(); // the session view renders from a state that lists the session
+    const view = 'session:' + s.id;
+    S.discardAfterSend.delete(view); // decided here, not by a leave of it during the start
+    if (S.view !== home && S.view !== view) {
+      end(); discardView(view);
+      toast('Enhance cancelled: you left New session. Your draft is still there.');
+      return;
+    }
+    // What New session holds now moves, including text typed or images attached during the start.
+    const draft = S.home.prompt, moved = S.attachments.filter(a => a.view === home);
     for (const a of moved) a.view = view;
-    drafts.set(view, draft); S.home.prompt = ''; S.sending.delete(home); rememberWsDefaults(l.path);
-    await refresh();
-    location.hash = '#/s/' + s.id; route(); // build the session view now so the enhance renders there
-    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft);
+    drafts.set(view, draft); S.home.prompt = ''; rememberWsDefaults(l.path);
+    S.ownDrafts.set(view, { home, seq: stateSeq });
+    // Running before the session view is built, so its draft pull keeps the composer and a leave keeps the session.
+    const job = enhanceJob(view, draft);
+    if (S.view === view) { const input = $('#input'); if (input) { input.value = draft; autosize(input); } update(); renderAttachments(); }
+    else { location.hash = '#/s/' + s.id; route(); }
+    end();
+    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft, job);
   }
   // A draft session left for New session, another session or history is discarded; its own sub-views and
-  // Settings/Tools/Spend keep it. A send still in flight decides first (the server would otherwise race it).
+  // Settings/Tools/Spend keep it. A send still in flight decides first (the server would otherwise race it), and so does
+  // a New-session Enhance still starting (the draft session left may be the one it created).
   // An enhance still running keeps it as is: job, text and images stay, the result lands in its draft, and the
   // session stays listed. Leaving it again once nothing runs (enhance done, failed or cancelled with ✕) discards it.
   function leaveDraft(prev, c) {
     if (!prev.startsWith('session:') || !['home', 'session', 'native'].includes(c.kind)) return;
     if (!S.store?.sessions.find(x => 'session:' + x.id === prev)?.draft) return;
-    if (S.sending.has(prev) || S.sendingBash.has(prev)) { S.discardAfterSend.add(prev); return; }
+    if (S.sending.has(prev) || S.sendingBash.has(prev) || S.homeStarts) { S.discardAfterSend.add(prev); return; }
     if (S.enhance.has(prev)) return;
     discardView(prev);
   }
   function discardView(view) {
-    S.enhance.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
+    S.enhance.delete(view); S.ownDrafts.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
     api(`/sessions/${encodeURIComponent(view.slice('session:'.length))}/command`, { type: 'discard' }).then(() => refresh()).catch(() => {});
   }
   // After a send settles: if the user left its draft session meanwhile, let the server decide (no-op once sent).
-  function afterSend(view) { if (S.discardAfterSend.delete(view) && S.view !== view) discardView(view); }
+  // A New-session Enhance still starting holds it until it ends (flushDiscards).
+  function afterSend(view) { if (!S.homeStarts && S.discardAfterSend.delete(view) && S.view !== view) discardView(view); }
+  const flushDiscards = () => { for (const view of [...S.discardAfterSend]) if (!S.sending.has(view) && !S.sendingBash.has(view)) afterSend(view); };
+  // A draft session New-session Enhance made, removed by someone else (another dashboard left it, a companion restart
+  // cleaned it up): its text and images go back to New session instead of staying in a view that no longer exists.
+  function rescueDraft(view) {
+    const { home } = S.ownDrafts.get(view);
+    S.ownDrafts.delete(view); S.enhance.delete(view); S.discardAfterSend.delete(view);
+    clearTimeout(draftTimers.get(view)); draftTimers.delete(view);
+    const text = Map.prototype.get.call(drafts, view) || '';
+    Map.prototype.delete.call(drafts, view); // not saved: the companion keeps no draft for a removed session
+    S.home.prompt = [S.home.prompt, text].filter(t => t.trim()).join('\n\n');
+    for (const a of S.attachments) if (a.view === view) a.view = home;
+    toast('The draft session is gone. Your draft is back in New session.', 'err');
+    if (S.view === view) { location.hash = '#/new'; route(); } else if (S.view === home) renderHome();
+  }
+  // Own draft sessions leave S.ownDrafts once sent (no longer drafts), and are rescued once a state requested after
+  // the draft moved there no longer lists them.
+  function checkOwnDrafts(seq) {
+    for (const [view, own] of S.ownDrafts) {
+      if (seq <= own.seq) continue;
+      const s = S.store.sessions.find(x => 'session:' + x.id === view);
+      if (!s || s.hidden) rescueDraft(view); else if (!s.draft) S.ownDrafts.delete(view);
+    }
+  }
   function enhanceCurrent() {
     const c = current(), view = S.view;
     const running = S.enhance.get(view);
@@ -4456,7 +4510,7 @@
       if (seq > stateShown) {
         stateShown = seq;
         const merged = st && mergeStore(st, view);
-        if (merged && mergeTx(merged, view, !!st.sx)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; }
+        if (merged && mergeTx(merged, view, !!st.sx)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; checkOwnDrafts(seq); }
         else if (st) { S.stateTag = ''; void refresh(); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
