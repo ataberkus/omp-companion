@@ -1,4 +1,6 @@
 node_modules/
+src-tauri/runtime/
+src-tauri/runtime.stamp
 .env
 *.log
 .DS_Store

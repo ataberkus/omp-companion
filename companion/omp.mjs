@@ -16,6 +16,7 @@ import { loadCommandHosts, unhostedMessage } from './command-hosts.mjs';
 import { RUNTIME_FILES, ompSources } from './omp-sdk.mjs';
 import { loadCustomUI, customUI } from './custom-ui.mjs';
 import { loadMcpConfig } from './mcp-config.mjs';
+import { scopeIrc } from './irc-scope.mjs';
 
 export const NOT_RUNNING = 'OMP process is not running.';
 const READY_MS = 30000;
@@ -68,6 +69,8 @@ async function loadRuntime(src) {
  m.authSync.createAuthStorageSettingsSync(settings, authStorage);
  const modelRegistry = new m.registryMod.ModelRegistry(authStorage, undefined, { settings });
  m.discovery.initializeWithSettings(settings);
+ // Every session of this process shares OMP's agent registry and IRC bus: partition them by session (irc-scope.mjs).
+ scopeIrc(m.agentRegistry.AgentRegistry.global(), m.ircBus.IrcBus.global(), m.agentRegistry.MAIN_AGENT_ID);
  await modelRegistry.hydrateCredentialScopedModelCaches();
  modelRegistry.refreshInBackground();
  await tuiTheme.ensureTheme?.();
@@ -183,14 +186,19 @@ class OmpSession {
   if (parsed.smol || parsed.slow || parsed.plan) settings.overrideModelRoles({ smol: parsed.smol, slow: parsed.slow, plan: parsed.plan });
   const scoped = await main.resolveScopedModels(parsed, rt.modelRegistry, settings);
   main.normalizeContinueSessionArgs(parsed, args);
-  const sessionManager = await main.createSessionManager(parsed, cwd, settings, async () => 'unavailable', { nativeFlagOwnership: 'preliminary' });
-  if (typeof parsed.resume === 'string' && !sessionManager) throw new Error('Resume cancelled: session was not moved.');
+  // A new session (no --resume/--continue) gets no session manager here and OMP would make one inside createAgentSession,
+  // leaving the session without an agent id: OMP then registers it as the process's "Main" agent, which is shown every
+  // other session's subagent traffic and receives messages their subagents send "Main". Made here as OMP would, it gets
+  // its own id like every other session.
+  const resumed = await main.createSessionManager(parsed, cwd, settings, async () => 'unavailable', { nativeFlagOwnership: 'preliminary' });
+  if (typeof parsed.resume === 'string' && !resumed) throw new Error('Resume cancelled: session was not moved.');
+  const sessionManager = resumed ?? rt.sessionMod.SessionManager.create(cwd);
   const options = await main.buildSessionOptions(parsed, scoped, sessionManager, rt.modelRegistry, settings);
   const eventBus = new bus.EventBus(), subagentEventBus = new bus.EventBus();
   Object.assign(options, {
    cwd, settings, authStorage: rt.authStorage, modelRegistry: rt.modelRegistry, hasUI: true, allowSessionModelFallback: false, settingsApproval: false,
    tuiTranscript: false, autoTitle: false, eventBus, subagentEventBus, deferRetryFallbackValidation: true,
-   ...(sessionManager ? { agentId: `companion:${sessionManager.getSessionId()}` } : {}),
+   agentId: `companion:${sessionManager.getSessionId()}`,
   });
   const { session, setToolUIContext, modelFallbackMessage, mcpManager } = await sdk.createAgentSession(options);
   this.#session = session; this.#mcp = mcpManager; this.#buses = { eventBus, subagentEventBus };

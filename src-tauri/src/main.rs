@@ -199,6 +199,11 @@ fn boot(app: AppHandle) {
     });
     let handle = app.clone();
     thread::spawn(move || watchdog(handle));
+    #[cfg(windows)]
+    {
+        let handle = app.clone();
+        thread::spawn(move || quit_on_installer_request(handle));
+    }
     // Development builds run the repo's files; only installed releases update themselves.
     if !cfg!(debug_assertions) {
         thread::spawn(move || update_loop(app));
@@ -478,6 +483,9 @@ fn nav_guard(app: AppHandle, port: u16) -> impl Fn(&Url) -> bool + Send + 'stati
     }
 }
 
+// Tauri's native drag-drop handler replaces WebView2's drop target on Windows: the page then never sees drop events,
+// so HTML5 drag and drop (reordering project headings, images dropped on the composer) does nothing. No window here
+// listens for Tauri's DragDrop events, so every window turns it off.
 fn new_window_handler(app: AppHandle, port: u16) -> impl Fn(Url, NewWindowFeatures) -> NewWindowResponse<Wry> + Send + Sync + 'static {
     move |url, features| {
         if !same_origin(&url, port) {
@@ -489,6 +497,7 @@ fn new_window_handler(app: AppHandle, port: u16) -> impl Fn(Url, NewWindowFeatur
         let built = WebviewWindowBuilder::new(&app, label, WebviewUrl::External("about:blank".parse().unwrap()))
             .window_features(features)
             .title(TITLE)
+            .disable_drag_drop_handler()
             .on_navigation(nav_guard(app.clone(), port))
             .on_new_window(new_window_handler(app.clone(), port))
             .build();
@@ -513,6 +522,7 @@ fn create_main(app: &AppHandle) {
     let built = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
         .title(TITLE)
         .inner_size(1400.0, 900.0)
+        .disable_drag_drop_handler()
         .visible(false)
         .on_navigation(nav_guard(app.clone(), shell.port))
         .on_new_window(new_window_handler(app.clone(), shell.port))
@@ -828,6 +838,28 @@ fn stop_companion(app: &AppHandle) {
     let _ = host.request(json!({ "cmd": "quit" }), Duration::from_secs(120));
     host.wait_exit(Duration::from_secs(10));
     shell.host_closed.store(true, Ordering::SeqCst);
+}
+
+// A newer installer started by hand sets this event before it replaces the app's files (installer-hooks.nsh,
+// OMP_STOP_APP): quit as from the tray, without asking, so sessions are paused and saved and Bun's files come free.
+// The installer waits for this process to end and closes it by force only after that times out. Windows only: the macOS
+// updater replaces the app bundle from inside the app.
+#[cfg(windows)]
+fn quit_on_installer_request(app: AppHandle) {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+    let name: Vec<u16> = format!("Local\\{}.quit-for-update", app.config().identifier).encode_utf16().chain(Some(0)).collect();
+    // Manual reset, initially unset; the name is per user session, like the per-user install.
+    let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+    if event.is_null() {
+        eprintln!("installer quit event: {}", std::io::Error::last_os_error());
+        return;
+    }
+    let signaled = unsafe { WaitForSingleObject(event, INFINITE) } == WAIT_OBJECT_0;
+    unsafe { CloseHandle(event) };
+    if signaled {
+        quit(&app, false);
+    }
 }
 
 fn on_window_event(window: &tauri::Window, event: &WindowEvent) {

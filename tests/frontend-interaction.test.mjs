@@ -8,9 +8,11 @@ const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(setImm
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
 // Runs the real dashboard script against a tiny DOM: elements by id, a few extra selectors, recorded fetches.
-async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {} } = {}) {
+// `coarse: true` reports a touch screen through matchMedia('(pointer: coarse)'); without it there is no matchMedia at all.
+// `size` is the viewport (a landscape phone is { width: 844, height: 390 }).
+async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {}, coarse = false, size = { width: 1360, height: 900 } } = {}) {
   const location = { hash, pathname: '/', search: '' };
-  const listeners = [], winListeners = new Map(), calls = [], elements = new Map(), extras = new Map(), storage = new Map();
+  const listeners = [], winListeners = new Map(), calls = [], elements = new Map(), extras = new Map(), storage = new Map(), timers = [];
   const document = { activeElement: null };
   const node = (id = '', extra = {}) => ({
     id, tagName: 'DIV', innerHTML: '', value: '', style: {}, dataset: {}, children: [], attrs: {}, hidden: false, isConnected: true,
@@ -24,7 +26,7 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     ...extra,
   });
   for (const id of ['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect', 'search', 'slash', 'scroller', 'tasks', 'chatPlan', 'extras', 'questions', 'queued', 'statusLine', 'modelSlot', 'hint', 'buttons', 'imagePreview', 'toasts', 'promptRail',
-    'pickerQ', 'pickerProvs', 'pickerThink', 'pickerList', 'setList', 'setMeta', 'setNav', 'updateStatus', 'home']) elements.set(id, node(id));
+    'pickerQ', 'pickerProvs', 'pickerThink', 'pickerList', 'pickerQuick', 'pickerFoot', 'pickerClose', 'setList', 'setMeta', 'setNav', 'updateStatus', 'home']) elements.set(id, node(id));
   elements.get('input').tagName = 'TEXTAREA';
   extras.set('[data-act="ompUpdate"]', node());
   for (const s of ['.composer-wrap', '.composer']) extras.set(s, node());
@@ -45,16 +47,19 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     return {};
   };
   runInNewContext(source, {
-    document, location, window: { innerHeight: 900, addEventListener: (type, fn) => winListeners.set(type, fn) }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
+    document, location, window: { innerHeight: size.height, addEventListener: (type, fn) => winListeners.set(type, fn) }, addEventListener() {}, innerWidth: size.width, innerHeight: size.height,
     history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) },
     localStorage: { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) }, sessionStorage: { getItem: () => 'test-token' },
-    setTimeout() {}, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
+    // Timers are recorded, never run on their own: a test runs the ones it means to (see saveDrafts).
+    setTimeout: (fn, ms) => timers.push({ fn, ms }), clearTimeout: id => { if (timers[id - 1]) timers[id - 1].cleared = true; },
+    requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
     fetch: async (url, opts) => {
       const body = opts?.body ? JSON.parse(opts.body) : undefined;
-      calls.push({ url, body });
+      calls.push({ url, body, ...(opts?.keepalive ? { keepalive: true } : {}) });
       const data = await reply(url, body);
       return { ok: true, status: 200, json: async () => structuredClone(data) };
     },
+    ...(coarse ? { matchMedia: q => ({ matches: /pointer:\s*coarse|hover:\s*none/.test(q), media: q, addEventListener() {}, removeEventListener() {} }) } : {}),
   });
   await flush();
   const fire = async (type, e) => { for (const [t, fn] of listeners) if (t === type) fn({ preventDefault() {}, stopPropagation() {}, ...e }); await flush(); };
@@ -63,7 +68,10 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
   const key = (k, mods = {}, t = elements.get('input')) => fire('keydown', { target: t, key: k, code: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
   const go = async h => { location.hash = h; winListeners.get('hashchange')(); await flush(); };
   const commands = () => calls.filter(c => /\/command$/.test(c.url)).map(c => ({ session: c.url.split('/')[3], ...c.body }));
-  return { elements, extras, calls, commands, fire, target, act, key, go, node, document, location, storage };
+  // Runs the composer-draft saves waiting out their 700 ms debounce.
+  const saveDrafts = async () => { for (const t of timers.filter(t => t.ms === 700 && !t.cleared && !t.ran)) { t.ran = true; t.fn(); } await flush(); };
+  const draftPosts = () => calls.filter(c => c.url === '/api/draft' && c.body);
+  return { elements, extras, calls, commands, fire, target, act, key, go, node, document, location, storage, winListeners, saveDrafts, draftPosts };
 }
 const idle = (id, extra = {}) => ({ id, title: id, cwd: '/p', status: 'paused', messages: [], queuedMessages: [], updatedAt: new Date().toISOString(), ...extra });
 const MODELS = { models: ['a', 'b', 'c'].map(x => ({ selector: 'p/' + x, id: x, name: x.toUpperCase(), provider: 'p' })), roles: { default: 'p/a', smol: 'p/b', slow: 'p/c' } };
@@ -114,6 +122,84 @@ test('Ctrl+P moves past a role without a reasoning suffix while OMP reports a le
   const d = await boot({ sessions: [idle('a', { modelSelector: 'p/a', thinking: 'high' })], models: MODELS });
   await d.key('p', { ctrlKey: true, code: 'KeyP' });
   assert.deepEqual(d.commands().filter(c => c.type === 'set_model').map(c => c.model), ['p/b']);
+});
+
+const MODELS_R = { models: [...MODELS.models, { selector: 'p/r', id: 'r', name: 'R', provider: 'p', reasoning: true, thinking: ['low', 'high'] }], roles: MODELS.roles };
+const pickerTap = (d, sel, data) => d.target({ '#picker': d.elements.get('picker'), '.picker': d.node(), [sel]: d.node('', { dataset: data }) });
+const rowIndex = (d, sel) => d.elements.get('pickerList').innerHTML.match(new RegExp(`data-pi="(\\d+)" title="${sel}"`))[1];
+const setModels = d => d.commands().filter(c => c.type === 'set_model').map(c => ({ model: c.model, thinking: c.thinking }));
+
+test('desktop: opening the picker focuses search and shows no quick-switch strip; touch: no keyboard on open', async () => {
+  const desk = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R });
+  await desk.fire('click', { target: desk.act('model') });
+  assert.equal(desk.document.activeElement, desk.elements.get('pickerQ'));
+  assert.equal(desk.elements.get('pickerQuick').hidden, true);
+  await desk.fire('click', { target: pickerTap(desk, '[data-pi]', { pi: rowIndex(desk, 'p/r') }), detail: 1 });
+  assert.deepEqual(setModels(desk), [{ model: 'p/r', thinking: '' }], 'a desktop click still applies at once');
+
+  const touch = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R, coarse: true });
+  await touch.fire('click', { target: touch.act('model') });
+  assert.notEqual(touch.document.activeElement, touch.elements.get('pickerQ'), 'the search box is not focused, so no on-screen keyboard');
+  assert.equal(touch.document.activeElement, touch.elements.get('pickerClose'));
+  await touch.fire('click', { target: pickerTap(touch, '[data-pclose]', {}), detail: 1 });
+  assert.equal(touch.elements.get('picker').hidden, true, 'the visible close button closes the picker');
+});
+
+test('touch: tapping a row with reasoning levels selects it; "Use model" applies it with the chosen level', async () => {
+  const d = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R, coarse: true });
+  await d.fire('click', { target: d.act('model') });
+  assert.doesNotMatch(d.elements.get('pickerThink').innerHTML, /data-think="high"/, 'p/a has no levels');
+  const pi = rowIndex(d, 'p/r');
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi }), detail: 1 });
+  assert.deepEqual(setModels(d), [], 'the first tap only selects');
+  assert.match(d.elements.get('pickerThink').innerHTML, /data-think="high"/, 'the levels follow the tapped row');
+  assert.match(d.elements.get('pickerFoot').innerHTML, /<b>R<\/b> · default reasoning/);
+  await d.fire('click', { target: pickerTap(d, '[data-think]', { think: 'high' }), detail: 1 });
+  assert.notEqual(d.document.activeElement, d.elements.get('pickerQ'), 'a level tap does not raise the keyboard');
+  assert.match(d.elements.get('pickerFoot').innerHTML, /<b>R<\/b> · high/);
+  await d.fire('click', { target: pickerTap(d, '[data-puse]', {}), detail: 1 });
+  assert.deepEqual(setModels(d), [{ model: 'p/r', thinking: 'high' }]);
+  assert.equal(d.elements.get('picker').hidden, true);
+
+  // A second tap on the selected row applies too; a row without levels applies on the first tap.
+  await d.fire('click', { target: d.act('model') });
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi: rowIndex(d, 'p/r') }), detail: 1 });
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi: rowIndex(d, 'p/r') }), detail: 1 });
+  await d.fire('click', { target: d.act('model') });
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi: rowIndex(d, 'p/c') }), detail: 1 });
+  assert.deepEqual(setModels(d).slice(1), [{ model: 'p/r', thinking: 'high' }, { model: 'p/c', thinking: '' }]);
+});
+
+test('touch: quick-switch chips apply a role or a favorite with its remembered level in one tap', async () => {
+  const d = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R, coarse: true });
+  d.storage.set('omp-fav-models', JSON.stringify(['p/r']));
+  d.storage.set('omp-think-levels', JSON.stringify({ 'p/r': 'high' }));
+  const chip = sel => d.elements.get('pickerQuick').innerHTML.match(new RegExp(`data-pquick="(\\d+)" title="${sel}"`))[1];
+  await d.fire('click', { target: d.act('model') });
+  assert.equal(d.elements.get('pickerQuick').hidden, false);
+  assert.match(d.elements.get('pickerQuick').innerHTML, /title="p\/a" aria-current="true"/, 'the current model is marked');
+  await d.fire('click', { target: pickerTap(d, '[data-pquick]', { pquick: chip('p/b') }), detail: 1 });
+  await d.fire('click', { target: d.act('model') });
+  await d.fire('click', { target: pickerTap(d, '[data-pquick]', { pquick: chip('p/r') }), detail: 1 });
+  assert.deepEqual(setModels(d), [{ model: 'p/b', thinking: '' }, { model: 'p/r', thinking: 'high' }]);
+});
+
+// The ⚑ advisor menu opens from the composer at the bottom of the screen; on a landscape phone it is taller than the room above.
+async function advMenu({ size, coarse, height, top }) {
+  const d = await boot({ sessions: [idle('a', { advisor: { enabled: true } })], models: MODELS, size, coarse });
+  const make = d.document.createElement;
+  d.document.createElement = tag => Object.assign(make(tag), { offsetHeight: height, offsetWidth: 280 });
+  const chip = d.node('', { dataset: { act: 'advMenu' }, getBoundingClientRect: () => ({ left: 40, top, bottom: top + 30 }) });
+  await d.fire('click', { target: d.target({ '[data-act]': chip }) });
+  return d.elements.get('advMenu').style;
+}
+test('the advisor menu stays on screen on a landscape phone; where it fits, it opens above its chip as before', async () => {
+  const phone = await advMenu({ size: { width: 844, height: 390 }, coarse: true, height: 340, top: 330 });
+  assert.equal(phone.top, '42px', 'no room above or below: pinned to the bottom edge instead of opening off-screen at 366px');
+  assert.equal(phone.maxHeight, '374px', 'and never taller than the screen');
+  const desk = await advMenu({ size: { width: 1360, height: 900 }, coarse: false, height: 340, top: 700 });
+  assert.equal(desk.top, '354px', 'desktop: above the chip, unchanged');
+  assert.equal(desk.left, '40px');
 });
 
 const SETTINGS = () => ({ file: '/cfg.yml', settings: [
@@ -301,6 +387,124 @@ test('composer drafts follow the companion: a remote draft fills an untouched co
   assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft') && c.body).length, 0, 'pulling never writes back');
 });
 
+test('composer drafts carry their images: a remote image fills an untouched composer, goes out with a send and clears with a send elsewhere', async () => {
+  const shot = name => ({ image: { type: 'image', mimeType: 'image/png', data: 'QUJD' + name.length }, preview: `data:image/jpeg;base64,${name}`, name, tokens: 1 });
+  const state = { drafts: { 'session:a': 5 } }, remote = { 'session:a': { text: '', at: 5, images: [shot('one')] } };
+  const routes = {
+    '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }),
+    // As the companion answers: images the dashboard names in ?have= come without their data.
+    '/draft': (body, url) => { if (body) return {}; const q = new URLSearchParams(url.split('?')[1]), d = remote[q.get('key')], have = q.getAll('have');
+      return { ...d, images: d.images.map(i => have.includes(i.name) ? { name: i.name, mimeType: i.image.mimeType, tokens: i.tokens } : i) }; },
+  };
+  const d = await boot({ routes }), preview = d.elements.get('imagePreview');
+  await d.fire('visibilitychange', {});
+  assert.equal(preview.hidden, false);
+  assert.match(preview.innerHTML, /data:image\/jpeg;base64,one/, 'an image-only draft from the laptop shows on the phone');
+  remote['session:a'] = { text: 'enhanced on the laptop', at: 9, images: [shot('one'), shot('two')] }; state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, 'enhanced on the laptop');
+  assert.match(preview.innerHTML, /base64,one.*base64,two/);
+  assert.match(d.calls.filter(c => c.url.startsWith('/api/draft?')).at(-1).url, /&have=one$/, 'the image it already has is not fetched again');
+  state.drafts = {};
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, '');
+  assert.equal(preview.hidden, true, 'sent from another device: its images leave this composer too');
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft') && c.body).length, 0, 'pulling never writes back');
+
+  // Sent from here, the remote images go with the message.
+  remote['session:a'] = { text: 'fix this', at: 12, images: [shot('one')] }; state.drafts = { 'session:a': 12 };
+  await d.fire('visibilitychange', {});
+  await d.key('Enter');
+  assert.deepEqual(d.commands().filter(c => c.type === 'prompt').map(({ message, images, preview }) => ({ message, images, preview })),
+    [{ message: 'fix this', images: [shot('one').image], preview: [shot('one').preview] }]);
+  assert.equal(preview.hidden, true);
+});
+
+test('composer draft images removed on this device and not yet synced are not replaced by the remote ones', async () => {
+  const shot = name => ({ image: { type: 'image', mimeType: 'image/png', data: 'QUJD' }, preview: `data:image/jpeg;base64,${name}`, name, tokens: 1 });
+  const state = { drafts: { 'session:a': 5 } }, remote = { text: 'look', at: 5, images: [shot('one')] };
+  const d = await boot({ routes: { '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }), '/draft': body => body ? {} : remote } });
+  const preview = d.elements.get('imagePreview');
+  await d.fire('visibilitychange', {});
+  assert.match(preview.innerHTML, /base64,one/);
+  await d.fire('click', { target: d.act('removeImage', { name: 'one' }) });
+  assert.equal(preview.hidden, true);
+  Object.assign(remote, { at: 9, images: [shot('one'), shot('two')] }); state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(preview.hidden, true, 'the local removal stands and is saved over the remote images');
+});
+
+test('a composer draft still waiting out its debounce is saved when the page is hidden or closed, with a request that outlives it', async () => {
+  const d = await boot({ sessions: [idle('a')], routes: { '/draft': () => ({ at: 1, images: [] }) } });
+  const input = d.elements.get('input'), type = async v => { input.value = v; await d.fire('input', { target: input }); };
+  await type('typed, then switched apps');
+  assert.equal(d.draftPosts().length, 0);
+  d.document.hidden = true;
+  await d.fire('visibilitychange', {});
+  assert.deepEqual(d.draftPosts(), [{ url: '/api/draft', body: { key: 'session:a', text: 'typed, then switched apps' }, keepalive: true }]);
+  d.document.hidden = false;
+  await type('typed, then closed the tab');
+  d.winListeners.get('pagehide')();
+  await flush();
+  assert.deepEqual(d.draftPosts().at(-1), { url: '/api/draft', body: { key: 'session:a', text: 'typed, then closed the tab' }, keepalive: true });
+  await d.saveDrafts();
+  assert.equal(d.draftPosts().length, 2, 'the debounced saves were sent already');
+});
+
+test('composer draft saves for one view go one at a time, and a poll never pulls over a save still under way', async () => {
+  const answers = [], state = { drafts: {} };
+  const d = await boot({ routes: {
+    '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }),
+    '/draft': body => { if (!body) return { text: 'older, from the phone', at: 7, images: [] }; const r = deferred(); answers.push(r); return r.promise; },
+  } });
+  const input = d.elements.get('input'), type = async v => { input.value = v; await d.fire('input', { target: input }); await d.saveDrafts(); };
+  await type('first');
+  await type('first, then more');
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['first'], 'the newer save waits for the one under way');
+  state.drafts = { 'session:a': 7 };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft?')).length, 0, 'no pull while a save is under way');
+  answers[0].resolve({ at: 8, images: [] });
+  await flush();
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['first', 'first, then more']);
+  answers[1].resolve({ at: 9, images: [] });
+  await flush();
+  state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(input.value, 'first, then more');
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft?')).length, 0, 'the last save is what this page knows as synced');
+});
+
+test('a composer draft save that fails while offline is sent again after the next poll that reaches the companion', async () => {
+  let offline = true;
+  const d = await boot({ sessions: [idle('a')], routes: { '/draft': body => { if (body && offline) throw new Error('offline'); return { at: 3, images: [] }; } } });
+  const input = d.elements.get('input');
+  input.value = 'written in a tunnel';
+  await d.fire('input', { target: input });
+  await d.saveDrafts();
+  assert.equal(d.draftPosts().length, 1);
+  offline = false;
+  await d.fire('visibilitychange', {});
+  await d.saveDrafts();
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['written in a tunnel', 'written in a tunnel']);
+  await d.fire('visibilitychange', {});
+  await d.saveDrafts();
+  assert.equal(d.draftPosts().length, 2, 'once saved, not sent again');
+});
+
+test('an extension pre-fill joins the synced draft once: added after the pulled draft, then forgotten by the companion', async () => {
+  const state = { drafts: { 'session:a': 5 } }, session = idle('a', { _editorText: { id: 'e1', text: 'from the extension' } });
+  const d = await boot({ routes: {
+    '/state': () => ({ projects: [], archived: [], sessions: [session], ...state }),
+    '/draft': body => body ? { at: 6, images: [] } : { text: 'my draft', at: 5, images: [] },
+  } });
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, 'my draft\n\nfrom the extension', 'added to the synced draft, not to an empty composer saved over it');
+  assert.deepEqual(d.commands().filter(c => c.type === 'editor_text_applied'), [{ session: 'a', type: 'editor_text_applied', id: 'e1' }]);
+  await d.saveDrafts();
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['my draft\n\nfrom the extension']);
+});
+
 test('a send still in flight to one session never blocks sending in another, and each composer shows only its own send', async () => {
   const slow = deferred();
   const d = await boot({ sessions: [idle('a'), idle('b')], routes: { '/sessions/a/command': body => body.type === 'prompt' ? slow.promise : {} } });
@@ -332,4 +536,91 @@ test('Commit related changes in one session is not blocked by one still sending 
   assert.deepEqual(d.commands().filter(c => c.type === 'prompt').map(c => c.session), ['a', 'b']);
   slow.resolve(idle('a'));
   await flush();
+});
+
+test('on touch a session row\'s ⋯ lists pin and archive; choosing one closes the menu and applies it', async () => {
+  const d = await boot({ coarse: true, sessions: [idle('a'), idle('b')], size: { width: 390, height: 844 } });
+  const list = d.elements.get('list').innerHTML;
+  const key = list.match(/data-rowmenu="([^"]+)"/)?.[1];
+  assert.ok(key, 'each row renders its ⋯');
+  assert.match(list, /data-pin="[^"]+"[^>]*>/, 'the hover buttons stay in the markup for pointers that can hover');
+  const row = d.node('', { querySelector: s => s === '[data-pin]' ? d.node('', { title: 'Pin to top', dataset: { unpin: '' } }) : s === '[data-archive]' ? d.node('', { title: 'Archive', dataset: { restore: '' } }) : null });
+  const btn = d.node('', { dataset: { rowmenu: key }, getAttribute: k => k === 'aria-label' ? 'Session actions: a' : undefined, closest: s => s === '.item-row' ? row : null,
+    getBoundingClientRect: () => ({ left: 330, right: 360, top: 806, bottom: 836 }) });
+  await d.fire('click', { target: d.target({ '[data-rowmenu]': btn }) });
+  const menu = d.elements.get('ctxMenu');
+  assert.ok(menu, 'the ⋯ opens a menu');
+  assert.deepEqual([...menu.innerHTML.matchAll(/<button[^>]*>([^<]+)</g)].map(m => m[1]), ['Pin to top', 'Archive', 'Open in new tab']);
+  assert.equal(menu.style.top, '792px', 'near the bottom of the screen it opens above its ⋯');
+  assert.equal(menu.style.left, '350px', 'right-aligned to the ⋯');
+
+  await d.fire('click', { target: d.target({ '[data-rowmenu]': btn }) });
+  assert.ok(!d.elements.has('ctxMenu'), 'a second tap on the same ⋯ closes it');
+  await d.fire('click', { target: d.target({ '[data-rowmenu]': btn }) });
+  const menu2 = d.elements.get('ctxMenu');
+  const pin = d.node('', { dataset: { pin: key, unpin: '' } });
+  await d.fire('click', { target: d.target({ '[data-pin]': pin, '#ctxMenu': menu2 }) });
+  assert.ok(!d.elements.has('ctxMenu'), 'choosing an action closes the menu');
+  assert.deepEqual(d.calls.filter(c => c.url.startsWith('/api/pin')).map(c => c.body), [{ key, pinned: true }]);
+});
+
+// The stylesheet as top-level rules and @media blocks (one level deep, as app.css is written).
+const css = await readFile(new URL('../local-dist/app.css', import.meta.url), 'utf8');
+const cssRules = (() => {
+  const out = [], text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let i = 0;
+  const block = (media, end) => {
+    while (i < end) {
+      const open = text.indexOf('{', i);
+      if (open < 0 || open >= end) return;
+      const head = text.slice(i, open).trim();
+      if (head.startsWith('@media')) {
+        let depth = 1, j = open + 1;
+        for (; depth; j++) depth += text[j] === '{' ? 1 : text[j] === '}' ? -1 : 0;
+        i = open + 1; block(head.slice(6).trim(), j - 1); i = j;
+      } else {
+        const close = text.indexOf('}', open);
+        out.push({ media, selector: head, body: text.slice(open + 1, close) });
+        i = close + 1;
+      }
+    }
+  };
+  block('', text.length);
+  return out;
+})();
+const rulesFor = (pattern, media) => cssRules.filter(r => pattern.test(r.selector) && (media === undefined || media(r.media)));
+const TOUCH = m => m.includes('max-width:820px') && m.includes('pointer:coarse');
+
+test('phones: markdown table cells wrap between words and keep a minimum width; desktop table rules are unchanged', () => {
+  const top = m => m === '';
+  assert.ok(rulesFor(/^\.md :is\(th,td\)$/, TOUCH).some(r => /overflow-wrap:break-word/.test(r.body)), 'cells no longer inherit overflow-wrap:anywhere on phones');
+  assert.ok(rulesFor(/^\.md :is\(th,td\):not\(\.num\)$/, TOUCH).some(r => /min-width:7em/.test(r.body)), 'a column cannot shrink below a readable width');
+  assert.deepEqual(rulesFor(/\.md (:is\()?(th|td)/, top).map(r => r.selector + '{' + r.body + '}'), [
+    '.md th,.md td{padding:7px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}',
+    '.md th{background:var(--card);font-weight:650}',
+  ], 'desktop cells keep their rules and get no wrapping override');
+  assert.deepEqual(rulesFor(/^\.md table$/, top).map(r => r.body), ['border-collapse:collapse;width:100%;font-size:13.5px']);
+});
+
+test('the compact touch sidebar and plan bar live only inside touch/narrow media queries', () => {
+  const compact = [/^\.filters button::after$/, /^\.list-bar \.seg button::after$/, /^\.sidebar \.sidebar-foot$/, /^\.sidebar-foot a svg$/, /^\.sidebar \.theme-btn$/,
+    /\.group-act,\.group-new\)::after$/, /^\.chat-plan \.chat-plan-link::after/];
+  for (const p of compact) {
+    const rules = rulesFor(p);
+    assert.ok(rules.length, `${p} exists`);
+    for (const r of rules) assert.ok(TOUCH(r.media), `${r.selector} is inside a touch/narrow query, not "${r.media || 'top level'}"`);
+  }
+  assert.deepEqual(rulesFor(/^\.item-row \.row-acts \.row-more$/).map(r => [r.media, /display:(none|grid)/.exec(r.body)?.[1]]), [['', 'none'], ['(hover:none)', 'grid']],
+    'the row ⋯ is hidden wherever rows can be hovered (desktop keeps its hover-revealed pin and archive)');
+  for (const r of rulesFor(/^\.item-row \.row-acts :is\(\.pin,\.arch\)$/)) assert.equal(r.media, '(hover:none)', 'pin and archive buttons hide only without hover');
+});
+
+test('a long draft grows the composer to a third of the screen on touch, 40% of the window on desktop as before', async () => {
+  for (const [opts, cap] of [[{ coarse: true, size: { width: 393, height: 659 } }, 659 / 3], [{}, 900 * 0.4]]) {
+    const d = await boot({ sessions: [idle('a')], ...opts });
+    const input = d.elements.get('input');
+    Object.assign(input, { value: 'a long paste\n'.repeat(80), scrollHeight: 2000 });
+    await d.fire('input', { target: input });
+    assert.equal(input.style.height, cap + 'px', opts.coarse ? 'touch' : 'desktop');
+  }
 });

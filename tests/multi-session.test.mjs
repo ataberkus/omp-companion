@@ -10,11 +10,11 @@ import { fakeOmp } from './fake-omp.mjs';
 const at = new Date().toISOString();
 const session = (id, dir, extra = {}) => ({ id, projectId: 'project', title: id, status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at, ...extra });
 
-async function start(t, sessions, omp, options = {}) {
+async function start(t, sessions, omp, options = {}, project = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-multi-'));
   const c = { dir, app: null };
   t.after(async () => { if (c.app) await c.app.close(); await rm(dir, { recursive: true, force: true }); });
-  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: sessions(dir), activity: [] }));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project', ...project }], sessions: sessions(dir), activity: [] }));
   c.app = await createCompanion({ dataDir: dir, omp, ...options });
   c.app.server.listen(0, '127.0.0.1');
   await once(c.app.server, 'listening');
@@ -115,7 +115,9 @@ test('polls send the viewed transcript as deltas: changed messages, the order wh
 test('an unchanged delta poll is answered 304, and a delta stays small however long the transcript is', async t => {
   const omp = fakeOmp();
   const long = Array.from({ length: 500 }, (_, i) => msg('m' + i, 'x'.repeat(2000) + i));
-  const c = await start(t, dir => [session('a', dir, { messages: long })], omp);
+  // The first poll starts a background branch probe; a temp folder outside any repo is 'workspace'. Starting with that
+  // branch keeps the probe from changing the reply (and its ETag) between the polls below.
+  const c = await start(t, dir => [session('a', dir, { messages: long, branch: 'workspace' })], omp, {}, { branch: 'workspace' });
   const a = c.app.store.sessions.find(s => s.id === 'a');
   const [, full, fullRes] = await c.get('/state?session=a&since=');
   assert.ok(Number(fullRes.headers.get('content-length') || JSON.stringify(full).length) > 900000);
@@ -132,6 +134,74 @@ test('an unchanged delta poll is answered 304, and a delta stays small however l
   const body = await changed.text();
   assert.ok(body.length < 20000, `one changed message out of 500 is a small reply (${body.length} bytes)`);
   assert.deepEqual(JSON.parse(body).tx.changed.map(m => m.id), ['m499']);
+});
+
+// store=<epoch>.<rev>: the session list and the store's other fields go out as changes too, so a poll while sessions
+// stream no longer resends every summary. The viewed session's transcript and /btw answers travel beside them.
+test('polls send session summaries as deltas: changed summaries, the order and other store fields when they changed', async t => {
+  const omp = fakeOmp();
+  // Branch probes run on the first poll; starting with the branch a temp folder gets keeps them from changing a summary.
+  const c = await start(t, dir => [session('a', dir, { messages: [msg('m1', 'one')], branch: 'workspace' }), session('b', dir, { messages: [msg('x1', 'other')], branch: 'workspace' })], omp, {}, { branch: 'workspace' });
+  const a = c.app.store.sessions.find(s => s.id === 'a'), b = c.app.store.sessions.find(s => s.id === 'b');
+  const poll = async (query, inm) => {
+    const res = await fetch(`http://127.0.0.1:${c.app.server.address().port}/api/state?${query}`, { headers: { Authorization: 'Bearer ' + c.app.token, ...(inm ? { 'If-None-Match': inm } : {}) } });
+    return { status: res.status, tag: res.headers.get('etag'), body: res.status === 200 ? await res.json() : null };
+  };
+
+  const first = (await poll('session=a&since=&store=')).body;
+  assert.deepEqual(first.sx.order, ['a', 'b']);
+  assert.deepEqual(first.sx.changed.map(s => s.id), ['a', 'b'], 'nothing held yet: every summary');
+  assert.ok(first.sx.changed.every(s => !('messages' in s) && !('_btw' in s)), 'summaries carry no transcript and no /btw answers');
+  assert.equal(first.sx.top.projects[0].id, 'project');
+  assert.ok(!('sessions' in first.sx.top) && !('activity' in first.sx.top), 'top: the store without the session list or the activity log');
+  assert.deepEqual(first.tx.messages.map(m => m.text), ['one'], 'the viewed transcript goes whole in tx');
+  assert.equal(first.sessions, undefined);
+  const { epoch } = first.sx, since = `${first.tx.epoch}.${first.tx.rev}`;
+  const view = rev => poll(`session=a&since=${since}&store=${epoch}.${rev}`).then(r => r.body);
+
+  const same = await poll(`session=a&since=${since}&store=${epoch}.${first.sx.rev}`);
+  assert.deepEqual(same.body.sx, { epoch, rev: first.sx.rev, changed: [] }, 'nothing changed: no summary, no order, no top');
+  assert.equal((await poll(`session=a&since=${since}&store=${epoch}.${first.sx.rev}`, same.tag)).status, 304);
+
+  b.title = 'b renamed';
+  let r = await view(first.sx.rev);
+  assert.deepEqual(r.sx.changed.map(s => [s.id, s.title]), [['b', 'b renamed']], 'only the summary that changed');
+  assert.equal(r.sx.order, undefined);
+  assert.equal(r.sx.top, undefined);
+  const renamed = r.sx.rev;
+
+  c.app.store.archived.push('s:b');
+  r = await view(renamed);
+  assert.deepEqual([r.sx.changed, r.sx.top?.archived, r.sx.order], [[], ['s:b'], undefined], 'a store field: top again, no summaries');
+
+  c.app.store.sessions.reverse();
+  r = await view(r.sx.rev);
+  assert.deepEqual([r.sx.changed, r.sx.order], [[], ['b', 'a']], 'a reorder: the order alone');
+
+  r = await view(renamed);
+  assert.deepEqual([r.sx.changed, r.sx.order, r.sx.top?.archived], [[], ['b', 'a'], ['s:b']], 'an older rev gets everything after it');
+  r = await view(first.sx.rev);
+  assert.deepEqual(r.sx.changed.map(s => s.id), ['b']);
+
+  a._btw = [{ id: 'q1', question: 'why?' }];
+  b._btw = [{ id: 'q2', question: 'not viewed' }];
+  r = await view(r.sx.rev);
+  assert.deepEqual(r.btw, [{ id: 'q1', question: 'why?' }], 'the viewed session\'s /btw answers beside the summaries');
+  assert.deepEqual(r.sx.changed, [], '/btw answers are no part of a summary');
+
+  r = (await poll(`session=a&since=${since}&store=stale.3`)).body;
+  assert.deepEqual(r.sx.changed.map(s => s.id), ['b', 'a'], 'an unknown epoch gets everything');
+  assert.ok(r.sx.top && r.sx.order);
+
+  const legacy = (await poll('session=a&since=')).body;
+  assert.equal(legacy.sx, undefined, 'a page that does not send store gets the whole list, as before');
+  assert.deepEqual(legacy.sessions.map(s => s.id), ['b', 'a']);
+  assert.deepEqual(legacy.sessions.find(s => s.id === 'a')._btw, [{ id: 'q1', question: 'why?' }]);
+
+  c.app.store.sessions.push({ ...b, title: 'same id twice' });
+  r = (await poll(`session=a&since=${since}&store=${epoch}.${r.sx.rev}`)).body;
+  assert.equal(r.sx, undefined, 'repeated session IDs cannot be merged: the whole list');
+  assert.equal(r.sessions.length, 3);
 });
 
 // Every dashboard lists OMP's history every 20 s. Heads are cached by file and read again only when the file changed.

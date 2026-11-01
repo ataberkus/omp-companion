@@ -19,6 +19,10 @@ dunce = "1"
 parking_lot = "0.12"
 tauri-plugin-updater = "2"
 
+# The installer's quit-for-update event (quit_on_installer_request in src/main.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

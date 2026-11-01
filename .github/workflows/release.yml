@@ -1,11 +1,29 @@
-# Pushing a tag vX.Y.Z builds the Windows installer and the macOS apps (Apple silicon and Intel), and publishes them as a
-# GitHub release with latest.json, which installed apps poll for updates. Needs repo secrets TAURI_SIGNING_PRIVATE_KEY and
-# TAURI_SIGNING_PRIVATE_KEY_PASSWORD (the updater key pair; the public half is in src-tauri/tauri.conf.json).
+# Every push to main (and a manual run of this workflow on main) builds the Windows NSIS installer and publishes it
+# as GitHub release v<version>; then the macOS apps (Apple silicon, then Intel) are built and added to the same release.
+# Pushes that only touch README.md, docs/ or .github/ files other than this workflow don't release.
+# The version is <major>.<minor> from src-tauri/tauri.conf.json plus this workflow's run number as the patch, e.g.
+# 1.0.57. It is written into tauri.conf.json, package.json and src-tauri/Cargo.toml in the runner's checkout only;
+# nothing is committed back. To change major or minor, commit the new X.Y.0 in those three files. The job fails
+# instead of publishing when an existing v* tag is already higher.
+# The build uses src-tauri/tauri.release.conf.json, so the installer is also the signed update package: the release
+# carries OMP Control Room_<version>_x64-setup.exe, its .sig and latest.json, the file installed apps check
+# (plugins.updater.endpoints) to find and install the newest release from the tray. The macOS jobs add each Mac's .dmg
+# and its update package (.app.tar.gz and .sig), and their platforms to latest.json. Signing needs two repository
+# secrets (Settings > Secrets and variables > Actions): TAURI_SIGNING_PRIVATE_KEY, the contents of the private key
+# matching plugins.updater.pubkey, and TAURI_SIGNING_PRIVATE_KEY_PASSWORD, its password (empty for a key without one).
+# Without the key the job fails before building instead of publishing a release installed apps can't update to.
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths:
+      - '**'
+      - '!README.md'
+      - '!docs/**'
+      - '!.github/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,29 +33,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: ${{ matrix.name }}
-    strategy:
-      # One platform at a time: each job creates the release if it is missing and adds its platform to latest.json, so
-      # jobs running side by side could create two releases or overwrite each other's latest.json.
-      max-parallel: 1
-      matrix:
-        include:
-          - { name: Windows, runner: windows-latest }
-          # Each Mac build runs on its own CPU: build.rs bundles the runner's Bun, and npm ci installs OMP's native
-          # modules for the runner's architecture.
-          - { name: macOS Apple silicon, runner: macos-latest }
-          - { name: macOS Intel, runner: macos-15-intel }
-    runs-on: ${{ matrix.runner }}
+  windows:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      # Before anything slow: a release without the updater signature would not reach installed apps.
+      - name: Check the updater signing key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Error 'The repository secret TAURI_SIGNING_PRIVATE_KEY is not set. Add the updater private key (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD) under Settings > Secrets and variables > Actions; see the header of this workflow.'
+            exit 1
+          }
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      # build.rs copies this Bun into the app: it is the runtime the app ships with.
+      # build.rs copies this Bun into the installer: it is the runtime the app ships with.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -50,28 +70,65 @@ jobs:
 
       - run: npm ci
 
-      - name: Tag matches the app version
+      - name: Set the release version
+        id: version
         shell: pwsh
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          $tag = '${{ github.ref_name }}'
-          if ($tag -ne "v$conf" -or $pkg -ne $conf -or $cargo -ne $conf) {
-            Write-Error "Tag $tag does not match the versions: tauri.conf.json $conf, package.json $pkg, Cargo.toml $cargo"
+          $ErrorActionPreference = 'Stop'
+          $confPath = 'src-tauri/tauri.conf.json'
+          $pkgPath = 'package.json'
+          $cargoPath = 'src-tauri/Cargo.toml'
+
+          $base = [version](Get-Content $confPath -Raw | ConvertFrom-Json).version
+          $version = "$($base.Major).$($base.Minor).$env:RUN_NUMBER"
+
+          # Highest existing v* tag and the commit it points at (peeled ^{} lines win for annotated tags).
+          $remote = git ls-remote --tags origin 'refs/tags/v*'
+          if ($LASTEXITCODE -ne 0) { Write-Error 'git ls-remote --tags origin failed'; exit 1 }
+          $tags = @{}
+          foreach ($line in $remote) {
+            if ($line -notmatch '^([0-9a-f]+)\s+refs/tags/v(\d+\.\d+\.\d+)(\^\{\})?$') { continue }
+            if ($Matches[3] -or -not $tags.ContainsKey($Matches[2])) { $tags[$Matches[2]] = $Matches[1] }
+          }
+          $latest = $tags.Keys | Sort-Object { [version]$_ } | Select-Object -Last 1
+          if ($latest) {
+            $cmp = ([version]$latest).CompareTo([version]$version)
+            # Equal is only a re-run of this same run on the same commit; anything else would not be newer.
+            if ($cmp -gt 0 -or ($cmp -eq 0 -and $tags[$latest] -ne $env:GITHUB_SHA)) {
+              Write-Error "Release v$version would not be newer than the existing tag v$latest. Raise major/minor in $confPath, $cargoPath and $pkgPath."
+              exit 1
+            }
+          }
+
+          # Replace the version fields in place so the files keep their formatting and line endings.
+          function Set-Version([string]$path, [string]$pattern, [string]$replacement) {
+            $text = Get-Content $path -Raw
+            $regex = [regex]::new($pattern, 'Multiline')
+            if (-not $regex.IsMatch($text)) { Write-Error "No version field found in $path"; exit 1 }
+            Set-Content $path -Value $regex.Replace($text, $replacement, 1) -NoNewline
+          }
+          Set-Version $confPath '^(\s*"version"\s*:\s*)"[^"]*"' "`${1}`"$version`""
+          Set-Version $pkgPath '^(  "version"\s*:\s*)"[^"]*"' "`${1}`"$version`""
+          Set-Version $cargoPath '^(version\s*=\s*)"[^"]*"' "`${1}`"$version`""
+
+          $conf = (Get-Content $confPath -Raw | ConvertFrom-Json).version
+          $pkg = (Get-Content $pkgPath -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path $cargoPath -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($conf -ne $version -or $pkg -ne $version -or $cargo -ne $version) {
+            Write-Error "Version not applied: tauri.conf.json $conf, package.json $pkg, Cargo.toml $cargo (expected $version)"
             exit 1
           }
+          Write-Output "Releasing v$version (previous tag: $(if ($latest) { "v$latest" } else { 'none' }))"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       # One test file at a time: tests/frontend-render.test.mjs times markdown rendering against a 50 ms budget, which
       # parallel test files competing for the runner's few cores can exceed.
       - run: node --test --test-concurrency=1 "tests/*.test.mjs"
 
-      # Spotlight indexes the disk image tauri build mounts to make the .dmg; on the slower Intel runner that kept the
-      # image busy past hdiutil's detach timeout ("timeout for DiskArbitration expired").
-      - name: Keep Spotlight off disk images
-        if: runner.os == 'macOS'
-        run: sudo mdutil -a -i off || echo "mdutil could not turn indexing off on every volume; continuing"
-
+      # tauri.release.conf.json turns on createUpdaterArtifacts: the setup .exe is signed with the key below, and the
+      # action uploads its .sig and a latest.json pointing at it.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,8 +137,81 @@ jobs:
         with:
           tauriScript: npx tauri
           args: --config src-tauri/tauri.release.conf.json
-          tagName: ${{ github.ref_name }}
-          releaseName: OMP Control Room ${{ github.ref_name }}
+          tagName: v${{ steps.version.outputs.version }}
+          releaseName: OMP Control Room v${{ steps.version.outputs.version }}
+          releaseBody: See the commits since the previous release.
+          releaseDraft: false
+          prerelease: false
+
+  # The Mac builds of the same commit, added to the release the Windows job published, under its version.
+  macos:
+    needs: windows
+    name: macOS ${{ matrix.name }}
+    strategy:
+      # One at a time: each job adds its platform to the release's latest.json, and jobs running side by side would
+      # overwrite each other's.
+      max-parallel: 1
+      matrix:
+        include:
+          # Each architecture builds on its own kind of Mac: build.rs bundles the runner's Bun, and npm ci installs OMP's
+          # native modules for the runner's CPU.
+          - { name: Apple silicon, runner: macos-latest }
+          - { name: Intel, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # The version the Windows job computed and released, written the same way (runner's checkout only).
+      - name: Set the release version
+        env:
+          VERSION: ${{ needs.windows.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("fs"), v = process.env.VERSION;
+            if (!/^\d+\.\d+\.\d+$/.test(v || "")) throw new Error(`No release version from the Windows job: "${v}"`);
+            for (const [file, re] of [["src-tauri/tauri.conf.json", /^(\s*"version"\s*:\s*)"[^"]*"/m], ["package.json", /^(  "version"\s*:\s*)"[^"]*"/m], ["src-tauri/Cargo.toml", /^(version\s*=\s*)"[^"]*"/m]]) {
+              const text = fs.readFileSync(file, "utf8");
+              if (!re.test(text)) throw new Error(`No version field found in ${file}`);
+              fs.writeFileSync(file, text.replace(re, `$1"${v}"`));
+            }
+            console.log(`Building v${v}`);
+          '
+
+      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
+
+      # Spotlight indexes the disk image tauri build mounts to make the .dmg; on the slower Intel runner that kept the
+      # image busy past hdiutil's detach timeout ("timeout for DiskArbitration expired").
+      - name: Keep Spotlight off disk images
+        run: sudo mdutil -a -i off || echo "mdutil could not turn indexing off on every volume; continuing"
+
+      # Ad-hoc signed (bundle.macOS.signingIdentity "-"); the update package is signed with the updater key below.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: npx tauri
+          args: --config src-tauri/tauri.release.conf.json
+          tagName: v${{ needs.windows.outputs.version }}
+          releaseName: OMP Control Room v${{ needs.windows.outputs.version }}
           releaseBody: See the commits since the previous release.
           releaseDraft: false
           prerelease: false

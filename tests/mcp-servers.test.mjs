@@ -9,7 +9,8 @@ import { maskArgs, maskUrl, serverView } from '../companion/mcp-config.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 async function boot(t, mcp) {
-  // The companion keeps folders as fs.realpath gives them; macOS's temp folder (/var/folders/…) is a symlink into /private/var.
+  // The companion keeps folders as fs.realpath gives them: it expands 8.3 short names (CI's TEMP is C:\Users\RUNNER~1\...)
+  // and resolves macOS's temp folder, a symlink (/var/folders/… is /private/var/folders/…).
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'omp-mcp-')));
   const omp = Object.assign(fakeOmp(), mcp);
   const app = await createCompanion({ dataDir: dir, ompSessionsDir: dir, ompCommand: process.execPath, omp });

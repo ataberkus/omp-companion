@@ -138,11 +138,12 @@ test('/state is asked for the viewed session only, switching sessions fetches at
     return { body: slim(id), headers: { ETag: '"v1"' } };
   } });
   await flush();
-  assert.ok(app.calls.some(c => c.url === '/api/state?session=s1&since='), 'nothing held yet: since is empty');
+  const asked = c => c.url.startsWith('/api/state?') && Object.fromEntries(new URL(c.url, 'http://x').searchParams);
+  assert.ok(app.calls.some(c => JSON.stringify(asked(c)) === JSON.stringify({ session: 's1', since: '', store: '' })), 'nothing held yet: since and store are empty');
   assert.match(app.thread(), /first session reply/);
   const n = app.calls.length;
   await app.go('#/s/s2');
-  assert.ok(app.calls.slice(n).some(c => c.url === '/api/state?session=s2&since='), 'no wait for the next poll');
+  assert.ok(app.calls.slice(n).some(c => JSON.stringify(asked(c)) === JSON.stringify({ session: 's2', since: '', store: '' })), 'no wait for the next poll');
   assert.match(app.thread(), /Loading…/);
   assert.match(app.els.get('topbar').innerHTML, /Chat s2/, 'the top bar shows the new session at once');
   assert.match(app.els.get('buttons').innerHTML, /data-act="follow_up"/, 'the composer already has the running session’s buttons');
@@ -192,12 +193,13 @@ test('the viewed transcript is merged from deltas; a delta that does not fit wha
   assert.equal(asked().at(-1), 'e2.1', 'deltas resume from the refetched transcript');
 });
 
-test('end to end: a dashboard merging deltas from the companion shows what a fresh full load shows', async t => {
+test('end to end: a dashboard merging deltas from the companion shows what a fresh full load shows, thread and sidebar', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'omp-delta-e2e-'));
   const messages = [];
   for (let i = 0; i < 30; i++) messages.push(i % 3 === 0 ? { id: 'u' + i, role: 'user', text: 'question ' + i, at: at(i) } : i % 3 === 1 ? reply('a' + i, 'answer **' + i + '**', i) : { id: 't' + i, role: 'tool', text: 'Done · read', at: at(i), tool: { name: 'read', intent: 'look ' + i, args: '{}', status: 'done', result: 'line ' + i } });
-  await writeFile(join(dataDir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [session('s1', messages, { status: 'review' })], activity: [], archived: [] }));
-  const app = await createCompanion({ dataDir, omp: fakeOmp() });
+  await writeFile(join(dataDir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [session('s1', messages, { status: 'review' }), session('s2', [reply('b1', 'second session')])], activity: [], archived: [] }));
+  // An empty OMP history: the sidebar lists only these sessions, not the machine's own OMP session files.
+  const app = await createCompanion({ dataDir, omp: fakeOmp(), ompSessionsDir: join(dataDir, 'omp-sessions') });
   t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
@@ -213,7 +215,7 @@ test('end to end: a dashboard merging deltas from the companion shows what a fre
   const ready = async page => { for (let i = 0; i < 400 && !page.loops().length; i++) await new Promise(r => setTimeout(r, 5)); await flush(); return page; };
   const live = await ready(boot({ token: app.token, respond: forward }));
   const s = app.store.sessions[0];
-  const shown = async () => { await live.go('#/'); await live.go('#/s/s1'); const fresh = await ready(boot({ token: app.token, respond: forward })); return [live.thread(), fresh.thread()]; };
+  const shown = async () => { await live.go('#/'); await live.go('#/s/s1'); const fresh = await ready(boot({ token: app.token, respond: forward })); return [[live.thread(), live.els.get('list').innerHTML], [fresh.thread(), fresh.els.get('list').innerHTML]]; };
   const steps = [
     () => { s.messages.at(-1).text += ' and more'; },
     () => { s.messages.push(reply('n1', 'a new reply', 40)); },
@@ -221,16 +223,120 @@ test('end to end: a dashboard merging deltas from the companion shows what a fre
     () => { s.messages.shift(); s.messages.shift(); },
     () => { const [m] = s.messages.splice(3, 1); s.messages.push(m); },
     () => { s.messages = [reply('r1', 'a rebuilt transcript', 50)]; },
+    // Other sessions and the rest of the store: summaries, the session order and store fields arrive as changes too.
+    () => { app.store.sessions[1].title = 'second, renamed'; },
+    () => { app.store.sessions.unshift(session('s3', [reply('c1', 'third session')], { title: 'third' })); },
+    () => { app.store.sessions.splice(app.store.sessions.findIndex(x => x.id === 's2'), 1); },
+    () => { app.store.pinned = ['s:s3']; },
   ];
   for (const [i, step] of steps.entries()) {
     step();
     const before = sizes.length;
     await live.poll();
-    assert.ok(live.calls.filter(c => c.url.startsWith('/api/state')).at(-1).url.match(/since=[\w-]+\.\d+$/), `step ${i}: polled with the rev it holds`);
-    if (i < 5) assert.ok(sizes[before] < 4000, `step ${i}: a delta, not the transcript (${sizes[before]} bytes)`);
+    const q = new URL(live.calls.filter(c => c.url.startsWith('/api/state')).at(-1).url, 'http://x').searchParams;
+    assert.match(q.get('since'), /^[\w-]+\.\d+$/, `step ${i}: polled with the transcript rev it holds`);
+    assert.match(q.get('store'), /^[\w-]+\.\d+$/, `step ${i}: polled with the store rev it holds`);
+    if (i !== 5) assert.ok(sizes[before] < 4000, `step ${i}: a delta, not the transcript or the session list (${sizes[before]} bytes)`);
     const [merged, full] = await shown();
-    assert.equal(merged, full, `step ${i}: the merged transcript renders exactly like a full load`);
+    assert.equal(merged[0], full[0], `step ${i}: the merged transcript renders exactly like a full load`);
+    assert.equal(merged[1], full[1], `step ${i}: the merged session list renders exactly like a full load`);
   }
+});
+
+// Enough DOM for setKeyed to patch a container part by part: markup splits into its top-level elements, as a browser
+// would split it (the thread's markup is well formed), and template elements parse one part. Counts whole rewrites
+// and inserted elements.
+const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+function topLevel(html) {
+  const out = [];
+  let depth = 0, start = 0;
+  for (const m of html.matchAll(/<(\/?)([a-zA-Z][\w-]*)(?:"[^"]*"|'[^']*'|[^'">])*>/g)) {
+    if (m[1]) { if (--depth === 0) out.push(html.slice(start, m.index + m[0].length)); continue; }
+    if (depth === 0) start = m.index;
+    if (VOID.has(m[2].toLowerCase()) || m[0].endsWith('/>')) { if (depth === 0) out.push(m[0]); } else depth++;
+  }
+  return out;
+}
+function keyedHost(document) {
+  const kids = [], stats = { rewrites: 0, inserted: 0 };
+  const element = outerHTML => {
+    const n = { nodeType: 1, outerHTML, parent: null, key: /data-(?:key|gid)="([^"]*)"/.exec(outerHTML)?.[1],
+      get nextElementSibling() { return n.parent ? kids[kids.indexOf(n) + 1] || null : null; },
+      remove() { if (n.parent) { kids.splice(kids.indexOf(n), 1); n.parent = null; } } };
+    return n;
+  };
+  const make = document.createElement;
+  document.createElement = tag => tag !== 'template' ? make(tag) : { set innerHTML(v) { const c = topLevel(v).map(element); this.content = { children: c, childNodes: c, firstElementChild: c[0] || null }; } };
+  const host = {
+    tagName: 'DIV', dataset: {}, style: {}, stats, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, scrollHeight: 0, scrollTop: 0, clientHeight: 0,
+    get children() { return kids; }, get firstElementChild() { return kids[0] || null; },
+    get innerHTML() { return kids.map(k => k.outerHTML).join(''); },
+    set innerHTML(v) { for (const k of kids.splice(0)) k.parent = null; for (const h of topLevel(v)) { const n = element(h); n.parent = host; kids.push(n); } stats.rewrites++; },
+    insertBefore(n, ref) { n.remove(); const i = ref ? kids.indexOf(ref) : -1; kids.splice(i < 0 ? kids.length : i, 0, n); n.parent = host; stats.inserted++; return n; },
+    contains: n => n === host || kids.includes(n), querySelector: () => null, querySelectorAll: () => [], matches: () => false, closest: () => null, addEventListener() {}, setAttribute() {}, removeAttribute() {}, focus() {},
+  };
+  return host;
+}
+
+test('polls rebuild only the thread parts that changed; the rest keep their elements and the thread reads like a full render', async () => {
+  let messages = Array.from({ length: 12 }, (_, i) => i % 2 ? reply('a' + i, 'answer ' + i, i) : { id: 'u' + i, role: 'user', text: 'question ' + i, at: at(i) });
+  const st = () => store([session('s1', messages, { status: 'running' })]);
+  const app = boot({ elements: { thread: keyedHost }, respond: stateOf(st) });
+  await flush();
+  const thread = app.els.get('thread'), full = async () => { const fresh = boot({ respond: stateOf(st) }); await flush(); return fresh.thread(); };
+  const rewrites = thread.stats.rewrites; // the Loading… placeholder, then the first render
+  assert.equal(thread.innerHTML, await full());
+
+  const first = [...thread.children];
+  messages = messages.map(m => m.id === 'a11' ? { ...m, text: m.text + ' and more' } : m);
+  thread.stats.inserted = 0;
+  await app.poll();
+  assert.deepEqual(thread.children.filter(n => !first.includes(n)).map(n => n.key), ['msg:a11'], 'the streaming reply alone is rebuilt');
+  assert.deepEqual([thread.stats.inserted, thread.stats.rewrites], [1, rewrites], 'and nothing is rewritten whole');
+  assert.equal(thread.innerHTML, await full());
+
+  // The oldest message drops off the front (the companion keeps 600) as a new one arrives: nothing else moves.
+  const kept = [...thread.children];
+  messages = [...messages.slice(1), reply('a12', 'a new reply', 12)];
+  thread.stats.inserted = 0;
+  await app.poll();
+  assert.equal(thread.stats.inserted, 1, 'only the new reply goes in');
+  assert.ok(kept.slice(1).every(n => thread.children.includes(n)), 'every other part keeps its element');
+  assert.equal(thread.innerHTML, await full());
+
+  // Messages without unique IDs key by position.
+  messages = [...messages, reply('a12', 'the same ID again', 13)];
+  await app.poll();
+  assert.equal(thread.innerHTML, await full());
+
+  // Written elsewhere since (a Loading… placeholder): the next render writes the thread whole, not into stale elements.
+  thread.innerHTML = '<div class="working">Loading…</div>';
+  messages = [...messages, reply('a14', 'after the placeholder', 14)];
+  await app.poll();
+  assert.equal(thread.stats.rewrites, rewrites + 2);
+  assert.equal(thread.innerHTML, await full());
+});
+
+test('an unchanged poll renders nothing while nothing works, and a tab looked at again still clears its badge', async () => {
+  let tag = 'v1', body = store([session('a', [], { status: 'review' }), session('b', [reply('m1', 'working on it')], { status: 'running' })]), writes = 0;
+  const list = document => { const n = document.createElement('list'); let html = ''; Object.defineProperty(n, 'innerHTML', { get: () => html, set: v => { html = v; writes++; } }); return n; };
+  const app = boot({ hash: '#/s/b', elements: { list }, respond: (url, opts) => url.startsWith('/api/state') ? opts.headers['If-None-Match'] === tag ? { status: 304 } : { body, headers: { ETag: tag } } : undefined });
+  await flush();
+  app.document.hasFocus = () => false; // the tab shows, but another window has the focus
+  body = store([session('a', [], { status: 'review' }), session('b', [reply('m1', 'done')], { status: 'review', workFinishedAt: at(9) })]);
+  tag = 'v2';
+  await app.poll();
+  assert.equal(app.document.title, '(1) OMP Control Room', 'b settled while nobody looked');
+  const n = writes;
+  await app.poll();
+  assert.equal(writes, n, 'a 304 with nothing working renders nothing');
+  app.document.hasFocus = () => true;
+  await app.poll();
+  assert.equal(app.document.title, 'OMP Control Room', 'looked at: the badge clears on an unchanged poll too');
+  assert.ok(writes > n, 'and the sidebar drops its mark');
+  const m = writes;
+  await app.poll();
+  assert.equal(writes, m);
 });
 
 test('a visible tab refreshes at once; offline polls say so in the view and in the status dot label', async () => {

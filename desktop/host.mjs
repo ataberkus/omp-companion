@@ -11,18 +11,22 @@ import { adoptLoginShellEnv } from './shell-env.mjs';
 const shellEnv = await adoptLoginShellEnv();
 // stdout carries the protocol, so this goes to stderr (the Tauri shell keeps its tail for crash reports).
 if (shellEnv.error) console.error(`Could not read your login shell's environment (${shellEnv.error}); added to PATH: ${shellEnv.added.join(', ') || 'nothing'}.`);
-const { createCompanion, portBusy, startupUpdate, tailnetAddress, tailscaleSelf } = await import('../companion/server.mjs');
-const { phoneLinks } = await import('./links.mjs');
+const { busySessions, createCompanion, portBusy, startupUpdate, tailscaleSelf } = await import('../companion/server.mjs');
+const { phoneLinks, pickTailnetHost } = await import('./links.mjs');
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
 const alreadyRunning = `The companion is already running on port ${port}, probably node companion/server.mjs or another OMP Control Room. Close it and try again.`;
 let companion, closing, lan = false;
-// OMP_WEB_HOST naming this PC's Tailscale address (100.x.y.z or fd7a:115c:a1e0::…) adds a listener there from launch, so
-// devices on the tailnet reach the app while the LAN stays closed. Any other OMP_WEB_HOST is ignored: the window needs
-// 127.0.0.1 and only the tray toggle opens the LAN. While the toggle is on, 0.0.0.0 covers the tailnet and this listener steps aside.
-const tailnetHost = tailnetAddress(process.env.OMP_WEB_HOST || '') ? process.env.OMP_WEB_HOST : '';
-let tailnet, tailnetUp = false, tailnetRetry, tailnetTask = Promise.resolve();
-const tailnetStep = step => (tailnetTask = tailnetTask.then(step));
+// A second listener on this PC's Tailscale address lets devices on the tailnet reach the app from launch while the LAN stays
+// closed (the window needs 127.0.0.1 and only the tray toggle opens the LAN). With OMP_WEB_HOST unset the address comes from
+// `tailscale status` and is rechecked every 30 s, following Tailscale as it connects, disconnects or changes address.
+// OMP_WEB_HOST naming a tailnet address (100.x.y.z or fd7a:115c:a1e0::…) pins it; any other OMP_WEB_HOST turns the listener off.
+// While the toggle is on, 0.0.0.0 covers the tailnet and this listener steps aside.
+const envHost = process.env.OMP_WEB_HOST || '';
+const autoTailnet = !envHost;
+let tailnet, tailnetHost = '', tailnetUp = false, tailnetRetry, tailnetTask = Promise.resolve();
+// A failed step must not break the chain: every later open or close would be skipped.
+const tailnetStep = step => (tailnetTask = tailnetTask.then(step).catch(e => console.error(`Tailnet listener: ${e.message}`)));
 
 // stdout carries only protocol lines; the shell ignores anything that is not JSON.
 const send = (msg, cb) => process.stdout.write(JSON.stringify(msg) + '\n', cb);
@@ -59,37 +63,59 @@ async function setLan(on) {
 }
 
 // Tailscale often connects after the app starts (both start at sign-in), so an address that is not up yet is retried every 30 s.
+// Auto mode keeps that timer running while listening, so a dropped or changed address is closed and the new one bound.
 function openTailnet() {
   clearTimeout(tailnetRetry);
-  return tailnetStep(() => new Promise(resolve => {
-    if (!tailnetHost || lan || tailnetUp || closing) return resolve();
+  return tailnetStep(async () => {
+    if (lan || closing) return;
+    const want = autoTailnet ? pickTailnetHost('', await tailscaleSelf().catch(() => null)) : pickTailnetHost(envHost, null);
+    if (lan || closing) return;
+    const retry = () => { tailnetRetry = setTimeout(openTailnet, 30000); tailnetRetry.unref?.(); };
+    if (tailnetUp && want === tailnetHost) return autoTailnet && retry();
+    if (tailnetUp) {
+      console.error(`Stopped listening on ${tailnetHost}:${port}: Tailscale disconnected or changed its address.`);
+      await stopTailnet();
+    }
+    if (!want) return autoTailnet && retry();
     tailnet ??= companion.serve();
-    const onError = e => {
-      tailnet.off('listening', onListening);
-      console.error(`Could not listen on ${tailnetHost}:${port} (${e.code || e.message}); is Tailscale connected? Retrying in 30 s.`);
-      tailnetRetry = setTimeout(openTailnet, 30000);
-      tailnetRetry.unref?.();
-      resolve();
-    };
-    const onListening = () => { tailnet.off('error', onError); tailnetUp = true; console.error(`Listening on the tailnet: http://${tailnetHost.includes(':') ? `[${tailnetHost}]` : tailnetHost}:${port}/`); resolve(); };
-    tailnet.once('error', onError).once('listening', onListening).listen(port, tailnetHost);
-  }));
-}
-
-function closeTailnet() {
-  clearTimeout(tailnetRetry);
-  return tailnetStep(() => {
-    if (!tailnetUp) return;
-    tailnetUp = false;
-    companion.closeScreen();
-    return new Promise(resolve => { tailnet.closeAllConnections(); tailnet.close(() => resolve()); });
+    await new Promise(resolve => {
+      const onError = e => {
+        tailnet.off('listening', onListening);
+        console.error(`Could not listen on ${want}:${port} (${e.code || e.message}); is Tailscale connected? Retrying in 30 s.`);
+        retry();
+        resolve();
+      };
+      const onListening = () => {
+        tailnet.off('error', onError);
+        tailnetUp = true; tailnetHost = want;
+        console.error(`Listening on the tailnet: http://${want.includes(':') ? `[${want}]` : want}:${port}/`);
+        if (autoTailnet) retry();
+        resolve();
+      };
+      tailnet.once('error', onError).once('listening', onListening).listen(port, want);
+    });
   });
 }
 
-const shutdown = () => (closing ??= companion ? companion.close() : Promise.resolve());
+// Runs inside a tailnetStep. The screen viewer goes first, as in bind().
+function stopTailnet() {
+  if (!tailnetUp) return;
+  tailnetUp = false; tailnetHost = '';
+  companion.closeScreen();
+  return new Promise(resolve => { tailnet.closeAllConnections(); tailnet.close(() => resolve()); });
+}
+
+// The timer is cleared again inside the step: an open step queued before this one may have rearmed it.
+function closeTailnet() {
+  clearTimeout(tailnetRetry);
+  return tailnetStep(() => { clearTimeout(tailnetRetry); return stopTailnet(); });
+}
+
+// companion.close() closes every listener, the tailnet one included.
+const shutdown = () => { clearTimeout(tailnetRetry); return (closing ??= companion ? companion.close() : Promise.resolve()); };
 
 const commands = {
-  busy: () => ({ busy: companion.store.sessions.filter(s => s.status === 'running' || s.status === 'queued').length }),
+  busy: () => ({ busy: busySessions(companion.store.sessions) }),
   lan: msg => setLan(Boolean(msg.on)),
   screen: msg => ({ screen: companion.setScreen(Boolean(msg.on)) }),
   links: async () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.password ? '' : companion.token, await tailscaleSelf()) }),

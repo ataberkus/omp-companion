@@ -172,6 +172,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
     tx: null, // the viewed transcript as last merged: { session, epoch, rev, messages } (see mergeTx)
+    sx: null, // the session summaries and other store fields as last merged: { epoch, rev, top, order, sessions } (see mergeStore)
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     attachments: [], editQueue: null, queueOpen: null, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
@@ -182,7 +183,9 @@
     // view → its in-flight send: { text, imagePreview, queued, at } for a composer message, {} for other prompts. Keyed by
     // view, so a send still going out to one session never blocks another session's composer.
     sending: new Map(),
-    sendingBash: new Set(), discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send
+    sendingBash: new Set(), discardAfterSend: new Set(), // draft-session views whose discard waits for an in-flight send or start
+    homeStarts: 0, // New-session Enhances between their click and their enhance request (enhanceFromHome)
+    ownDrafts: new Map(), // draft-session view → { home, seq } for those New-session Enhance moved a draft into
   };
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
@@ -198,15 +201,19 @@
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
   // `token` probes a pasted token without adopting it; `etag` ({ tag }) makes the GET conditional and resolves null on 304.
-  async function api(p, body, { timeout = 30000, token = S.token, etag } = {}) {
+  // `keepalive` lets the request outlive the page (a closing tab); browsers cap such bodies at 64 KB, so larger ones go as usual.
+  // A refused request's error carries its HTTP status.
+  async function api(p, body, { timeout = 30000, token = S.token, etag, keepalive = false } = {}) {
     if (!token) throw Object.assign(new Error('Not connected.'), { auth: true });
+    const json = body === undefined ? undefined : JSON.stringify(body);
     let res;
     try {
       res = await fetch('/api' + p, {
         method: body === undefined ? 'GET' : 'POST',
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: json,
         signal: AbortSignal.timeout(timeout),
+        ...(keepalive && json && json.length < 60000 ? { keepalive: true } : {}),
       });
     } catch (e) { throw new Error(e.name === 'TimeoutError' ? 'The companion did not answer in time.' : 'The companion is not reachable.'); }
     // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
@@ -218,14 +225,14 @@
       if (metaToken && token === metaToken) { location.reload(); throw Object.assign(new Error('Reconnecting to the restarted companion…'), { auth: true }); }
       setToken(''); throw Object.assign(new Error('The password or connection token is no longer valid. Enter it again, or open the link printed by the companion.'), { auth: true });
     }
-    if (!res.ok) throw new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`);
+    if (!res.ok) throw Object.assign(new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`), { status: res.status });
     if (etag) etag.tag = res.headers?.get?.('ETag') || '';
     return data;
   }
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; leaveScreen(); }
+    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; S.sx = null; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -424,7 +431,7 @@
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}${it.unseen ? ' unseen' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}${it.unseen ? '<span class="sr-only"> (new)</span>' : ''}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${meta}</span>${workTime(it)}
-      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}</span></div>`];
+      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}<button type="button" class="row-more${it.pinned ? ' on' : ''}" data-rowmenu="${esc(it.key)}" aria-haspopup="menu" title="Session actions" aria-label="Session actions: ${esc(it.title)}${it.pinned ? ' (pinned)' : ''}">${it.pinned ? ICON_PIN : ICON_MORE}</button></span></div>`];
   }
 
   function renderList() {
@@ -578,48 +585,91 @@
     loadBg(bgFile(), true);
     setTimeout(() => { if ($('#questions')?.hidden) input.focus(); }, 0);
   }
-  // Composer drafts per view, saved to the companion (debounced) so they survive reloads and show up on other devices.
-  // draftSynced: view → { text, at } last agreed with the server. A remote change replaces the composer only while it still
-  // shows that text; an edit made here since then is saved over the remote one instead.
-  const draftSynced = new Map(), draftTimers = new Map();
+  // Composer drafts per view, text and attached images, saved to the companion (debounced) so they survive reloads and show
+  // up on other devices. draftSynced: view → { text, names, at } last agreed with the server, names being the attached
+  // images' names. A remote change replaces the composer only while it still shows that draft; an edit made here since
+  // then (text or images) is saved over the remote one instead.
+  // draftSaving: view → its save under way; draftRetry: views whose last save failed (offline, companion error).
+  const draftSynced = new Map(), draftTimers = new Map(), draftSaving = new Map(), draftRetry = new Set();
   const draftKey = view => /^(session|native):./.test(view) ? view : '';
+  const viewImages = view => S.attachments.filter(a => a.view === view);
+  const imageNames = list => list.map(a => a.name).join('\n');
   function saveDraft(view) {
     if (!draftKey(view) || !S.token) return;
     clearTimeout(draftTimers.get(view));
     draftTimers.set(view, setTimeout(() => sendDraft(view), 700));
   }
-  function sendDraft(view) {
+  function sendDraft(view, opts) {
     draftTimers.delete(view);
-    const text = Map.prototype.get.call(drafts, view) || '';
-    if ((draftSynced.get(view)?.text ?? '') === text) return;
-    return api('/draft', { key: view, text }).then(r => draftSynced.set(view, { text, at: r.at })).catch(() => {});
+    // One save per view at a time, so the companion stores them, and this page records them, in the order they were made.
+    const saving = draftSaving.get(view);
+    if (saving) return saving.then(() => sendDraft(view, opts));
+    const text = Map.prototype.get.call(drafts, view) || '', list = viewImages(view), names = imageNames(list), known = draftSynced.get(view);
+    const sameImages = (known?.names ?? '') === names;
+    if ((known?.text ?? '') === text && sameImages) return;
+    // Images go only when the set changed: a text edit leaves the companion's copies as they are.
+    const images = sameImages ? {} : { images: list.map(({ image, preview, name, tokens }) => ({ image, preview, name, tokens })) };
+    const save = api('/draft', { key: view, text, ...images }, opts).then(r => {
+      draftRetry.delete(view);
+      const synced = (r.images || []).join('\n');
+      draftSynced.set(view, { text, names: synced, at: r.at });
+      // The companion kept other images (another device changed them since the last pull): save this composer's over them.
+      if (synced !== names) saveDraft(view);
+    }, e => {
+      // Unreachable or failing companion: saved again after the next poll that gets through (retryDrafts).
+      // A refused draft (too large, session gone) would only be refused again.
+      if (!e.status || e.status >= 500) draftRetry.add(view);
+    }).finally(() => { if (draftSaving.get(view) === save) draftSaving.delete(view); });
+    draftSaving.set(view, save);
+    return save;
   }
-  // Sends drafts still waiting out their debounce now, e.g. before the page reloads.
-  const flushDrafts = () => Promise.all([...draftTimers].map(([view, timer]) => { clearTimeout(timer); return sendDraft(view); }));
+  const retryDrafts = () => { for (const view of draftRetry) saveDraft(view); draftRetry.clear(); };
+  // Sends drafts still waiting out their debounce now, e.g. before the page reloads or is hidden (opts: api's keepalive).
+  const flushDrafts = opts => Promise.all([...draftTimers].map(([view, timer]) => { clearTimeout(timer); return sendDraft(view, opts); }));
+  // This page holds the view's current draft: edited here and not saved yet, or agreeing with the companion's latest one.
+  const draftKnown = view => {
+    if (!draftKey(view) || draftTimers.has(view) || draftSaving.has(view)) return true;
+    const at = S.store?.drafts?.[view] ?? null, known = draftSynced.get(view);
+    return known ? known.at === at : !at;
+  };
   async function pullDraft() {
     const view = S.view;
-    if (!draftKey(view) || draftTimers.has(view) || !S.store) return;
+    // A running enhance is about to replace the draft: the composer stays as it is until it ends.
+    if (!draftKey(view) || draftTimers.has(view) || draftSaving.has(view) || !S.store || S.enhance.has(view)) return;
     const at = S.store.drafts?.[view] ?? null, known = draftSynced.get(view);
     if (known ? known.at === at : !at) return;
-    let remote = { text: '', at: null };
-    if (at) try { remote = await api('/draft?key=' + encodeURIComponent(view)); } catch { return; }
-    if (S.view !== view || draftTimers.has(view)) return;
-    const local = Map.prototype.get.call(drafts, view) || '';
-    draftSynced.set(view, { text: remote.text, at: remote.at });
-    if (local !== (known?.text ?? '')) { if (local !== remote.text) saveDraft(view); return; }
+    let remote = { text: '', at: null, images: [] };
+    // Images this composer already holds come back by name only, without their data.
+    const have = viewImages(view).map(a => '&have=' + encodeURIComponent(a.name)).join('');
+    if (at) try { remote = await api('/draft?key=' + encodeURIComponent(view) + have); } catch { return; }
+    // A save made or answered meanwhile is newer than this answer: the next poll compares against it.
+    if (S.view !== view || draftTimers.has(view) || draftSaving.has(view) || draftSynced.get(view) !== known || S.enhance.has(view)) return;
+    const list = viewImages(view), local = Map.prototype.get.call(drafts, view) || '', localNames = imageNames(list);
+    const images = (remote.images || []).map(r => r.image ? { view, image: r.image, preview: r.preview, name: r.name, tokens: r.tokens } : list.find(a => a.name === r.name));
+    if (images.some(a => !a)) return; // an image sent by name is gone here: the next poll fetches the draft whole
+    const remoteNames = imageNames(images);
+    draftSynced.set(view, { text: remote.text, names: remoteNames, at: remote.at });
+    if (local !== (known?.text ?? '') || localNames !== (known?.names ?? '')) { if (local !== remote.text || localNames !== remoteNames) saveDraft(view); return; }
     if (remote.text) Map.prototype.set.call(drafts, view, remote.text); else Map.prototype.delete.call(drafts, view);
     const input = $('#input');
-    if (input && input.value !== remote.text && !S.enhance.has(view)) { input.value = remote.text; autosize(input); updateComposer(); }
+    if (input && input.value !== remote.text) { input.value = remote.text; autosize(input); }
+    if (localNames !== remoteNames) S.attachments = S.attachments.filter(a => a.view !== view).concat(images);
+    update(); renderAttachments();
   }
   class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
   const drafts = new Drafts();
-  const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.4) + 'px'; };
+  // The composer grows with its text up to 40% of the window. On touch screens the cap is a third of what is visible,
+  // which shrinks while the on-screen keyboard is up, so a long paste never covers the conversation and the toolbar.
+  const composerMax = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches ? (window.visualViewport?.height || window.innerHeight) / 3 : window.innerHeight * 0.4;
+  const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, composerMax()) + 'px'; };
   // Typing is not the only thing that changes how tall a draft is: re-fit the composer when its width changes (sidebar,
-  // side panels, rotation, shown again after being hidden) and when the window height changes the 40% cap.
+  // side panels, rotation, shown again after being hidden) and when the window or the visible area (keyboard) changes the cap.
   const fitWidths = new WeakMap();
   const fitObserver = new ResizeObserver(entries => { for (const e of entries) { const w = Math.round(e.contentRect.width); if (fitWidths.get(e.target) !== w) { fitWidths.set(e.target, w); autosize(e.target); } } });
   const fitComposer = el => { autosize(el); fitObserver.disconnect(); fitObserver.observe(el); };
-  addEventListener('resize', () => { for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); });
+  const refit = () => { for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); };
+  addEventListener('resize', refit);
+  window.visualViewport?.addEventListener('resize', refit);
 
   const previewLoading = new Set();
   async function loadPreview(file) {
@@ -747,19 +797,31 @@
   }
 
   // ---------- enhance prompt: a read-only OMP run rewrites the draft with project context ----------
-  const enhanceBlocked = v => !v.trim() || /^[/!]/.test(v.trim());
+  // Enhanceable: text that is not a slash or shell command, or no text with images attached (as Send accepts).
+  const enhanceBlocked = (v, images) => v.trim() ? /^[/!]/.test(v.trim()) : !images;
   function enhanceButton(view, draft) {
-    return S.enhance.has(view)
-      ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`
-      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.sending.has(view) ? 'disabled' : ''}>✨</button>`;
+    if (S.enhance.has(view)) return `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`;
+    const images = S.attachments.some(a => a.view === view);
+    const why = S.sending.has(view) ? 'Wait until the message is sent'
+      : !enhanceBlocked(draft, images) ? '' : draft.trim() ? 'Slash and shell commands are not enhanced' : 'Type a draft or attach an image to enhance';
+    return `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="${why || 'Rewrite this draft with project context (Ctrl+Shift+E)'}" ${why ? 'disabled' : ''}>✨</button>`;
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
-  async function startEnhance(view, body, original) {
+  // An enhance counts as running from here (✕, read-only composer, no draft pull or discard), before its request goes out.
+  function enhanceJob(view, original) {
     const job = { id: null, original, model: '', step: '' };
     S.enhance.set(view, job); refreshComposer();
+    return job;
+  }
+  async function startEnhance(view, body, original, job = enhanceJob(view, original)) {
     let r;
     try { r = await api('/enhance', body, { timeout: 60000 }); }
-    catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); } toast(e.message, 'err'); return; }
+    catch (e) {
+      if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); }
+      // The draft session New-session Enhance made is gone (another dashboard left it): its draft goes back to New session.
+      if (e.status === 404 && S.ownDrafts.has(view)) return rescueDraft(view);
+      toast(e.message, 'err'); return;
+    }
     // Cancelled while the request was in flight: stop the job it just created.
     if (S.enhance.get(view) !== job) { api('/enhance/stop', { id: r.id }).catch(() => {}); return; }
     Object.assign(job, { id: r.id, model: r.model }); refreshComposer();
@@ -794,46 +856,91 @@
   }
   // Enhance on New session: create the session in the picked folder as a draft (no prompt yet), start its OMP,
   // carry the draft and images over, and enhance there. Leaving it unsent discards it unless the enhance still runs (leaveDraft).
+  // From the click until the enhance runs, New session takes no second Enhance or Start and no draft session is discarded
+  // (S.homeStarts): the panel lists the new session before /quick-start answers, and opening and leaving it meanwhile must
+  // not remove the session the enhance is about to use. The draft moves only when the enhance starts there, so a start
+  // given up (failed, or New session left for another view meanwhile) leaves it on New session.
   const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
-    const l = S.home.listing, draft = S.home.prompt, home = S.view;
-    if (!l || S.sending.has(home) || enhanceBlocked(draft)) return;
-    S.sending.set(home, {}); renderHome();
+    const l = S.home.listing, home = S.view;
+    if (!l || S.sending.has(home) || enhanceBlocked(S.home.prompt, attached().length)) return;
+    S.sending.set(home, {}); S.homeStarts++; renderHome();
+    const end = () => { S.sending.delete(home); S.homeStarts--; flushDiscards(); if (current().kind === 'home') renderHome(); };
     let s;
     try { s = await api('/quick-start', { ...homeStartBody(l), draft: true }); }
-    catch (e) { S.sending.delete(home); if (current().kind === 'home') renderHome(); toast(e.message, 'err'); return; }
+    catch (e) { end(); toast(e.message, 'err'); return; }
     api('/commands?session=' + encodeURIComponent(s.id)).catch(() => {}); // starts OMP in the picked folder
-    const view = 'session:' + s.id, moved = attached();
+    await refresh(); // the session view renders from a state that lists the session
+    const view = 'session:' + s.id;
+    S.discardAfterSend.delete(view); // decided here, not by a leave of it during the start
+    if (S.view !== home && S.view !== view) {
+      end(); discardView(view);
+      toast('Enhance cancelled: you left New session. Your draft is still there.');
+      return;
+    }
+    // What New session holds now moves, including text typed or images attached during the start.
+    const draft = S.home.prompt, moved = S.attachments.filter(a => a.view === home);
     for (const a of moved) a.view = view;
-    drafts.set(view, draft); S.home.prompt = ''; S.sending.delete(home); rememberWsDefaults(l.path);
-    await refresh();
-    location.hash = '#/s/' + s.id; route(); // build the session view now so the enhance renders there
-    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft);
+    drafts.set(view, draft); S.home.prompt = ''; rememberWsDefaults(l.path);
+    S.ownDrafts.set(view, { home, seq: stateSeq });
+    // Running before the session view is built, so its draft pull keeps the composer and a leave keeps the session.
+    const job = enhanceJob(view, draft);
+    if (S.view === view) { const input = $('#input'); if (input) { input.value = draft; autosize(input); } update(); renderAttachments(); }
+    else { location.hash = '#/s/' + s.id; route(); }
+    end();
+    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft, job);
   }
   // A draft session left for New session, another session or history is discarded; its own sub-views and
-  // Settings/Tools/Spend keep it. A send still in flight decides first (the server would otherwise race it).
-  // An enhance still running keeps it as is: job, text and images stay, the result lands in its draft, and the
-  // session stays listed. Leaving it again once nothing runs (enhance done, failed or cancelled with ✕) discards it.
+  // Settings/Tools/Spend keep it. An enhance still running keeps it as is, checked first so no deferral below can queue it:
+  // job, text and images stay, the result lands in its draft, and the session stays listed. Leaving it again once nothing
+  // runs (enhance done, failed or cancelled with ✕) discards it. Otherwise a send still in flight decides first (the server
+  // would otherwise race it), and so does a New-session Enhance still starting (the draft session left may be the one it
+  // created, which has no enhance job until the start ends).
   function leaveDraft(prev, c) {
     if (!prev.startsWith('session:') || !['home', 'session', 'native'].includes(c.kind)) return;
     if (!S.store?.sessions.find(x => 'session:' + x.id === prev)?.draft) return;
-    if (S.sending.has(prev) || S.sendingBash.has(prev)) { S.discardAfterSend.add(prev); return; }
     if (S.enhance.has(prev)) return;
+    if (S.sending.has(prev) || S.sendingBash.has(prev) || S.homeStarts) { S.discardAfterSend.add(prev); return; }
     discardView(prev);
   }
   function discardView(view) {
-    S.enhance.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
+    S.enhance.delete(view); S.ownDrafts.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
     api(`/sessions/${encodeURIComponent(view.slice('session:'.length))}/command`, { type: 'discard' }).then(() => refresh()).catch(() => {});
   }
   // After a send settles: if the user left its draft session meanwhile, let the server decide (no-op once sent).
-  function afterSend(view) { if (S.discardAfterSend.delete(view) && S.view !== view) discardView(view); }
+  // A New-session Enhance still starting holds it until it ends (flushDiscards). A draft whose enhance started after it
+  // was queued (opened again, enhanced, left) leaves the queue kept; leaving it once the enhance ends discards it.
+  function afterSend(view) { if (!S.homeStarts && S.discardAfterSend.delete(view) && S.view !== view && !S.enhance.has(view)) discardView(view); }
+  const flushDiscards = () => { for (const view of [...S.discardAfterSend]) if (!S.sending.has(view) && !S.sendingBash.has(view)) afterSend(view); };
+  // A draft session New-session Enhance made, removed by someone else (another dashboard left it, a companion restart
+  // cleaned it up): its text and images go back to New session instead of staying in a view that no longer exists.
+  function rescueDraft(view) {
+    const { home } = S.ownDrafts.get(view);
+    S.ownDrafts.delete(view); S.enhance.delete(view); S.discardAfterSend.delete(view);
+    clearTimeout(draftTimers.get(view)); draftTimers.delete(view);
+    const text = Map.prototype.get.call(drafts, view) || '';
+    Map.prototype.delete.call(drafts, view); // not saved: the companion keeps no draft for a removed session
+    S.home.prompt = [S.home.prompt, text].filter(t => t.trim()).join('\n\n');
+    for (const a of S.attachments) if (a.view === view) a.view = home;
+    toast('The draft session is gone. Your draft is back in New session.', 'err');
+    if (S.view === view) { location.hash = '#/new'; route(); } else if (S.view === home) renderHome();
+  }
+  // Own draft sessions leave S.ownDrafts once sent (no longer drafts), and are rescued once a state requested after
+  // the draft moved there no longer lists them.
+  function checkOwnDrafts(seq) {
+    for (const [view, own] of S.ownDrafts) {
+      if (seq <= own.seq) continue;
+      const s = S.store.sessions.find(x => 'session:' + x.id === view);
+      if (!s || s.hidden) rescueDraft(view); else if (!s.draft) S.ownDrafts.delete(view);
+    }
+  }
   function enhanceCurrent() {
     const c = current(), view = S.view;
     const running = S.enhance.get(view);
     if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
     if (c.kind === 'home') return enhanceFromHome();
     const input = $('#input');
-    if (!input || enhanceBlocked(input.value) || S.sending.has(view)) return;
+    if (!input || enhanceBlocked(input.value, attached().length) || S.sending.has(view)) return;
     const text = input.value.trim(), images = imagePayload(attached());
     let body;
     if (c.kind === 'session') {
@@ -970,25 +1077,46 @@
     if (menu) { menu.classList.add('open'); menu.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'true'); }
   }
   // A container rendered as [key, html] parts, one element each. Unchanged parts keep their element (polls must not
-  // recreate rows: that drops hover and restarts animations), changed parts are rebuilt, moved ones moved. A container
-  // that does not hold one child per part rendered last (first or empty render, or changed elsewhere) is rewritten whole.
+  // recreate rows: that drops hover, text selection and running animations, and re-parsing a long thread on every poll
+  // cost more than the rest of the page together), changed parts are rebuilt, moved ones moved; scroll offsets and
+  // <details> state the renderers don't track carry over into a rebuilt part, as in swapHtml. The container is rewritten
+  // whole when it doesn't hold exactly the elements rendered last (first or empty render, or written elsewhere since),
+  // when keys repeat, or when a changed part is not one element.
   function setKeyed(el, parts) {
-    const prev = el._parts, kids = el.children;
-    el._parts = parts;
-    if (!prev?.length || kids?.length !== prev.length) { swapHtml(el, parts.map(p => p[1]).join('')); return; }
-    const old = new Map(prev.map(([k, h], i) => [k, { h, n: kids[i] }]));
-    keepFocus(el, () => {
-      let next = el.firstElementChild;
+    const prev = el._parts, nodes = el._nodes, kids = el.children, keys = new Set(parts.map(p => p[0])), unique = keys.size === parts.length;
+    el._parts = parts; el._nodes = null;
+    let built = null;
+    if (unique && prev?.length && nodes?.length === prev.length && kids?.length === nodes.length && nodes.every((n, i) => kids[i] === n)) {
+      const old = new Map(prev.map(([k, h], i) => [k, { h, n: nodes[i] }]));
+      built = new Map();
       for (const [k, h] of parts) {
-        const o = old.get(k);
-        let n = o?.n;
-        old.delete(k);
-        if (n && o.h !== h) { if (n === next) next = n.nextElementSibling; n.remove(); n = null; }
-        if (!n) { const t = document.createElement('template'); t.innerHTML = h; n = t.content.firstElementChild; }
-        if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
+        if (old.get(k)?.h === h) continue;
+        const t = document.createElement('template'); t.innerHTML = h;
+        const c = t.content, n = c.firstElementChild;
+        if (!n || c.children.length !== 1 || [...c.childNodes].some(x => x !== n && (x.nodeType !== 3 || x.data.trim()))) { built = null; break; }
+        built.set(k, n);
       }
-      for (const { n } of old.values()) n.remove();
-    });
+      if (built) {
+        const out = [], carry = [];
+        keepFocus(el, () => {
+          // Dropped parts go first: one left at the insertion point would make every later part move.
+          for (const [k, o] of old) if (!keys.has(k)) o.n.remove();
+          let next = el.firstElementChild;
+          for (const [k] of parts) {
+            const f = built.get(k);
+            let n = old.get(k)?.n;
+            if (f) { if (n) { carry.push([f, uiState(n, true)]); if (n === next) next = n.nextElementSibling; n.remove(); } n = f; }
+            if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
+            out.push(n);
+          }
+        });
+        for (const [n, keep] of carry) restoreUi(n, keep);
+        el._nodes = out;
+        return;
+      }
+    }
+    swapHtml(el, parts.map(p => p[1]).join(''));
+    el._nodes = unique && el.children?.length === parts.length ? [...el.children] : null;
   }
   // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
   // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
@@ -1028,20 +1156,28 @@
     n.focus({ preventScroll: true });
     if (text && s0 != null) try { n.setSelectionRange(s0, s1); } catch {}
   }
-  function swapHtml(el, html) {
+  // Scroll offsets and <details> state below root (root's own too with self) that the renderers don't track, to carry over a rebuild.
+  function uiState(root, self) {
     const keep = [];
     for (const n of touched) {
       if (!n.isConnected) { touched.delete(n); continue; }
-      if (el.contains(n) && n !== el) keep.push({ ...uiKey(el, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null, stick: n.matches?.('.job-thought pre') && n.scrollHeight - n.scrollTop - n.clientHeight < 8 });
+      if (root.contains(n) && (self || n !== root)) keep.push({ ...uiKey(root, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null, stick: n.matches?.('.job-thought pre') && n.scrollHeight - n.scrollTop - n.clientHeight < 8 });
     }
-    keepFocus(el, () => { el.innerHTML = html; });
+    return keep;
+  }
+  function restoreUi(root, keep) {
     for (const k of keep) {
-      const n = findUi(el, k);
+      const n = findUi(root, k);
       if (!n) continue;
       if (k.open != null && n.tagName === 'DETAILS') n.open = k.open;
       n.scrollTop = k.stick ? n.scrollHeight : k.top; n.scrollLeft = k.left;
       touched.add(n);
     }
+  }
+  function swapHtml(el, html) {
+    const keep = uiState(el, false);
+    keepFocus(el, () => { el.innerHTML = html; });
+    restoreUi(el, keep);
   }
 
   // ---------- activity: tool calls and thinking ----------
@@ -1269,40 +1405,43 @@
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
-    const parts = [];
-    if (opts.head) parts.push(opts.head);
-    else if (status === 'history') parts.push(`<div class="history-note">📜 Saved OMP session. Type below to continue it here. It picks up exactly where it left off.</div>`);
+    // [key, html] parts for setKeyed: a poll rebuilds only the parts whose markup changed (the streaming tail, mostly).
+    // A key repeats only for messages without unique IDs, which then key by position.
+    const parts = [], seen = new Map();
+    const add = (key, html) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html]); };
+    if (opts.head) add('head', opts.head);
+    else if (status === 'history') add('hist', `<div class="history-note">📜 Saved OMP session. Type below to continue it here. It picks up exactly where it left off.</div>`);
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
       if (m.adv) {
         const group = [];
         while (i < messages.length && messages[i].adv) group.push(messages[i++]);
         i--;
-        parts.push(advisorReview(group));
+        add('adv:' + group[0].id, advisorReview(group));
         continue;
       }
       if (m.role === 'tool' || m.role === 'thinking') {
         const group = [];
         while (i < messages.length && !messages[i].adv && (messages[i].role === 'tool' || messages[i].role === 'thinking')) group.push(messages[i++]);
         i--;
-        parts.push(activityBlock(group, status === 'running' && i === mainEnd));
+        add('act:' + group[0].id, activityBlock(group, status === 'running' && i === mainEnd));
         continue;
       }
       if (m.role === 'system') {
         const err = /error|fail|could not|cannot|not running|timed out|exited/i.test(m.text);
-        parts.push(`<div class="msg system ${err ? 'err' : ''}"><div class="bubble">${esc(m.text)}</div></div>`);
+        add('msg:' + m.id, `<div class="msg system ${err ? 'err' : ''}"><div class="bubble">${esc(m.text)}</div></div>`);
         continue;
       }
       if (m.role === 'advisor') {
         const shown = (m.notes || []).filter(n => !S.advImportant || n.severity === 'concern' || n.severity === 'blocker');
-        for (const note of shown) {
+        shown.forEach((note, j) => {
           const level = ['nit', 'concern', 'blocker'].includes(note.severity) ? note.severity : 'nit';
-          parts.push(`<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
-        }
+          add('note:' + m.id + ':' + j, `<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
+        });
         continue;
       }
       if (m.role === 'advisor-update') {
-        parts.push(`<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
+        add('upd:' + m.id, `<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
         continue;
       }
       const user = m.role === 'user';
@@ -1317,11 +1456,11 @@
         : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
       const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
         : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
-      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
+      add('msg:' + m.id, `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
         ${body}</div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
-      parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
+      add('pending', `<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
     }
     if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((tail?.role !== 'tool' && tail?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
       let label = opts.task ? esc(opts.task) : opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
@@ -1330,18 +1469,18 @@
         const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : tail?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
         label = `${waitingOn} · no activity for ${fmtMs(Math.floor(idle) * 1000)}`;
       }
-      parts.push(`<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
+      add('working', `<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
     }
-    if (opts.tail) parts.push(opts.tail);
-    if (!messages.length && !pending && status !== 'history' && !opts.head) parts.push(`<div class="history-note">This session is ready. Send the first message below.</div>`);
+    if (opts.tail) add('tail', opts.tail);
+    if (!messages.length && !pending && status !== 'history' && !opts.head) add('empty', `<div class="history-note">This session is ready. Send the first message below.</div>`);
     // Keep the in-progress steer edit across re-renders triggered by live events.
     const draft = $('#thread [data-steerinput]'), focused = draft && document.activeElement === draft;
     if (draft && S.editSteer) S.editSteer.text = draft.value;
-    swapHtml($('#thread'), parts.join(''));
+    setKeyed($('#thread'), parts);
     S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
     showToolImages($('#thread'));
     const fresh = $('#thread [data-steerinput]');
-    if (fresh && S.editSteer) { fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
+    if (fresh && S.editSteer) { if (fresh !== draft) fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
@@ -1786,9 +1925,7 @@
       <button data-advact="status"><span aria-hidden="true">↻</span> Refresh status</button>
       ${files.map(f => `<button data-sub="${esc(f.file)}"><span aria-hidden="true">▸</span> Open ${esc(f.name === '__advisor' ? 'advisor' : f.name.slice(10))} transcript</button>`).join('')}
       <div class="adv-note">Changing the model updates ${S.advCfg?.source === 'WATCHDOG.yml' ? 'your <code>WATCHDOG.yml</code>' : 'the <code>advisor</code> model role'} (all sessions) and restarts this session's OMP while it is idle.</div>`;
-    const r = btn.getBoundingClientRect();
-    el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
-    el.style.top = (r.top < el.offsetHeight + 12 ? r.bottom + 6 : r.top - el.offsetHeight - 6) + 'px';
+    placeMenu(el, btn);
     el.style.visibility = '';
     el.querySelector('input,button')?.focus();
   }
@@ -2009,15 +2146,41 @@
     const all = [...new Set(M.models.map(m => m.provider))];
     return all.sort((a, b) => (pref.has(b) - pref.has(a)) || (a === 'openrouter') - (b === 'openrouter') || a.localeCompare(b));
   }
+  // Touch screens: no keyboard pops up over the list on open, a tap selects a row so its reasoning levels show before
+  // "Use model" applies it, and a quick-switch strip offers roles, favorites and recent models. Guarded: tests have no matchMedia.
+  const touchUI = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  // Roles, then favorites, then recently used: one chip per model and reasoning level.
+  function quickModels() {
+    const out = [], seen = new Set();
+    const add = (sel, thinking, badge) => {
+      const m = modelInfo(sel), k = sel + '\n' + thinking;
+      if (!m || seen.has(k)) return;
+      seen.add(k); out.push({ sel, thinking, badge, name: m.name });
+    };
+    for (const r of ['default', 'smol', 'slow']) { const v = S.models.roles?.[r]; if (v) { const s = splitSel(v); add(s.sel, s.thinking, r); } }
+    for (const sel of favs()) { const m = thinkGet(sel) || ''; add(sel, !m || (modelInfo(sel)?.thinking || []).includes(m) ? m : '', '★'); }
+    for (const [sel, th] of recentModels()) add(sel, th || '', '');
+    return out.slice(0, 16);
+  }
   async function openPicker(ctx) {
-    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [], opener: S.picker?.opener || document.activeElement };
+    S.picker?.unfit?.();
+    const touch = touchUI();
+    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [], quick: [], touch, tapped: -1, opener: S.picker?.opener || document.activeElement };
     let el = $('#picker');
     if (!el) { el = document.createElement('div'); el.id = 'picker'; el.className = 'picker-wrap'; document.body.appendChild(el); }
-    el.innerHTML = `<div class="picker" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" role="combobox" aria-expanded="true" aria-controls="pickerList" aria-autocomplete="list" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
-      <div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList" role="listbox" aria-label="Models"><div class="working"><span class="spinner"></span> Loading models…</div></div>
-      <div class="picker-foot"><span>↑↓ to move · Enter to choose · hover to see reasoning levels</span></div></div>`;
+    el.innerHTML = `<div class="picker${touch ? ' touch' : ''}" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" role="combobox" aria-expanded="true" aria-controls="pickerList" aria-autocomplete="list" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd><button type="button" class="picker-close" id="pickerClose" data-pclose aria-label="Close model picker" title="Close">✕</button></div>
+      <div class="picker-quick" id="pickerQuick" role="group" aria-label="Quick switch" hidden></div><div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList" role="listbox" aria-label="Models"><div class="working"><span class="spinner"></span> Loading models…</div></div>
+      <div class="picker-foot" id="pickerFoot"><span>${touch ? 'Tap a model to see its reasoning levels' : '↑↓ to move · Enter to choose · hover to see reasoning levels'}</span></div></div>`;
     el.hidden = false;
-    $('#pickerQ').focus();
+    // A touch keyboard would cover the list: the search box gets focus only when tapped.
+    if (touch) $('#pickerClose')?.focus(); else $('#pickerQ').focus();
+    // Phones: the sheet follows the visual viewport, so an open keyboard shrinks it instead of covering it.
+    const vv = window.visualViewport;
+    if (touch && vv && el.style.setProperty) {
+      const fit = () => { el.style.setProperty('--pick-top', vv.offsetTop + 'px'); el.style.setProperty('--pick-h', vv.height + 'px'); };
+      fit(); vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit);
+      S.picker.unfit = () => { vv.removeEventListener('resize', fit); vv.removeEventListener('scroll', fit); el.style.removeProperty('--pick-top'); el.style.removeProperty('--pick-h'); };
+    }
     // One scrolling line of providers: a plain mouse wheel scrolls it sideways.
     const provs = $('#pickerProvs'); if (provs) provs.onwheel = e => { if (e.deltaY && !e.deltaX && provs.scrollWidth > provs.clientWidth) { provs.scrollLeft += e.deltaY; e.preventDefault(); } };
     try { await ensureModels(); } catch (e) { $('#pickerList').innerHTML = `<div class="side-empty">${esc(e.message)}</div>`; return; }
@@ -2028,6 +2191,7 @@
   }
   function closePicker() {
     const opener = S.picker?.opener;
+    S.picker?.unfit?.();
     S.picker = null; const el = $('#picker'); if (el) { el.hidden = true; el.innerHTML = ''; }
     // Return focus unless a pick already moved it somewhere on purpose.
     if (opener?.isConnected && (!document.activeElement || document.activeElement === document.body)) opener.focus();
@@ -2038,6 +2202,12 @@
     const counts = new Map();
     for (const m of S.models.models) counts.set(m.provider, (counts.get(m.provider) || 0) + 1);
     keepFocus($('#pickerProvs'), () => { const el = $('#pickerProvs'), x = el.scrollLeft; el.innerHTML = `<button class="chip ${!P.provider ? 'sel' : ''}" data-prov="">All</button>` + providerOrder().map(p => `<button class="chip ${P.provider === p ? 'sel' : ''}" data-prov="${esc(p)}">${esc(p)} <small>${counts.get(p)}</small></button>`).join(''); el.scrollLeft = x; });
+    const qe = $('#pickerQuick');
+    P.quick = P.touch && !P.q.trim() && !P.provider ? quickModels() : [];
+    if (qe) {
+      qe.hidden = !P.quick.length;
+      keepFocus(qe, () => { const x = qe.scrollLeft; qe.innerHTML = !P.quick.length ? '' : '<span class="muted">Switch to</span>' + P.quick.map((it, i) => { const cur = it.sel === P.ctx.model && it.thinking === (P.ctx.thinking || ''); return `<button type="button" class="chip ${cur ? 'sel' : ''}" data-pquick="${i}" title="${esc(it.sel)}"${cur ? ' aria-current="true"' : ''}>${esc(it.name)}${it.thinking ? ` <small>${esc(it.thinking)}</small>` : ''}${it.badge ? ` <small>${esc(it.badge)}</small>` : ''}</button>`; }).join(''); qe.scrollLeft = x; });
+    }
     const sections = pickerRows();
     P.flat = sections.flatMap(s => s.rows);
     if (P.hi < 0) { const cur = P.flat.findIndex(r => r.sel === P.ctx.model); P.hi = cur >= 0 ? cur : 0; }
@@ -2074,13 +2244,20 @@
     keepFocus($('#pickerThink'), () => { $('#pickerThink').innerHTML = !r ? '' : !r.m || !r.m.reasoning || !levels.length
       ? `<span class="muted">${r.m && !r.m.reasoning ? 'This model has no reasoning levels.' : 'Reasoning follows your OMP config.'}</span>`
       : `<span class="muted">Reasoning</span><button class="chip ${!P.thinking ? 'sel' : ''}" data-think="">Default${defLevel ? ` <small>${esc(defLevel)}</small>` : ''}</button>` + levels.map(l => `<button class="chip ${P.thinking === l ? 'sel' : ''}" data-think="${esc(l)}">${esc(l)}</button>`).join(''); });
+    // Touch: the footer names the selected model and level and applies them.
+    const f = $('#pickerFoot');
+    if (P.touch && f) keepFocus(f, () => {
+      const th = r && pickThinking(P, r);
+      f.innerHTML = `<span class="pf-sel">${!r ? 'No model selected' : `<b>${esc(r.name)}</b>${th ? ' · ' + esc(th) : hasLevels(r) ? ' · default reasoning' : ''}`}</span><button type="button" class="btn primary sm" data-puse${r ? '' : ' disabled'}>Use model</button>`;
+    });
   }
+  const hasLevels = r => !!(r?.m?.reasoning && r.m.thinking?.length);
+  const pickThinking = (P, r) => P.thinking && (r.m?.thinking || []).includes(P.thinking) ? P.thinking : (r.thinking || '');
   function pickModel(i) {
     const P = S.picker;
     const r = P?.flat[i];
     if (!r) return;
-    const levels = r.m?.thinking || [];
-    const thinking = P.thinking && levels.includes(P.thinking) ? P.thinking : (r.thinking || '');
+    const thinking = pickThinking(P, r);
     const ctx = P.ctx;
     closePicker();
     ctx.apply(r.sel, thinking);
@@ -2113,12 +2290,19 @@
     el.innerHTML = `<div class="tm-head">Reasoning</div><button data-thinkset="" class="${!ctx.thinking ? 'sel' : ''}">Default${def ? ` <small>${esc(def)}</small>` : ''}</button>`
       + levels.map(l => `<button data-thinkset="${esc(l)}" class="${ctx.thinking === l ? 'sel' : ''}">${esc(l)}</button>`).join('');
     document.body.appendChild(el);
-    const r = btn.getBoundingClientRect();
-    el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
-    const below = r.top < el.offsetHeight + 12;
-    el.style.top = (below ? r.bottom + 6 : r.top - el.offsetHeight - 6) + 'px';
+    placeMenu(el, btn);
     el._ctx = ctx; el._btn = btn;
     (el.querySelector('.sel') || el.querySelector('button'))?.focus();
+  }
+  // ✦ and ⚑ menus: beside the chip, above it when there is room, and always inside the visible area, so a landscape phone
+  // (or an open touch keyboard, which shrinks the visual viewport) never pushes the menu off-screen; taller menus scroll.
+  function placeMenu(el, btn) {
+    const vv = window.visualViewport, vw = vv?.width ?? innerWidth, vh = vv?.height ?? innerHeight, ox = vv?.offsetLeft ?? 0, oy = vv?.offsetTop ?? 0;
+    el.style.maxHeight = Math.max(120, vh - 16) + 'px';
+    const r = btn.getBoundingClientRect();
+    el.style.left = Math.max(ox + 8, Math.min(r.left, ox + vw - el.offsetWidth - 8)) + 'px';
+    const below = r.top - oy < el.offsetHeight + 12;
+    el.style.top = Math.max(oy + 8, Math.min(below ? r.bottom + 6 : r.top - el.offsetHeight - 6, oy + vh - el.offsetHeight - 8)) + 'px';
   }
   // ✦ and ⚑ menus; closing hands focus back to the chip when it was inside the menu.
   const closeThinkMenu = () => document.querySelectorAll('#thinkMenu, #advMenu').forEach(m => { const back = m.contains(document.activeElement) && m._btn; m.remove(); if (back?.isConnected) back.focus(); });
@@ -2454,8 +2638,14 @@
     if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…${s?.draft ? ' · Draft kept if you leave' : ''}</span>`; }
     else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
-    // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
-    if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id) { editorApplied.set(s.id, s._editorText.id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
+    // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft. Not before this
+    // page knows the view's synced draft (it would add to an empty composer and save that over the draft), and once applied
+    // the companion forgets the request, so other devices and later page loads take it from the synced draft instead.
+    if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id && draftKnown(S.view)) {
+      const id = s._editorText.id;
+      editorApplied.set(s.id, id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input);
+      api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'editor_text_applied', id }).catch(() => {});
+    }
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     input.readOnly = !!enhancing;
     const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
@@ -2710,7 +2900,7 @@
   async function restoreComposer(r) {
     const input = $('#input'), view = S.view;
     if (input) { input.value = r.text || ''; if (r.text) drafts.set(view, r.text); else drafts.delete(view); autosize(input); input.focus(); }
-    S.attachments = S.attachments.filter(a => a.view !== view);
+    S.attachments = S.attachments.filter(a => a.view !== view); saveDraft(view);
     for (const [i, img] of (r.images || []).entries()) {
       const bytes = Uint8Array.from(atob(img.data), ch => ch.charCodeAt(0));
       await attachImage(new File([bytes], `message-image-${i + 1}.${img.mimeType.split('/')[1] || 'png'}`, { type: img.mimeType }));
@@ -2922,7 +3112,7 @@
       const stem = (file.name || 'pasted-image').replace(/\.[A-Za-z0-9]+$/, '') || 'pasted-image';
       const name = `${stem}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name, tokens });
-      update(); renderAttachments();
+      update(); renderAttachments(); saveDraft(view);
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
   }
 
@@ -2982,7 +3172,8 @@
     } catch (e) {
       toast(e.message, 'err');
       if (text && !retry) { drafts.set(retryView, text); const target = S.view === retryView ? $('#input') : null; if (target && !target.value) { target.value = text; autosize(target); } }
-      S.attachments.push(...attachment.map(a => ({ ...a, view: retryView })));
+      // Back in the draft under the same names, so the companion keeps (or rewrites) the same files, never copies.
+      if (attachment.length) { S.attachments.push(...attachment.map(a => ({ ...a, view: retryView }))); saveDraft(retryView); }
     } finally {
       S.sending.delete(pendingView); S.lastSig = ''; update();
       afterSend(sendView);
@@ -3042,6 +3233,7 @@
     const phases = JSON.parse(JSON.stringify(s.todos || []));
     fn(phases);
     s.todos = phases; update();
+    S.sx = null; // the summary just edited no longer matches any rev: the next poll fetches the whole list
     try { await sessionApi({ type: 'todos', phases }); await refresh(); }
     catch (e) { toast(e.message, 'err'); await refresh(); }
   }
@@ -3219,10 +3411,10 @@
     const monthName = new Date().toLocaleDateString('en', { month: 'long', year: 'numeric' });
     el.innerHTML = `${note}<div class="spend-cards">${[['Today', total.today], [monthName, total.month], ['All time', total.all]].map(([k, v]) => `<div><span>${esc(k)}</span><b>${usd(v)}</b></div>`).join('')}</div>
       <section class="set-group"><h2>By model</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Model</th><th class="num">Today</th><th class="num">This month</th><th class="num">All time</th></tr></thead><tbody>
-        ${sorted.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
+        ${sorted.map(([k, v]) => `<tr><td class="model">${esc(k)}</td><td class="num">${usd(v.today)}</td><td class="num">${usd(v.month)}</td><td class="num">${usd(v.all)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No usage recorded yet.</td></tr>'}
       </tbody></table></div></div></section>
       <section class="set-group"><h2>${esc(monthName)} by day</h2><div class="md"><div class="table-wrap"><table><thead><tr><th>Day</th><th class="num">Total</th><th>Models</th></tr></thead><tbody>
-        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
+        ${[...days].sort((a, b) => b[0].localeCompare(a[0])).map(([d, x]) => `<tr><td>${esc(new Date(d + 'T12:00').toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short' }))}</td><td class="num"><b>${usd([...x.values()].reduce((a, b) => a + b, 0))}</b></td><td class="muted model">${[...x].sort(byCost).map(([m, c]) => `${esc(m)} ${usd(c)}`).join(' · ')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No spend this month.</td></tr>'}
       </tbody></table></div></div></section>`;
   }
 
@@ -4157,7 +4349,7 @@
     const h = S.home, l = h.listing;
     const html = `
       <div><h2>Where do you want to <em>work</em>?</h2></div>
-      <p class="sub">Pick a workspace, say what to do, press Enter. <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</p>
+      <p class="sub">Pick a workspace, say what to do, press Enter.<span class="kbd-hint"> <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</span></p>
       <div id="homeWs">${homeWsHtml()}</div>
       <div class="folder-box">
         <form class="folder-head" id="pathForm">
@@ -4197,6 +4389,8 @@
     if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
   }
   function renderAttachments() {
+    // New session has no composer render; its ✨ follows the attachments here (an image alone is enhanceable).
+    const he = $('#homeEnhance'); if (he && current().kind === 'home') setIfChanged(he, enhanceButton(S.view, S.home.prompt));
     const preview = $('#imagePreview');
     if (!preview) return;
     const list = attached();
@@ -4266,14 +4460,34 @@
   // ---------- polling ----------
   // /state?session=<id> sends messages only for the viewed session (for a Changes page, its parent); the rest stay summaries.
   const stateSession = () => { const c = current(); return c.kind === 'session' ? c.id : c.kind === 'changes' && c.parent.startsWith('s:') ? c.parent.slice(2) : ''; };
+  // The session list arrives as changes too (store=<epoch>.<rev>): the summaries changed after that rev, the session order
+  // when it changed and the store's other fields (top) when they changed; the rest are the summaries already held. A reply
+  // without sx (an older companion) is the whole store. Null when the changes don't fit what is held: the caller polls
+  // the whole list instead.
+  function mergeStore(st, view) {
+    const x = st.sx;
+    if (!x) { S.sx = null; return st; }
+    const held = S.sx?.epoch === x.epoch ? S.sx : null, byId = new Map(held?.sessions.map(s => [s.id, s]));
+    for (const s of x.changed || []) byId.set(s.id, s);
+    const top = x.top || held?.top, order = x.order || held?.order, sessions = top && order?.map(id => byId.get(id));
+    if (!sessions || sessions.some(s => !s)) { S.sx = null; return null; }
+    S.sx = { epoch: x.epoch, rev: x.rev, top, order, sessions };
+    // Only the viewed session holds its transcript (mergeTx) and /btw answers; a summary kept from an earlier view lets go of them.
+    for (const s of sessions) if (s.id !== view && ('messages' in s || '_btw' in s)) { delete s.messages; delete s._btw; }
+    const v = view && byId.get(view);
+    if (v) { if (st.btw) v._btw = st.btw; else delete v._btw; }
+    return { ...top, sessions, tx: st.tx };
+  }
   // Once this page holds the viewed transcript, polls ask only for what changed (since=<epoch>.<rev>): the reply's tx lists
   // the messages changed after that rev, and the message order when it changed; the rest are the objects already held.
-  // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it.
+  // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it:
+  // tx.messages from a companion that sends the store as changes (summaries are kept across polls), else the session's own.
   // False when the delta doesn't fit what is held: the caller drops the reply and polls the full transcript instead.
-  function mergeTx(st, view) {
+  function mergeTx(st, view, kept) {
     const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null;
     if (!t || !s || t.session !== view) { S.tx = null; return true; }
-    if (s.messages) { S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages: s.messages }; return true; }
+    const whole = kept ? t.messages : s.messages;
+    if (whole) { s.messages = whole; S.tx = t.epoch ? { session: view, epoch: t.epoch, rev: t.rev, messages: whole } : null; return true; }
     const base = S.tx?.session === view && S.tx.epoch === t.epoch ? S.tx.messages : null;
     const byId = base && new Map(base.map(m => [m.id, m]));
     if (byId) for (const m of t.changed || []) byId.set(m.id, m);
@@ -4282,22 +4496,35 @@
     s.messages = messages; S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages };
     return true;
   }
-  let stateSeq = 0, stateShown = 0;
-  async function refresh() {
-    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null;
+  // A reply that changes nothing: no summary, order or other store field, no transcript change and no /btw answers.
+  const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
+  let stateSeq = 0, stateShown = 0, renderedAt = 0;
+  // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works
+  // or nobody sees the page: only "ago" labels could change then, and those still render every 10 s. While something
+  // works its running timer ticks on every poll, as before. Other callers always render: they may have changed the page.
+  async function refresh(poll = false) {
+    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null, online = S.online;
+    let fresh = !poll;
     try {
-      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : ''), undefined, { etag });
-      S.online = true; S.fails = 0;
+      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
+      S.online = true; S.fails = 0; retryDrafts();
       // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
       if (seq > stateShown) {
         stateShown = seq;
-        if (st && mergeTx(st, view)) { S.store = st; S.stateTag = etag.tag; }
+        const merged = st && mergeStore(st, view);
+        if (merged && mergeTx(merged, view, !!st.sx)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; checkOwnDrafts(seq); }
         else if (st) { S.stateTag = ''; void refresh(); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
     if (Date.now() - S.nativeAt > 20000) {
       S.nativeAt = Date.now();
-      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; } catch {}
+      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; fresh = true; } catch {}
+    }
+    if (!fresh && S.online === online && (document.hidden || !busyNow()) && Date.now() - renderedAt < 10000) {
+      // A tab looked at again still takes its sessions off the title badge and out of the sidebar marks.
+      const unseen = [...attn.unseen.keys()].join();
+      checkAttention();
+      if ([...attn.unseen.keys()].join() === unseen) return;
     }
     syncUi();
     checkAttention(); // first: the sidebar marks what checkAttention finds new
@@ -4305,13 +4532,16 @@
     update();
     void pullDraft();
     if (current().kind === 'home') renderHomeRecent();
+    renderedAt = Date.now(); // only once rendered: a render that throws is retried on the next poll
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
+  // Something works: polls come every 1.2 s and each renders.
+  const busyNow = () => panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running') || s.uiRequests?.some(q => q.method === 'custom'));
   async function loop() {
     try {
-      if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
+      if (S.token) { await refresh(true); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
     } catch (e) { console.error('Refresh failed:', e); } finally { // a render that throws must not end polling for good
-      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running') || s.uiRequests?.some(q => q.method === 'custom'));
+      const busy = busyNow();
       // Back off while the companion is unreachable instead of hammering it every second.
       setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
     }
@@ -4359,17 +4589,20 @@
   window.addEventListener('focus', checkAttention);
   // Hidden tabs (and the desktop app in the tray) poll every 8 s; catch up at once when shown again.
   document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); usagePoll(); });
+  // A phone switching apps or a closing tab may never run the 700 ms draft debounce (frozen or gone): save pending drafts now.
+  document.addEventListener('visibilitychange', () => { if (document.hidden) void flushDrafts({ keepalive: true }); });
+  window.addEventListener('pagehide', () => void flushDrafts({ keepalive: true }));
 
   // ---------- events ----------
   const closeMenu = m => { if (!m) return; m.classList.remove('open'); m.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'false'); };
   const closeMenus = () => document.querySelectorAll('.menu.open').forEach(closeMenu);
   const overlayOpen = () => !!(S.picker || $('#modal') || $('#lightbox'));
   const keyIs = (e, k) => keyChar(e) === k;
-  // The phone drawer (≤820 px) covers the page, so the page is inert while it is open.
+  // The phone drawer (≤820 px, and landscape phones) covers the page, so the page is inert while it is open.
   function setNav(open, moveFocus) {
     $('#app').classList.toggle('nav-open', open);
     const m = main();
-    // Drawer layouts (narrow, or landscape phones on Screen) cover the page: keep it out of reach while open.
+    // Drawer layouts (narrow, or landscape phones) cover the page: keep it out of reach while open.
     if (m) m.inert = open && getComputedStyle($('#sidebar')).position === 'fixed';
     document.querySelectorAll('[data-act="nav"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
     // Back to the ☰ that is showing: on a landscape phone's Screen page that's the toolbar's, not the hidden header's.
@@ -4452,13 +4685,27 @@
       S.lastSig = ''; update(); return;
     }
     if (t.closest('#picker')) {
+      const P = S.picker;
+      if (t.closest('[data-pclose]')) { closePicker(); return; }
+      const qk = t.closest('[data-pquick]');
+      if (qk) { const it = P.quick[+qk.dataset.pquick]; if (it) { const ctx = P.ctx; closePicker(); ctx.apply(it.sel, it.thinking); } return; }
+      if (t.closest('[data-puse]')) { pickModel(P.hi); return; }
       const fav = t.closest('[data-fav]');
-      if (fav) { toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top; return; }
+      if (fav) {
+        // Touch: favoriting adds or drops a Favorites section, so keep the selected row by identity, not position.
+        const keep = P.touch && P.flat[P.hi], tap = P.touch && P.flat[P.tapped];
+        toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top;
+        const at = r => r ? P.flat.findIndex(x => x.sel === r.sel && x.thinking === r.thinking && !!x.isDefault === !!r.isDefault) : -1;
+        if (keep && S.picker === P) { const i = at(keep); if (i >= 0) pickerHi(i); P.tapped = at(tap); }
+        return;
+      }
       const row = t.closest('[data-pi]'), prov = t.closest('[data-prov]'), th = t.closest('[data-think]');
-      if (row) pickModel(+row.dataset.pi);
-      // Keyboard activation (detail 0) keeps focus on the chip via keepFocus; a pointer click returns to the search box.
-      else if (prov) { S.picker.provider = prov.dataset.prov; S.picker.hi = 0; renderPicker(); if (e.detail) $('#pickerQ').focus(); }
-      else if (th) { S.picker.thinking = th.dataset.think; const k = S.picker.flat[S.picker.hi]?.sel; if (k) S.picker.mem[k] = S.picker.thinking; renderThink(); if (e.detail) $('#pickerQ').focus(); }
+      // Touch: the first tap on a row with reasoning levels selects it (levels and "Use model" follow); a second tap applies.
+      if (row) { const i = +row.dataset.pi; if (P.touch && e.detail && P.tapped !== i && hasLevels(P.flat[i])) { P.tapped = i; pickerHi(i); } else pickModel(i); }
+      // Keyboard activation (detail 0) keeps focus on the chip via keepFocus; a pointer click returns to the search box,
+      // except on touch, where focusing it would raise the on-screen keyboard.
+      else if (prov) { P.provider = prov.dataset.prov; P.hi = 0; P.tapped = -1; renderPicker(); if (e.detail && !P.touch) $('#pickerQ').focus(); }
+      else if (th) { P.thinking = th.dataset.think; const k = P.flat[P.hi]?.sel; if (k) P.mem[k] = P.thinking; renderThink(); if (e.detail && !P.touch) $('#pickerQ').focus(); }
       else if (!t.closest('.picker')) closePicker();
       return;
     }
@@ -4579,10 +4826,12 @@
       if (Date.now() - S.groupDragEnd < 400) return; // the click that may trail a header drag is not a collapse
       toggleCollapsed(gl.dataset.group); return;
     }
+    const rm = t.closest('[data-rowmenu]');
+    if (rm) { e.preventDefault(); const open = $('#ctxMenu')?._row === rm.dataset.rowmenu; closeCtx(); if (!open) openRowMenu(rm); return; }
     const ar = t.closest('[data-archive]');
-    if (ar) { e.preventDefault(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
+    if (ar) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const pn = t.closest('[data-pin]');
-    if (pn) { e.preventDefault(); setPinned(pn.dataset.pin, !pn.dataset.unpin); return; }
+    if (pn) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); setPinned(pn.dataset.pin, !pn.dataset.unpin); return; }
     const nt = t.closest('[data-newtab]');
     if (nt) { closeCtx(); openItemTab(nt.dataset.newtab); return; }
     closeCtx();
@@ -4611,7 +4860,7 @@
     else if (act === 'advisor') { closeMenu(a.closest('.menu')); advisorCommand(a.dataset.advisor); }
     else if (act === 'attach') $('#imageInput')?.click();
     else if (act === 'enhance') enhanceCurrent();
-    else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.name !== a.dataset.name); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
+    else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.view !== S.view || x.name !== a.dataset.name); saveDraft(S.view); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
     else if (act === 'abort' || act === 'complete') sessionCommand(act);
@@ -4732,6 +4981,20 @@
   addEventListener('resize', closeCtx);
   document.addEventListener('scroll', closeCtx, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ctxMenu')) { const item = $('#ctxMenu')._item; closeCtx(); if (item?.isConnected) item.focus(); } });
+  // Touch screens cannot hover a row to reveal its pin and archive buttons: the row's ⋯ (a pin when pinned) lists them.
+  function openRowMenu(btn) {
+    const key = btn.dataset.rowmenu, row = btn.closest('.item-row'), pin = row?.querySelector('[data-pin]'), arch = row?.querySelector('[data-archive]');
+    const m = document.createElement('div');
+    m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu row-menu'; m._item = btn; m._row = key; m.setAttribute('role', 'menu'); m.setAttribute('aria-label', btn.getAttribute('aria-label'));
+    m.innerHTML = (pin ? `<button role="menuitem" data-pin="${esc(key)}" data-unpin="${esc(pin.dataset.unpin)}">${esc(pin.title)}</button>` : '')
+      + (arch ? `<button role="menuitem" data-archive="${esc(key)}" data-restore="${esc(arch.dataset.restore)}">${esc(arch.title)}</button>` : '')
+      + `<button role="menuitem" data-newtab="${esc(key)}">Open in new tab</button>`;
+    document.body.appendChild(m);
+    const r = btn.getBoundingClientRect(), h = m.offsetHeight;
+    m.style.left = Math.max(4, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 4)) + 'px';
+    m.style.top = (r.bottom + 4 + h <= innerHeight - 4 ? r.bottom + 4 : Math.max(4, r.top - 4 - h)) + 'px';
+    m.querySelector('button').focus({ preventScroll: true });
+  }
   // ---------- workspaces: header menu, quick switcher, attention stepping ----------
   // The ⋯ on a project header: focus, start, rename, colour, branch, terminal, hide. A folder known only from OMP's
   // history becomes a registered workspace on its first change (the server's /projects/update takes its path).
@@ -4923,7 +5186,7 @@
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
-    else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
+    else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; S.picker.tapped = -1; renderPicker(); }
     else if (t.id === 'homePrompt') { S.home.prompt = t.value; autosize(t); S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
     else if (t.id === 'swInput') { $('#modal')._switcher.hi = 0; renderSwitcher(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
@@ -5055,7 +5318,8 @@
   document.addEventListener('mousemove', e => { if (S.picker && (e.movementX || e.movementY)) S.picker.kbd = false; });
   document.addEventListener('mouseover', e => {
     const row = e.target.closest?.('#picker [data-pi]');
-    if (!row || !S.picker || S.picker.kbd || +row.dataset.pi === S.picker.hi) return;
+    // Touch browsers send a synthetic mouseover with each tap; there the tap itself moves the selection.
+    if (!row || !S.picker || S.picker.kbd || S.picker.touch || +row.dataset.pi === S.picker.hi) return;
     pickerHi(+row.dataset.pi);
   });
   document.addEventListener('keydown', e => {

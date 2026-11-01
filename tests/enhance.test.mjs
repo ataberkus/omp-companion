@@ -55,6 +55,8 @@ async function boot({ hash = '#/s/a', sessions = [], routes = {}, home } = {}) {
       const body = opts?.body ? JSON.parse(opts.body) : undefined;
       calls.push({ url, body });
       const data = await reply(url, body);
+      // A route answering { httpStatus, error } is refused like the companion refuses: non-OK status, JSON error.
+      if (data?.httpStatus) return { ok: false, status: data.httpStatus, json: async () => ({ error: data.error }) };
       return { ok: true, status: 200, json: async () => structuredClone(data) };
     },
   };
@@ -123,6 +125,54 @@ test('Ctrl+Shift+E starts and cancels; slash and shell drafts are ignored', asyn
   assert.equal(d.toasts().length, 0, 'cancel is silent');
 });
 
+// Finished sessions (review, done) use the same ✨ rule as any idle composer: text, or images alone, as Send accepts.
+const enhanceSlot = d => d.elements.get('enhanceSlot').innerHTML;
+const shot = [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }], shotPreview = ['data:image/jpeg;base64,UFJF'];
+const enhanceRoutes = () => ({ '/enhance': body => body ? { id: 'j', model: 'p/m' } : { status: 'running', step: '' } });
+for (const status of ['review', 'done']) {
+  test(`${status}: a typed draft enables ✨ and a click enhances it`, async () => {
+    const d = await boot({ sessions: [idle('a', { status })], routes: enhanceRoutes() });
+    assert.match(enhanceSlot(d), /title="Type a draft or attach an image to enhance" disabled>✨/);
+    await d.type('fix it');
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+    await d.fire('click', { target: d.act('enhance') });
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it' }]);
+  });
+  test(`${status}: an image with no text is enhanced, slash and shell drafts say why they are not`, async () => {
+    const d = await boot({ sessions: [idle('a', { status })], routes: enhanceRoutes() });
+    await d.paste({ type: 'image/png', size: 3, name: 'shot.png' });
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+    assert.doesNotMatch(d.elements.get('buttons').innerHTML, /disabled/, 'Send accepts it too');
+    await d.type('/compact');
+    assert.match(enhanceSlot(d), /title="Slash and shell commands are not enhanced" disabled>✨/);
+    await d.type('');
+    await d.fire('click', { target: d.act('enhance') });
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: '', images: shot, preview: shotPreview }]);
+  });
+  test(`${status}: a draft restored on switching back enables ✨ without typing`, async () => {
+    const d = await boot({ sessions: [idle('a', { status }), idle('b', { status })], routes: enhanceRoutes() });
+    await d.type('fix it');
+    await d.go('#/s/b');
+    assert.match(enhanceSlot(d), /disabled/);
+    await d.go('#/s/a');
+    assert.equal(d.input.value, 'fix it');
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+  });
+  for (const outcome of ['succeeds', 'fails']) test(`${status}: ✨ is enabled again once a send ${outcome}`, async () => {
+    const pending = deferred();
+    const d = await boot({ sessions: [idle('a', { status })], routes: { ...enhanceRoutes(), '/sessions/a/command': () => pending.promise } });
+    await d.type('hi');
+    await d.key('Enter');
+    assert.match(enhanceSlot(d), /title="Wait until the message is sent" disabled>✨/);
+    if (outcome === 'fails') pending.reject(new Error('down')); else pending.resolve({ id: 'a', status: 'running' });
+    for (let i = 0; i < 16; i++) await new Promise(setImmediate);
+    await d.type('again');
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+    await d.fire('click', { target: d.act('enhance') });
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'again' }]);
+  });
+}
+
 test('poll failure stops polling with one error toast', async () => {
   const d = await boot({ sessions: [idle('a')], routes: { '/enhance': body => { if (body) return { id: 'j', model: 'p/m' }; throw new Error('gone'); } } });
   await d.type('fix it');
@@ -176,6 +226,156 @@ test('a failed draft-session start leaves New session untouched', async () => {
   assert.equal(d.location.hash, '#/new');
   assert.deepEqual(d.posts('/enhance'), []);
   assert.equal(d.toasts().filter(t => /\berr\b/.test(t.className)).length, 1);
+});
+
+// New-session Enhance, from /quick-start until its enhance runs: the draft session already shows in the panel, so the
+// user can open it and leave it again. That leave used to discard it, and the enhance then got "Session not found.".
+const homeEnhance = async (routes, sessions = []) => {
+  const d = await boot({ hash: '#/new', sessions, routes: { '/browse': () => ({ path: 'C:/proj', parent: null, roots: [], recent: [], dirs: [], isGit: true }), ...routes } });
+  await startHomeEnhance(d);
+  return d;
+};
+// Picks C:/proj on New session, types a draft with an image and clicks ✨ (New session must be the current view).
+const startHomeEnhance = async d => {
+  await d.fire('click', { target: d.target({ '[data-go]': d.node('', { dataset: { go: 'C:/proj' } }) }) });
+  const home = d.elements.get('homePrompt');
+  home.value = 'fix it'; await d.fire('input', { target: home });
+  await d.fire('paste', { target: home, clipboardData: { getData: () => '', items: [{ type: 'image/png', getAsFile: () => ({ type: 'image/png', size: 3, name: 'shot.png' }) }] } });
+  await d.fire('click', { target: d.act('enhance') });
+};
+// One dashboard poll (the loop's next tick), as it runs while a request is pending.
+const poll = async d => { const due = d.timers.filter(t => t.ms === 1200 || t.ms === 3500); d.timers.splice(0, d.timers.length, ...d.timers.filter(t => !due.includes(t))); for (const t of due) t.fn(); await flush(); };
+const errToasts = d => d.toasts().filter(t => /\berr\b/.test(t.className)).map(t => t.textContent);
+const discardUrls = d => d.calls.filter(c => c.body?.type === 'discard').map(c => c.url);
+// New session as rendered: its prompt holds the draft, its staged image is shown, ✨ and Start are usable.
+const homeHasDraft = d => {
+  const html = d.elements.get('home').innerHTML;
+  assert.match(html, /aria-label="Initial prompt"[^>]*>fix it<\/textarea>/);
+  assert.match(d.elements.get('imagePreview').innerHTML, /src="data:image\/jpeg;base64,UFJF"/);
+  assert.match(html, /aria-label="Enhance prompt"[^>]*>✨/);
+  assert.match(html, />Start session ↵</);
+};
+// The companion lists the session as soon as it is created, before /quick-start answers (`started`).
+const created = (sessions, started) => ({
+  '/quick-start': async () => { sessions.push(idle('n', { draft: true, cwd: 'C:/proj' })); await started.promise; return { id: 'n' }; },
+  '/sessions/n/command': body => { if (body.type === 'discard') sessions.splice(sessions.findIndex(s => s.id === 'n'), 1); return { discarded: true }; },
+  '/enhance': body => !body ? { status: 'running', step: '' } : sessions.some(s => s.id === 'n') ? { id: 'j', model: 'p/m' } : { httpStatus: 404, error: 'Session not found.' },
+});
+
+test('New-session Enhance: the draft session opened and left before its enhance starts is kept and enhanced', async () => {
+  const sessions = [], started = deferred(), d = await homeEnhance(created(sessions, started), sessions);
+  await poll(d);
+  await d.go('#/s/n');
+  await d.go('#/new');
+  started.resolve(); await flush();
+  assert.deepEqual(discardUrls(d), [], 'not discarded under the starting enhance');
+  assert.deepEqual(errToasts(d), []);
+  assert.equal(d.location.hash, '#/s/n');
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'n', text: 'fix it', images: shot, preview: shotPreview }]);
+  assert.equal(d.input.value, 'fix it');
+  assert.equal(d.input.readOnly, true);
+});
+
+// Draft session d enhances on its own while a New-session Enhance starts. Leaving d then used to queue it behind the
+// start, and the start's end discarded it: the companion stopped d's enhance and removed the session.
+const enhancingDraftAndHomeStart = async (hash = '#/s/d') => {
+  const sessions = [idle('d', { draft: true })], started = deferred(), routes = created(sessions, started);
+  const own = { status: 'running', step: 'reading src/a.js' };
+  const d = await boot({ hash, sessions, routes: {
+    ...routes,
+    '/browse': () => ({ path: 'C:/proj', parent: null, roots: [], recent: [], dirs: [], isGit: true }),
+    '/enhance': (body, url) => body?.session === 'd' ? { id: 'jd', model: 'p/m' } : !body && url.includes('id=jd') ? own.result || own : routes['/enhance'](body),
+  } });
+  return { d, sessions, started, own };
+};
+
+test('New-session Enhance: a draft session left while its own enhance runs is not discarded when the start ends', async () => {
+  const { d, started, own } = await enhancingDraftAndHomeStart();
+  await d.type('tidy it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.go('#/new');
+  await startHomeEnhance(d);
+  await d.go('#/s/d');
+  await d.go('#/new');
+  started.resolve(); await flush();
+  await d.runPolls();
+  assert.equal(d.location.hash, '#/s/n', 'the New-session Enhance still went ahead');
+  assert.deepEqual(discardUrls(d), [], 'd is kept');
+  assert.deepEqual(d.posts('/enhance/stop'), [], "d's enhance keeps running");
+  await d.go('#/s/d');
+  assert.equal(d.input.readOnly, true, 'still enhancing on return');
+  assert.match(d.elements.get('statusLine').innerHTML, /Draft kept if you leave/);
+  own.result = { status: 'done', text: 'Tidier' };
+  await d.runPolls();
+  assert.equal(d.input.value, 'Tidier');
+  await d.go('#/new');
+  assert.deepEqual(discardUrls(d), ['/api/sessions/d/command'], 'leaving once its enhance ended discards it as before');
+});
+
+test('New-session Enhance: a draft queued for discard during the start but enhancing when it ends is kept', async () => {
+  const { d, started } = await enhancingDraftAndHomeStart('#/new');
+  await startHomeEnhance(d);
+  await d.go('#/s/d'); // left while idle during the start: queued behind it
+  await d.go('#/new');
+  await d.go('#/s/d');
+  await d.type('tidy it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.go('#/new');
+  started.resolve(); await flush();
+  assert.deepEqual(discardUrls(d), [], 'its enhance keeps it');
+  assert.deepEqual(d.posts('/enhance/stop'), []);
+  await d.go('#/s/d');
+  assert.match(d.elements.get('statusLine').innerHTML, /Draft kept if you leave/);
+});
+
+test('New-session Enhance: a draft session gone before /enhance puts the text and images back on New session', async () => {
+  const sessions = [], started = deferred(), routes = created(sessions, started);
+  started.resolve();
+  // Removed elsewhere (another dashboard left it) between /quick-start and /enhance.
+  const d = await homeEnhance({ ...routes, '/enhance': body => { if (body) sessions.length = 0; return routes['/enhance'](body); } }, sessions);
+  assert.equal(errToasts(d).length, 1);
+  assert.equal(d.location.hash, '#/new');
+  homeHasDraft(d);
+});
+
+test('New-session Enhance: a draft save answered while the start refreshes does not empty the composer', async () => {
+  const sessions = [], state = deferred();
+  let slow = false;
+  const d = await homeEnhance({
+    '/quick-start': () => { sessions.push(idle('n', { draft: true, cwd: 'C:/proj' })); slow = true; return { id: 'n' }; },
+    '/state': () => slow ? (slow = false, state.promise) : { projects: [], sessions, archived: [] },
+    '/draft': body => ({ at: 5, images: (body.images || []).map(i => i.name) }),
+    ...enhanceRoutes(),
+  }, sessions);
+  // That /state request went out before the draft was saved: its reply does not know the saved draft.
+  for (const t of d.timers.filter(t => t.ms === 700)) t.fn();
+  await flush();
+  state.resolve({ projects: [], sessions, archived: [] }); await flush();
+  assert.equal(d.location.hash, '#/s/n');
+  assert.equal(d.input.value, 'fix it');
+  assert.match(d.elements.get('imagePreview').innerHTML, /src="data:image\/jpeg;base64,UFJF"/);
+});
+
+test('New-session Enhance: leaving New session while the start runs keeps you there and the draft on New session', async () => {
+  const sessions = [idle('b')], started = deferred(), d = await homeEnhance(created(sessions, started), sessions);
+  await d.go('#/s/b');
+  started.resolve(); await flush();
+  assert.equal(d.location.hash, '#/s/b', 'no jump to the new session');
+  assert.deepEqual(d.posts('/enhance'), []);
+  assert.deepEqual(discardUrls(d), ['/api/sessions/n/command'], 'the unused draft session goes');
+  await d.go('#/new');
+  homeHasDraft(d);
+});
+
+test('New-session Enhance: a draft session removed elsewhere while its enhance runs puts the draft back on New session', async () => {
+  const sessions = [], started = deferred(), d = await homeEnhance(created(sessions, started), sessions);
+  started.resolve(); await flush();
+  assert.equal(d.location.hash, '#/s/n');
+  sessions.length = 0; // another dashboard left it: the companion discarded it and stopped its enhance
+  await poll(d);
+  assert.equal(errToasts(d).length, 1);
+  assert.equal(d.location.hash, '#/new');
+  homeHasDraft(d);
 });
 
 test('leaving an idle draft for New session or another session discards it; its own Changes view does not', async () => {

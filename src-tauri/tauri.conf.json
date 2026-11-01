@@ -3,7 +3,9 @@
   "productName": "OMP Control Room",
   "version": "1.0.0",
   "identifier": "dev.omp.control-room",
-  "build": {},
+  "build": {
+    "beforeBuildCommand": "node scripts/stage-runtime.mjs"
+  },
   "app": { "windows": [] },
   "bundle": {
     "active": true,
@@ -12,13 +14,17 @@
     "externalBin": ["binaries/bun"],
     "resources": {
       "../companion/": "companion/",
-      "../node_modules/": "node_modules/",
       "../local-dist/": "local-dist/",
       "../desktop/host.mjs": "desktop/host.mjs",
       "../desktop/links.mjs": "desktop/links.mjs",
       "../desktop/shell-env.mjs": "desktop/shell-env.mjs"
     },
-    "windows": { "nsis": { "installMode": "currentUser" } },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    },
     "macOS": { "minimumSystemVersion": "13.0", "signingIdentity": "-", "entitlements": "Entitlements.plist" }
   },
   "plugins": {

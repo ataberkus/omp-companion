@@ -62,7 +62,8 @@ const FAKE_OMP = (dir, { fail = false } = {}) => {
 };
 
 async function boot(t, { config = '', omp = {}, session = {} } = {}) {
-  // The companion keeps folders as fs.realpath gives them; macOS's temp folder (/var/folders/…) is a symlink into /private/var.
+  // The companion keeps folders as fs.realpath gives them: it expands 8.3 short names (CI's TEMP is C:\Users\RUNNER~1\...)
+  // and resolves macOS's temp folder, a symlink (/var/folders/… is /private/var/folders/…).
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'omp-enhance-')));
   const state = { app: null, base: '' };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
@@ -237,6 +238,16 @@ test('requests need exactly one target and a real session', async t => {
   assert.equal((await call('/enhance', { text: 'x', session: 'session', path: dir })).status, 400);
   assert.equal((await call('/enhance', { text: 'x', session: 'nope' })).status, 404);
   assert.equal((await call('/enhance', { text: '   ', session: 'session' })).status, 400);
+});
+
+test('an image-only draft is enhanced from a fixed placeholder; no text and no image is still refused', async t => {
+  const { dir, call, settle } = await boot(t);
+  const start = await call('/enhance', { session: 'session', text: '  ', images: [image] });
+  assert.equal(start.status, 202);
+  assert.equal((await settle(start.body.id)).status, 'done');
+  assert.ok((await readFile(join(dir, 'stdin.txt'), 'utf8')).endsWith('<draft>\n(No text: the attached images are the whole draft. Write the prompt they ask for.)\n</draft>'));
+  assert.equal((await call('/enhance', { session: 'session', text: '', images: [] })).status, 400);
+  assert.equal((await call('/enhance', { session: 'session', images: [image] })).status, 400, 'text stays required as a string');
 });
 
 test('a session whose working directory is gone is refused up front, not reported as `spawn ENOENT`', async t => {
