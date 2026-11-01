@@ -123,6 +123,54 @@ test('Ctrl+Shift+E starts and cancels; slash and shell drafts are ignored', asyn
   assert.equal(d.toasts().length, 0, 'cancel is silent');
 });
 
+// Finished sessions (review, done) use the same ✨ rule as any idle composer: text, or images alone, as Send accepts.
+const enhanceSlot = d => d.elements.get('enhanceSlot').innerHTML;
+const shot = [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }], shotPreview = ['data:image/jpeg;base64,UFJF'];
+const enhanceRoutes = () => ({ '/enhance': body => body ? { id: 'j', model: 'p/m' } : { status: 'running', step: '' } });
+for (const status of ['review', 'done']) {
+  test(`${status}: a typed draft enables ✨ and a click enhances it`, async () => {
+    const d = await boot({ sessions: [idle('a', { status })], routes: enhanceRoutes() });
+    assert.match(enhanceSlot(d), /title="Type a draft or attach an image to enhance" disabled>✨/);
+    await d.type('fix it');
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+    await d.fire('click', { target: d.act('enhance') });
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it' }]);
+  });
+  test(`${status}: an image with no text is enhanced, slash and shell drafts say why they are not`, async () => {
+    const d = await boot({ sessions: [idle('a', { status })], routes: enhanceRoutes() });
+    await d.paste({ type: 'image/png', size: 3, name: 'shot.png' });
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+    assert.doesNotMatch(d.elements.get('buttons').innerHTML, /disabled/, 'Send accepts it too');
+    await d.type('/compact');
+    assert.match(enhanceSlot(d), /title="Slash and shell commands are not enhanced" disabled>✨/);
+    await d.type('');
+    await d.fire('click', { target: d.act('enhance') });
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: '', images: shot, preview: shotPreview }]);
+  });
+  test(`${status}: a draft restored on switching back enables ✨ without typing`, async () => {
+    const d = await boot({ sessions: [idle('a', { status }), idle('b', { status })], routes: enhanceRoutes() });
+    await d.type('fix it');
+    await d.go('#/s/b');
+    assert.match(enhanceSlot(d), /disabled/);
+    await d.go('#/s/a');
+    assert.equal(d.input.value, 'fix it');
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+  });
+  for (const outcome of ['succeeds', 'fails']) test(`${status}: ✨ is enabled again once a send ${outcome}`, async () => {
+    const pending = deferred();
+    const d = await boot({ sessions: [idle('a', { status })], routes: { ...enhanceRoutes(), '/sessions/a/command': () => pending.promise } });
+    await d.type('hi');
+    await d.key('Enter');
+    assert.match(enhanceSlot(d), /title="Wait until the message is sent" disabled>✨/);
+    if (outcome === 'fails') pending.reject(new Error('down')); else pending.resolve({ id: 'a', status: 'running' });
+    for (let i = 0; i < 16; i++) await new Promise(setImmediate);
+    await d.type('again');
+    assert.doesNotMatch(enhanceSlot(d), /disabled/);
+    await d.fire('click', { target: d.act('enhance') });
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'again' }]);
+  });
+}
+
 test('poll failure stops polling with one error toast', async () => {
   const d = await boot({ sessions: [idle('a')], routes: { '/enhance': body => { if (body) return { id: 'j', model: 'p/m' }; throw new Error('gone'); } } });
   await d.type('fix it');
