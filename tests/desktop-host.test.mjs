@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { portBusy } from '../companion/server.mjs';
+import { portBusy, tailscaleSelf } from '../companion/server.mjs';
+import { pickTailnetHost } from '../desktop/links.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -121,4 +122,30 @@ test('closing stdin shuts the companion down and frees the port', async t => {
   const code = await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('host did not exit within 10s')), 10000).unref())]);
   assert.equal(code, 0);
   assert.equal(await portBusy(port), false);
+});
+
+// OMP_WEB_HOST unset: the host looks up this PC's Tailscale address itself. Without Tailscale it simply stays on 127.0.0.1;
+// with it, the tailnet listener answers from launch, survives a LAN toggle round trip and is freed on quit.
+test('with OMP_WEB_HOST unset the host listens on this PC\'s Tailscale address when there is one and quits cleanly', async t => {
+  const { port, exited, next, request } = await startHost(t, null, { OMP_WEB_HOST: '' });
+  const { token } = await next();
+  const host = pickTailnetHost('', await tailscaleSelf());
+  const base = host && `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
+  const tailnetAnswers = async () => {
+    for (let i = 0; i < 40; i++) {
+      try { return (await fetch(`${base}/api/state`, { headers: { Authorization: `Bearer ${token}` } })).status; } catch {}
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return 0;
+  };
+  if (base) assert.equal(await tailnetAnswers(), 200);
+  assert.equal((await request({ cmd: 'lan', on: true })).lan, true);
+  assert.equal((await request({ cmd: 'lan', on: false })).lan, false);
+  if (base) assert.equal(await tailnetAnswers(), 200);
+  assert.equal((await request({ cmd: 'links' })).ok, true);
+  assert.deepEqual(await request({ cmd: 'quit' }), { id: 4, ok: true });
+  assert.equal(await exited, 0);
+  assert.equal(await portBusy(port), false);
+  // A connect probe to the tailnet address can time out instead of being refused (portBusy counts that as busy), so bind it instead.
+  if (host) { const s = createServer().listen(port, host); await once(s, 'listening'); s.close(); await once(s, 'close'); }
 });
