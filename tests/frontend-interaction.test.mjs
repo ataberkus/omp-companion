@@ -9,7 +9,8 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 
 // Runs the real dashboard script against a tiny DOM: elements by id, a few extra selectors, recorded fetches.
 // `coarse: true` reports a touch screen through matchMedia('(pointer: coarse)'); without it there is no matchMedia at all.
-async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {}, coarse = false } = {}) {
+// `size` is the viewport (a landscape phone is { width: 844, height: 390 }).
+async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {}, coarse = false, size = { width: 1360, height: 900 } } = {}) {
   const location = { hash, pathname: '/', search: '' };
   const listeners = [], winListeners = new Map(), calls = [], elements = new Map(), extras = new Map(), storage = new Map();
   const document = { activeElement: null };
@@ -46,7 +47,7 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     return {};
   };
   runInNewContext(source, {
-    document, location, window: { innerHeight: 900, addEventListener: (type, fn) => winListeners.set(type, fn) }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
+    document, location, window: { innerHeight: size.height, addEventListener: (type, fn) => winListeners.set(type, fn) }, addEventListener() {}, innerWidth: size.width, innerHeight: size.height,
     history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) },
     localStorage: { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout() {}, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
@@ -176,6 +177,24 @@ test('touch: quick-switch chips apply a role or a favorite with its remembered l
   await d.fire('click', { target: d.act('model') });
   await d.fire('click', { target: pickerTap(d, '[data-pquick]', { pquick: chip('p/r') }), detail: 1 });
   assert.deepEqual(setModels(d), [{ model: 'p/b', thinking: '' }, { model: 'p/r', thinking: 'high' }]);
+});
+
+// The ⚑ advisor menu opens from the composer at the bottom of the screen; on a landscape phone it is taller than the room above.
+async function advMenu({ size, coarse, height, top }) {
+  const d = await boot({ sessions: [idle('a', { advisor: { enabled: true } })], models: MODELS, size, coarse });
+  const make = d.document.createElement;
+  d.document.createElement = tag => Object.assign(make(tag), { offsetHeight: height, offsetWidth: 280 });
+  const chip = d.node('', { dataset: { act: 'advMenu' }, getBoundingClientRect: () => ({ left: 40, top, bottom: top + 30 }) });
+  await d.fire('click', { target: d.target({ '[data-act]': chip }) });
+  return d.elements.get('advMenu').style;
+}
+test('the advisor menu stays on screen on a landscape phone; where it fits, it opens above its chip as before', async () => {
+  const phone = await advMenu({ size: { width: 844, height: 390 }, coarse: true, height: 340, top: 330 });
+  assert.equal(phone.top, '42px', 'no room above or below: pinned to the bottom edge instead of opening off-screen at 366px');
+  assert.equal(phone.maxHeight, '374px', 'and never taller than the screen');
+  const desk = await advMenu({ size: { width: 1360, height: 900 }, coarse: false, height: 340, top: 700 });
+  assert.equal(desk.top, '354px', 'desktop: above the chip, unchanged');
+  assert.equal(desk.left, '40px');
 });
 
 const SETTINGS = () => ({ file: '/cfg.yml', settings: [
