@@ -4,7 +4,7 @@
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 import * as os from 'node:os';
 import * as readline from 'node:readline';
-import { createCompanion, portBusy, startupUpdate, tailscaleSelf } from '../companion/server.mjs';
+import { busySessions, createCompanion, portBusy, startupUpdate, tailscaleSelf } from '../companion/server.mjs';
 import { phoneLinks, pickTailnetHost } from './links.mjs';
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
@@ -108,7 +108,7 @@ function closeTailnet() {
 const shutdown = () => { clearTimeout(tailnetRetry); return (closing ??= companion ? companion.close() : Promise.resolve()); };
 
 const commands = {
-  busy: () => ({ busy: companion.store.sessions.filter(s => s.status === 'running' || s.status === 'queued').length }),
+  busy: () => ({ busy: busySessions(companion.store.sessions) }),
   lan: msg => setLan(Boolean(msg.on)),
   screen: msg => ({ screen: companion.setScreen(Boolean(msg.on)) }),
   links: async () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.password ? '' : companion.token, await tailscaleSelf()) }),

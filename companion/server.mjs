@@ -1003,6 +1003,9 @@ export async function updateOmp(entry,{cwd=os.homedir(),timeout=20*60*1000}={}){
  }catch(e){return {status:'error',exitCode:typeof e.code==='number'?e.code:null,output:cleanUpdateOutput(e.stdout,e.stderr,e.killed?'Update timed out.':e.message)||'OMP update failed.'};}
 }
 const defaultDataDir=()=>process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
+// Sessions the desktop app's quit and update prompts count as still working: the dashboard's "In panel" set (not hidden),
+// with a turn running or queued. review and paused wait for the user, so they don't count.
+export const busySessions=sessions=>sessions.filter(s=>!s.hidden&&(s.status==='running'||s.status==='queued')).length;
 // Opening the companion first brings OMP up to date, before any OMP process starts. A failed or timed-out update
 // starts with the installed build. OMP_WEB_NO_UPDATE=1 skips it; a source checkout is updated with git instead.
 // Sessions run OMP's SDK in this process and `omp update` replaces only the CLI, so the SDK release matching the CLI is

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { portBusy, tailscaleSelf } from '../companion/server.mjs';
+import { busySessions, portBusy, tailscaleSelf } from '../companion/server.mjs';
 import { pickTailnetHost } from '../desktop/links.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -66,6 +66,16 @@ test('host reports ready, serves the dashboard, answers busy/lan/links and quits
   assert.deepEqual(unknown, { id: 5, ok: false, error: 'Unknown command: nope' });
   assert.deepEqual(await request({ cmd: 'quit' }), { id: 6, ok: true });
   assert.equal(await exited, 0);
+});
+
+// The quit/update prompt counts what the dashboard's "In panel" filter shows: a hidden session (a removed one, or a
+// draft whose worktree Windows still held) is out of the panel, so it never asks "N sessions are still working".
+test('busy counts running and queued panel sessions, not hidden ones, review or paused', () => {
+  const s = (status, hidden) => ({ id: status + (hidden ? '-hidden' : ''), status, ...(hidden ? { hidden: true } : {}) });
+  assert.equal(busySessions([s('running'), s('queued')]), 2);
+  assert.equal(busySessions([s('running', true), s('queued', true)]), 0);
+  assert.equal(busySessions([s('review'), s('paused'), s('done'), s('error')]), 0);
+  assert.equal(busySessions([s('running'), s('running', true), s('queued', true), s('review')]), 1);
 });
 
 // Like network access, screen sharing starts off at every launch: OMP_WEB_SCREEN is for the plain companion, the tray decides here.
