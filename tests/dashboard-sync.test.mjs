@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
@@ -32,7 +32,7 @@ test('composer drafts sync through the companion: polls carry timestamps only, t
   assert.equal(saved.key, 'session:a');
   const [, state] = await c.call('/state?session=a');
   assert.deepEqual(state.drafts, { 'session:a': saved.at }, 'no draft text in polls');
-  assert.deepEqual((await c.call('/draft?key=session:a'))[1], { text: 'half a thought', at: saved.at });
+  assert.deepEqual((await c.call('/draft?key=session:a'))[1], { text: 'half a thought', at: saved.at, images: [] });
 
   assert.equal((await c.call('/draft', { key: 'bogus', text: 'x' }))[0], 400);
   assert.equal((await c.call('/draft', { key: 'session:a', text: 5 }))[0], 400);
@@ -44,8 +44,90 @@ test('composer drafts sync through the companion: polls carry timestamps only, t
 
   // Sending (or clearing the box) deletes it everywhere.
   await c.call('/draft', { key: 'session:a', text: '' });
-  assert.deepEqual((await c.call('/draft?key=session:a'))[1], { text: '', at: null });
+  assert.deepEqual((await c.call('/draft?key=session:a'))[1], { text: '', at: null, images: [] });
   assert.equal('session:a' in (await c.call('/state'))[1].drafts, false);
+});
+
+const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/e1YAAAAASUVORK5CYII=';
+const shot = (name, data = png) => ({ image: { type: 'image', mimeType: 'image/png', data }, preview: `data:image/jpeg;base64,${png}`, name, tokens: 1 });
+
+test('composer drafts carry their images: kept as files outside workspace.json and polls, image-only drafts allowed, invalid images refused', async t => {
+  const c = await start(t, dir => [session('a', { cwd: dir })]);
+  const files = async () => (await readdir(join(c.dir, 'drafts')).catch(() => [])).sort();
+  // A PNG carrying a marker, so finding it in workspace.json or a poll would mean the image data went there.
+  const marked = Buffer.concat([Buffer.from(png, 'base64'), Buffer.from('draft-image-marker')]).toString('base64');
+  const [status, saved] = await c.call('/draft', { key: 'session:a', text: 'look at this', images: [shot('one.png', marked), shot('two.png')] });
+  assert.equal(status, 200);
+  assert.deepEqual(saved.images, ['one.png', 'two.png']);
+  assert.deepEqual((await c.call('/draft?key=session:a'))[1], { text: 'look at this', at: saved.at, images: [shot('one.png', marked), shot('two.png')] });
+  const [, poll] = await c.call('/state');
+  assert.deepEqual(poll.drafts, { 'session:a': saved.at });
+  assert.ok(!JSON.stringify(poll).includes(marked), 'no image data in polls');
+  assert.equal((await files()).length, 2);
+
+  // A text edit leaves the images be; the dashboard already has them, so ?have= skips their data.
+  const [, edited] = await c.call('/draft', { key: 'session:a', text: 'look closer' });
+  assert.ok(edited.at > saved.at);
+  assert.deepEqual(edited.images, ['one.png', 'two.png']);
+  assert.deepEqual((await c.call('/draft?key=session:a&have=one.png'))[1].images, [{ name: 'one.png', mimeType: 'image/png', tokens: 1 }, shot('two.png')]);
+
+  // Saving the same images again (a failed send puts them back) reuses the same files; removing one deletes its file.
+  await c.call('/draft', { key: 'session:a', text: 'look closer', images: [shot('one.png', marked), shot('two.png')] });
+  assert.equal((await files()).length, 2);
+  await c.call('/draft', { key: 'session:a', text: 'look closer', images: [shot('two.png')] });
+  assert.equal((await files()).length, 1);
+
+  // Images alone are a draft, and it survives a restart with workspace.json holding only their metadata.
+  await c.call('/draft', { key: 'session:a', text: '', images: [shot('one.png', marked)] });
+  await c.app.close();
+  const workspace = await readFile(join(c.dir, 'workspace.json'), 'utf8');
+  assert.ok(!workspace.includes(marked), 'no image data in workspace.json');
+  assert.deepEqual(JSON.parse(workspace).drafts['session:a'].images.map(i => i.name), ['one.png']);
+  await c.open();
+  const [, back] = await c.call('/draft?key=session:a');
+  assert.equal(back.text, '');
+  assert.deepEqual(back.images, [shot('one.png', marked)]);
+  assert.ok('session:a' in (await c.call('/state'))[1].drafts);
+
+  // Invalid images are refused and change nothing.
+  for (const images of [[{ ...shot('x.svg'), image: { type: 'image', mimeType: 'image/svg+xml', data: png } }], [shot('x.png', Buffer.alloc(6 * 1024 * 1024).toString('base64'))],
+    [{ ...shot('x.png'), image: { type: 'image', mimeType: 'image/jpeg', data: png } }], [shot('same.png'), shot('same.png')], [{ ...shot('x.png'), preview: 'javascript:alert(1)' }], 'nope'])
+    assert.equal((await c.call('/draft', { key: 'session:a', text: '', images }))[0], 400, JSON.stringify(images).slice(0, 80));
+  assert.deepEqual((await c.call('/draft?key=session:a'))[1].images.map(i => i.name), ['one.png']);
+
+  // No text and no images (sent from a device) clears the draft and its files.
+  await c.call('/draft', { key: 'session:a', text: '', images: [] });
+  assert.deepEqual((await c.call('/draft?key=session:a'))[1], { text: '', at: null, images: [] });
+  assert.equal('session:a' in (await c.call('/state'))[1].drafts, false);
+  assert.deepEqual(await files(), []);
+});
+
+test('drafts of removed sessions are refused and dropped, so their images never linger; an applied pre-fill is forgotten', async t => {
+  const c = await start(t, dir => [session('a', { cwd: dir }), session('w', { cwd: dir, hidden: true, worktreeRemoved: new Date().toISOString() })]);
+  const files = async () => (await readdir(join(c.dir, 'drafts')).catch(() => [])).sort();
+  // A phone still showing a session another device deleted the worktree of (or discarded) saves late.
+  for (const key of ['session:w', 'session:missing'])
+    assert.equal((await c.call('/draft', { key, text: 'late', images: [shot('one.png')] }))[0], 404, key);
+  assert.deepEqual(await files(), []);
+  assert.deepEqual((await c.call('/state'))[1].drafts, {});
+
+  // One left by an older companion in workspace.json is dropped at startup, its image file too.
+  await c.call('/draft', { key: 'session:a', text: '', images: [shot('one.png')] });
+  await c.app.close();
+  const file = join(c.dir, 'workspace.json'), ws = JSON.parse(await readFile(file, 'utf8'));
+  ws.drafts = { 'session:missing': ws.drafts['session:a'] };
+  await writeFile(file, JSON.stringify(ws));
+  await c.open();
+  assert.deepEqual((await c.call('/state'))[1].drafts, {});
+  assert.deepEqual(await files(), []);
+
+  // A dashboard put an extension's pre-fill into the draft: forgotten, unless a newer one replaced it meanwhile.
+  const s = c.app.store.sessions.find(x => x.id === 'a');
+  s._editorText = { id: 'e2', text: 'newer' };
+  assert.equal((await c.call('/sessions/a/command', { type: 'editor_text_applied', id: 'e1' }))[0], 200);
+  assert.equal(s._editorText.id, 'e2');
+  await c.call('/sessions/a/command', { type: 'editor_text_applied', id: 'e2' });
+  assert.equal(s._editorText, undefined);
 });
 
 test('Open in editor: editor links with the line, reveal for Show in folder, relative paths need the session folder', async t => {

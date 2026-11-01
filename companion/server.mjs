@@ -132,8 +132,29 @@ function chatImages(body){
  const images=body.images.map(image=>{const {problem}=checkImage(image);if(problem)throw error(problem);return {type:'image',mimeType:image.mimeType,data:image.data};});
  // preview: one data URL or one per image; stored on the message as-is.
  const previews=body.preview===undefined?[]:[].concat(body.preview);
- if(previews.length>images.length||previews.some(p=>typeof p!=='string'||p.length>1024*1024||!/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(p)))throw error('Invalid image preview.');
+ if(previews.length>images.length||previews.some(p=>!imagePreview(p)))throw error('Invalid image preview.');
  return images;
+}
+// A small JPEG/PNG data URL the dashboard shows for an attached image (attachImage), at most 1 MB.
+const imagePreview=p=>typeof p==='string'&&p.length<=1024*1024&&/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(p);
+// The dashboard's UPLOAD_MAX: base64 image data and previews one composer can hold, under the 48 MB request cap.
+const DRAFT_IMAGES_MAX=45*1024*1024;
+// The images attached in a composer draft, as attachImage made them: an image as chat attachments accept it (checkImage),
+// its preview, a name unique in the draft and its token estimate. Each gets an ID from its view and content, so saving
+// the same attachments again (say after a failed send) names the same file.
+function draftImages(list,key){
+ if(!Array.isArray(list))throw error('Draft images must be a list.');
+ const names=new Set();let bytes=0;
+ return list.map(a=>{
+  const {problem}=checkImage(a?.image);if(problem)throw error(problem);
+  if(!imagePreview(a.preview))throw error('Invalid image preview.');
+  if(typeof a.name!=='string'||!a.name||a.name.length>300||names.has(a.name))throw error('Each draft image needs its own name (maximum 300 characters).');
+  if(!Number.isInteger(a.tokens)||a.tokens<0||a.tokens>1e6)throw error('Invalid image token estimate.');
+  names.add(a.name);bytes+=a.image.data.length+a.preview.length;
+  if(bytes>DRAFT_IMAGES_MAX)throw error(`Draft images must stay under ${DRAFT_IMAGES_MAX/1048576} MB together.`);
+  const entry={image:{type:'image',mimeType:a.image.mimeType,data:a.image.data},preview:a.preview,name:a.name,tokens:a.tokens};
+  return {id:createHash('sha256').update(key).update('\0').update(JSON.stringify(entry)).digest('hex'),entry};
+ });
 }
 async function git(cwd,args){return (await exec('git',['-C',cwd,...args],{timeout:15000,maxBuffer:1024*1024,windowsHide:true})).stdout.trim();}
 const samePath=(a,b)=>{const n=v=>path.resolve(v||'');return process.platform==='win32'?n(a).toLowerCase()===n(b).toLowerCase():n(a)===n(b);};
@@ -1091,8 +1112,22 @@ export async function createCompanion(options={}){
  delete store.enhanceThinking;
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
  store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
- // Composer drafts per dashboard view ('session:<id>' or 'native:<file>'), shared by every device using this companion.
- store.drafts=Object.fromEntries(Object.entries(store.drafts&&typeof store.drafts==='object'?store.drafts:{}).filter(([k,v])=>/^(session|native):./.test(k)&&typeof v?.text==='string'&&v.text&&typeof v.at==='number'));
+ // Composer drafts per dashboard view ('session:<id>' or 'native:<file>'), shared by every device using this companion:
+ // {text,images,at}, where images holds only each attached image's {id,name,mimeType,tokens}. The image data and preview
+ // live in drafts/<id>.json, so workspace.json and /api/state polls stay small. A draft of images alone has no text.
+ const draftDir=path.join(dataDir,'drafts'),draftImageFile=id=>path.join(draftDir,id+'.json');
+ const draftMeta=i=>typeof i?.id==='string'&&/^[0-9a-f]{64}$/.test(i.id)&&typeof i.name==='string'&&!!i.name&&Object.hasOwn(IMAGE_EXT,i.mimeType)&&Number.isInteger(i.tokens)&&i.tokens>=0;
+ // A session view whose session was removed (a discarded draft session) or lost its folder (worktree deleted) has no
+ // composer left: a draft for it would only hold its images on disk until 200 newer drafts pushed it out.
+ const draftGone=key=>{const id=/^session:(.+)$/.exec(key)?.[1];if(id===undefined)return false;const s=store.sessions.find(x=>x.id===id);return !s||!!s.worktreeRemoved;};
+ {const files=new Set(await fs.readdir(draftDir).catch(()=>[]));
+  store.drafts=Object.fromEntries(Object.entries(store.drafts&&typeof store.drafts==='object'?store.drafts:{}).flatMap(([k,v])=>{
+   if(!/^(session|native):./.test(k)||draftGone(k)||typeof v?.text!=='string'||typeof v.at!=='number')return [];
+   const images=(Array.isArray(v.images)?v.images:[]).filter(i=>draftMeta(i)&&files.has(i.id+'.json')).map(({id,name,mimeType,tokens})=>({id,name,mimeType,tokens}));
+   return v.text||images.length?[[k,{text:v.text,images,at:v.at}]]:[];}));
+  // Image files no draft refers to (its draft was saved over or cleared before a crash) and dead companions' temp files go.
+  const kept=new Set(Object.values(store.drafts).flatMap(d=>d.images.map(i=>i.id+'.json')));
+  for(const f of files){const m=/^[0-9a-f]{64}\.json(?:\.(\d+)\.tmp)?$/.exec(f);if(m&&(m[1]?!alive(Number(m[1])):!kept.has(f)))await fs.rm(path.join(draftDir,f),{force:true}).catch(()=>{});}}
  // Where "Open in editor" opens files (Settings › Open in editor).
  if(!EDITOR_CHOICES.includes(store.editor))store.editor='auto';
  // Sidebar layout shared by every device: project-group order and collapsed group keys (`cwd || label`). null = not saved
@@ -1559,7 +1594,7 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','stop_commands','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','worktree_finish'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','stop_commands','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','worktree_finish','editor_text_applied'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -1567,6 +1602,9 @@ const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.
    try{return await command(s,body,checkedImages,queuedId);}finally{if(!sent(s)){s.draft=true;scheduleSave(s);}}
   }
   if(body.type==='discard')return discardDraft(s);
+  // A dashboard put an extension's composer pre-fill (set_editor_text) into the session's draft, which syncs it to every
+  // device: forgotten here, so no other device or later page load adds it a second time.
+  if(body.type==='editor_text_applied'){if(s._editorText&&s._editorText.id===body.id){delete s._editorText;scheduleSave(s);}return {};}
   // Composer ghost text (OMP's spelling.autocomplete engine). Never starts OMP; any failure means no suggestion.
   if(body.type==='predict_word'||body.type==='predict_word_feedback'){
    const runner=runners.get(s.id),draft=body.text,cursor=body.cursor;
@@ -2139,7 +2177,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   let removed=true;
   const root=store.projects.find(p=>p.id===s.projectId)?.path;
   if(s.isolated&&root&&s.branch?.startsWith('omp-web/')){removed=await removeWorktree(s,root);if(!removed)console.error(`Could not remove draft worktree ${s.cwd}; will retry on next start.`);}
-  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);store.pinned=store.pinned.filter(k=>k!=='s:'+s.id);delete store.drafts['session:'+s.id];}
+  if(removed){const i=store.sessions.indexOf(s);if(i>=0)store.sessions.splice(i,1);store.archived=store.archived.filter(k=>k!=='s:'+s.id);store.pinned=store.pinned.filter(k=>k!=='s:'+s.id);dropDraft('session:'+s.id);}
   else s.hidden=true;
   await persist(s);return {discarded:true};
  }
@@ -2244,7 +2282,7 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
    await stopRunner(s);
    if(!await removeWorktree(s,root))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
    // The session's folder is gone, so it leaves the panel; its OMP transcript stays in history.
-   s.hidden=true;s.status='done';s.worktreeRemoved=now();delete store.drafts['session:'+s.id];
+   s.hidden=true;s.status='done';s.worktreeRemoved=now();dropDraft('session:'+s.id);
    activity(s,`Deleted worktree and branch ${branch}`,'done');await persist(s);return {action,deleted:true};
   }
   await persist(s);return {action,...await worktreeStatus(s)};
@@ -2483,6 +2521,11 @@ async function spend(sync){
   const parent=path.dirname(dir);return {path:dir,parent:parent===dir?null:parent,isGit:await exists(path.join(dir,'.git')),project:store.projects.find(p=>samePath(p.path,dir))?.id,dirs};
  }
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
+ // Draft saves and removals run one at a time per view ('draft:<key>'), so an image file is removed only once no newer
+ // save of that view refers to it. Image IDs include the view, so no other view's draft shares a file.
+ const sweepDraftImages=(key,ids)=>{const keep=new Set((store.drafts[key]?.images??[]).map(i=>i.id));return Promise.all(ids.filter(id=>!keep.has(id)).map(id=>fs.rm(draftImageFile(id),{force:true}).catch(()=>{})));};
+ // Removes a view's draft now and its image files once earlier saves of that view are done.
+ const dropDraft=key=>{const d=store.drafts[key];if(!d)return;delete store.drafts[key];scheduleSave([]);if(d.images.length)void lock('draft:'+key,()=>sweepDraftImages(key,d.images.map(i=>i.id)));};
  // Each live session refreshes on its own: one whose OMP holds its command queue (/compact, a handoff, a login waiting
  // for the user) answers get_state only once that ends, and must not hold back every other session's todos, context
  // use and settle check meanwhile. A session keeps at most one refresh in flight.
@@ -2650,7 +2693,10 @@ async function spend(sync){
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
    }
-   if(req.method==='GET'&&url.pathname==='/api/draft'){const d=store.drafts[url.searchParams.get('key')];json({text:d?.text??'',at:d?.at??null});return;}
+   // A view's draft with its images' data and previews; images named in ?have= (the dashboard has them) come without.
+   if(req.method==='GET'&&url.pathname==='/api/draft'){const d=store.drafts[url.searchParams.get('key')],have=new Set(url.searchParams.getAll('have'));
+    const images=[];for(const i of d?.images??[]){if(have.has(i.name)){images.push({name:i.name,mimeType:i.mimeType,tokens:i.tokens});continue;}try{images.push(JSON.parse(await fs.readFile(draftImageFile(i.id),'utf8')));}catch{}}
+    json({text:d?.text??'',at:d?.at??null,images});return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions'){json({dir:ompSessionsDir,sessions:await listNativeSessions()});return;}
    if(req.method==='GET'&&url.pathname==='/api/omp-sessions/preview'){const file=sessionFileParam(url.searchParams.get('file'));let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}json({...head,file,contextTokens:await lastContext(file).catch(()=>undefined),messages:await importMessages(file,150,stashImages)});return;}
    // A tool-result image by the ID its message carries (see stashImages); content-addressed, so it never changes. One pruned
@@ -2704,7 +2750,7 @@ async function spend(sync){
    if(req.method==='GET'&&url.pathname==='/api/screen'){json({supported:screenSupported,enabled:screenOn,desktop:Boolean(options.desktop),viewer:viewer&&{address:viewer.address,since:viewer.since}});return;}
    if(req.method!=='POST')throw error('Route not found.',404);
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);
-   const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||url.pathname==='/api/enhance'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
+   const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||url.pathname==='/api/enhance'||url.pathname==='/api/draft'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
    const buffers=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>cap)throw error(cap>256*1024?'This message is too large to upload: text and images together must stay under 48 MB. Remove some images and try again.':'Request body too large.',413);buffers.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(buffers).toString());}catch{throw error('Invalid JSON.');}
    if(!body||typeof body!=='object'||Array.isArray(body))throw error('JSON object required.');
    if(url.pathname==='/api/projects'){
@@ -2766,14 +2812,29 @@ async function spend(sync){
     if(!options.restart)throw error('Restart works when the companion runs from start.bat, which starts it again. Stop it and start it yourself.',409);
     await pauseSessions();const relaunch=await options.restart();json({ok:true});if(relaunch)res.once('finish',()=>void relaunch());return;
    }
-   // Composer drafts (debounced from every device); an empty text clears the view's draft.
+   // Composer drafts (debounced from every device). images, when given, replaces the attached images ([] removes them);
+   // without it they stay. A draft with neither text nor images is cleared.
    if(url.pathname==='/api/draft'){
     const key=typeof body.key==='string'&&/^(session|native):./.test(body.key)&&body.key.length<=4200?body.key:null;if(!key)throw error('Invalid draft key.');
     if(typeof body.text!=='string'||body.text.length>200000)throw error('Draft must be text under 200,000 characters.');
-    if(body.text)store.drafts[key]={text:body.text,at:Date.now()};else delete store.drafts[key];
-    // Oldest drafts go first past 200, so an abandoned pile cannot grow workspace.json without bound.
-    const keys=Object.keys(store.drafts);if(keys.length>200)for(const k of keys.sort((a,b)=>store.drafts[a].at-store.drafts[b].at).slice(0,keys.length-200))delete store.drafts[k];
-    scheduleSave([]);json({key,at:store.drafts[key]?.at??null});return;
+    const images=body.images===undefined?null:draftImages(body.images,key);
+    if(draftGone(key))throw error('Session not found.',404);
+    const saved=await lock('draft:'+key,async()=>{
+     const old=store.drafts[key];
+     if(images?.length){await fs.mkdir(draftDir,{recursive:true,mode:0o700});for(const {id,entry} of images)if(!await exists(draftImageFile(id)))await writeAtomic(draftImageFile(id),JSON.stringify(entry));}
+     const meta=images?images.map(({id,entry})=>({id,name:entry.name,mimeType:entry.image.mimeType,tokens:entry.tokens})):old?.images??[];
+     // Removed while the images were written (dropDraft has cleared its draft): store nothing, keep none of the files.
+     if(draftGone(key)){await sweepDraftImages(key,meta.map(i=>i.id));throw error('Session not found.',404);}
+     // Strictly later than the last save, so every change gets a timestamp the other devices see as new.
+     if(body.text||meta.length)store.drafts[key]={text:body.text,images:meta,at:Math.max(Date.now(),(old?.at??0)+1)};else delete store.drafts[key];
+     // Oldest drafts go first past 200, so an abandoned pile cannot grow workspace.json and drafts/ without bound.
+     const keys=Object.keys(store.drafts);if(keys.length>200)for(const k of keys.sort((a,b)=>store.drafts[a].at-store.drafts[b].at).slice(0,keys.length-200))dropDraft(k);
+     scheduleSave([]);
+     await sweepDraftImages(key,(old?.images??[]).map(i=>i.id));
+     const d=store.drafts[key];return {at:d?.at??null,images:(d?.images??[]).map(i=>i.name)};
+    });
+    // images: the names of the images the draft now holds, so a dashboard that left them out learns whether they match.
+    json({key,...saved});return;
    }
    if(url.pathname==='/api/editor'){if(!EDITOR_CHOICES.includes(body.editor))throw error('Unknown editor.');store.editor=body.editor;await persist([]);json({editor:store.editor});return;}
    // Open in editor: a file from a diff or tool call, relative paths resolved against the session folder.
@@ -2834,7 +2895,7 @@ async function spend(sync){
    }
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
-   const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status'];
+   const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','editor_text_applied'];
    // Commands answer with the session; one whose transcript nothing has read yet gets it read for the reply only (deferTranscript).
    if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);const r=await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body)));json(r===s&&unread(s)?{...s,messages:readTranscript(s)}:r);return;}
    throw error('Route not found.',404);

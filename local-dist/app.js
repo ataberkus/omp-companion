@@ -199,15 +199,19 @@
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
   // `token` probes a pasted token without adopting it; `etag` ({ tag }) makes the GET conditional and resolves null on 304.
-  async function api(p, body, { timeout = 30000, token = S.token, etag } = {}) {
+  // `keepalive` lets the request outlive the page (a closing tab); browsers cap such bodies at 64 KB, so larger ones go as usual.
+  // A refused request's error carries its HTTP status.
+  async function api(p, body, { timeout = 30000, token = S.token, etag, keepalive = false } = {}) {
     if (!token) throw Object.assign(new Error('Not connected.'), { auth: true });
+    const json = body === undefined ? undefined : JSON.stringify(body);
     let res;
     try {
       res = await fetch('/api' + p, {
         method: body === undefined ? 'GET' : 'POST',
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: json,
         signal: AbortSignal.timeout(timeout),
+        ...(keepalive && json && json.length < 60000 ? { keepalive: true } : {}),
       });
     } catch (e) { throw new Error(e.name === 'TimeoutError' ? 'The companion did not answer in time.' : 'The companion is not reachable.'); }
     // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
@@ -219,7 +223,7 @@
       if (metaToken && token === metaToken) { location.reload(); throw Object.assign(new Error('Reconnecting to the restarted companion…'), { auth: true }); }
       setToken(''); throw Object.assign(new Error('The password or connection token is no longer valid. Enter it again, or open the link printed by the companion.'), { auth: true });
     }
-    if (!res.ok) throw new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`);
+    if (!res.ok) throw Object.assign(new Error(data.error || `The companion rejected the request (HTTP ${res.status}).`), { status: res.status });
     if (etag) etag.tag = res.headers?.get?.('ETag') || '';
     return data;
   }
@@ -579,38 +583,76 @@
     loadBg(bgFile(), true);
     setTimeout(() => { if ($('#questions')?.hidden) input.focus(); }, 0);
   }
-  // Composer drafts per view, saved to the companion (debounced) so they survive reloads and show up on other devices.
-  // draftSynced: view → { text, at } last agreed with the server. A remote change replaces the composer only while it still
-  // shows that text; an edit made here since then is saved over the remote one instead.
-  const draftSynced = new Map(), draftTimers = new Map();
+  // Composer drafts per view, text and attached images, saved to the companion (debounced) so they survive reloads and show
+  // up on other devices. draftSynced: view → { text, names, at } last agreed with the server, names being the attached
+  // images' names. A remote change replaces the composer only while it still shows that draft; an edit made here since
+  // then (text or images) is saved over the remote one instead.
+  // draftSaving: view → its save under way; draftRetry: views whose last save failed (offline, companion error).
+  const draftSynced = new Map(), draftTimers = new Map(), draftSaving = new Map(), draftRetry = new Set();
   const draftKey = view => /^(session|native):./.test(view) ? view : '';
+  const viewImages = view => S.attachments.filter(a => a.view === view);
+  const imageNames = list => list.map(a => a.name).join('\n');
   function saveDraft(view) {
     if (!draftKey(view) || !S.token) return;
     clearTimeout(draftTimers.get(view));
     draftTimers.set(view, setTimeout(() => sendDraft(view), 700));
   }
-  function sendDraft(view) {
+  function sendDraft(view, opts) {
     draftTimers.delete(view);
-    const text = Map.prototype.get.call(drafts, view) || '';
-    if ((draftSynced.get(view)?.text ?? '') === text) return;
-    return api('/draft', { key: view, text }).then(r => draftSynced.set(view, { text, at: r.at })).catch(() => {});
+    // One save per view at a time, so the companion stores them, and this page records them, in the order they were made.
+    const saving = draftSaving.get(view);
+    if (saving) return saving.then(() => sendDraft(view, opts));
+    const text = Map.prototype.get.call(drafts, view) || '', list = viewImages(view), names = imageNames(list), known = draftSynced.get(view);
+    const sameImages = (known?.names ?? '') === names;
+    if ((known?.text ?? '') === text && sameImages) return;
+    // Images go only when the set changed: a text edit leaves the companion's copies as they are.
+    const images = sameImages ? {} : { images: list.map(({ image, preview, name, tokens }) => ({ image, preview, name, tokens })) };
+    const save = api('/draft', { key: view, text, ...images }, opts).then(r => {
+      draftRetry.delete(view);
+      const synced = (r.images || []).join('\n');
+      draftSynced.set(view, { text, names: synced, at: r.at });
+      // The companion kept other images (another device changed them since the last pull): save this composer's over them.
+      if (synced !== names) saveDraft(view);
+    }, e => {
+      // Unreachable or failing companion: saved again after the next poll that gets through (retryDrafts).
+      // A refused draft (too large, session gone) would only be refused again.
+      if (!e.status || e.status >= 500) draftRetry.add(view);
+    }).finally(() => { if (draftSaving.get(view) === save) draftSaving.delete(view); });
+    draftSaving.set(view, save);
+    return save;
   }
-  // Sends drafts still waiting out their debounce now, e.g. before the page reloads.
-  const flushDrafts = () => Promise.all([...draftTimers].map(([view, timer]) => { clearTimeout(timer); return sendDraft(view); }));
+  const retryDrafts = () => { for (const view of draftRetry) saveDraft(view); draftRetry.clear(); };
+  // Sends drafts still waiting out their debounce now, e.g. before the page reloads or is hidden (opts: api's keepalive).
+  const flushDrafts = opts => Promise.all([...draftTimers].map(([view, timer]) => { clearTimeout(timer); return sendDraft(view, opts); }));
+  // This page holds the view's current draft: edited here and not saved yet, or agreeing with the companion's latest one.
+  const draftKnown = view => {
+    if (!draftKey(view) || draftTimers.has(view) || draftSaving.has(view)) return true;
+    const at = S.store?.drafts?.[view] ?? null, known = draftSynced.get(view);
+    return known ? known.at === at : !at;
+  };
   async function pullDraft() {
     const view = S.view;
-    if (!draftKey(view) || draftTimers.has(view) || !S.store) return;
+    // A running enhance is about to replace the draft: the composer stays as it is until it ends.
+    if (!draftKey(view) || draftTimers.has(view) || draftSaving.has(view) || !S.store || S.enhance.has(view)) return;
     const at = S.store.drafts?.[view] ?? null, known = draftSynced.get(view);
     if (known ? known.at === at : !at) return;
-    let remote = { text: '', at: null };
-    if (at) try { remote = await api('/draft?key=' + encodeURIComponent(view)); } catch { return; }
-    if (S.view !== view || draftTimers.has(view)) return;
-    const local = Map.prototype.get.call(drafts, view) || '';
-    draftSynced.set(view, { text: remote.text, at: remote.at });
-    if (local !== (known?.text ?? '')) { if (local !== remote.text) saveDraft(view); return; }
+    let remote = { text: '', at: null, images: [] };
+    // Images this composer already holds come back by name only, without their data.
+    const have = viewImages(view).map(a => '&have=' + encodeURIComponent(a.name)).join('');
+    if (at) try { remote = await api('/draft?key=' + encodeURIComponent(view) + have); } catch { return; }
+    // A save made or answered meanwhile is newer than this answer: the next poll compares against it.
+    if (S.view !== view || draftTimers.has(view) || draftSaving.has(view) || draftSynced.get(view) !== known || S.enhance.has(view)) return;
+    const list = viewImages(view), local = Map.prototype.get.call(drafts, view) || '', localNames = imageNames(list);
+    const images = (remote.images || []).map(r => r.image ? { view, image: r.image, preview: r.preview, name: r.name, tokens: r.tokens } : list.find(a => a.name === r.name));
+    if (images.some(a => !a)) return; // an image sent by name is gone here: the next poll fetches the draft whole
+    const remoteNames = imageNames(images);
+    draftSynced.set(view, { text: remote.text, names: remoteNames, at: remote.at });
+    if (local !== (known?.text ?? '') || localNames !== (known?.names ?? '')) { if (local !== remote.text || localNames !== remoteNames) saveDraft(view); return; }
     if (remote.text) Map.prototype.set.call(drafts, view, remote.text); else Map.prototype.delete.call(drafts, view);
     const input = $('#input');
-    if (input && input.value !== remote.text && !S.enhance.has(view)) { input.value = remote.text; autosize(input); updateComposer(); }
+    if (input && input.value !== remote.text) { input.value = remote.text; autosize(input); }
+    if (localNames !== remoteNames) S.attachments = S.attachments.filter(a => a.view !== view).concat(images);
+    update(); renderAttachments();
   }
   class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
   const drafts = new Drafts();
@@ -2540,8 +2582,14 @@
     if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…${s?.draft ? ' · Draft kept if you leave' : ''}</span>`; }
     else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
-    // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft.
-    if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id) { editorApplied.set(s.id, s._editorText.id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input); }
+    // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft. Not before this
+    // page knows the view's synced draft (it would add to an empty composer and save that over the draft), and once applied
+    // the companion forgets the request, so other devices and later page loads take it from the synced draft instead.
+    if (s?._editorText && editorApplied.get(s.id) !== s._editorText.id && draftKnown(S.view)) {
+      const id = s._editorText.id;
+      editorApplied.set(s.id, id); input.value = input.value.trim() ? input.value + '\n\n' + s._editorText.text : s._editorText.text; drafts.set(S.view, input.value); autosize(input);
+      api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'editor_text_applied', id }).catch(() => {});
+    }
     if (input.placeholder !== placeholder) input.placeholder = placeholder;
     input.readOnly = !!enhancing;
     const slot = $('#enhanceSlot'); if (slot) setIfChanged(slot, enhanceButton(S.view, input.value));
@@ -2796,7 +2844,7 @@
   async function restoreComposer(r) {
     const input = $('#input'), view = S.view;
     if (input) { input.value = r.text || ''; if (r.text) drafts.set(view, r.text); else drafts.delete(view); autosize(input); input.focus(); }
-    S.attachments = S.attachments.filter(a => a.view !== view);
+    S.attachments = S.attachments.filter(a => a.view !== view); saveDraft(view);
     for (const [i, img] of (r.images || []).entries()) {
       const bytes = Uint8Array.from(atob(img.data), ch => ch.charCodeAt(0));
       await attachImage(new File([bytes], `message-image-${i + 1}.${img.mimeType.split('/')[1] || 'png'}`, { type: img.mimeType }));
@@ -3008,7 +3056,7 @@
       const stem = (file.name || 'pasted-image').replace(/\.[A-Za-z0-9]+$/, '') || 'pasted-image';
       const name = `${stem}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name, tokens });
-      update(); renderAttachments();
+      update(); renderAttachments(); saveDraft(view);
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
   }
 
@@ -3068,7 +3116,8 @@
     } catch (e) {
       toast(e.message, 'err');
       if (text && !retry) { drafts.set(retryView, text); const target = S.view === retryView ? $('#input') : null; if (target && !target.value) { target.value = text; autosize(target); } }
-      S.attachments.push(...attachment.map(a => ({ ...a, view: retryView })));
+      // Back in the draft under the same names, so the companion keeps (or rewrites) the same files, never copies.
+      if (attachment.length) { S.attachments.push(...attachment.map(a => ({ ...a, view: retryView }))); saveDraft(retryView); }
     } finally {
       S.sending.delete(pendingView); S.lastSig = ''; update();
       afterSend(sendView);
@@ -4402,7 +4451,7 @@
     let fresh = !poll;
     try {
       const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
-      S.online = true; S.fails = 0;
+      S.online = true; S.fails = 0; retryDrafts();
       // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
       if (seq > stateShown) {
         stateShown = seq;
@@ -4484,6 +4533,9 @@
   window.addEventListener('focus', checkAttention);
   // Hidden tabs (and the desktop app in the tray) poll every 8 s; catch up at once when shown again.
   document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); usagePoll(); });
+  // A phone switching apps or a closing tab may never run the 700 ms draft debounce (frozen or gone): save pending drafts now.
+  document.addEventListener('visibilitychange', () => { if (document.hidden) void flushDrafts({ keepalive: true }); });
+  window.addEventListener('pagehide', () => void flushDrafts({ keepalive: true }));
 
   // ---------- events ----------
   const closeMenu = m => { if (!m) return; m.classList.remove('open'); m.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'false'); };
@@ -4752,7 +4804,7 @@
     else if (act === 'advisor') { closeMenu(a.closest('.menu')); advisorCommand(a.dataset.advisor); }
     else if (act === 'attach') $('#imageInput')?.click();
     else if (act === 'enhance') enhanceCurrent();
-    else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.name !== a.dataset.name); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
+    else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.view !== S.view || x.name !== a.dataset.name); saveDraft(S.view); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
     else if (act === 'abort' || act === 'complete') sessionCommand(act);

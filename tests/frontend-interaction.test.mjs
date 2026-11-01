@@ -12,7 +12,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 // `size` is the viewport (a landscape phone is { width: 844, height: 390 }).
 async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {}, coarse = false, size = { width: 1360, height: 900 } } = {}) {
   const location = { hash, pathname: '/', search: '' };
-  const listeners = [], winListeners = new Map(), calls = [], elements = new Map(), extras = new Map(), storage = new Map();
+  const listeners = [], winListeners = new Map(), calls = [], elements = new Map(), extras = new Map(), storage = new Map(), timers = [];
   const document = { activeElement: null };
   const node = (id = '', extra = {}) => ({
     id, tagName: 'DIV', innerHTML: '', value: '', style: {}, dataset: {}, children: [], attrs: {}, hidden: false, isConnected: true,
@@ -50,10 +50,12 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     document, location, window: { innerHeight: size.height, addEventListener: (type, fn) => winListeners.set(type, fn) }, addEventListener() {}, innerWidth: size.width, innerHeight: size.height,
     history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) },
     localStorage: { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) }, sessionStorage: { getItem: () => 'test-token' },
-    setTimeout() {}, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
+    // Timers are recorded, never run on their own: a test runs the ones it means to (see saveDrafts).
+    setTimeout: (fn, ms) => timers.push({ fn, ms }), clearTimeout: id => { if (timers[id - 1]) timers[id - 1].cleared = true; },
+    requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
     fetch: async (url, opts) => {
       const body = opts?.body ? JSON.parse(opts.body) : undefined;
-      calls.push({ url, body });
+      calls.push({ url, body, ...(opts?.keepalive ? { keepalive: true } : {}) });
       const data = await reply(url, body);
       return { ok: true, status: 200, json: async () => structuredClone(data) };
     },
@@ -66,7 +68,10 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
   const key = (k, mods = {}, t = elements.get('input')) => fire('keydown', { target: t, key: k, code: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
   const go = async h => { location.hash = h; winListeners.get('hashchange')(); await flush(); };
   const commands = () => calls.filter(c => /\/command$/.test(c.url)).map(c => ({ session: c.url.split('/')[3], ...c.body }));
-  return { elements, extras, calls, commands, fire, target, act, key, go, node, document, location, storage };
+  // Runs the composer-draft saves waiting out their 700 ms debounce.
+  const saveDrafts = async () => { for (const t of timers.filter(t => t.ms === 700 && !t.cleared && !t.ran)) { t.ran = true; t.fn(); } await flush(); };
+  const draftPosts = () => calls.filter(c => c.url === '/api/draft' && c.body);
+  return { elements, extras, calls, commands, fire, target, act, key, go, node, document, location, storage, winListeners, saveDrafts, draftPosts };
 }
 const idle = (id, extra = {}) => ({ id, title: id, cwd: '/p', status: 'paused', messages: [], queuedMessages: [], updatedAt: new Date().toISOString(), ...extra });
 const MODELS = { models: ['a', 'b', 'c'].map(x => ({ selector: 'p/' + x, id: x, name: x.toUpperCase(), provider: 'p' })), roles: { default: 'p/a', smol: 'p/b', slow: 'p/c' } };
@@ -380,6 +385,124 @@ test('composer drafts follow the companion: a remote draft fills an untouched co
   await d.fire('visibilitychange', {});
   assert.equal(d.elements.get('input').value, '', 'sent from another device');
   assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft') && c.body).length, 0, 'pulling never writes back');
+});
+
+test('composer drafts carry their images: a remote image fills an untouched composer, goes out with a send and clears with a send elsewhere', async () => {
+  const shot = name => ({ image: { type: 'image', mimeType: 'image/png', data: 'QUJD' + name.length }, preview: `data:image/jpeg;base64,${name}`, name, tokens: 1 });
+  const state = { drafts: { 'session:a': 5 } }, remote = { 'session:a': { text: '', at: 5, images: [shot('one')] } };
+  const routes = {
+    '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }),
+    // As the companion answers: images the dashboard names in ?have= come without their data.
+    '/draft': (body, url) => { if (body) return {}; const q = new URLSearchParams(url.split('?')[1]), d = remote[q.get('key')], have = q.getAll('have');
+      return { ...d, images: d.images.map(i => have.includes(i.name) ? { name: i.name, mimeType: i.image.mimeType, tokens: i.tokens } : i) }; },
+  };
+  const d = await boot({ routes }), preview = d.elements.get('imagePreview');
+  await d.fire('visibilitychange', {});
+  assert.equal(preview.hidden, false);
+  assert.match(preview.innerHTML, /data:image\/jpeg;base64,one/, 'an image-only draft from the laptop shows on the phone');
+  remote['session:a'] = { text: 'enhanced on the laptop', at: 9, images: [shot('one'), shot('two')] }; state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, 'enhanced on the laptop');
+  assert.match(preview.innerHTML, /base64,one.*base64,two/);
+  assert.match(d.calls.filter(c => c.url.startsWith('/api/draft?')).at(-1).url, /&have=one$/, 'the image it already has is not fetched again');
+  state.drafts = {};
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, '');
+  assert.equal(preview.hidden, true, 'sent from another device: its images leave this composer too');
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft') && c.body).length, 0, 'pulling never writes back');
+
+  // Sent from here, the remote images go with the message.
+  remote['session:a'] = { text: 'fix this', at: 12, images: [shot('one')] }; state.drafts = { 'session:a': 12 };
+  await d.fire('visibilitychange', {});
+  await d.key('Enter');
+  assert.deepEqual(d.commands().filter(c => c.type === 'prompt').map(({ message, images, preview }) => ({ message, images, preview })),
+    [{ message: 'fix this', images: [shot('one').image], preview: [shot('one').preview] }]);
+  assert.equal(preview.hidden, true);
+});
+
+test('composer draft images removed on this device and not yet synced are not replaced by the remote ones', async () => {
+  const shot = name => ({ image: { type: 'image', mimeType: 'image/png', data: 'QUJD' }, preview: `data:image/jpeg;base64,${name}`, name, tokens: 1 });
+  const state = { drafts: { 'session:a': 5 } }, remote = { text: 'look', at: 5, images: [shot('one')] };
+  const d = await boot({ routes: { '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }), '/draft': body => body ? {} : remote } });
+  const preview = d.elements.get('imagePreview');
+  await d.fire('visibilitychange', {});
+  assert.match(preview.innerHTML, /base64,one/);
+  await d.fire('click', { target: d.act('removeImage', { name: 'one' }) });
+  assert.equal(preview.hidden, true);
+  Object.assign(remote, { at: 9, images: [shot('one'), shot('two')] }); state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(preview.hidden, true, 'the local removal stands and is saved over the remote images');
+});
+
+test('a composer draft still waiting out its debounce is saved when the page is hidden or closed, with a request that outlives it', async () => {
+  const d = await boot({ sessions: [idle('a')], routes: { '/draft': () => ({ at: 1, images: [] }) } });
+  const input = d.elements.get('input'), type = async v => { input.value = v; await d.fire('input', { target: input }); };
+  await type('typed, then switched apps');
+  assert.equal(d.draftPosts().length, 0);
+  d.document.hidden = true;
+  await d.fire('visibilitychange', {});
+  assert.deepEqual(d.draftPosts(), [{ url: '/api/draft', body: { key: 'session:a', text: 'typed, then switched apps' }, keepalive: true }]);
+  d.document.hidden = false;
+  await type('typed, then closed the tab');
+  d.winListeners.get('pagehide')();
+  await flush();
+  assert.deepEqual(d.draftPosts().at(-1), { url: '/api/draft', body: { key: 'session:a', text: 'typed, then closed the tab' }, keepalive: true });
+  await d.saveDrafts();
+  assert.equal(d.draftPosts().length, 2, 'the debounced saves were sent already');
+});
+
+test('composer draft saves for one view go one at a time, and a poll never pulls over a save still under way', async () => {
+  const answers = [], state = { drafts: {} };
+  const d = await boot({ routes: {
+    '/state': () => ({ projects: [], archived: [], sessions: [idle('a')], ...state }),
+    '/draft': body => { if (!body) return { text: 'older, from the phone', at: 7, images: [] }; const r = deferred(); answers.push(r); return r.promise; },
+  } });
+  const input = d.elements.get('input'), type = async v => { input.value = v; await d.fire('input', { target: input }); await d.saveDrafts(); };
+  await type('first');
+  await type('first, then more');
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['first'], 'the newer save waits for the one under way');
+  state.drafts = { 'session:a': 7 };
+  await d.fire('visibilitychange', {});
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft?')).length, 0, 'no pull while a save is under way');
+  answers[0].resolve({ at: 8, images: [] });
+  await flush();
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['first', 'first, then more']);
+  answers[1].resolve({ at: 9, images: [] });
+  await flush();
+  state.drafts = { 'session:a': 9 };
+  await d.fire('visibilitychange', {});
+  assert.equal(input.value, 'first, then more');
+  assert.equal(d.calls.filter(c => c.url.startsWith('/api/draft?')).length, 0, 'the last save is what this page knows as synced');
+});
+
+test('a composer draft save that fails while offline is sent again after the next poll that reaches the companion', async () => {
+  let offline = true;
+  const d = await boot({ sessions: [idle('a')], routes: { '/draft': body => { if (body && offline) throw new Error('offline'); return { at: 3, images: [] }; } } });
+  const input = d.elements.get('input');
+  input.value = 'written in a tunnel';
+  await d.fire('input', { target: input });
+  await d.saveDrafts();
+  assert.equal(d.draftPosts().length, 1);
+  offline = false;
+  await d.fire('visibilitychange', {});
+  await d.saveDrafts();
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['written in a tunnel', 'written in a tunnel']);
+  await d.fire('visibilitychange', {});
+  await d.saveDrafts();
+  assert.equal(d.draftPosts().length, 2, 'once saved, not sent again');
+});
+
+test('an extension pre-fill joins the synced draft once: added after the pulled draft, then forgotten by the companion', async () => {
+  const state = { drafts: { 'session:a': 5 } }, session = idle('a', { _editorText: { id: 'e1', text: 'from the extension' } });
+  const d = await boot({ routes: {
+    '/state': () => ({ projects: [], archived: [], sessions: [session], ...state }),
+    '/draft': body => body ? { at: 6, images: [] } : { text: 'my draft', at: 5, images: [] },
+  } });
+  await d.fire('visibilitychange', {});
+  assert.equal(d.elements.get('input').value, 'my draft\n\nfrom the extension', 'added to the synced draft, not to an empty composer saved over it');
+  assert.deepEqual(d.commands().filter(c => c.type === 'editor_text_applied'), [{ session: 'a', type: 'editor_text_applied', id: 'e1' }]);
+  await d.saveDrafts();
+  assert.deepEqual(d.draftPosts().map(c => c.body.text), ['my draft\n\nfrom the extension']);
 });
 
 test('a send still in flight to one session never blocks sending in another, and each composer shows only its own send', async () => {
