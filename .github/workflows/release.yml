@@ -1,12 +1,12 @@
-# Every push to main (and a manual run of this workflow on main) builds the signed Windows installer and publishes it
-# as GitHub release v<version> with latest.json, which installed apps poll for updates. Pushes that only touch
-# README.md, docs/ or .github/ files other than this workflow don't release.
+# Every push to main (and a manual run of this workflow on main) builds the Windows NSIS installer and publishes it
+# as GitHub release v<version>. Pushes that only touch README.md, docs/ or .github/ files other than this workflow
+# don't release.
 # The version is <major>.<minor> from src-tauri/tauri.conf.json plus this workflow's run number as the patch, e.g.
 # 1.0.57. It is written into tauri.conf.json, package.json and src-tauri/Cargo.toml in the runner's checkout only;
 # nothing is committed back. To change major or minor, commit the new X.Y.0 in those three files. The job fails
 # instead of publishing when an existing v* tag is already higher.
-# Needs repo secrets TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (the updater key pair; the
-# public half is in src-tauri/tauri.conf.json).
+# The release carries no updater package, signature or latest.json, so it needs no signing secrets and installed apps
+# don't update themselves from it: users install a new version by running its installer.
 name: Release
 
 on:
@@ -110,11 +110,8 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: npx tauri
-          args: --config src-tauri/tauri.release.conf.json
           tagName: v${{ steps.version.outputs.version }}
           releaseName: OMP Control Room v${{ steps.version.outputs.version }}
           releaseBody: See the commits since the previous release.
