@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -9,7 +9,8 @@ import { maskArgs, maskUrl, serverView } from '../companion/mcp-config.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 async function boot(t, mcp) {
-  const dir = await mkdtemp(join(tmpdir(), 'omp-mcp-'));
+  // The companion keeps folders as fs.realpath gives them; macOS's temp folder (/var/folders/…) is a symlink into /private/var.
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'omp-mcp-')));
   const omp = Object.assign(fakeOmp(), mcp);
   const app = await createCompanion({ dataDir: dir, ompSessionsDir: dir, ompCommand: process.execPath, omp });
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });

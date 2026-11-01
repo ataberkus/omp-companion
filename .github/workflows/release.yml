@@ -62,7 +62,9 @@ jobs:
             exit 1
           }
 
-      - run: npm test
+      # One test file at a time: tests/frontend-render.test.mjs times markdown rendering against a 50 ms budget, which
+      # parallel test files competing for the runner's few cores can exceed.
+      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
 
       - uses: tauri-apps/tauri-action@v0
         env:

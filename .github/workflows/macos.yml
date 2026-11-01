@@ -44,7 +44,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: npm ci
-      - run: npm test
+      # One test file at a time: tests/frontend-render.test.mjs times markdown rendering against a 50 ms budget, which
+      # parallel test files competing for the runner's few cores can exceed.
+      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
 
   build:
     strategy:
@@ -72,10 +74,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Saved after failed runs too: a later step failing must not cost the next run a cold Rust build.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           key: ${{ matrix.arch }}
+          cache-on-failure: true
 
       - run: npm ci
 
@@ -87,7 +91,7 @@ jobs:
           codesign --verify --strict --verbose=2 "$APP"
           codesign --display --entitlements - "$APP/Contents/MacOS/bun"
           main="$APP/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")"
-          lipo -archs "$main" "$APP/Contents/MacOS/bun"
+          for bin in "$main" "$APP/Contents/MacOS/bun"; do echo "$(basename "$bin"): $(lipo -archs "$bin")"; done
           plutil -p "$APP/Contents/Info.plist"
           du -sh "$APP" src-tauri/target/release/bundle/dmg/*.dmg
 
