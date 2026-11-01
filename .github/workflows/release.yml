@@ -1,11 +1,24 @@
-# Pushing a tag vX.Y.Z builds the signed Windows installer and publishes it as a GitHub release with latest.json,
-# which installed apps poll for updates. Needs repo secrets TAURI_SIGNING_PRIVATE_KEY and
-# TAURI_SIGNING_PRIVATE_KEY_PASSWORD (the updater key pair; the public half is in src-tauri/tauri.conf.json).
+# Every push to main (and a manual run of this workflow on main) builds the signed Windows installer and publishes it
+# as GitHub release v<version> with latest.json, which installed apps poll for updates. Pushes that only touch
+# README.md, docs/ or .github/ files other than this workflow don't release.
+# The version is <major>.<minor> from src-tauri/tauri.conf.json plus this workflow's run number as the patch, e.g.
+# 1.0.57. It is written into tauri.conf.json, package.json and src-tauri/Cargo.toml in the runner's checkout only;
+# nothing is committed back. To change major or minor, commit the new X.Y.0 in those three files. The job fails
+# instead of publishing when an existing v* tag is already higher.
+# Needs repo secrets TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD (the updater key pair; the
+# public half is in src-tauri/tauri.conf.json).
 name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths:
+      - '**'
+      - '!README.md'
+      - '!docs/**'
+      - '!.github/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,6 +29,7 @@ concurrency:
 
 jobs:
   windows:
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,17 +52,58 @@ jobs:
 
       - run: npm ci
 
-      - name: Tag matches the app version
+      - name: Set the release version
+        id: version
         shell: pwsh
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          $tag = '${{ github.ref_name }}'
-          if ($tag -ne "v$conf" -or $pkg -ne $conf -or $cargo -ne $conf) {
-            Write-Error "Tag $tag does not match the versions: tauri.conf.json $conf, package.json $pkg, Cargo.toml $cargo"
+          $ErrorActionPreference = 'Stop'
+          $confPath = 'src-tauri/tauri.conf.json'
+          $pkgPath = 'package.json'
+          $cargoPath = 'src-tauri/Cargo.toml'
+
+          $base = [version](Get-Content $confPath -Raw | ConvertFrom-Json).version
+          $version = "$($base.Major).$($base.Minor).$env:RUN_NUMBER"
+
+          # Highest existing v* tag and the commit it points at (peeled ^{} lines win for annotated tags).
+          $remote = git ls-remote --tags origin 'refs/tags/v*'
+          if ($LASTEXITCODE -ne 0) { Write-Error 'git ls-remote --tags origin failed'; exit 1 }
+          $tags = @{}
+          foreach ($line in $remote) {
+            if ($line -notmatch '^([0-9a-f]+)\s+refs/tags/v(\d+\.\d+\.\d+)(\^\{\})?$') { continue }
+            if ($Matches[3] -or -not $tags.ContainsKey($Matches[2])) { $tags[$Matches[2]] = $Matches[1] }
+          }
+          $latest = $tags.Keys | Sort-Object { [version]$_ } | Select-Object -Last 1
+          if ($latest) {
+            $cmp = ([version]$latest).CompareTo([version]$version)
+            # Equal is only a re-run of this same run on the same commit; anything else would not be newer.
+            if ($cmp -gt 0 -or ($cmp -eq 0 -and $tags[$latest] -ne $env:GITHUB_SHA)) {
+              Write-Error "Release v$version would not be newer than the existing tag v$latest. Raise major/minor in $confPath, $cargoPath and $pkgPath."
+              exit 1
+            }
+          }
+
+          # Replace the version fields in place so the files keep their formatting and line endings.
+          function Set-Version([string]$path, [string]$pattern, [string]$replacement) {
+            $text = Get-Content $path -Raw
+            $regex = [regex]::new($pattern, 'Multiline')
+            if (-not $regex.IsMatch($text)) { Write-Error "No version field found in $path"; exit 1 }
+            Set-Content $path -Value $regex.Replace($text, $replacement, 1) -NoNewline
+          }
+          Set-Version $confPath '^(\s*"version"\s*:\s*)"[^"]*"' "`${1}`"$version`""
+          Set-Version $pkgPath '^(  "version"\s*:\s*)"[^"]*"' "`${1}`"$version`""
+          Set-Version $cargoPath '^(version\s*=\s*)"[^"]*"' "`${1}`"$version`""
+
+          $conf = (Get-Content $confPath -Raw | ConvertFrom-Json).version
+          $pkg = (Get-Content $pkgPath -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path $cargoPath -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($conf -ne $version -or $pkg -ne $version -or $cargo -ne $version) {
+            Write-Error "Version not applied: tauri.conf.json $conf, package.json $pkg, Cargo.toml $cargo (expected $version)"
             exit 1
           }
+          Write-Output "Releasing v$version (previous tag: $(if ($latest) { "v$latest" } else { 'none' }))"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - run: npm test
 
@@ -60,8 +115,8 @@ jobs:
         with:
           tauriScript: npx tauri
           args: --config src-tauri/tauri.release.conf.json
-          tagName: ${{ github.ref_name }}
-          releaseName: OMP Control Room ${{ github.ref_name }}
+          tagName: v${{ steps.version.outputs.version }}
+          releaseName: OMP Control Room v${{ steps.version.outputs.version }}
           releaseBody: See the commits since the previous release.
           releaseDraft: false
           prerelease: false

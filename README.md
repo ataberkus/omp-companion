@@ -154,10 +154,10 @@ The build writes an NSIS installer to `src-tauri/target/release/bundle/nsis/OMP 
 
 ### Releases
 
-Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml` on a Windows runner: it checks that the tag matches the app version, runs the tests, builds the signed installer and publishes it as a GitHub release together with `latest.json`, the file installed apps poll for updates. To release:
+Every push to `main` runs `.github/workflows/release.yml` on a Windows runner: it picks a new version, runs the tests, builds the signed installer and publishes it as GitHub release `v<version>` together with `latest.json`, the file installed apps poll for updates. No tagging by hand; the workflow creates the tag on the pushed commit. Pushes that only change `README.md`, `docs/` or `.github/` files other than the workflow don't release. To rerun a release, use **Run workflow** on the *Release* workflow (on `main`).
 
-1. Set the same new version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json`, and commit.
-2. `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
+1. **Version.** `<major>.<minor>` comes from the committed `src-tauri/tauri.conf.json`, and the patch is the workflow's run number, so each release is higher than the last (for example `1.0.57`). The workflow writes that version into `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json` in its own checkout only; nothing is committed back, so the repo keeps `X.Y.0`. If an existing `v*` tag is already higher, the job fails instead of publishing.
+2. **Changing major or minor.** Set the same `X.Y.0` in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json` and push it; that push releases `X.Y.<run number>`. Lowering it below a published release makes the job fail.
 
 Updates are signed with the updater key pair. The public key is in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`); the private key lives outside the repo (`%USERPROFILE%\.tauri\omp-control-room.key`) and in the repository secrets `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Losing the private key means installed apps can't verify new releases and must be reinstalled by hand. For a local `npm run dist`, set those two variables in the environment first.
 
