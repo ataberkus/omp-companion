@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -79,4 +79,45 @@ test('a streaming session rewrites only its own transcript, and transcripts surv
   await open();
   assert.deepEqual(app.store.sessions.find(s => s.id === 'a').messages.map(m => m.text), ['earlier in a', 'Go', 'Hello streamed world']);
   assert.deepEqual(app.store.sessions.find(s => s.id === 'b').messages.map(m => m.text), ['earlier in b']);
+});
+
+// Every transcript is checked at startup but held in memory only once something reads it: hundreds of sessions'
+// transcripts cost more than the rest of the companion. Saves skip the unread ones; replies that carry a transcript read it.
+test('transcripts are held only once read; saves skip the unread ones; replies and restarts still have them all', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-transcript-lazy-'));
+  let app;
+  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
+  const at = new Date().toISOString();
+  const session = id => ({ id, projectId: 'project', title: id, status: 'paused', cwd: dir, model: 'OMP default', native: false, todos: [], createdAt: at, updatedAt: at });
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: ['a', 'b', 'c'].map(session), activity: [] }));
+  await mkdir(join(dir, 'transcripts'));
+  for (const id of ['a', 'b', 'c']) await writeFile(join(dir, 'transcripts', id + '.json'), JSON.stringify([{ id: id + '1', role: 'user', text: 'earlier in ' + id, at }]));
+  const open = async () => { app = await createCompanion({ dataDir: dir, omp: fakeOmp() }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); };
+  const call = async (path, body) => { const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + app.token, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) }); return res.json(); };
+  const held = id => !Object.getOwnPropertyDescriptor(app.store.sessions.find(s => s.id === id), 'messages').get;
+  await open();
+  assert.deepEqual(['a', 'b', 'c'].map(held), [false, false, false], 'nothing read yet, nothing held');
+
+  assert.deepEqual((await call('/state?session=a&since=&store=')).tx.messages.map(m => m.text), ['earlier in a']);
+  assert.deepEqual(['a', 'b', 'c'].map(held), [true, false, false], 'viewing a session holds its transcript only');
+  const full = await call('/state');
+  assert.deepEqual(full.sessions.map(s => s.messages?.map(m => m.text)), [['earlier in a'], ['earlier in b'], ['earlier in c']], 'the whole store still carries every transcript');
+  assert.equal(held('b'), false, 'read for that reply only');
+  const renamed = await call('/sessions/b/command', { type: 'rename', name: 'b renamed' });
+  assert.deepEqual(renamed.messages.map(m => m.text), ['earlier in b'], 'a command\'s reply carries the transcript as before');
+
+  const files = async () => Promise.all(['a', 'b', 'c'].map(async id => [await readFile(join(dir, 'transcripts', id + '.json'), 'utf8'), (await stat(join(dir, 'transcripts', id + '.json'))).mtimeMs]));
+  const before = await files();
+  app.store.sessions.find(s => s.id === 'a').messages.push({ id: 'a2', role: 'assistant', text: 'new in a', at });
+  await app.close(); app = undefined; // quitting saves every session
+  const after = await files();
+  assert.deepEqual(JSON.parse(after[0][0]).map(m => m.text), ['earlier in a', 'new in a']);
+  assert.deepEqual(after.slice(1), before.slice(1), 'unread transcripts are not rewritten');
+  assert.ok(JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions.every(s => !('messages' in s)));
+
+  await open();
+  assert.deepEqual(app.store.sessions.map(s => [s.title, s.messages.map(m => m.text)]), [['a', ['earlier in a', 'new in a']], ['b renamed', ['earlier in b']], ['c', ['earlier in c']]]);
+  await app.close(); app = undefined;
+  await writeFile(join(dir, 'transcripts', 'c.json'), '[{"id":"c1",');
+  await assert.rejects(createCompanion({ dataDir: dir, omp: fakeOmp() }), /Cannot read the transcript of session c/, 'a transcript that does not parse still stops the companion at startup');
 });

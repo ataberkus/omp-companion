@@ -2,7 +2,7 @@ import { createServer, STATUS_CODES } from 'node:http';
 import { connect } from 'node:net';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1069,11 +1069,16 @@ export async function createCompanion(options={}){
  const queuedImageFile=id=>path.join(dataDir,'queued-images',id+'.json');
  let store;
  try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
- // Transcripts as last written, by session ID: a save rewrites only those that changed. A workspace.json from before the split
+ // Transcripts as last written, by session ID: a digest of each one's JSON, so a save rewrites only those that changed (the
+ // JSON itself, kept for that comparison, cost as much memory as the transcripts). A workspace.json from before the split
  // still embeds them; those sessions have no entry here, so the first save moves them out.
- const savedTranscripts=new Map();
- await Promise.all(store.sessions.map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
-  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');s.messages=JSON.parse(raw);savedTranscripts.set(s.id,raw);}
+ const savedTranscripts=new Map(),textDigest=text=>createHash('sha1').update(text).digest('base64');
+ // Every transcript is read and checked at startup (one that does not parse stops the companion), eight at a time, but kept
+ // only once something reads it: 400 sessions' transcripts held at once cost more memory than the rest of the companion
+ // (~400 MB parsed for 160 MB of files) and slowed every garbage collection. Until then s.messages reads it from disk on
+ // first use (deferTranscript).
+ for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
+  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');JSON.parse(raw);savedTranscripts.set(s.id,textDigest(raw));deferTranscript(s);}
   catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
@@ -1141,6 +1146,13 @@ export async function createCompanion(options={}){
   let total=files.reduce((n,f)=>n+f.size,0);files.sort((a,b)=>a.at-b.at);
   for(const f of files){if(total<=toolImageCap)break;await fs.rm(path.join(toolImageDir,f.name),{force:true}).catch(()=>{});total-=f.size;}
  }
+ // A transcript not read since startup: the first read of s.messages (or a new value for it) reads it from disk, and from
+ // then on it is an ordinary array. Not enumerable until then, so a summary or workspace.json never reads it. Its file is
+ // what was last saved, so saves skip it (unread).
+ function deferTranscript(s){Object.defineProperty(s,'messages',{configurable:true,enumerable:false,get(){const list=readTranscript(s);holdTranscript(s,list);return list;},set(list){holdTranscript(s,list);}});}
+ function holdTranscript(s,list){Object.defineProperty(s,'messages',{value:list,writable:true,enumerable:true,configurable:true});}
+ function unread(s){return !!Object.getOwnPropertyDescriptor(s,'messages')?.get;}
+ function readTranscript(s){try{return JSON.parse(readFileSync(transcriptFile(s.id),'utf8'));}catch(e){if(e.code==='ENOENT')return [];throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}
  // Save scope: the sessions whose transcripts may have changed; undefined = all of them, [] = workspace.json only.
  // Scopes union: true = every session, else a Set of sessions.
  function widen(acc,scope){if(scope===undefined||acc===true)return true;acc??=new Set();for(const s of [scope].flat())acc.add(s);return acc;}
@@ -1157,14 +1169,14 @@ export async function createCompanion(options={}){
   const scoped=nextScope;nextSave=nextScope=undefined;
   try{
    const sessions=new Set(store.sessions),ids=new Set(store.sessions.map(s=>s.id)),changed=[];
-   for(const s of sessions)if(scoped===true||scoped.has(s)||!savedTranscripts.has(s.id)){const text=JSON.stringify(s.messages||[],omit);if(text!==savedTranscripts.get(s.id))changed.push([s.id,text]);}
+   for(const s of sessions)if(!unread(s)&&(scoped===true||scoped.has(s)||!savedTranscripts.has(s.id))){const text=JSON.stringify(s.messages||[],omit),sum=textDigest(text);if(sum!==savedTranscripts.get(s.id))changed.push([s.id,text,sum]);}
    const snapshot=JSON.stringify(store,function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
    const gone=[...savedTranscripts.keys()].filter(id=>!ids.has(id));
    if(changed.length)await fs.mkdir(transcriptDir,{recursive:true,mode:0o700});
    // A few at a time: the first save after an upgrade writes every transcript (hundreds of flushed files). All settle
    // before a failure is reported, so no write of this save overlaps the next one's.
    const settled=async writes=>{const failed=(await Promise.allSettled(writes)).find(r=>r.status==='rejected');if(failed)throw failed.reason;};
-   const writeTranscripts=async()=>{for(let i=0;i<changed.length;i+=8)await settled(changed.slice(i,i+8).map(async([id,text])=>{await writeAtomic(transcriptFile(id),text);savedTranscripts.set(id,text);}));};
+   const writeTranscripts=async()=>{for(let i=0;i<changed.length;i+=8)await settled(changed.slice(i,i+8).map(async([id,text,sum])=>{await writeAtomic(transcriptFile(id),text);savedTranscripts.set(id,sum);}));};
    const writeIndex=async()=>{if(snapshot!==lastSaved){await writeAtomic(stateFile,snapshot);lastSaved=snapshot;}};
    // A transcript reaches disk before workspace.json first lists its session; otherwise both are written at once.
    if(changed.some(([id])=>!savedTranscripts.has(id))){await writeTranscripts();await writeIndex();}else await settled([writeTranscripts(),writeIndex()]);
@@ -2035,7 +2047,29 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const {roles,defaultThinking}=await modelRoles();
   modelCache={at:Date.now(),data:{models,roles,defaultThinking,thinkingLevels:THINKING}};return modelCache.data;
  }
- const currentBranch=async dir=>{try{return await git(dir,['branch','--show-current'])||'detached';}catch{return 'workspace';}};
+ // The branch checked out in `dir` as `git branch --show-current` names it ('detached' for a detached HEAD, 'workspace'
+ // outside a repository), read from the repository's HEAD file. Dashboards ask for every project every 15 s, and starting
+ // git.exe for 30-odd projects at once stalled the event loop, and every OMP session in this process with it, for 150-250 ms
+ // each time. A HEAD that is neither a branch nor a commit (a reftable repository's placeholder, say) still asks git.
+ async function gitHead(dir){
+  const is=(p,kind)=>fs.stat(p).then(st=>st[kind](),()=>false);
+  for(let d=path.resolve(dir);;d=path.dirname(d)){
+   const dotGit=path.join(d,'.git'),st=await fs.stat(dotGit).catch(()=>null);
+   if(st?.isDirectory())return fs.readFile(path.join(dotGit,'HEAD'),'utf8');
+   // A linked worktree's or a submodule's .git file names its git directory.
+   if(st?.isFile()){const m=/^gitdir:(.+)$/m.exec(await fs.readFile(dotGit,'utf8'));return m?fs.readFile(path.join(path.resolve(d,m[1].trim()),'HEAD'),'utf8'):'';}
+   if(await is(path.join(d,'HEAD'),'isFile')&&await is(path.join(d,'objects'),'isDirectory'))return fs.readFile(path.join(d,'HEAD'),'utf8');
+   if(path.dirname(d)===d)return null;
+  }
+ }
+ const currentBranch=async dir=>{
+  const head=await gitHead(dir).catch(()=>'');
+  if(head===null)return 'workspace';
+  const ref=/^ref: refs\/heads\/(.+?)\s*$/.exec(head);
+  if(ref&&ref[1]!=='.invalid')return ref[1];
+  if(/^[0-9a-f]{40}(?:[0-9a-f]{24})?\s*$/.test(head))return 'detached';
+  try{return await git(dir,['branch','--show-current'])||'detached';}catch{return 'workspace';}
+ };
  async function ensureProject(dir,name){
   let p=store.projects.find(p=>samePath(p.path,dir));if(p)return p;
   const branch=await currentBranch(dir);
@@ -2247,6 +2281,28 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   const held=/^([\w-]{1,32})\.(\d{1,15})$/.exec(since||''),rev=held?.[1]===c.epoch?Number(held[2]):-1;
   if(!(rev>=0&&rev<=c.rev))return {delta:false,tx:{session:s.id,epoch:c.epoch,rev:c.rev}};
   return {delta:true,tx:{session:s.id,epoch:c.epoch,rev:c.rev,...(c.orderRev>rev?{order:c.order}:{}),changed:list.filter(m=>entries.get(m.id).rev>rev)}};
+ }
+ // The session list and the rest of the store go out as changes too. A full reply with 400 sessions was ~600 KB (~180 KB
+ // gzipped) and went out on every poll, every 1.2 s per dashboard while any session worked, though only the working
+ // sessions' summaries had changed. Each poll serializes every session's summary (all but its transcript and /btw answers,
+ // which go out on their own) and the store's other fields (top), and compares them with the previous poll's, like the
+ // viewed transcript. A dashboard that sends store=<epoch>.<rev> gets the summaries that changed after that rev, the order
+ // when it changed and top when it changed; an unknown epoch or rev gets everything. Returned serialized, splicing in each
+ // summary's JSON from the comparison; null when session IDs repeat, which only the full list can show.
+ const storeSync={epoch:randomBytes(6).toString('base64url'),rev:0,top:'',topRev:0,order:[],orderRev:0,entries:new Map()};
+ function storeDelta(top,since){
+  const c=storeSync,next=c.rev+1,entries=new Map(),order=[];let changed=false;
+  for(const s of store.sessions){if(entries.has(s.id))return null;
+   const json=JSON.stringify({...s,messages:undefined,_btw:undefined}),prev=c.entries.get(s.id);
+   if(prev?.json===json)entries.set(s.id,prev);else{entries.set(s.id,{json,rev:next});changed=true;}
+   order.push(s.id);}
+  const topJson=JSON.stringify(top);if(topJson!==c.top){c.top=topJson;c.topRev=next;changed=true;}
+  if(order.length!==c.order.length||order.some((id,i)=>id!==c.order[i])){c.order=order;c.orderRev=next;changed=true;}
+  if(changed)c.rev=next;
+  c.entries=entries;
+  const held=/^([\w-]{1,32})\.(\d{1,15})$/.exec(since||''),rev=held?.[1]===c.epoch?Number(held[2]):-1,all=!(rev>=0&&rev<=c.rev),out=[];
+  for(const e of entries.values())if(all||e.rev>rev)out.push(e.json);
+  return `{"epoch":"${c.epoch}","rev":${c.rev}${all||c.topRev>rev?`,"top":${c.top}`:''}${all||c.orderRev>rev?`,"order":${JSON.stringify(c.order)}`:''},"changed":[${out.join(',')}]}`;
  }
  // Unknown (git failed) counts as still listed, so the worktree is retried rather than abandoned.
  async function worktreeListed(root,dir){try{return (await git(root,['worktree','list','--porcelain'])).split(/\r?\n/).some(l=>l.startsWith('worktree ')&&samePath(l.slice(9),dir));}catch{return true;}}
@@ -2571,13 +2627,23 @@ async function spend(sync){
     markOverlaps();refreshBranches();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
-    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView()});return;}
+    // Without ?session: the whole store, every transcript included (read for this reply only when nothing has read it yet).
+    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),sessions:store.sessions.map(s=>unread(s)?{...s,messages:readTranscript(s)}:s)});return;}
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
     // A viewed session with no OMP process running gets its prompts' entry IDs from the session file (live ones from refresh).
     {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive&&needsBackfill(s))void lock(s.id,async()=>{if(!runners.get(s.id)?.alive&&needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));}).catch(()=>{});}
-    // since=<epoch>.<rev>, or empty while it holds none: the dashboard merges the viewed transcript from deltas (transcriptDelta).
-    const id=url.searchParams.get('session'),since=url.searchParams.get('since'),viewed=since!==null&&store.sessions.find(s=>s.id===id),tx=viewed?transcriptDelta(viewed,since):null;
-    const body=JSON.stringify({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined,...(tx?{tx:tx.tx}:{}),sessions:store.sessions.map(s=>s.id===id?(tx?.delta?{...s,messages:undefined}:s):{...s,messages:undefined,_btw:undefined})}),tag=`"${digest(body)}"`;
+    const id=url.searchParams.get('session'),since=url.searchParams.get('since'),viewed=store.sessions.find(s=>s.id===id);
+    const top={...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined};
+    // store=<epoch>.<rev>, or empty while it holds none: the session list and the rest of the store as changes (storeDelta),
+    // the viewed transcript as changes after since=<epoch>.<rev> (transcriptDelta) or whole in tx.messages, its /btw answers in btw.
+    const sx=url.searchParams.has('store')?storeDelta({...top,sessions:undefined},url.searchParams.get('store')):null;
+    let body;
+    if(sx!==null){const tx=viewed&&transcriptDelta(viewed,since??''),t=viewed&&(tx?.delta?tx.tx:{...(tx?.tx||{session:viewed.id}),messages:viewed.messages});
+     body=`{"sx":${sx}${t?`,"tx":${JSON.stringify(t)}`:''}${viewed?._btw?`,"btw":${JSON.stringify(viewed._btw)}`:''}}`;}
+    // Without store (a page loaded from an older companion): the whole list. With since, the viewed transcript as deltas.
+    else{const tx=since!==null&&viewed?transcriptDelta(viewed,since):null;
+     body=JSON.stringify({...top,...(tx?{tx:tx.tx}:{}),sessions:store.sessions.map(s=>s.id===id?(tx?.delta?{...s,messages:undefined}:{...s,messages:s.messages}):{...s,messages:undefined,_btw:undefined})});}
+    const tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
     send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
    }
@@ -2766,7 +2832,8 @@ async function spend(sync){
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
    const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status'];
-   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);json(await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body))));return;}
+   // Commands answer with the session; one whose transcript nothing has read yet gets it read for the reply only (deferTranscript).
+   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);const r=await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body)));json(r===s&&unread(s)?{...s,messages:readTranscript(s)}:r);return;}
    throw error('Route not found.',404);
   }catch(e){json({error:e.message},e.status||500);}
  }

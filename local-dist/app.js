@@ -172,6 +172,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
     tx: null, // the viewed transcript as last merged: { session, epoch, rev, messages } (see mergeTx)
+    sx: null, // the session summaries and other store fields as last merged: { epoch, rev, top, order, sessions } (see mergeStore)
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     attachments: [], editQueue: null, queueOpen: null, view: '', lastSig: '', nativeAt: 0,
     models: null, picker: null, nativeChoice: new Map(), nativeAdv: new Map(), expandAll: false,
@@ -225,7 +226,7 @@
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; leaveScreen(); }
+    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; S.sx = null; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -978,25 +979,46 @@
     if (menu) { menu.classList.add('open'); menu.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'true'); }
   }
   // A container rendered as [key, html] parts, one element each. Unchanged parts keep their element (polls must not
-  // recreate rows: that drops hover and restarts animations), changed parts are rebuilt, moved ones moved. A container
-  // that does not hold one child per part rendered last (first or empty render, or changed elsewhere) is rewritten whole.
+  // recreate rows: that drops hover, text selection and running animations, and re-parsing a long thread on every poll
+  // cost more than the rest of the page together), changed parts are rebuilt, moved ones moved; scroll offsets and
+  // <details> state the renderers don't track carry over into a rebuilt part, as in swapHtml. The container is rewritten
+  // whole when it doesn't hold exactly the elements rendered last (first or empty render, or written elsewhere since),
+  // when keys repeat, or when a changed part is not one element.
   function setKeyed(el, parts) {
-    const prev = el._parts, kids = el.children;
-    el._parts = parts;
-    if (!prev?.length || kids?.length !== prev.length) { swapHtml(el, parts.map(p => p[1]).join('')); return; }
-    const old = new Map(prev.map(([k, h], i) => [k, { h, n: kids[i] }]));
-    keepFocus(el, () => {
-      let next = el.firstElementChild;
+    const prev = el._parts, nodes = el._nodes, kids = el.children, keys = new Set(parts.map(p => p[0])), unique = keys.size === parts.length;
+    el._parts = parts; el._nodes = null;
+    let built = null;
+    if (unique && prev?.length && nodes?.length === prev.length && kids?.length === nodes.length && nodes.every((n, i) => kids[i] === n)) {
+      const old = new Map(prev.map(([k, h], i) => [k, { h, n: nodes[i] }]));
+      built = new Map();
       for (const [k, h] of parts) {
-        const o = old.get(k);
-        let n = o?.n;
-        old.delete(k);
-        if (n && o.h !== h) { if (n === next) next = n.nextElementSibling; n.remove(); n = null; }
-        if (!n) { const t = document.createElement('template'); t.innerHTML = h; n = t.content.firstElementChild; }
-        if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
+        if (old.get(k)?.h === h) continue;
+        const t = document.createElement('template'); t.innerHTML = h;
+        const c = t.content, n = c.firstElementChild;
+        if (!n || c.children.length !== 1 || [...c.childNodes].some(x => x !== n && (x.nodeType !== 3 || x.data.trim()))) { built = null; break; }
+        built.set(k, n);
       }
-      for (const { n } of old.values()) n.remove();
-    });
+      if (built) {
+        const out = [], carry = [];
+        keepFocus(el, () => {
+          // Dropped parts go first: one left at the insertion point would make every later part move.
+          for (const [k, o] of old) if (!keys.has(k)) o.n.remove();
+          let next = el.firstElementChild;
+          for (const [k] of parts) {
+            const f = built.get(k);
+            let n = old.get(k)?.n;
+            if (f) { if (n) { carry.push([f, uiState(n, true)]); if (n === next) next = n.nextElementSibling; n.remove(); } n = f; }
+            if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
+            out.push(n);
+          }
+        });
+        for (const [n, keep] of carry) restoreUi(n, keep);
+        el._nodes = out;
+        return;
+      }
+    }
+    swapHtml(el, parts.map(p => p[1]).join(''));
+    el._nodes = unique && el.children?.length === parts.length ? [...el.children] : null;
   }
   // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
   // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
@@ -1036,20 +1058,28 @@
     n.focus({ preventScroll: true });
     if (text && s0 != null) try { n.setSelectionRange(s0, s1); } catch {}
   }
-  function swapHtml(el, html) {
+  // Scroll offsets and <details> state below root (root's own too with self) that the renderers don't track, to carry over a rebuild.
+  function uiState(root, self) {
     const keep = [];
     for (const n of touched) {
       if (!n.isConnected) { touched.delete(n); continue; }
-      if (el.contains(n) && n !== el) keep.push({ ...uiKey(el, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null, stick: n.matches?.('.job-thought pre') && n.scrollHeight - n.scrollTop - n.clientHeight < 8 });
+      if (root.contains(n) && (self || n !== root)) keep.push({ ...uiKey(root, n), top: n.scrollTop, left: n.scrollLeft, open: n.tagName === 'DETAILS' ? n.open : null, stick: n.matches?.('.job-thought pre') && n.scrollHeight - n.scrollTop - n.clientHeight < 8 });
     }
-    keepFocus(el, () => { el.innerHTML = html; });
+    return keep;
+  }
+  function restoreUi(root, keep) {
     for (const k of keep) {
-      const n = findUi(el, k);
+      const n = findUi(root, k);
       if (!n) continue;
       if (k.open != null && n.tagName === 'DETAILS') n.open = k.open;
       n.scrollTop = k.stick ? n.scrollHeight : k.top; n.scrollLeft = k.left;
       touched.add(n);
     }
+  }
+  function swapHtml(el, html) {
+    const keep = uiState(el, false);
+    keepFocus(el, () => { el.innerHTML = html; });
+    restoreUi(el, keep);
   }
 
   // ---------- activity: tool calls and thinking ----------
@@ -1277,40 +1307,43 @@
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
-    const parts = [];
-    if (opts.head) parts.push(opts.head);
-    else if (status === 'history') parts.push(`<div class="history-note">📜 Saved OMP session. Type below to continue it here. It picks up exactly where it left off.</div>`);
+    // [key, html] parts for setKeyed: a poll rebuilds only the parts whose markup changed (the streaming tail, mostly).
+    // A key repeats only for messages without unique IDs, which then key by position.
+    const parts = [], seen = new Map();
+    const add = (key, html) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html]); };
+    if (opts.head) add('head', opts.head);
+    else if (status === 'history') add('hist', `<div class="history-note">📜 Saved OMP session. Type below to continue it here. It picks up exactly where it left off.</div>`);
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
       if (m.adv) {
         const group = [];
         while (i < messages.length && messages[i].adv) group.push(messages[i++]);
         i--;
-        parts.push(advisorReview(group));
+        add('adv:' + group[0].id, advisorReview(group));
         continue;
       }
       if (m.role === 'tool' || m.role === 'thinking') {
         const group = [];
         while (i < messages.length && !messages[i].adv && (messages[i].role === 'tool' || messages[i].role === 'thinking')) group.push(messages[i++]);
         i--;
-        parts.push(activityBlock(group, status === 'running' && i === mainEnd));
+        add('act:' + group[0].id, activityBlock(group, status === 'running' && i === mainEnd));
         continue;
       }
       if (m.role === 'system') {
         const err = /error|fail|could not|cannot|not running|timed out|exited/i.test(m.text);
-        parts.push(`<div class="msg system ${err ? 'err' : ''}"><div class="bubble">${esc(m.text)}</div></div>`);
+        add('msg:' + m.id, `<div class="msg system ${err ? 'err' : ''}"><div class="bubble">${esc(m.text)}</div></div>`);
         continue;
       }
       if (m.role === 'advisor') {
         const shown = (m.notes || []).filter(n => !S.advImportant || n.severity === 'concern' || n.severity === 'blocker');
-        for (const note of shown) {
+        shown.forEach((note, j) => {
           const level = ['nit', 'concern', 'blocker'].includes(note.severity) ? note.severity : 'nit';
-          parts.push(`<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
-        }
+          add('note:' + m.id + ':' + j, `<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
+        });
         continue;
       }
       if (m.role === 'advisor-update') {
-        parts.push(`<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
+        add('upd:' + m.id, `<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
         continue;
       }
       const user = m.role === 'user';
@@ -1325,11 +1358,11 @@
         : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
       const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
         : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
-      parts.push(`<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
+      add('msg:' + m.id, `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
         ${body}</div>`);
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
-      parts.push(`<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
+      add('pending', `<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
     }
     if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((tail?.role !== 'tool' && tail?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
       let label = opts.task ? esc(opts.task) : opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
@@ -1338,18 +1371,18 @@
         const waitingOn = runningTools ? `Running ${runningTools === 1 ? 'a tool' : runningTools + ' tools'}` : tail?.role === 'tool' ? 'Waiting for the model after the last tool call' : 'Waiting for the model';
         label = `${waitingOn} · no activity for ${fmtMs(Math.floor(idle) * 1000)}`;
       }
-      parts.push(`<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
+      add('working', `<div class="working${idle >= 120 && status === 'running' ? ' quiet' : ''}" role="status" title="${idle >= 120 ? 'OMP has not reported anything for a while. It may be waiting on a slow model response. Press Stop and resend if it never recovers.' : ''}"><span class="spinner"></span> ${label}</div>`);
     }
-    if (opts.tail) parts.push(opts.tail);
-    if (!messages.length && !pending && status !== 'history' && !opts.head) parts.push(`<div class="history-note">This session is ready. Send the first message below.</div>`);
+    if (opts.tail) add('tail', opts.tail);
+    if (!messages.length && !pending && status !== 'history' && !opts.head) add('empty', `<div class="history-note">This session is ready. Send the first message below.</div>`);
     // Keep the in-progress steer edit across re-renders triggered by live events.
     const draft = $('#thread [data-steerinput]'), focused = draft && document.activeElement === draft;
     if (draft && S.editSteer) S.editSteer.text = draft.value;
-    swapHtml($('#thread'), parts.join(''));
+    setKeyed($('#thread'), parts);
     S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
     showToolImages($('#thread'));
     const fresh = $('#thread [data-steerinput]');
-    if (fresh && S.editSteer) { fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
+    if (fresh && S.editSteer) { if (fresh !== draft) fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
@@ -3095,6 +3128,7 @@
     const phases = JSON.parse(JSON.stringify(s.todos || []));
     fn(phases);
     s.todos = phases; update();
+    S.sx = null; // the summary just edited no longer matches any rev: the next poll fetches the whole list
     try { await sessionApi({ type: 'todos', phases }); await refresh(); }
     catch (e) { toast(e.message, 'err'); await refresh(); }
   }
@@ -4321,14 +4355,34 @@
   // ---------- polling ----------
   // /state?session=<id> sends messages only for the viewed session (for a Changes page, its parent); the rest stay summaries.
   const stateSession = () => { const c = current(); return c.kind === 'session' ? c.id : c.kind === 'changes' && c.parent.startsWith('s:') ? c.parent.slice(2) : ''; };
+  // The session list arrives as changes too (store=<epoch>.<rev>): the summaries changed after that rev, the session order
+  // when it changed and the store's other fields (top) when they changed; the rest are the summaries already held. A reply
+  // without sx (an older companion) is the whole store. Null when the changes don't fit what is held: the caller polls
+  // the whole list instead.
+  function mergeStore(st, view) {
+    const x = st.sx;
+    if (!x) { S.sx = null; return st; }
+    const held = S.sx?.epoch === x.epoch ? S.sx : null, byId = new Map(held?.sessions.map(s => [s.id, s]));
+    for (const s of x.changed || []) byId.set(s.id, s);
+    const top = x.top || held?.top, order = x.order || held?.order, sessions = top && order?.map(id => byId.get(id));
+    if (!sessions || sessions.some(s => !s)) { S.sx = null; return null; }
+    S.sx = { epoch: x.epoch, rev: x.rev, top, order, sessions };
+    // Only the viewed session holds its transcript (mergeTx) and /btw answers; a summary kept from an earlier view lets go of them.
+    for (const s of sessions) if (s.id !== view && ('messages' in s || '_btw' in s)) { delete s.messages; delete s._btw; }
+    const v = view && byId.get(view);
+    if (v) { if (st.btw) v._btw = st.btw; else delete v._btw; }
+    return { ...top, sessions, tx: st.tx };
+  }
   // Once this page holds the viewed transcript, polls ask only for what changed (since=<epoch>.<rev>): the reply's tx lists
   // the messages changed after that rev, and the message order when it changed; the rest are the objects already held.
-  // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it.
+  // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it:
+  // tx.messages from a companion that sends the store as changes (summaries are kept across polls), else the session's own.
   // False when the delta doesn't fit what is held: the caller drops the reply and polls the full transcript instead.
-  function mergeTx(st, view) {
+  function mergeTx(st, view, kept) {
     const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null;
     if (!t || !s || t.session !== view) { S.tx = null; return true; }
-    if (s.messages) { S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages: s.messages }; return true; }
+    const whole = kept ? t.messages : s.messages;
+    if (whole) { s.messages = whole; S.tx = t.epoch ? { session: view, epoch: t.epoch, rev: t.rev, messages: whole } : null; return true; }
     const base = S.tx?.session === view && S.tx.epoch === t.epoch ? S.tx.messages : null;
     const byId = base && new Map(base.map(m => [m.id, m]));
     if (byId) for (const m of t.changed || []) byId.set(m.id, m);
@@ -4337,22 +4391,35 @@
     s.messages = messages; S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages };
     return true;
   }
-  let stateSeq = 0, stateShown = 0;
-  async function refresh() {
-    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null;
+  // A reply that changes nothing: no summary, order or other store field, no transcript change and no /btw answers.
+  const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
+  let stateSeq = 0, stateShown = 0, renderedAt = 0;
+  // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works
+  // or nobody sees the page: only "ago" labels could change then, and those still render every 10 s. While something
+  // works its running timer ticks on every poll, as before. Other callers always render: they may have changed the page.
+  async function refresh(poll = false) {
+    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null, online = S.online;
+    let fresh = !poll;
     try {
-      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : ''), undefined, { etag });
+      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
       S.online = true; S.fails = 0;
       // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
       if (seq > stateShown) {
         stateShown = seq;
-        if (st && mergeTx(st, view)) { S.store = st; S.stateTag = etag.tag; }
+        const merged = st && mergeStore(st, view);
+        if (merged && mergeTx(merged, view, !!st.sx)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; }
         else if (st) { S.stateTag = ''; void refresh(); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
     if (Date.now() - S.nativeAt > 20000) {
       S.nativeAt = Date.now();
-      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; } catch {}
+      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; fresh = true; } catch {}
+    }
+    if (!fresh && S.online === online && (document.hidden || !busyNow()) && Date.now() - renderedAt < 10000) {
+      // A tab looked at again still takes its sessions off the title badge and out of the sidebar marks.
+      const unseen = [...attn.unseen.keys()].join();
+      checkAttention();
+      if ([...attn.unseen.keys()].join() === unseen) return;
     }
     syncUi();
     checkAttention(); // first: the sidebar marks what checkAttention finds new
@@ -4360,13 +4427,16 @@
     update();
     void pullDraft();
     if (current().kind === 'home') renderHomeRecent();
+    renderedAt = Date.now(); // only once rendered: a render that throws is retried on the next poll
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
+  // Something works: polls come every 1.2 s and each renders.
+  const busyNow = () => panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running') || s.uiRequests?.some(q => q.method === 'custom'));
   async function loop() {
     try {
-      if (S.token) { await refresh(); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
+      if (S.token) { await refresh(true); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
     } catch (e) { console.error('Refresh failed:', e); } finally { // a render that throws must not end polling for good
-      const busy = panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running') || s.uiRequests?.some(q => q.method === 'custom'));
+      const busy = busyNow();
       // Back off while the companion is unreachable instead of hammering it every second.
       setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
     }
