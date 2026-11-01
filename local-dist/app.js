@@ -2009,15 +2009,41 @@
     const all = [...new Set(M.models.map(m => m.provider))];
     return all.sort((a, b) => (pref.has(b) - pref.has(a)) || (a === 'openrouter') - (b === 'openrouter') || a.localeCompare(b));
   }
+  // Touch screens: no keyboard pops up over the list on open, a tap selects a row so its reasoning levels show before
+  // "Use model" applies it, and a quick-switch strip offers roles, favorites and recent models. Guarded: tests have no matchMedia.
+  const touchUI = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  // Roles, then favorites, then recently used: one chip per model and reasoning level.
+  function quickModels() {
+    const out = [], seen = new Set();
+    const add = (sel, thinking, badge) => {
+      const m = modelInfo(sel), k = sel + '\n' + thinking;
+      if (!m || seen.has(k)) return;
+      seen.add(k); out.push({ sel, thinking, badge, name: m.name });
+    };
+    for (const r of ['default', 'smol', 'slow']) { const v = S.models.roles?.[r]; if (v) { const s = splitSel(v); add(s.sel, s.thinking, r); } }
+    for (const sel of favs()) { const m = thinkGet(sel) || ''; add(sel, !m || (modelInfo(sel)?.thinking || []).includes(m) ? m : '', '★'); }
+    for (const [sel, th] of recentModels()) add(sel, th || '', '');
+    return out.slice(0, 16);
+  }
   async function openPicker(ctx) {
-    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [], opener: S.picker?.opener || document.activeElement };
+    S.picker?.unfit?.();
+    const touch = touchUI();
+    const t0 = ctx.thinking || thinkGet(ctx.model) || ''; S.picker = { ctx, q: '', provider: '', hi: 0, thinking: t0, thinkSel: ctx.model, mem: ctx.model ? { [ctx.model]: t0 } : {}, flat: [], quick: [], touch, tapped: -1, opener: S.picker?.opener || document.activeElement };
     let el = $('#picker');
     if (!el) { el = document.createElement('div'); el.id = 'picker'; el.className = 'picker-wrap'; document.body.appendChild(el); }
-    el.innerHTML = `<div class="picker" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" role="combobox" aria-expanded="true" aria-controls="pickerList" aria-autocomplete="list" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
-      <div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList" role="listbox" aria-label="Models"><div class="working"><span class="spinner"></span> Loading models…</div></div>
-      <div class="picker-foot"><span>↑↓ to move · Enter to choose · hover to see reasoning levels</span></div></div>`;
+    el.innerHTML = `<div class="picker${touch ? ' touch' : ''}" role="dialog" aria-modal="true" aria-label="Choose model"><div class="picker-search"><input id="pickerQ" role="combobox" aria-expanded="true" aria-controls="pickerList" aria-autocomplete="list" aria-label="Search models" placeholder="Search ${S.models ? S.models.models.length : ''} models… (e.g. opus, gpt 6, gemini flash)" autocomplete="off" spellcheck="false"><kbd>Esc</kbd><button type="button" class="picker-close" id="pickerClose" data-pclose aria-label="Close model picker" title="Close">✕</button></div>
+      <div class="picker-quick" id="pickerQuick" role="group" aria-label="Quick switch" hidden></div><div class="picker-provs" id="pickerProvs"></div><div class="picker-think" id="pickerThink"></div><div class="picker-list" id="pickerList" role="listbox" aria-label="Models"><div class="working"><span class="spinner"></span> Loading models…</div></div>
+      <div class="picker-foot" id="pickerFoot"><span>${touch ? 'Tap a model to see its reasoning levels' : '↑↓ to move · Enter to choose · hover to see reasoning levels'}</span></div></div>`;
     el.hidden = false;
-    $('#pickerQ').focus();
+    // A touch keyboard would cover the list: the search box gets focus only when tapped.
+    if (touch) $('#pickerClose')?.focus(); else $('#pickerQ').focus();
+    // Phones: the sheet follows the visual viewport, so an open keyboard shrinks it instead of covering it.
+    const vv = window.visualViewport;
+    if (touch && vv && el.style.setProperty) {
+      const fit = () => { el.style.setProperty('--pick-top', vv.offsetTop + 'px'); el.style.setProperty('--pick-h', vv.height + 'px'); };
+      fit(); vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit);
+      S.picker.unfit = () => { vv.removeEventListener('resize', fit); vv.removeEventListener('scroll', fit); el.style.removeProperty('--pick-top'); el.style.removeProperty('--pick-h'); };
+    }
     // One scrolling line of providers: a plain mouse wheel scrolls it sideways.
     const provs = $('#pickerProvs'); if (provs) provs.onwheel = e => { if (e.deltaY && !e.deltaX && provs.scrollWidth > provs.clientWidth) { provs.scrollLeft += e.deltaY; e.preventDefault(); } };
     try { await ensureModels(); } catch (e) { $('#pickerList').innerHTML = `<div class="side-empty">${esc(e.message)}</div>`; return; }
@@ -2028,6 +2054,7 @@
   }
   function closePicker() {
     const opener = S.picker?.opener;
+    S.picker?.unfit?.();
     S.picker = null; const el = $('#picker'); if (el) { el.hidden = true; el.innerHTML = ''; }
     // Return focus unless a pick already moved it somewhere on purpose.
     if (opener?.isConnected && (!document.activeElement || document.activeElement === document.body)) opener.focus();
@@ -2038,6 +2065,12 @@
     const counts = new Map();
     for (const m of S.models.models) counts.set(m.provider, (counts.get(m.provider) || 0) + 1);
     keepFocus($('#pickerProvs'), () => { const el = $('#pickerProvs'), x = el.scrollLeft; el.innerHTML = `<button class="chip ${!P.provider ? 'sel' : ''}" data-prov="">All</button>` + providerOrder().map(p => `<button class="chip ${P.provider === p ? 'sel' : ''}" data-prov="${esc(p)}">${esc(p)} <small>${counts.get(p)}</small></button>`).join(''); el.scrollLeft = x; });
+    const qe = $('#pickerQuick');
+    P.quick = P.touch && !P.q.trim() && !P.provider ? quickModels() : [];
+    if (qe) {
+      qe.hidden = !P.quick.length;
+      keepFocus(qe, () => { const x = qe.scrollLeft; qe.innerHTML = !P.quick.length ? '' : '<span class="muted">Switch to</span>' + P.quick.map((it, i) => { const cur = it.sel === P.ctx.model && it.thinking === (P.ctx.thinking || ''); return `<button type="button" class="chip ${cur ? 'sel' : ''}" data-pquick="${i}" title="${esc(it.sel)}"${cur ? ' aria-current="true"' : ''}>${esc(it.name)}${it.thinking ? ` <small>${esc(it.thinking)}</small>` : ''}${it.badge ? ` <small>${esc(it.badge)}</small>` : ''}</button>`; }).join(''); qe.scrollLeft = x; });
+    }
     const sections = pickerRows();
     P.flat = sections.flatMap(s => s.rows);
     if (P.hi < 0) { const cur = P.flat.findIndex(r => r.sel === P.ctx.model); P.hi = cur >= 0 ? cur : 0; }
@@ -2074,13 +2107,20 @@
     keepFocus($('#pickerThink'), () => { $('#pickerThink').innerHTML = !r ? '' : !r.m || !r.m.reasoning || !levels.length
       ? `<span class="muted">${r.m && !r.m.reasoning ? 'This model has no reasoning levels.' : 'Reasoning follows your OMP config.'}</span>`
       : `<span class="muted">Reasoning</span><button class="chip ${!P.thinking ? 'sel' : ''}" data-think="">Default${defLevel ? ` <small>${esc(defLevel)}</small>` : ''}</button>` + levels.map(l => `<button class="chip ${P.thinking === l ? 'sel' : ''}" data-think="${esc(l)}">${esc(l)}</button>`).join(''); });
+    // Touch: the footer names the selected model and level and applies them.
+    const f = $('#pickerFoot');
+    if (P.touch && f) keepFocus(f, () => {
+      const th = r && pickThinking(P, r);
+      f.innerHTML = `<span class="pf-sel">${!r ? 'No model selected' : `<b>${esc(r.name)}</b>${th ? ' · ' + esc(th) : hasLevels(r) ? ' · default reasoning' : ''}`}</span><button type="button" class="btn primary sm" data-puse${r ? '' : ' disabled'}>Use model</button>`;
+    });
   }
+  const hasLevels = r => !!(r?.m?.reasoning && r.m.thinking?.length);
+  const pickThinking = (P, r) => P.thinking && (r.m?.thinking || []).includes(P.thinking) ? P.thinking : (r.thinking || '');
   function pickModel(i) {
     const P = S.picker;
     const r = P?.flat[i];
     if (!r) return;
-    const levels = r.m?.thinking || [];
-    const thinking = P.thinking && levels.includes(P.thinking) ? P.thinking : (r.thinking || '');
+    const thinking = pickThinking(P, r);
     const ctx = P.ctx;
     closePicker();
     ctx.apply(r.sel, thinking);
@@ -2113,10 +2153,13 @@
     el.innerHTML = `<div class="tm-head">Reasoning</div><button data-thinkset="" class="${!ctx.thinking ? 'sel' : ''}">Default${def ? ` <small>${esc(def)}</small>` : ''}</button>`
       + levels.map(l => `<button data-thinkset="${esc(l)}" class="${ctx.thinking === l ? 'sel' : ''}">${esc(l)}</button>`).join('');
     document.body.appendChild(el);
+    // Keep the menu inside the visible area: narrow phones, and an open touch keyboard (the visual viewport) too.
+    const vv = window.visualViewport, vw = vv?.width ?? innerWidth, vh = vv?.height ?? innerHeight, ox = vv?.offsetLeft ?? 0, oy = vv?.offsetTop ?? 0;
+    el.style.maxHeight = Math.max(120, vh - 16) + 'px';
     const r = btn.getBoundingClientRect();
-    el.style.left = Math.max(8, Math.min(r.left, innerWidth - el.offsetWidth - 8)) + 'px';
-    const below = r.top < el.offsetHeight + 12;
-    el.style.top = (below ? r.bottom + 6 : r.top - el.offsetHeight - 6) + 'px';
+    el.style.left = Math.max(ox + 8, Math.min(r.left, ox + vw - el.offsetWidth - 8)) + 'px';
+    const below = r.top - oy < el.offsetHeight + 12;
+    el.style.top = Math.max(oy + 8, Math.min(below ? r.bottom + 6 : r.top - el.offsetHeight - 6, oy + vh - el.offsetHeight - 8)) + 'px';
     el._ctx = ctx; el._btn = btn;
     (el.querySelector('.sel') || el.querySelector('button'))?.focus();
   }
@@ -4452,13 +4495,27 @@
       S.lastSig = ''; update(); return;
     }
     if (t.closest('#picker')) {
+      const P = S.picker;
+      if (t.closest('[data-pclose]')) { closePicker(); return; }
+      const qk = t.closest('[data-pquick]');
+      if (qk) { const it = P.quick[+qk.dataset.pquick]; if (it) { const ctx = P.ctx; closePicker(); ctx.apply(it.sel, it.thinking); } return; }
+      if (t.closest('[data-puse]')) { pickModel(P.hi); return; }
       const fav = t.closest('[data-fav]');
-      if (fav) { toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top; return; }
+      if (fav) {
+        // Touch: favoriting adds or drops a Favorites section, so keep the selected row by identity, not position.
+        const keep = P.touch && P.flat[P.hi], tap = P.touch && P.flat[P.tapped];
+        toggleFav(fav.dataset.fav); const top = $('#pickerList').scrollTop; renderPicker(); $('#pickerList').scrollTop = top;
+        const at = r => r ? P.flat.findIndex(x => x.sel === r.sel && x.thinking === r.thinking && !!x.isDefault === !!r.isDefault) : -1;
+        if (keep && S.picker === P) { const i = at(keep); if (i >= 0) pickerHi(i); P.tapped = at(tap); }
+        return;
+      }
       const row = t.closest('[data-pi]'), prov = t.closest('[data-prov]'), th = t.closest('[data-think]');
-      if (row) pickModel(+row.dataset.pi);
-      // Keyboard activation (detail 0) keeps focus on the chip via keepFocus; a pointer click returns to the search box.
-      else if (prov) { S.picker.provider = prov.dataset.prov; S.picker.hi = 0; renderPicker(); if (e.detail) $('#pickerQ').focus(); }
-      else if (th) { S.picker.thinking = th.dataset.think; const k = S.picker.flat[S.picker.hi]?.sel; if (k) S.picker.mem[k] = S.picker.thinking; renderThink(); if (e.detail) $('#pickerQ').focus(); }
+      // Touch: the first tap on a row with reasoning levels selects it (levels and "Use model" follow); a second tap applies.
+      if (row) { const i = +row.dataset.pi; if (P.touch && e.detail && P.tapped !== i && hasLevels(P.flat[i])) { P.tapped = i; pickerHi(i); } else pickModel(i); }
+      // Keyboard activation (detail 0) keeps focus on the chip via keepFocus; a pointer click returns to the search box,
+      // except on touch, where focusing it would raise the on-screen keyboard.
+      else if (prov) { P.provider = prov.dataset.prov; P.hi = 0; P.tapped = -1; renderPicker(); if (e.detail && !P.touch) $('#pickerQ').focus(); }
+      else if (th) { P.thinking = th.dataset.think; const k = P.flat[P.hi]?.sel; if (k) P.mem[k] = P.thinking; renderThink(); if (e.detail && !P.touch) $('#pickerQ').focus(); }
       else if (!t.closest('.picker')) closePicker();
       return;
     }
@@ -4923,7 +4980,7 @@
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
-    else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; renderPicker(); }
+    else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; S.picker.tapped = -1; renderPicker(); }
     else if (t.id === 'homePrompt') { S.home.prompt = t.value; autosize(t); S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
     else if (t.id === 'swInput') { $('#modal')._switcher.hi = 0; renderSwitcher(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
@@ -5055,7 +5112,8 @@
   document.addEventListener('mousemove', e => { if (S.picker && (e.movementX || e.movementY)) S.picker.kbd = false; });
   document.addEventListener('mouseover', e => {
     const row = e.target.closest?.('#picker [data-pi]');
-    if (!row || !S.picker || S.picker.kbd || +row.dataset.pi === S.picker.hi) return;
+    // Touch browsers send a synthetic mouseover with each tap; there the tap itself moves the selection.
+    if (!row || !S.picker || S.picker.kbd || S.picker.touch || +row.dataset.pi === S.picker.hi) return;
     pickerHi(+row.dataset.pi);
   });
   document.addEventListener('keydown', e => {

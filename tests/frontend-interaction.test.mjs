@@ -8,7 +8,8 @@ const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(setImm
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
 // Runs the real dashboard script against a tiny DOM: elements by id, a few extra selectors, recorded fetches.
-async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {} } = {}) {
+// `coarse: true` reports a touch screen through matchMedia('(pointer: coarse)'); without it there is no matchMedia at all.
+async function boot({ hash = '#/s/a', sessions = [], models = { models: [], roles: {} }, routes = {}, coarse = false } = {}) {
   const location = { hash, pathname: '/', search: '' };
   const listeners = [], winListeners = new Map(), calls = [], elements = new Map(), extras = new Map(), storage = new Map();
   const document = { activeElement: null };
@@ -24,7 +25,7 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     ...extra,
   });
   for (const id of ['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect', 'search', 'slash', 'scroller', 'tasks', 'chatPlan', 'extras', 'questions', 'queued', 'statusLine', 'modelSlot', 'hint', 'buttons', 'imagePreview', 'toasts', 'promptRail',
-    'pickerQ', 'pickerProvs', 'pickerThink', 'pickerList', 'setList', 'setMeta', 'setNav', 'updateStatus', 'home']) elements.set(id, node(id));
+    'pickerQ', 'pickerProvs', 'pickerThink', 'pickerList', 'pickerQuick', 'pickerFoot', 'pickerClose', 'setList', 'setMeta', 'setNav', 'updateStatus', 'home']) elements.set(id, node(id));
   elements.get('input').tagName = 'TEXTAREA';
   extras.set('[data-act="ompUpdate"]', node());
   for (const s of ['.composer-wrap', '.composer']) extras.set(s, node());
@@ -55,6 +56,7 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
       const data = await reply(url, body);
       return { ok: true, status: 200, json: async () => structuredClone(data) };
     },
+    ...(coarse ? { matchMedia: q => ({ matches: /pointer:\s*coarse|hover:\s*none/.test(q), media: q, addEventListener() {}, removeEventListener() {} }) } : {}),
   });
   await flush();
   const fire = async (type, e) => { for (const [t, fn] of listeners) if (t === type) fn({ preventDefault() {}, stopPropagation() {}, ...e }); await flush(); };
@@ -114,6 +116,66 @@ test('Ctrl+P moves past a role without a reasoning suffix while OMP reports a le
   const d = await boot({ sessions: [idle('a', { modelSelector: 'p/a', thinking: 'high' })], models: MODELS });
   await d.key('p', { ctrlKey: true, code: 'KeyP' });
   assert.deepEqual(d.commands().filter(c => c.type === 'set_model').map(c => c.model), ['p/b']);
+});
+
+const MODELS_R = { models: [...MODELS.models, { selector: 'p/r', id: 'r', name: 'R', provider: 'p', reasoning: true, thinking: ['low', 'high'] }], roles: MODELS.roles };
+const pickerTap = (d, sel, data) => d.target({ '#picker': d.elements.get('picker'), '.picker': d.node(), [sel]: d.node('', { dataset: data }) });
+const rowIndex = (d, sel) => d.elements.get('pickerList').innerHTML.match(new RegExp(`data-pi="(\\d+)" title="${sel}"`))[1];
+const setModels = d => d.commands().filter(c => c.type === 'set_model').map(c => ({ model: c.model, thinking: c.thinking }));
+
+test('desktop: opening the picker focuses search and shows no quick-switch strip; touch: no keyboard on open', async () => {
+  const desk = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R });
+  await desk.fire('click', { target: desk.act('model') });
+  assert.equal(desk.document.activeElement, desk.elements.get('pickerQ'));
+  assert.equal(desk.elements.get('pickerQuick').hidden, true);
+  await desk.fire('click', { target: pickerTap(desk, '[data-pi]', { pi: rowIndex(desk, 'p/r') }), detail: 1 });
+  assert.deepEqual(setModels(desk), [{ model: 'p/r', thinking: '' }], 'a desktop click still applies at once');
+
+  const touch = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R, coarse: true });
+  await touch.fire('click', { target: touch.act('model') });
+  assert.notEqual(touch.document.activeElement, touch.elements.get('pickerQ'), 'the search box is not focused, so no on-screen keyboard');
+  assert.equal(touch.document.activeElement, touch.elements.get('pickerClose'));
+  await touch.fire('click', { target: pickerTap(touch, '[data-pclose]', {}), detail: 1 });
+  assert.equal(touch.elements.get('picker').hidden, true, 'the visible close button closes the picker');
+});
+
+test('touch: tapping a row with reasoning levels selects it; "Use model" applies it with the chosen level', async () => {
+  const d = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R, coarse: true });
+  await d.fire('click', { target: d.act('model') });
+  assert.doesNotMatch(d.elements.get('pickerThink').innerHTML, /data-think="high"/, 'p/a has no levels');
+  const pi = rowIndex(d, 'p/r');
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi }), detail: 1 });
+  assert.deepEqual(setModels(d), [], 'the first tap only selects');
+  assert.match(d.elements.get('pickerThink').innerHTML, /data-think="high"/, 'the levels follow the tapped row');
+  assert.match(d.elements.get('pickerFoot').innerHTML, /<b>R<\/b> · default reasoning/);
+  await d.fire('click', { target: pickerTap(d, '[data-think]', { think: 'high' }), detail: 1 });
+  assert.notEqual(d.document.activeElement, d.elements.get('pickerQ'), 'a level tap does not raise the keyboard');
+  assert.match(d.elements.get('pickerFoot').innerHTML, /<b>R<\/b> · high/);
+  await d.fire('click', { target: pickerTap(d, '[data-puse]', {}), detail: 1 });
+  assert.deepEqual(setModels(d), [{ model: 'p/r', thinking: 'high' }]);
+  assert.equal(d.elements.get('picker').hidden, true);
+
+  // A second tap on the selected row applies too; a row without levels applies on the first tap.
+  await d.fire('click', { target: d.act('model') });
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi: rowIndex(d, 'p/r') }), detail: 1 });
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi: rowIndex(d, 'p/r') }), detail: 1 });
+  await d.fire('click', { target: d.act('model') });
+  await d.fire('click', { target: pickerTap(d, '[data-pi]', { pi: rowIndex(d, 'p/c') }), detail: 1 });
+  assert.deepEqual(setModels(d).slice(1), [{ model: 'p/r', thinking: 'high' }, { model: 'p/c', thinking: '' }]);
+});
+
+test('touch: quick-switch chips apply a role or a favorite with its remembered level in one tap', async () => {
+  const d = await boot({ sessions: [idle('a', { modelSelector: 'p/a' })], models: MODELS_R, coarse: true });
+  d.storage.set('omp-fav-models', JSON.stringify(['p/r']));
+  d.storage.set('omp-think-levels', JSON.stringify({ 'p/r': 'high' }));
+  const chip = sel => d.elements.get('pickerQuick').innerHTML.match(new RegExp(`data-pquick="(\\d+)" title="${sel}"`))[1];
+  await d.fire('click', { target: d.act('model') });
+  assert.equal(d.elements.get('pickerQuick').hidden, false);
+  assert.match(d.elements.get('pickerQuick').innerHTML, /title="p\/a" aria-current="true"/, 'the current model is marked');
+  await d.fire('click', { target: pickerTap(d, '[data-pquick]', { pquick: chip('p/b') }), detail: 1 });
+  await d.fire('click', { target: d.act('model') });
+  await d.fire('click', { target: pickerTap(d, '[data-pquick]', { pquick: chip('p/r') }), detail: 1 });
+  assert.deepEqual(setModels(d), [{ model: 'p/b', thinking: '' }, { model: 'p/r', thinking: 'high' }]);
 });
 
 const SETTINGS = () => ({ file: '/cfg.yml', settings: [
