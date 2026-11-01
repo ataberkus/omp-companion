@@ -102,7 +102,7 @@ jobs:
       # Spotlight indexes every disk image the DMG step mounts; on the slower Intel runner that kept the image busy past
       # hdiutil's detach timeout ("timeout for DiskArbitration expired").
       - name: Keep Spotlight off disk images
-        run: sudo mdutil -a -i off
+        run: sudo mdutil -a -i off || echo "mdutil could not turn indexing off on every volume; continuing"
 
       # Then the disk image from the built binary. Verbose, because hdiutil's own errors only show in the debug log.
       - name: Disk image
