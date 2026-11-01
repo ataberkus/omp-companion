@@ -239,6 +239,16 @@ test('requests need exactly one target and a real session', async t => {
   assert.equal((await call('/enhance', { text: '   ', session: 'session' })).status, 400);
 });
 
+test('an image-only draft is enhanced from a fixed placeholder; no text and no image is still refused', async t => {
+  const { dir, call, settle } = await boot(t);
+  const start = await call('/enhance', { session: 'session', text: '  ', images: [image] });
+  assert.equal(start.status, 202);
+  assert.equal((await settle(start.body.id)).status, 'done');
+  assert.ok((await readFile(join(dir, 'stdin.txt'), 'utf8')).endsWith('<draft>\n(No text: the attached images are the whole draft. Write the prompt they ask for.)\n</draft>'));
+  assert.equal((await call('/enhance', { session: 'session', text: '', images: [] })).status, 400);
+  assert.equal((await call('/enhance', { session: 'session', images: [image] })).status, 400, 'text stays required as a string');
+});
+
 test('a session whose working directory is gone is refused up front, not reported as `spawn ENOENT`', async t => {
   const gone = join(tmpdir(), 'omp-enhance-gone-' + process.pid);
   const { call } = await boot(t, { session: { status: 'done', cwd: gone } });

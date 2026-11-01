@@ -22,7 +22,7 @@ OMP has no prompt enhancer of its own. The RPC `btw` side question is not used: 
 
 ## 1. User-facing behaviour
 
-- **Button:** icon-only `✨` (accessible name "Enhance prompt") in the composer bar, next to `＋ Image`. Present on every composer: live sessions, the New-session screen, and continuing a session from OMP history. Disabled when the draft is empty, starts with `/` or `!`, or an enhance is already running in this view.
+- **Button:** icon-only `✨` (accessible name "Enhance prompt") in the composer bar, next to `＋ Image`. Present on every composer: live sessions, the New-session screen, and continuing a session from OMP history. Disabled, with a title saying why, when the draft has no text and no attached image, starts with `/` or `!`, or a message is being sent from this view; while an enhance runs it turns into `✕` (cancel). Session status (running, review, done, paused, error) does not matter. An image-only draft is sent with empty `text`; the companion accepts that only when images are attached and puts a fixed placeholder in `<draft>` telling the enhancer the images are the request.
 - **Shortcut:** Ctrl+Shift+E (Cmd+Shift+E on macOS) while the composer has focus. It is listed in the button's title and added to the dashboard-shortcut list that composer hotkeys can't reuse. Firefox reserves Ctrl+Shift+E for its network monitor; the button still works there.
 - **While running:**
   - The textarea is read-only, so the user can't type into a draft that is about to be replaced.

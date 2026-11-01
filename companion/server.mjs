@@ -577,12 +577,14 @@ function enhanceArgs({model,thinking,overlay,system,guard,images}){
 // The last 6 turns, each run of assistant messages reduced to its last (the reply the user saw). Clips keep both ends: the
 // start holds the ask or context, the end of a reply its options and question; the latest reply gets the most room.
 // Tag lookalikes inside messages are defused so quoted text cannot close <conversation> or open a <draft>.
+// An image-only draft: the images are the request.
+const ENHANCE_IMAGE_ONLY='(No text: the attached images are the whole draft. Write the prompt they ask for.)';
 function enhanceInput(draft,messages){
  const chat=messages.filter(m=>m.role==='user'||m.role==='assistant'),tail=chat.filter((m,i)=>m.role==='user'||chat[i+1]?.role!=='assistant').slice(-6);
  const latest=tail.findLastIndex(m=>m.role==='assistant'),clip=(t,n)=>t.length>n?`${t.slice(0,n/2)}\n[…]\n${t.slice(-n/2)}`:t;
  const defuse=t=>t.replace(/<(\/?)(conversation|draft)>/gi,'‹$1$2›');
  const lines=tail.map((m,i)=>`${m.role==='user'?'User':'Assistant'}: ${defuse(clip(String(m.text||''),i===latest?6000:1500))}`);
- return (lines.length?`<conversation>\n${lines.join('\n')}\n</conversation>\n`:'')+`<draft>\n${defuse(String(draft))}\n</draft>`;
+ return (lines.length?`<conversation>\n${lines.join('\n')}\n</conversation>\n`:'')+`<draft>\n${draft?defuse(String(draft)):ENHANCE_IMAGE_ONLY}\n</draft>`;
 }
 function stepLabel(toolName,args,cwd){
  const a=args||{};let s;
@@ -677,7 +679,7 @@ By intent:
 
 ## Language and images
 - Write the whole prompt in the draft's language, even when the code, docs or conversation use another. When the draft is not in English and the agent is to explain or report, tell it to answer in that language.
-- If images are attached, turn the states, layout and details they show into concrete requirements; they stay attached to the final message, so refer to them rather than re-describing them.
+- If images are attached, turn the states, layout and details they show into concrete requirements; they stay attached to the final message, so refer to them rather than re-describing them. A draft with no text means the images alone are the request: work out from them what the user wants done.
 
 Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 `;
@@ -2305,7 +2307,9 @@ async function spend(sync){
  // Enhance jobs: one read-only `omp -p` per click; the dashboard polls GET /api/enhance until it settles.
  const enhanceJobs=new Map();
  async function startEnhance(body){
-  const draft=text(body.text,'Draft',200000);
+ // A draft may be only images (as a prompt may): no text, at least one image; chatImages validates them below.
+ const imageOnly=typeof body.text==='string'&&!body.text.trim()&&Array.isArray(body.images)&&body.images.length>0;
+ const draft=imageOnly?'':text(body.text,'Draft',200000);
   if(!!body.session===!!body.path)throw error('Choose a session or a folder to enhance in.');
   const s=body.session?store.sessions.find(x=>x.id===body.session):null;
   if(body.session&&!s)throw error('Session not found.',404);

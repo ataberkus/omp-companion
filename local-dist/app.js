@@ -747,11 +747,14 @@
   }
 
   // ---------- enhance prompt: a read-only OMP run rewrites the draft with project context ----------
-  const enhanceBlocked = v => !v.trim() || /^[/!]/.test(v.trim());
+  // Enhanceable: text that is not a slash or shell command, or no text with images attached (as Send accepts).
+  const enhanceBlocked = (v, images) => v.trim() ? /^[/!]/.test(v.trim()) : !images;
   function enhanceButton(view, draft) {
-    return S.enhance.has(view)
-      ? `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`
-      : `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="Rewrite this draft with project context (Ctrl+Shift+E)" ${enhanceBlocked(draft) || S.sending.has(view) ? 'disabled' : ''}>✨</button>`;
+    if (S.enhance.has(view)) return `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`;
+    const images = S.attachments.some(a => a.view === view);
+    const why = S.sending.has(view) ? 'Wait until the message is sent'
+      : !enhanceBlocked(draft, images) ? '' : draft.trim() ? 'Slash and shell commands are not enhanced' : 'Type a draft or attach an image to enhance';
+    return `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="${why || 'Rewrite this draft with project context (Ctrl+Shift+E)'}" ${why ? 'disabled' : ''}>✨</button>`;
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
   async function startEnhance(view, body, original) {
@@ -797,7 +800,7 @@
   const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
     const l = S.home.listing, draft = S.home.prompt, home = S.view;
-    if (!l || S.sending.has(home) || enhanceBlocked(draft)) return;
+    if (!l || S.sending.has(home) || enhanceBlocked(draft, attached().length)) return;
     S.sending.set(home, {}); renderHome();
     let s;
     try { s = await api('/quick-start', { ...homeStartBody(l), draft: true }); }
@@ -833,7 +836,7 @@
     if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
     if (c.kind === 'home') return enhanceFromHome();
     const input = $('#input');
-    if (!input || enhanceBlocked(input.value) || S.sending.has(view)) return;
+    if (!input || enhanceBlocked(input.value, attached().length) || S.sending.has(view)) return;
     const text = input.value.trim(), images = imagePayload(attached());
     let body;
     if (c.kind === 'session') {
@@ -4242,6 +4245,8 @@
     if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
   }
   function renderAttachments() {
+    // New session has no composer render; its ✨ follows the attachments here (an image alone is enhanceable).
+    const he = $('#homeEnhance'); if (he && current().kind === 'home') setIfChanged(he, enhanceButton(S.view, S.home.prompt));
     const preview = $('#imagePreview');
     if (!preview) return;
     const list = attached();
