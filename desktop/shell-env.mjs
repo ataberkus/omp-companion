@@ -20,7 +20,7 @@ const MAX_OUTPUT = 8 * 1024 * 1024;
 // Resolves to { env } with the login shell's environment, or { error } when the shell fails, prints no environment or
 // takes longer than `timeout` ms. `runtime` is a JavaScript runtime that takes -e (the app's Bun) and prints the
 // environment as JSON between two random marks, so banners and other output from the user's shell files are ignored.
-export function loginShellEnv({ shell = process.env.SHELL, env = process.env, timeout = 8000, runtime = process.execPath } = {}) {
+export function loginShellEnv({ env = process.env, shell = env.SHELL, timeout = 8000, runtime = process.execPath } = {}) {
   const fallback = existsSync('/bin/zsh') ? '/bin/zsh' : '/bin/sh';
   const sh = shell && path.isAbsolute(shell) && SHELLS.has(path.basename(shell)) ? shell : fallback;
   const mark = randomBytes(16).toString('hex');

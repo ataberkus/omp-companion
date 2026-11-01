@@ -9,7 +9,7 @@ import { adoptLoginShellEnv } from './shell-env.mjs';
 // A macOS app opened from Finder or the Dock gets launchd's bare environment: take the login shell's (PATH, API keys,
 // OMP_* settings) first. The companion's modules are imported only afterwards because they read the environment as they load.
 const shellEnv = await adoptLoginShellEnv();
-// stdout carries the protocol, so this goes to stderr (the shell keeps its tail for crash reports).
+// stdout carries the protocol, so this goes to stderr (the Tauri shell keeps its tail for crash reports).
 if (shellEnv.error) console.error(`Could not read your login shell's environment (${shellEnv.error}); added to PATH: ${shellEnv.added.join(', ') || 'nothing'}.`);
 const { createCompanion, portBusy, startupUpdate, tailnetAddress, tailscaleSelf } = await import('../companion/server.mjs');
 const { phoneLinks } = await import('./links.mjs');
