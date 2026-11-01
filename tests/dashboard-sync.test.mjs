@@ -8,11 +8,11 @@ import { createCompanion, internals } from '../companion/server.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 const session = (id, extra = {}) => { const at = new Date().toISOString(); return { id, title: id, status: 'paused', cwd: extra.cwd, native: false, messages: [], todos: [], createdAt: at, updatedAt: at, ...extra }; };
-async function start(t, sessions, options = {}) {
+async function start(t, sessions, options = {}, projects = () => []) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-sync-'));
   const state = { app: null, dir };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
-  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: sessions(dir), activity: [] }));
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: projects(dir), sessions: sessions(dir), activity: [] }));
   state.open = async () => {
     state.app = await createCompanion({ dataDir: dir, ...options });
     state.app.server.listen(0, '127.0.0.1');
@@ -98,6 +98,23 @@ test('two active sessions in the same folder editing the same file are flagged o
   // Once one of them is done the warning goes away.
   c.app.store.sessions.find(s => s.id === 'b').status = 'done';
   assert.equal((await c.call('/state'))[1].sessions.find(s => s.id === 'a')._overlaps, undefined);
+});
+
+// Polls refresh every project's branch (at most every 15 s), read from the repository's HEAD file: starting git for
+// 30-odd projects at once stalled the companion for a quarter second each time. These .git folders hold nothing but a
+// HEAD, which git itself would not take for a repository, so every name below comes from HEAD alone.
+test('polls name each project\'s branch from its HEAD file: branches, detached commits, linked worktrees and subfolders', async t => {
+  const folders = ['p1', 'p2', 'p3', join('p1', 'sub', 'deep'), 'plain'];
+  const c = await start(t, dir => [session('s', { cwd: join(dir, 'p1'), projectId: 'p1' })], {}, dir => folders.map((f, i) => ({ id: ['p1', 'p2', 'p3', 'p4', 'p5'][i], path: join(dir, f), name: f })));
+  for (const f of folders) await mkdir(join(c.dir, f), { recursive: true });
+  await mkdir(join(c.dir, 'p1', '.git')); await writeFile(join(c.dir, 'p1', '.git', 'HEAD'), 'ref: refs/heads/feature/x\n');
+  await mkdir(join(c.dir, 'p2', '.git')); await writeFile(join(c.dir, 'p2', '.git', 'HEAD'), '0123456789abcdef0123456789abcdef01234567\n');
+  await mkdir(join(c.dir, 'gitdirs', 'p3'), { recursive: true }); await writeFile(join(c.dir, 'gitdirs', 'p3', 'HEAD'), 'ref: refs/heads/omp-web/abc\n');
+  await writeFile(join(c.dir, 'p3', '.git'), 'gitdir: ../gitdirs/p3\n');
+  let st;
+  for (let i = 0; i < 100; i++) { st = (await c.call('/state'))[1]; if (st.projects.every(p => p.branch)) break; await new Promise(r => setTimeout(r, 20)); }
+  assert.deepEqual(st.projects.map(p => [p.id, p.branch]), [['p1', 'feature/x'], ['p2', 'detached'], ['p3', 'omp-web/abc'], ['p4', 'feature/x'], ['p5', 'workspace']]);
+  assert.equal(st.sessions[0].branch, 'feature/x', 'sessions working in the project folder carry its branch');
 });
 
 test('a session that settles, fails or asks a question is reported once through onAttention', async t => {
