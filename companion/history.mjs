@@ -58,11 +58,15 @@ export function createHistory(ctx){
   files.sort((a,b)=>b.mtime-a.mtime||(a.file<b.file?-1:a.file>b.file?1:0));
   // Panel sessions by file, built once: matching each of up to 200 files against every session cost files × sessions path resolutions.
   const managed=new Map();for(const s of store.sessions)if(s.sessionFile){const k=pathKey(s.sessionFile);if(!managed.has(k))managed.set(k,s);}
-  return (await Promise.all(files.slice(0,limit).map(async f=>{
+  const one=async f=>{
    let c=headCache.get(f.file);if(c?.mtime!==f.mtime||c.size!==f.size){try{c={mtime:f.mtime,size:f.size,head:await readSessionHead(f.file)};}catch{return null;}headCache.set(f.file,c);}
    const head=c.head,managedSession=managed.get(pathKey(f.file));
    return {file:f.file,title:head.title||head.preview.split('\n')[0].slice(0,80)||'Untitled session',cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
-  }))).filter(Boolean);
+  };
+  // Under Bun the start-up warm-up below outlasts createCompanion: 16 heads at a time, so a request that comes in meanwhile
+  // waits for one batch's parses, not 200. Node finishes it inside createCompanion, all at once.
+  const list=files.slice(0,limit),n=process.versions.bun?16:list.length||1,rows=[];for(let i=0;i<list.length;i+=n)rows.push(...await Promise.all(list.slice(i,i+n).map(one)));
+  return rows.filter(Boolean);
  }
  // The first listing reads up to 200 heads (~125 ms for 150 files) on the first dashboard load's path, so it starts with
  // the companion; a request meanwhile waits for it rather than reading the same heads again, then lists from the cache.
