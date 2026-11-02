@@ -954,6 +954,10 @@ img.msg-image,.attach-preview img,.queued-image img{cursor:zoom-in}
 /* Tools › Disk space: the scan/bulk action rows; per-row actions stay on one line. */
 .disk-acts{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:12px 0}
 .disk-acts .spinner{vertical-align:-2px}
+/* Collapsible blocks (overview, data locations, worktrees per project, orphans): the summary carries a count and size. */
+.disk-group>summary{cursor:pointer;margin:8px 0}
+.disk-group>summary h2{display:inline;margin:0}
+.disk-group .disk-group{margin-left:12px}
 
 /* Screen: the PC's display fills the stage; touch-action:none hands every gesture to the page (tap, drag, pinch). */
 .screen-view{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}

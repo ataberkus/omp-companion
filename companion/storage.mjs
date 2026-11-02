@@ -1,11 +1,14 @@
 // Disk use of isolated sessions' worktrees (Tools › Disk space): each worktree's size with what git tracks split from
 // ignored and untracked output (node_modules, target/), its git state, and folders under <dataDir>/worktrees that no
-// session uses any more. Cleanup runs only when asked: removing a worktree (folder and omp-web/ branch, as Finish
-// worktree › Delete does), removing an orphan folder, or deleting a worktree's ignored files while keeping it.
+// session uses any more. Also the size of every other place the companion and OMP keep data (transcripts, OMP's session
+// store and blobs, stats.db…), shown only: OMP's own storage is cleaned with Tools › gc. Cleanup runs only when asked:
+// removing a worktree (folder and omp-web/ branch, as Finish worktree › Delete does), removing an orphan folder, or
+// deleting a worktree's ignored files while keeping it.
 // Walking 100+ GB of worktrees takes minutes, so scans and cleanups run one at a time in the background and the page
 // polls GET /api/storage, which only returns what the last run found; dashboard polls of /api/state never measure.
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { exists, now, error, samePath } from './util.mjs';
 import { git, gitRun, removeWorktreeFolder } from './git.mjs';
 const CLEAN_TIMEOUT=10*60000;
@@ -14,7 +17,7 @@ export function createStorage(ctx){
  const worktreeStatus=(...args)=>ctx.worktreeStatus(...args);
  const deleteWorktree=(...args)=>ctx.deleteWorktree(...args);
  const worktreesDir=path.join(dataDir,'worktrees');
- const state={scannedAt:null,worktrees:[],orphans:[],results:[],error:''};
+ const state={scannedAt:null,worktrees:[],orphans:[],locations:[],results:[],error:''};
  let job=null,run=null;
  const busy=s=>['running','queued'].includes(s.status)||!!s._task||!!s._bash;
  const listed=s=>s.isolated&&s.branch?.startsWith('omp-web/')&&!s.worktreeRemoved;
@@ -39,6 +42,33 @@ export function createStorage(ctx){
    }));
   }
   return {bytes,tracked:files?tracked:null,linked};
+ }
+ // A file's or folder's size; a missing one is {missing:true} with 0 bytes instead of failing the scan.
+ async function measurePath(p){
+  const st=await fs.lstat(p).catch(()=>null);
+  if(!st)return {bytes:0,tracked:null,linked:0,missing:true};
+  if(st.isDirectory())return {...await measure(p),missing:false};
+  return {bytes:st.isFile()?st.size:0,tracked:null,linked:st.isFile()&&st.nlink>1?st.size:0,missing:false};
+ }
+ // Every place the companion and OMP keep data. A location with parts is the sum of those paths ("Other": whatever in the
+ // folder no other row covers), so nothing is counted twice. worktrees/ repeats the rows below as one total.
+ const NAMED=[['worktrees','Session worktrees'],['transcripts','Transcripts'],['sessions','Panel session files'],['tool-images','Tool images'],['omp-sdk','SDK copies'],['drafts','Draft images'],['queued-images','Queued images'],['enhance','Enhance images'],['exports','HTML exports'],['workspace.json','Workspace file']];
+ async function locationList(){
+  const agent=ctx.agentDir(),sessions=ctx.ompSessionsDir,blobs=path.join(agent,'blobs'),stats=path.join(os.homedir(),'.omp','stats.db');
+  const rest=async(dir,skip)=>(await fs.readdir(dir).catch(()=>[])).map(n=>path.join(dir,n)).filter(p=>!skip.some(s=>samePath(s,p)));
+  const named=NAMED.map(([n,label])=>({key:'data:'+n,label,path:path.join(dataDir,n),group:'companion',...(n==='tool-images'?{cap:ctx.toolImageCap}:{})}));
+  return [...named,
+   {key:'data:other',label:'Other companion files',path:dataDir,group:'companion',parts:await rest(dataDir,named.map(l=>l.path))},
+   {key:'omp:sessions',label:'OMP session store',path:sessions,group:'omp'},
+   {key:'omp:blobs',label:'OMP blobs',path:blobs,group:'omp'},
+   {key:'omp:stats',label:'OMP stats database',path:stats,group:'omp',parts:[stats,stats+'-wal',stats+'-shm']},
+   {key:'omp:agent',label:'Other OMP agent files',path:agent,group:'omp',parts:await rest(agent,[sessions,blobs])}];
+ }
+ async function locationRow({parts,...l}){
+  if(!parts)return {...l,...await measurePath(l.path)};
+  const row={...l,bytes:0,tracked:null,linked:0,missing:!await exists(l.path)};
+  for(const p of parts){if(ctx.closing)break;const m=await measurePath(p);row.bytes+=m.bytes;row.linked+=m.linked;}
+  return row;
  }
  async function sessionRow(s){
   const p=store.projects.find(x=>x.id===s.projectId);
@@ -88,11 +118,12 @@ export function createStorage(ctx){
  const view=()=>({job,...state});
  function scan(){
   return start('scan',0,async j=>{
-   const sessions=store.sessions.filter(listed),folders=await orphanDirs();
-   j.total=sessions.length+folders.length;
-   const worktrees=[],orphans=[];state.worktrees=worktrees;state.orphans=orphans;
+   const sessions=store.sessions.filter(listed),folders=await orphanDirs(),places=await locationList();
+   j.total=sessions.length+folders.length+places.length;
+   const worktrees=[],orphans=[],locations=[];state.worktrees=worktrees;state.orphans=orphans;state.locations=locations;
    for(const s of sessions){if(ctx.closing)return;worktrees.push(await sessionRow(s));j.done++;}
    for(const dir of folders){if(ctx.closing)return;const o=await orphanInfo(dir);if(o)orphans.push({...o,...await measure(o.dir)});j.done++;}
+   for(const l of places){if(ctx.closing)return;locations.push(await locationRow(l));j.done++;}
    state.scannedAt=now();
   });
  }
@@ -119,11 +150,17 @@ export function createStorage(ctx){
   if(await exists(o.dir))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
  }
  const list=(v,what)=>{if(v===undefined)return [];if(!Array.isArray(v)||v.length>1000||v.some(x=>typeof x!=='string'||!x||x.length>4096))throw error(`${what} must be a list of strings.`);return [...new Set(v)];};
- // sessions: session IDs whose worktree and omp-web/ branch go; orphans: folder paths from the scan's orphans.
+ // sessions: session IDs whose worktree and omp-web/ branch go; orphans: folder paths from the scan's orphans;
+ // archived: true adds every archived session that still has a worktree, chosen here so ones the last scan missed count.
  // Without confirm, any with uncommitted changes or commits the project's branch lacks is refused instead.
- function remove({sessions,orphans,confirm}={}){
+ function remove({sessions,orphans,archived,confirm}={}){
   const ids=list(sessions,'sessions'),dirs=list(orphans,'orphans').map(d=>path.isAbsolute(d)?path.resolve(d):'');
   if(dirs.some(d=>!d||(!samePath(path.dirname(d),worktreesDir)&&!removedOwner(d))))throw error('orphans must be worktree folders the scan listed.');
+  if(archived===true){
+   const found=store.sessions.filter(s=>listed(s)&&store.archived.includes('s:'+s.id)).map(s=>s.id);
+   if(!found.length&&!ids.length&&!dirs.length)throw error('No archived session has a worktree to remove.');
+   for(const id of found)if(!ids.includes(id))ids.push(id);
+  }
   if(!ids.length&&!dirs.length)throw error('Choose worktrees to remove.');
   return start('remove',ids.length+dirs.length,async j=>{
    const done=(key,rows,match,e)=>{const row=rows.find(match);state.results.push(e?{key,ok:false,error:e.message}:{key,ok:true,freed:row?.bytes||0});if(!e&&row)rows.splice(rows.indexOf(row),1);j.done++;};

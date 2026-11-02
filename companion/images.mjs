@@ -111,5 +111,5 @@ export function createToolImages(ctx){
   let total=files.reduce((n,f)=>n+f.size,0);files.sort((a,b)=>a.at-b.at);
   for(const f of files){if(total<=toolImageCap)break;await fs.rm(path.join(toolImageDir,f.name),{force:true}).catch(()=>{});total-=f.size;}
  }
- return {toolImageDir,imageWrites,stashImages,ompBlob};
+return {toolImageDir,toolImageCap,imageWrites,stashImages,ompBlob};
 }

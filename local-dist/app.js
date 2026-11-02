@@ -3526,11 +3526,14 @@
     finally { btn.disabled = false; }
   }
 
-  // ---------- Tools › Disk space: isolated sessions' worktrees ----------
+  // ---------- Tools › Disk space: isolated sessions' worktrees and everything else OMP keeps on disk ----------
   // The companion measures in the background (POST /storage/scan) and the pane polls GET /storage while a scan or cleanup
   // runs. Bulk removal preselects only safe worktrees: archived, hidden or done, nothing uncommitted, every commit merged.
+  // The other data locations are shown only; OMP's own storage is cleaned with Tools › Storage cleanup (gc).
   const DISK = '__disk';
-  S.disk = { data: null, error: '', sel: new Set(), scannedAt: null, loading: false };
+  // open: <details> the user opened or closed, by data-key. Kept here, not only in the DOM: a scan empties its lists until
+  // they are measured again, so a group can vanish for a few polls and must come back as the user left it.
+  S.disk = { data: null, error: '', sel: new Set(), scannedAt: null, loading: false, open: new Map() };
   let diskPoll;
   const fmtSize = n => n >= 1073741824 ? (n / 1073741824).toFixed(n >= 10737418240 ? 0 : 1) + ' GB' : n >= 1048576 ? Math.round(n / 1048576) + ' MB' : Math.round(n / 1024) + ' KB';
   async function loadDisk() {
@@ -3564,33 +3567,45 @@
     const el = $('#toolForm'), D = S.disk, d = D.data;
     if (!el) return;
     if (!d) { if (!D.loading && !D.error) loadDisk(); setIfChanged(el, D.error ? `<div class="msg system err"><div class="bubble">${esc(D.error)}</div></div>` : '<div class="working"><span class="spinner"></span> Loading…</div>'); return; }
-    const job = d.job, off = job ? ' disabled' : '', rows = [...d.worktrees].sort((a, b) => b.bytes - a.bytes), orphans = [...d.orphans].sort((a, b) => b.bytes - a.bytes);
+    const job = d.job, off = job ? ' disabled' : '', rows = [...d.worktrees].sort((a, b) => b.bytes - a.bytes), orphans = [...d.orphans].sort((a, b) => b.bytes - a.bytes), locations = d.locations || [];
     const sum = (list, f) => list.reduce((n, r) => n + (f(r) || 0), 0), all = [...rows, ...orphans];
-    const sel = rows.filter(r => D.sel.has(r.id)), safe = rows.filter(r => r.safe);
+    const sel = rows.filter(r => D.sel.has(r.id)), safe = rows.filter(r => r.safe), archived = rows.filter(r => r.archived);
     const failed = d.results.filter(r => !r.ok), label = k => rows.find(r => r.id === k)?.title || orphans.find(o => o.dir === k)?.name || k;
+    const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    // A collapsible block: open as the user left it (S.disk.open, set by the toggle listener), else open by default.
+    const group = (key, open, sum, body) => `<details class="disk-group" data-key="disk:${esc(key)}" data-def="${open ? 1 : 0}"${(D.open.get('disk:' + key) ?? open) ? ' open' : ''}><summary>${sum}</summary>${body}</details>`;
+    const linkedTitle = r => r.linked ? ` title="${fmtSize(r.linked)} of it is hardlinked from elsewhere and is not freed"` : '';
+    const byProject = [...rows.reduce((m, r) => m.set(r.project || 'No project', [...(m.get(r.project || 'No project') || []), r]), new Map())].sort((a, b) => sum(b[1], r => r.bytes) - sum(a[1], r => r.bytes));
+    const worktreeRow = r => `<tr><td><input type="checkbox" data-disksel="${esc(r.id)}" aria-label="Select ${esc(r.title)}"${D.sel.has(r.id) ? ' checked' : ''}${r.safe && !job ? '' : ' disabled'}></td>
+          <td><a href="#/s/${encodeURIComponent(r.id)}">${esc(r.title || r.id)}</a><div class="muted"><code>${esc(r.branch)}</code></div></td>
+          <td>${diskState(r)}</td><td class="num"${linkedTitle(r)}>${fmtSize(r.bytes)}</td><td class="num">${r.tracked == null ? '' : fmtSize(r.bytes - r.tracked)}</td>
+          <td class="num"><button class="btn sm ghost" data-disk="clean" data-id="${esc(r.id)}"${off || (r.busy || !r.exists || r.error ? ' disabled' : '')} title="Delete only files .gitignore matches; keep the worktree and branch">Clean build output</button> <button class="btn sm danger" data-disk="remove" data-id="${esc(r.id)}"${off || (r.busy || r.error ? ' disabled' : '')}>Remove</button></td></tr>`;
+    const locGroups = [['companion', 'Companion data'], ['omp', 'OMP']].map(([g, name]) => [g, name, locations.filter(l => l.group === g)]).filter(x => x[2].length);
+    const locRow = l => `<tr><td>${esc(l.label)}${l.cap ? `<div class="muted">capped at ${fmtSize(l.cap)}</div>` : ''}</td><td><code>${esc(l.path)}</code></td><td class="num"${linkedTitle(l)}>${l.missing ? '<span class="muted">not present</span>' : fmtSize(l.bytes)}</td></tr>`;
+    const total = sum(locations, l => l.bytes);
     setIfChanged(el, `<section class="set-group tool-pane"><h2>Disk space</h2>
-      <p class="set-desc">Each isolated session works in its own Git worktree: a full checkout of the project plus whatever was installed or built in it (node_modules, target/…). Archiving or finishing a session keeps that folder, so they pile up. Measure them here, then remove the ones you are done with, or delete only their ignored build output.</p>
+      <p class="set-desc">Each isolated session works in its own Git worktree: a full checkout of the project plus whatever was installed or built in it (node_modules, target/…). Archiving or finishing a session keeps that folder, so they pile up. Measure them here, then remove the ones you are done with, or delete only their ignored build output. Measuring also sizes everything else the companion and OMP keep on disk.</p>
       <div class="disk-acts"><button class="btn sm primary" data-disk="scan"${off}>${d.scannedAt ? 'Measure again' : 'Measure worktrees'}</button>
         <span class="muted">${job ? `<span class="spinner"></span> ${job.kind === 'scan' ? 'Measuring' : job.kind === 'clean' ? 'Cleaning' : 'Removing'} ${job.done} of ${job.total}…` : d.scannedAt ? `Measured ${esc(ago(d.scannedAt))}` : 'Not measured yet: walking big worktrees can take a few minutes.'}</span></div>
       ${d.error ? `<div class="msg system err"><div class="bubble">${esc(d.error)}</div></div>` : ''}
       ${failed.length ? `<div class="msg system err"><div class="bubble">${failed.map(r => `${esc(label(r.key))}: ${esc(r.error)}`).join('<br>')}</div></div>` : ''}
-      ${all.length ? `<div class="spend-cards"><div><span>${all.length} worktree ${all.length === 1 ? 'folder' : 'folders'}</span><b>${fmtSize(sum(all, r => r.bytes))}</b></div>
+      ${all.length || locations.length ? group('overview', true, `Overview <span class="muted">${fmtSize(locations.length ? total : sum(all, r => r.bytes))}</span>`, `<div class="spend-cards">${locations.length ? `<div title="Every location under All OMP data${sum(locations, l => l.linked) ? `; ${fmtSize(sum(locations, l => l.linked))} of it is hardlinked from elsewhere` : ''}"><span>All OMP data</span><b>${fmtSize(total)}</b></div>` : ''}
+        <div><span>${count(all.length, 'worktree folder', 'worktree folders')}</span><b>${fmtSize(sum(all, r => r.bytes))}</b></div>
         <div><span>Build output and untracked files</span><b>${fmtSize(sum(all, r => r.bytes - (r.tracked ?? 0)))}</b></div>
-        <div><span>Safe to remove (${safe.length})</span><b>${fmtSize(sum(safe, r => r.bytes))}</b></div></div>` : ''}
+        <div title="Hardlinked files are not counted: removing one copy frees nothing"><span>Safe to remove (${safe.length})</span><b>${fmtSize(sum(safe, r => r.bytes - (r.linked || 0)))}</b></div></div>`) : ''}
       </section>
-      ${rows.length ? `<section class="set-group"><h2>Session worktrees</h2>
-        <div class="disk-acts"><button class="btn sm danger" data-disk="removeSelected"${off || (sel.length ? '' : ' disabled')}>Remove selected (${sel.length}, ${fmtSize(sum(sel, r => r.bytes))})</button><span class="muted">Only safe worktrees can be selected: archived, hidden or done, with nothing uncommitted and every commit already in the project's branch. Others have their own Remove, which says what would be lost.</span></div>
-        <div class="md"><div class="table-wrap"><table><thead><tr><th></th><th>Session</th><th>State</th><th class="num">Size</th><th class="num">Build output</th><th></th></tr></thead><tbody>
-        ${rows.map(r => `<tr><td><input type="checkbox" data-disksel="${esc(r.id)}" aria-label="Select ${esc(r.title)}"${D.sel.has(r.id) ? ' checked' : ''}${r.safe && !job ? '' : ' disabled'}></td>
-          <td><a href="#/s/${encodeURIComponent(r.id)}">${esc(r.title || r.id)}</a><div class="muted">${esc(r.project)} · <code>${esc(r.branch)}</code></div></td>
-          <td>${diskState(r)}</td><td class="num" title="${r.linked ? `${fmtSize(r.linked)} of it is hardlinked from elsewhere and is not freed` : ''}">${fmtSize(r.bytes)}</td><td class="num">${r.tracked == null ? '' : fmtSize(r.bytes - r.tracked)}</td>
-          <td class="num"><button class="btn sm ghost" data-disk="clean" data-id="${esc(r.id)}"${off || (r.busy || !r.exists || r.error ? ' disabled' : '')} title="Delete only files .gitignore matches; keep the worktree and branch">Clean build output</button> <button class="btn sm danger" data-disk="remove" data-id="${esc(r.id)}"${off || (r.busy || r.error ? ' disabled' : '')}>Remove</button></td></tr>`).join('')}
-        </tbody></table></div></div></section>` : ''}
-      ${orphans.length ? `<section class="set-group"><h2>Orphaned folders</h2><p class="set-desc">Worktree folders no session uses: left behind when Windows held a folder during removal, or by a session that is gone. Removing one also prunes Git's record of it; its branch stays.</p>
+      ${locations.length ? `<section class="set-group">${group('data', true, `<h2>All OMP data</h2> <span class="muted">${count(locations.length, 'location', 'locations')} · ${fmtSize(total)}</span>`, `<p class="set-desc">Shown only. Session worktrees are removed below; OMP's own session store and blobs are cleaned with <a href="#" data-tool="gc">Storage cleanup (gc)</a>. Deleting these folders by hand can break running sessions.</p>
+        ${locGroups.map(([g, name, list]) => group('data:' + g, true, `${esc(name)} <span class="muted">${fmtSize(sum(list, l => l.bytes))}</span>`, `<div class="md"><div class="table-wrap"><table><thead><tr><th>Location</th><th>Path</th><th class="num">Size</th></tr></thead><tbody>${[...list].sort((a, b) => b.bytes - a.bytes).map(locRow).join('')}</tbody></table></div></div>`)).join('')}`)}</section>` : ''}
+      ${rows.length ? `<section class="set-group">${group('worktrees', true, `<h2>Session worktrees</h2> <span class="muted">${count(rows.length, 'worktree', 'worktrees')} · ${fmtSize(sum(rows, r => r.bytes))}</span>`, `
+        <div class="disk-acts"><button class="btn sm danger" data-disk="removeSelected"${off || (sel.length ? '' : ' disabled')}>Remove selected (${sel.length}, ${fmtSize(sum(sel, r => r.bytes))})</button><button class="btn sm danger" data-disk="removeArchived"${off || (archived.length ? '' : ' disabled')}>Remove all archived (${archived.length}, ${fmtSize(sum(archived, r => r.bytes))})</button><span class="muted">Only safe worktrees can be selected: archived, hidden or done, with nothing uncommitted and every commit already in the project's branch. Others have their own Remove, which says what would be lost. Remove all archived skips archived worktrees with unmerged or uncommitted work.</span></div>
+        ${byProject.map(([name, list]) => group('project:' + name, list.some(r => r.safe || r.archived), `${esc(name)} <span class="muted">${count(list.length, 'worktree', 'worktrees')} · ${fmtSize(sum(list, r => r.bytes))}</span>`, `<div class="md"><div class="table-wrap"><table><thead><tr><th></th><th>Session</th><th>State</th><th class="num">Size</th><th class="num">Build output</th><th></th></tr></thead><tbody>
+        ${list.map(worktreeRow).join('')}
+        </tbody></table></div></div>`)).join('')}`)}</section>` : ''}
+      ${orphans.length ? `<section class="set-group">${group('orphans', true, `<h2>Orphaned folders</h2> <span class="muted">${count(orphans.length, 'folder', 'folders')} · ${fmtSize(sum(orphans, o => o.bytes))}</span>`, `<p class="set-desc">Worktree folders no session uses: left behind when Windows held a folder during removal, or by a session that is gone. Removing one also prunes Git's record of it; its branch stays.</p>
         <div class="md"><div class="table-wrap"><table><thead><tr><th>Folder</th><th>State</th><th class="num">Size</th><th></th></tr></thead><tbody>
         ${orphans.map(o => `<tr><td><code>${esc(o.dir)}</code></td><td>${o.kind === 'removed' ? `worktree of ${esc(o.title || o.sessionId)}, already removed` : 'no session'}${o.branch ? ` · <code>${esc(o.branch)}</code>` : ''}${o.dirty ? ` · <span class="err">${o.dirty} uncommitted</span>` : ''}${o.root ? '' : ' · not part of a repository'}</td><td class="num">${fmtSize(o.bytes)}</td>
           <td class="num"><button class="btn sm danger" data-disk="removeOrphan" data-dir="${esc(o.dir)}"${off}>Remove</button></td></tr>`).join('')}
-        </tbody></table></div></div></section>` : ''}`);
+        </tbody></table></div></div>`)}</section>` : ''}`);
   }
   function diskAct(btn) {
     const d = S.disk.data, act = btn.dataset.disk, r = d?.worktrees.find(x => x.id === btn.dataset.id);
@@ -3599,6 +3614,11 @@
       const sel = d.worktrees.filter(x => S.disk.sel.has(x.id));
       if (!sel.length || !confirm(`Remove ${sel.length === 1 ? '1 worktree' : `${sel.length} worktrees`} (${fmtSize(sel.reduce((n, x) => n + x.bytes, 0))}) and ${sel.length === 1 ? 'its omp-web/ branch' : 'their omp-web/ branches'}?\n\n${sel.length === 1 ? 'It has' : 'Each has'} nothing uncommitted and every commit is already in its project's branch. ${sel.length === 1 ? 'The session leaves the panel; its transcript stays' : 'The sessions leave the panel; their transcripts stay'} in OMP history.`)) return;
       return diskStart('remove', { sessions: sel.map(x => x.id) });
+    }
+    if (act === 'removeArchived') {
+      const arch = d.worktrees.filter(x => x.archived);
+      if (!arch.length || !confirm(`Remove every archived session's worktree (${arch.length === 1 ? '1 worktree' : `${arch.length} worktrees`}, ${fmtSize(arch.reduce((n, x) => n + x.bytes, 0))}) and ${arch.length === 1 ? 'its omp-web/ branch' : 'their omp-web/ branches'}?\n\nArchived worktrees with uncommitted changes or commits not in their project's branch, and sessions OMP is still working in, are skipped. ${arch.length === 1 ? 'The session leaves the panel; its transcript stays' : 'The sessions leave the panel; their transcripts stay'} in OMP history.`)) return;
+      return diskStart('remove', { archived: true });
     }
     if (act === 'remove' && r) {
       const loses = r.dirty || r.ahead || !r.base || r.problem;
@@ -5463,6 +5483,7 @@
     if (d.open) showToolImages(d);
     if (d.classList?.contains('activity')) remember(groupOpen, d.dataset.gid);
     else if (d.classList?.contains('row')) remember(rowOpen, d.dataset.rid);
+    else if (d.classList?.contains('disk-group')) remember(S.disk.open, d.dataset.key);
     else if (d.hasAttribute?.('data-finished')) S.finishedOpen = d.open;
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
     else if (d.tagName === 'DETAILS') { touched.add(d); const p = d.open && d.matches('.job-thought') && d.querySelector('pre'); if (p && !touched.has(p)) p.scrollTop = p.scrollHeight; }
