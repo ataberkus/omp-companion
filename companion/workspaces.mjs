@@ -43,15 +43,18 @@ export function createWorkspaces(ctx){
    .then(r=>{if(r.some(Boolean)&&!ctx.closing)scheduleSave([],true);});
   branchRun=Promise.all([round,...[...branchLookups].filter(([id])=>store.projects.some(p=>p.id===id&&!p.hidden)).map(([,run])=>run)]);
  }
+ // Worktree folders being created: their session joins the store only once git is done, so the Tools page's storage scan
+ // must not take them for orphans.
+ const creatingWorktrees=new Set();
  async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch,draft=false}){
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
-  if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);
-   try{await addWorktree(p.path,wt,b);cwd=wt;branch=b;}catch(e){isolated=false;notes.push(`Worktree isolation skipped: ${e.message} Working directly in ${p.path}.`);}}
+  if(isolate){const wt=path.join(dataDir,'worktrees',id);const b='omp-web/'+id.slice(0,8);creatingWorktrees.add(wt);
+   try{await addWorktree(p.path,wt,b);cwd=wt;branch=b;}catch(e){isolated=false;creatingWorktrees.delete(wt);notes.push(`Worktree isolation skipped: ${e.message} Working directly in ${p.path}.`);}}
   // Commit the session started from: the Changes working-tree view can diff against it, so the agent's own commits show too.
   const baseSha=await git(cwd,['rev-parse','--verify','HEAD']).catch(()=>undefined);
   const s={id,projectId:p.id,title,prompt,status:prompt?'queued':'paused',model:String(model||'OMP default'),provider:String(provider||''),branch,cwd,isolated,native,sessionFile,createdAt:now(),updatedAt:now(),tokens:0,cost:0,messages,todos:[],...(baseSha?{baseSha}:{}),...(launch?{launch}:{}),...(draft?{draft:true}:{})};
   if(selector){const i=selector.indexOf('/');s.modelSelector=selector;s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking){s.thinkingChoice=thinking;s.thinking=thinking;}
-  for(const n of notes)append(s,'system',n);store.sessions.unshift(s);activity(s,sessionFile?`Resumed ${title}`:`Started ${title}`,'running');
+  for(const n of notes)append(s,'system',n);store.sessions.unshift(s);creatingWorktrees.delete(cwd);activity(s,sessionFile?`Resumed ${title}`:`Started ${title}`,'running');
   if(prompt)await command(s,{type:'prompt',message:prompt});else await persist(s);return s;
  }
  const sent=s=>s.messages.some(m=>m.role==='user'||m.id?.startsWith('tool-bash-'))||!!s.queuedMessages?.length;
@@ -119,14 +122,16 @@ export function createWorkspaces(ctx){
    await gitRun(st.exists?s.cwd:root,['push','-u',st.remote,branch],{timeout:120000,env:{GIT_TERMINAL_PROMPT:'0'}});
    activity(s,`Pushed ${branch} to ${st.remote}`,'update');
   }
-  if(action==='delete'){
-   await stopRunner(s);
-   if(!await removeWorktree(s,root))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
-   // The session's folder is gone, so it leaves the panel; its OMP transcript stays in history.
-   s.hidden=true;s.status='done';s.worktreeRemoved=now();dropDraft('session:'+s.id);
-   activity(s,`Deleted worktree and branch ${branch}`,'done');await persist(s);return {action,deleted:true};
-  }
+  if(action==='delete'){await deleteWorktree(s,root);return {action,deleted:true};}
   await persist(s);return {action,...await worktreeStatus(s)};
+ }
+ // Stops the session's OMP, removes its worktree folder and omp-web/ branch, and takes the session off the panel; its OMP
+ // transcript stays in history. Callers have checked it is idle and isolated (finishWorktree, the Tools page's storage cleanup).
+ async function deleteWorktree(s,root){
+  await stopRunner(s);
+  if(!await removeWorktree(s,root))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
+  s.hidden=true;s.status='done';s.worktreeRemoved=now();dropDraft('session:'+s.id);
+  activity(s,`Deleted worktree and branch ${s.branch}`,'done');await persist(s);
  }
  // Files edited (edit/write tool records) by two active sessions that share a folder rather than separate worktrees.
  // Set as _overlaps on both sessions before each /api/state reply. A transcript nothing has read yet contributes the
@@ -171,5 +176,5 @@ export function createWorkspaces(ctx){
   const dirs=entries.filter(e=>e.isDirectory()&&!e.name.startsWith('.')&&!['node_modules','$RECYCLE.BIN','System Volume Information'].includes(e.name)).map(e=>({name:e.name,path:path.join(dir,e.name)})).sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'})).slice(0,1000);
   const parent=path.dirname(dir);return {path:dir,parent:parent===dir?null:parent,isGit:await exists(path.join(dir,'.git')),project:store.projects.find(p=>samePath(p.path,dir))?.id,dirs};
  }
- return {sent,browse,discardDraft,worktreeStatus,finishWorktree,ensureProject,refreshBranch,refreshBranches,createSession,markOverlaps,get branchRun(){return branchRun;}};
+ return {sent,browse,discardDraft,worktreeStatus,finishWorktree,deleteWorktree,creatingWorktrees,ensureProject,refreshBranch,refreshBranches,createSession,markOverlaps,get branchRun(){return branchRun;}};
 }

@@ -75,7 +75,8 @@ export const currentBranch=async dir=>{
 };
 // Checking out a whole repo can outlast git()'s 15 s on Windows: the same 746-file checkout measured 1-20 s from run to run.
 // A timeout kills only the git.exe wrapper, so git finished the worktree anyway while the session reported it as skipped.
-const WORKTREE_ADD_TIMEOUT=10*60000;
+// Deleting one (worktree remove) can take as long.
+const WORKTREE_TIMEOUT=10*60000;
 // Errors are user-facing sentences: why this folder can't get a worktree, or git's own error.
 export async function addWorktree(root,wt,b){
  try{await gitRun(root,['rev-parse','--is-inside-work-tree'],{timeout:15000});}
@@ -83,22 +84,30 @@ export async function addWorktree(root,wt,b){
  // Inside a work tree, HEAD fails to resolve only while the current branch is unborn.
  try{await gitRun(root,['rev-parse','--verify','--quiet','HEAD^{commit}'],{timeout:15000});}catch{throw error('the repository has no commits yet, and a worktree needs at least one.');}
  await fs.mkdir(path.dirname(wt),{recursive:true});
- try{await gitRun(root,['worktree','add','-q','-b',b,wt,'HEAD'],{timeout:WORKTREE_ADD_TIMEOUT});}
+ try{await gitRun(root,['worktree','add','-q','-b',b,wt,'HEAD'],{timeout:WORKTREE_TIMEOUT});}
  catch(e){
   // Drop whatever got created (folder, git's record, branch) so a failed attempt leaves nothing behind.
   await removeWorktree({cwd:wt,branch:b},root).catch(()=>{});
-  throw error(e.status===504?`git worktree add did not finish within ${WORKTREE_ADD_TIMEOUT/60000} minutes.`:`git worktree add failed: ${e.message.replace(/\.?$/,'.')}`);
+  throw error(e.status===504?`git worktree add did not finish within ${WORKTREE_TIMEOUT/60000} minutes.`:`git worktree add failed: ${e.message.replace(/\.?$/,'.')}`);
  }
 }
 // Removes an isolated session's worktree folder and its omp-web/ branch; false when Windows still holds the folder.
 export async function removeWorktree(s,root){
+ if(!await removeWorktreeFolder(s.cwd,root))return false;
+ await git(root,['branch','-D',s.branch]).catch(()=>{});return true;
+}
+// Removes a worktree folder of the repository at root (git's record too), leaving every branch; false when Windows still holds it.
+// A folder with a Rust target/ or node_modules can hold 100k+ files, which takes git far longer than git()'s 15 s to delete.
+export async function removeWorktreeFolder(dir,root){
  for(let i=0;i<20;i++){
-  try{await git(root,['worktree','remove','--force',s.cwd]);break;}
+  try{await gitRun(root,['worktree','remove','--force',dir],{timeout:WORKTREE_TIMEOUT});return true;}
   // On Windows `remove` can drop git's record and the files yet fail on the empty folder a dying process still holds;
   // retries then say "not a working tree". Once git no longer lists it, only the leftover folder remains.
-  catch{if(!await worktreeListed(root,s.cwd)){await git(root,['worktree','prune']).catch(()=>{});await fs.rm(s.cwd,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});break;}if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
+  catch(e){
+   if(e.status===504)throw error(`git worktree remove did not finish within ${WORKTREE_TIMEOUT/60000} minutes.`,504);
+   if(!await worktreeListed(root,dir)){await git(root,['worktree','prune']).catch(()=>{});await fs.rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});return true;}if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
  }
- await git(root,['branch','-D',s.branch]).catch(()=>{});return true;
+ return false;
 }
 // Changes › Working tree: the real `git diff` of the session's folder against the commit it started from (or HEAD),
 // plus untracked files, in OMP's diff format with absolute paths.

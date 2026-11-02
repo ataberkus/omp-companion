@@ -40,7 +40,7 @@ async function setup(t) {
     const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/${id}/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     return [res.status, await res.json()];
   };
-  return { root, wt, start, command, app: () => app };
+  return { root, wt, data, start, command, app: () => app };
 }
 
 test('Working tree changes: git diff since the session started plus untracked files, in the line-numbered diff format', async t => {
@@ -218,4 +218,111 @@ test('Push to main: merge with commit first commits the worktree\'s uncommitted 
   assert.equal(await readFile(join(root, 'feature.txt'), 'utf8'), 'feature\n');
   assert.equal(await readFile(join(root, 'a.txt'), 'utf8'), 'edited\n');
   assert.equal(await git(root, 'branch', '--show-current'), 'main');
+});
+
+// Tools › Disk space: /api/storage scans and cleanups run in the background; this starts one and waits until it is done.
+const storage = async (app, path = '', body) => {
+  const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/storage${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  return [res.status, await res.json()];
+};
+async function storageRun(app, path, body = {}) {
+  const [code, r] = await storage(app, path, body);
+  assert.equal(code, 202, r.error);
+  let v = r;
+  while (v.job) { await new Promise(res => setTimeout(res, 20)); v = (await storage(app))[1]; }
+  assert.equal(v.error, '');
+  return v;
+}
+
+test('Disk space: the scan sizes each worktree, ignored files included, with its git state; cleaning keeps the worktree', async t => {
+  const { root, wt, app } = await setup(t);
+  await writeFile(join(wt, 'ignored.log'), 'x'.repeat(5000));
+  await writeFile(join(wt, 'notes.txt'), 'untracked\n');
+  const { worktrees, orphans, scannedAt } = await storageRun(app(), '/scan');
+  assert.ok(scannedAt);
+  assert.deepEqual(worktrees.map(r => r.id), ['w'], 'only isolated omp-web/ sessions');
+  const [r] = worktrees;
+  assert.equal(r.tracked, 14 + 4 + 12, 'a.txt, gone.txt, .gitignore');
+  assert.ok(r.bytes >= r.tracked + 5000 + 10, `${r.bytes} counts ignored.log and notes.txt`);
+  assert.deepEqual([r.exists, r.base, r.branch, r.ahead, r.dirty, r.archived, r.hidden, r.status, r.safe], [true, 'main', 'omp-web/abcd1234', 0, 1, false, false, 'review', false]);
+  assert.deepEqual(orphans, []);
+
+  // Cleaning deletes only what .gitignore matches.
+  const cleaned = await storageRun(app(), '/clean', { sessions: ['w'] });
+  assert.equal(cleaned.results[0].ok, true);
+  assert.ok(cleaned.results[0].freed >= 5000);
+  assert.equal(await exists(join(wt, 'ignored.log')), false);
+  assert.equal(await readFile(join(wt, 'notes.txt'), 'utf8'), 'untracked\n');
+  assert.notEqual(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '', 'the branch stays');
+  assert.ok(cleaned.worktrees[0].bytes < r.bytes - 4000);
+});
+
+test('Disk space: a clean archived worktree is removed; dirty, ahead and running ones are refused unless confirmed', async t => {
+  const { root, wt, app } = await setup(t);
+  const s = app().store.sessions.find(x => x.id === 'w');
+  app().store.archived.push('s:w');
+  assert.equal((await storageRun(app(), '/scan')).worktrees[0].safe, true);
+
+  // Uncommitted work: refused without confirm, the folder stays.
+  await writeFile(join(wt, 'feature.txt'), 'feature\n');
+  let v = await storageRun(app(), '/remove', { sessions: ['w'] });
+  assert.equal(v.results[0].ok, false); assert.match(v.results[0].error, /1 uncommitted change/);
+  assert.ok(await exists(wt));
+
+  // Commits main lacks: refused too (removal deletes the branch).
+  await git(wt, 'add', '.'); await git(wt, 'commit', '-m', 'Add feature');
+  v = await storageRun(app(), '/remove', { sessions: ['w'] });
+  assert.match(v.results[0].error, /1 commit not in main/);
+  assert.notEqual(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
+
+  // A working session is refused even when confirmed.
+  s.status = 'running';
+  v = await storageRun(app(), '/remove', { sessions: ['w'], confirm: true });
+  assert.match(v.results[0].error, /Wait for OMP to finish/);
+  assert.ok(await exists(wt));
+  s.status = 'review';
+  // Sessions not in their own worktree are never touched.
+  v = await storageRun(app(), '/remove', { sessions: ['plain'], confirm: true });
+  assert.equal(v.results[0].ok, false);
+
+  // Merged back: nothing is lost, so it goes without confirm.
+  await git(root, 'merge', '--no-edit', 'omp-web/abcd1234');
+  v = await storageRun(app(), '/remove', { sessions: ['w'] });
+  assert.equal(v.results[0].ok, true, v.results[0].error);
+  assert.equal(await exists(wt), false);
+  assert.equal(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
+  assert.ok(s.worktreeRemoved);
+  assert.deepEqual([s.hidden, s.status], [true, 'done']);
+  assert.deepEqual((await storageRun(app(), '/scan')).worktrees, []);
+});
+
+test('Disk space: folders no session uses are listed as orphans and removed with git\'s record pruned; their branch stays', async t => {
+  const { root, wt, data, app } = await setup(t);
+  const orphan = join(data, 'worktrees', 'gone-session'), stray = join(data, 'worktrees', 'stray');
+  await git(root, 'worktree', 'add', '-b', 'omp-web/gone1234', orphan);
+  await mkdir(stray); await writeFile(join(stray, 'leftover.bin'), 'y'.repeat(2000));
+  // A session whose worktree was removed while Windows held its folder.
+  app().store.sessions.find(x => x.id === 'w').worktreeRemoved = new Date().toISOString();
+
+  const { worktrees, orphans } = await storageRun(app(), '/scan');
+  assert.deepEqual(worktrees, []);
+  const by = Object.fromEntries(orphans.map(o => [o.name, o]));
+  assert.deepEqual(Object.keys(by).sort(), ['gone-session', 'stray', 'wt']);
+  assert.deepEqual([by['gone-session'].kind, by['gone-session'].branch, by['gone-session'].dirty, by['gone-session'].root], ['unknown', 'omp-web/gone1234', 0, root]);
+  assert.deepEqual([by.wt.kind, by.wt.sessionId], ['removed', 'w']);
+  assert.ok(by.stray.bytes >= 2000);
+
+  // Only folders the scan can list are accepted.
+  assert.equal((await storage(app(), '/remove', { orphans: [join(data, 'worktrees', '..')] }))[0], 400);
+  assert.equal((await storage(app(), '/remove', { orphans: [root] }))[0], 400);
+
+  await writeFile(join(orphan, 'wip.txt'), 'wip\n');
+  let v = await storageRun(app(), '/remove', { orphans: [orphan] });
+  assert.match(v.results[0].error, /uncommitted change/);
+  v = await storageRun(app(), '/remove', { orphans: orphans.map(o => o.dir), confirm: true });
+  assert.deepEqual(v.results.map(r => r.ok), [true, true, true], JSON.stringify(v.results));
+  for (const d of [orphan, stray, wt]) assert.equal(await exists(d), false, d);
+  assert.doesNotMatch(await git(root, 'worktree', 'list', '--porcelain'), /gone-session|[\\/]wt\b/);
+  assert.notEqual(await git(root, 'branch', '--list', 'omp-web/gone1234'), '', 'the branch keeps its commits');
+  assert.deepEqual(v.orphans, []);
 });
