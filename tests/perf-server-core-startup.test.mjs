@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
+import { openStore } from '../companion/store.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 const at = new Date(0).toISOString();
@@ -83,4 +84,25 @@ test('a start whose store loads unchanged leaves workspace.json alone; one that 
   await app.close();
   assert.notEqual(await readFile(file, 'utf8'), text);
   assert.equal(JSON.parse(await readFile(file, 'utf8')).sessions[0].title, 'renamed');
+});
+
+// Base wrote workspace.json only when its JSON changed; with the digests in it, every save that changed only a transcript (a
+// !command's result, a notice, a cancelled steer) also rewrote and flushed it. Saves of everything record them instead.
+test('a save that changes only a transcript leaves workspace.json alone; the next full save records its digest', async t => {
+  const dir = await dataDir(t, [session('a', 'paused'), session('b', 'paused')], { a: '[]', b: '[]' });
+  const file = join(dir, 'workspace.json'), id = async () => (await stat(file)).ino;
+  let st = await openStore({ dataDir: dir });
+  await st.persist();
+  const before = await id(), a = st.store.sessions[0];
+  a.messages.push({ id: 'n1', role: 'system', text: 'Extension failed', at });
+  await st.persist(a);
+  assert.equal(await id(), before, 'not rewritten for a transcript-only change');
+  const bytes = await readFile(join(dir, 'transcripts', 'a.json'));
+  assert.equal(JSON.parse(bytes)[0].id, 'n1');
+  // A start after a crash here parses a.json (its digest no longer matches) and loads the change.
+  assert.deepEqual((await openStore({ dataDir: dir })).store.sessions[0].messages.map(m => m.id), ['n1']);
+  await st.persist();
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).transcriptDigests.a, sha1(bytes));
+  st = await openStore({ dataDir: dir });
+  assert.deepEqual(st.store.sessions[0].messages.map(m => m.id), ['n1']);
 });

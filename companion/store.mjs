@@ -91,15 +91,17 @@ export async function openStore(ctx){
  // Transcripts are written before workspace.json lists their session, and deleted only once it no longer does.
  // A failed save's scope joins the next one. workspace.json is written only when its JSON changed, starting from the file
  // as loaded: the startup save of a store that loads unchanged (a clean quit) rewrote and flushed the same bytes.
- let lastSaved=stateText,nextSave,nextScope;
+ let lastSaved=stateText,lastDigests,nextSave,nextScope;
  const persist=scope=>{nextScope=widen(nextScope,scope);if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{
   const scoped=nextScope;nextSave=nextScope=undefined;
   try{
    const sessions=new Set(store.sessions),ids=new Set(store.sessions.map(s=>s.id)),changed=[];
    for(const s of sessions)if(!unread(s)&&(scoped===true||scoped.has(s)||!savedTranscripts.has(s.id))){const text=JSON.stringify(s.messages||[],omit),sum=textDigest(text);if(sum!==savedTranscripts.get(s.id))changed.push([s.id,text,sum]);}
-   // Each transcript's digest as it is on disk once this save is done, for the next startup's check. A write that fails or
-   // races another companion only makes the file differ from it, and that file is parsed.
-   const due=new Map(changed.map(([id,,sum])=>[id,sum])),transcriptDigests={};for(const id of ids){const d=due.get(id)??savedTranscripts.get(id);if(d)transcriptDigests[id]=d;}
+   // Each transcript's digest as it is on disk once this save is done, for the next startup's check. Recorded by saves of
+   // everything (startup, quit, pause); the others keep the digests last written, so one that changes only a transcript
+   // (a !command's result, a notice) does not also rewrite workspace.json. A digest that no longer matches its file (a
+   // crash before the next full save, a failed write, another companion) only makes that file be parsed.
+   let transcriptDigests=lastDigests;if(scoped===true||!transcriptDigests){const due=new Map(changed.map(([id,,sum])=>[id,sum]));transcriptDigests={};for(const id of ids){const d=due.get(id)??savedTranscripts.get(id);if(d)transcriptDigests[id]=d;}}
    const snapshot=JSON.stringify({...store,transcriptDigests},function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
    const gone=[...savedTranscripts.keys()].filter(id=>!ids.has(id));
    if(changed.length)await fs.mkdir(transcriptDir,{recursive:true,mode:0o700});
@@ -107,7 +109,7 @@ export async function openStore(ctx){
    // before a failure is reported, so no write of this save overlaps the next one's.
    const settled=async writes=>{const failed=(await Promise.allSettled(writes)).find(r=>r.status==='rejected');if(failed)throw failed.reason;};
    const writeTranscripts=async()=>{for(let i=0;i<changed.length;i+=8)await settled(changed.slice(i,i+8).map(async([id,text,sum])=>{await writeAtomic(transcriptFile(id),text);savedTranscripts.set(id,sum);}));};
-   const writeIndex=async()=>{if(snapshot!==lastSaved){await writeAtomic(stateFile,snapshot);lastSaved=snapshot;}};
+   const writeIndex=async()=>{if(snapshot!==lastSaved){await writeAtomic(stateFile,snapshot);lastSaved=snapshot;}lastDigests=transcriptDigests;};
    // A transcript reaches disk before workspace.json first lists its session; otherwise both are written at once.
    if(changed.some(([id])=>!savedTranscripts.has(id))){await writeTranscripts();await writeIndex();}else await settled([writeTranscripts(),writeIndex()]);
    for(const id of gone){await fs.rm(transcriptFile(id),{force:true});savedTranscripts.delete(id);}
