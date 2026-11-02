@@ -2,6 +2,7 @@
 // activity log and attention hooks.
 import { randomUUID } from 'node:crypto';
 import { now } from './util.mjs';
+import { capMessages } from './transcript.mjs';
 export function createMessages(ctx){
  const {options,store,scheduleSave}=ctx;
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
@@ -12,7 +13,7 @@ export function createMessages(ctx){
 // mid-thought doesn't split the live activity group, and its echo moves it to where OMP actually read it.
 const unreadSteer=m=>m.role==='user'&&(m.steer==='pending'||m.steer==='received');
 const place=(s,m)=>{let i=s.messages.length;while(i>0&&unreadSteer(s.messages[i-1]))i--;s.messages.splice(i,0,m);};
-const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else{const m={id,role,text:value.slice(-100000),at:now()};if(role==='user')s.messages.push(m);else place(s,m);}s.messages=s.messages.slice(-600);return s.messages.find(m=>m.id===id);};
+const append=(s,role,value,id=randomUUID())=>{if(!value)return;const existing=s.messages.find(m=>m.id===id);if(existing)existing.text=value.slice(-100000);else{const m={id,role,text:value.slice(-100000),at:now()};if(role==='user')s.messages.push(m);else place(s,m);}s.messages=capMessages(s,s.messages);return s.messages.find(m=>m.id===id);};
  // OMP forgets steers it never read once the turn ends; flag them so the user can resend.
  function dropSteers(s){for(const m of s.messages)if(m.steer==='pending')m.steer='dropped';}
  // Info toasts in the dashboard; warnings and errors also stay in the chat.

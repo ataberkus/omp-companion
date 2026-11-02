@@ -2,10 +2,23 @@
 // Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something)
 //   | {"event":"screen","address"} (a device started viewing and controlling this PC; address null when it stopped).
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
+//   {"cmd":"quit","resume":true} (an app update) also leaves the update note below before replying, so the new version
+//   resumes the sessions that were working; a plain quit does not.
+import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { busySessions, createCompanion, portBusy, startupUpdate, tailscaleSelf } from '../companion/server.mjs';
-import { phoneLinks, pickTailnetHost } from './links.mjs';
+import { adoptLoginShellEnv } from './shell-env.mjs';
+
+// A macOS app opened from Finder or the Dock gets launchd's bare environment: take the login shell's (PATH, API keys,
+// OMP_* settings) first. The companion's modules are imported only afterwards because they read the environment as they load.
+const shellEnv = await adoptLoginShellEnv();
+// stdout carries the protocol, so this goes to stderr (the Tauri shell keeps its tail for crash reports).
+if (shellEnv.error) console.error(`Could not read your login shell's environment (${shellEnv.error}); added to PATH: ${shellEnv.added.join(', ') || 'nothing'}.`);
+const { busySessions, createCompanion, portBusy, startupUpdate, tailscaleSelf } = await import('../companion/server.mjs');
+const { restartHandoff } = await import('../companion/system.mjs');
+const { defaultDataDir } = await import('../companion/update.mjs');
+const { phoneLinks, pickTailnetHost } = await import('./links.mjs');
 
 const port = Number(process.env.OMP_WEB_PORT || 4545);
 const alreadyRunning = `The companion is already running on port ${port}, probably node companion/server.mjs or another OMP Control Room. Close it and try again.`;
@@ -104,8 +117,30 @@ function closeTailnet() {
   return tailnetStep(() => { clearTimeout(tailnetRetry); return stopTailnet(); });
 }
 
-// companion.close() closes every listener, the tailnet one included.
+// companion.close() closes every listener, the tailnet one included, and resolves with the IDs of the sessions it paused.
 const shutdown = () => { clearTimeout(tailnetRetry); return (closing ??= companion ? companion.close() : Promise.resolve()); };
+
+// The update note: an app update (the tray's Install update, or a newer installer asking the app to quit) writes
+// {at, resume} here, and the next host resumes those sessions. Tray Quit, sign-out and crash recovery send a plain quit and
+// leave none, so their sessions come back paused. Its own file: restart.json belongs to start.bat's companion, which may
+// share the data dir, and the two never read each other's note. No token: the app's token changes at every launch.
+const updateNote = path.join(defaultDataDir(), 'update-resume.json');
+// Long enough for an installer that replaces node_modules; a note left by an install that failed goes stale after it.
+const UPDATE_NOTE_MAX_AGE = 10 * 60 * 1000;
+
+async function writeUpdateNote(resume) {
+  if (!resume?.length) return;
+  await fs.mkdir(path.dirname(updateNote), { recursive: true, mode: 0o700 });
+  await fs.writeFile(updateNote, JSON.stringify({ at: Date.now(), resume }), { mode: 0o600 });
+}
+
+// Read once and deleted at once, so a later launch or a crash recovery resumes nothing. Stale or malformed: nothing.
+async function takeUpdateNote() {
+  const text = await fs.readFile(updateNote, 'utf8').catch(() => '');
+  if (!text) return [];
+  await fs.rm(updateNote, { force: true }).catch(e => console.error(`Could not remove the update note: ${e.message}`));
+  return restartHandoff(text, Date.now(), UPDATE_NOTE_MAX_AGE)?.resume ?? [];
+}
 
 const commands = {
   busy: () => ({ busy: busySessions(companion.store.sessions) }),
@@ -120,7 +155,11 @@ async function handle(line) {
   if (!msg || typeof msg !== 'object') return;
   const { id, cmd } = msg;
   if (cmd === 'quit') {
-    try { await shutdown(); } finally { send({ id, ok: true }, () => process.exit(0)); }
+    try {
+      const paused = await shutdown();
+      // Written before the reply: the shell waits for it, then the installer replaces the app's files.
+      if (msg.resume === true) await writeUpdateNote(paused).catch(e => console.error(`Could not save the sessions to resume after the update: ${e.message}`));
+    } finally { send({ id, ok: true }, () => process.exit(0)); }
     return;
   }
   try {
@@ -144,11 +183,13 @@ async function main() {
   listen();
   // Before createCompanion: it pauses running sessions and saves workspace.json, which would clobber a live companion.
   if (await portBusy(port)) return fatal(alreadyRunning);
-  // The shell gives up on a host that is not ready within 60 s; an update cut short starts with the installed OMP.
-  // stdout carries the protocol, so update progress goes to stderr.
-  await startupUpdate({ timeout: 45000, log: m => console.error(m) });
+  // Taken before the OMP update below, which can use up to 45 s of the note's freshness.
+  const resume = await takeUpdateNote();
+  // The shell gives up on a host that is not ready within 60 s, reading the login shell included; an update cut short
+  // starts with the installed OMP. stdout carries the protocol, so update progress goes to stderr.
+  await startupUpdate({ timeout: 45000 - (shellEnv.ms || 0), log: m => console.error(m) });
   // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
-  // Attention events become Windows notifications in the shell; it skips them while the main window has focus.
+  // Attention events become native notifications in the shell; it skips them while the main window has focus.
   const verbs = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
   const onAttention = a => send({ event: 'attention', title: `${a.title} ${verbs[a.kind] || 'needs you'}`.slice(0, 200), body: a.detail || 'Open OMP Control Room to continue.' });
   // Screen sharing starts off at every launch, like network access; only the tray turns it on (OMP_WEB_SCREEN doesn't apply here).
@@ -157,7 +198,7 @@ async function main() {
   // environment at once, so OMP's tools and CLI runs never inherit it.
   const token = process.env.OMP_WEB_DESKTOP_TOKEN;
   delete process.env.OMP_WEB_DESKTOP_TOKEN;
-  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}) }); }
+  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}), ...(resume.length ? { resume } : {}) }); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);

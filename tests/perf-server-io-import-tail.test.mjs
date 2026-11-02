@@ -62,3 +62,24 @@ test('a short tail first gives the messages and images the whole 12 MB tail give
     }
   }
 });
+
+// A resume or a session switch asks whether a prompt was cut (info.promptTrimmed). The prompt of a long autonomous run can
+// sit far above the shorter tail, so those callers get the whole 12 MB parsed and the same answer as before.
+test('importMessages with info: a prompt above the shorter tail still counts as trimmed', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-import-info-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 's.jsonl'), at = i => new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString();
+  const lines = [JSON.stringify({ type: 'session', id: 's', cwd: '/w', timestamp: at(0) }), JSON.stringify({ type: 'message', id: 'u1', timestamp: at(1), message: { role: 'user', content: 'Run the whole migration on your own' } })];
+  // Padded above the shorter tail (limit × 8 KB), then more replies than limit, none of them the user's.
+  for (let i = 0; i < 40; i++) lines.push(JSON.stringify({ type: 'message', id: 'p' + i, timestamp: at(2 + i), message: { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(20000) }] } }));
+  for (let i = 0; i < 60; i++) lines.push(JSON.stringify({ type: 'message', id: 'a' + i, timestamp: at(100 + i), message: { role: 'assistant', content: [{ type: 'text', text: 'step ' + i }] } }));
+  await writeFile(file, lines.join('\n') + '\n');
+  const info = {}, old = {}, frames = [];
+  for (const line of (await readTail(file, 12 * 1024 * 1024)).split('\n')) { try { frames.push(JSON.parse(line)); } catch {} }
+  const want = entryMessages(frames, 50, undefined, old);
+  assert.equal(old.promptTrimmed, true);
+  assert.deepEqual(await importMessages(file, 50, undefined, info), want);
+  assert.equal(info.promptTrimmed, true);
+  // Without info (previews, transcripts) the shorter tail is enough and gives the same messages.
+  assert.deepEqual(await importMessages(file, 50), want);
+});

@@ -1009,6 +1009,9 @@
     const p = ws === false || !cwd ? null : projectAt(cwd), name = p?.name || (ws === false || !cwd ? '' : base(cwd));
     return `<div class="meta">${name ? `<span class="ws-chip" style="--pc:${esc(p?.color || pathColor(cwd))}" title="${esc('Workspace ' + name)}">${esc(name)}</span>` : ''}<button type="button" class="btn-reset path" style="white-space:nowrap" data-copy-text="${esc(cwd)}" title="Copy ${esc(cwd)}" aria-label="Copy path ${esc(cwd)}">${esc(midPath(cwd))}</button>${extra}</div>`;
   }
+  // The session has had a prompt of the user's: one in its transcript, or one the companion's 600-message cap trimmed out
+  // of it (promptTrimmed) after a long autonomous run. Fresh sessions (nothing sent, a /btw only) have neither.
+  const hasPrompt = s => !!s.promptTrimmed || !!s.messages?.some(m => m.role === 'user');
   function renderTopbarSession(s) {
     const p = projectOf(s);
     const extra = [
@@ -1024,7 +1027,7 @@
     ].join('');
     const btn = [changesButton(s.messages || [], 's:' + s.id), sideButton(), `<button class="btn sm ghost" data-act="usage" title="Live provider quota for the selected model" aria-label="Usage" aria-haspopup="dialog">◔ <span class="lbl">Usage</span></button>`];
     if (s.status === 'running' || s.status === 'queued') btn.push(`<button class="btn sm danger" data-act="abort" aria-label="Stop">■ <span class="lbl">Stop</span></button>`);
-    if (['review', 'paused', 'error'].includes(s.status) && s.messages?.some(m => m.role === 'user')) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
+    if (['review', 'paused', 'error'].includes(s.status) && hasPrompt(s)) btn.push(`<button class="btn sm" data-act="complete" aria-label="Mark done">✓ <span class="lbl">Mark done</span></button>`);
     const idle = s.status !== 'running' && s.status !== 'queued';
     const pref = (key, on, label, yes = true, no = false) => `<button data-pref="${key}" data-value="${esc(JSON.stringify(on ? no : yes))}" aria-pressed="${!!on}"><span class="check" aria-hidden="true">${on ? '✓' : ''}</span>${esc(label)}</button>`;
     const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
@@ -1045,7 +1048,7 @@
           <button data-act="cycleThinking">Next thinking level</button>
           ${idle ? `<button data-act="launch">Launch options…${launchCount(s.launch) ? ` <small>${launchCount(s.launch)} set</small>` : ''}</button>` : ''}
           <button data-act="rename">Rename session…</button>
-          ${idle && s.messages?.some(m => m.role === 'user') ? '<button data-act="editLast">Edit last message…</button><button data-act="regenerate">Regenerate last reply</button>' : ''}
+          ${idle && hasPrompt(s) ? '<button data-act="editLast">Edit last message…</button><button data-act="regenerate">Regenerate last reply</button>' : ''}
           ${idle ? '<button data-act="branch">Branch from an earlier message…</button><button data-act="handoff">Hand off to a fresh session…</button><button data-act="newSession">Start a fresh OMP session (/new)…</button><button data-act="switchSession">Switch to another saved session…</button>' : ''}
           <button data-act="export">Export as HTML</button>
           <button data-act="stats">Session stats</button>
@@ -2745,7 +2748,7 @@
         ${has && !command && !busy ? `<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}">■ Stop &amp; send</button>` : ''}
         <button class="btn danger" data-act="abort" title="Stop the current turn" aria-label="Stop the current turn">■</button>`;
     } else {
-      const fresh = s.messages ? !s.messages.some(m => m.role === 'user') : !s.prompt && !s.workStartedAt;
+      const fresh = s.messages ? !hasPrompt(s) : !s.prompt && !s.workStartedAt;
       placeholder = fresh ? 'What should OMP do?' : s.status === 'done' ? 'Send a message to reopen this session…' : 'Reply to continue…';
       hintText = 'Enter to send · Shift+Enter new line · / commands · !cmd shell';
       btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${sending ? 'Sending…' : 'Send ↵'}</button>`;

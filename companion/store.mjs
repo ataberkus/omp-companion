@@ -8,6 +8,7 @@ import { now, replaceFile } from './util.mjs';
 import { finishWork } from './session-views.mjs';
 import { EDITOR_CHOICES } from './system.mjs';
 import { colors, projectColor } from './workspaces.mjs';
+import { MESSAGE_LIMIT } from './transcript.mjs';
 export async function openStore(ctx){
  const {dataDir}=ctx;
  const stateFile=path.join(dataDir,'workspace.json');
@@ -40,10 +41,14 @@ export async function openStore(ctx){
  // review sessions: running and queued ones load paused (below), and nothing makes a session active again without reading
  // its transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it would trip over leaves no
  // entry and markOverlaps reads the transcript then, as before.
+ // Transcripts trimmed before promptTrimmed existed: a full window (only the cap fills one) without a message of the
+ // user's lost its prompt to the cap, since agent output only follows a prompt. Such sessions get the flag now, from every
+ // transcript parsed here: one that matches its digest was written or parsed by a companion that already sets the flag.
+ const trimmedBefore=(s,list)=>{if(s.promptTrimmed===undefined&&Array.isArray(list)&&list.length>=MESSAGE_LIMIT&&!list.some(m=>m?.role==='user'))s.promptTrimmed=true;};
  const editsAtStart=new WeakMap(),noteEdits=(s,list)=>{try{const out=[];for(const m of list||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path)out.push({path:f.path});editsAtStart.set(s,out);}catch{}};
- for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
+ for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages)){trimmedBefore(s,s.messages);return;}s.messages=[];
   try{const raw=await fs.readFile(transcriptFile(s.id)),sum=textDigest(raw);
-   if(sum!==recorded[s.id]||s.status==='review'){const list=JSON.parse(raw.toString('utf8'));if(s.status==='review')noteEdits(s,list);}
+   if(sum!==recorded[s.id]||s.status==='review'){const list=JSON.parse(raw.toString('utf8'));trimmedBefore(s,list);if(s.status==='review')noteEdits(s,list);}
    savedTranscripts.set(s.id,sum);deferTranscript(s);}
   catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.

@@ -103,14 +103,15 @@ export async function createCompanion(options={}){
  const servers=new Set();
  const serve=()=>{const srv=createServer((req,res)=>onRequest(req,res,srv));srv.on('upgrade',(req,socket,head)=>onUpgrade(req,socket,head,srv));servers.add(srv);return srv;};
  const server=serve();
- // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever.
- const close=async()=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;};
+ // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever. Resolves with the IDs of the
+ // visible sessions it paused (pauseSessions): the desktop app's update quit hands them to the new version to resume.
+ const close=async()=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));const paused=await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;return paused;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
  for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
- // Sessions that were working when the last companion restarted (options.resume, from its restart note) carry on; a
- // rate-limit wait is re-armed above instead. Normal starts, quits and crash recovery pass none, so they stay paused.
+ // Sessions that were working when the last companion restarted or the desktop app updated (options.resume, from the restart
+ // or update note) carry on; a rate-limit wait is re-armed above instead. Normal starts, quits and crash recovery pass none, so they stay paused.
  {const resume=new Set(Array.isArray(options.resume)?options.resume:[]);
   for(const s of store.sessions)if(resume.has(s.id)&&s.status==='paused'&&!s.hidden&&!s.rateLimitResume)void resumeAfterRestart(s).catch(e=>console.error('Automatic resume failed:',e.message));}
 // closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.

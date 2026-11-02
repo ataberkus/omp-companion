@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { now, error, contentText, samePath, clip } from './util.mjs';
 import { toolImages } from './images.mjs';
 import { startWork, finishWork, askQuestion, parseAdvisorStatus, btwView, subagentView, goalView, loopView } from './session-views.mjs';
-import { advisorMessage, tanMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt } from './transcript.mjs';
+import { advisorMessage, tanMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt } from './transcript.mjs';
 import { launchArgs } from './launch.mjs';
 // What a session resumed after a restart is told: its interrupted turn is in OMP's session file, so it carries on from there.
 const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
@@ -175,7 +175,7 @@ export function createRunner(ctx){
   if(f.type==='loop_state'){const v=loopView(f.loop);if(v)s._loop=v;else delete s._loop;}
   // /loop re-sends its prompt as the next user message; loop.mode = reset first started a fresh (empty) OMP session.
   if(f.type==='loop_iteration'&&typeof f.text==='string'){
-   if(f.fresh){s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;delete s._entryCursor;append(s,'system',String(f.note||'').slice(0,2000));const runner=runners.get(s.id);if(runner?.alive)void refresh(s,runner);}
+   if(f.fresh){s.messages=[];delete s.promptTrimmed;s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;delete s._entryCursor;append(s,'system',String(f.note||'').slice(0,2000));const runner=runners.get(s.id);if(runner?.alive)void refresh(s,runner);}
    delete s._streamId;delete s._thinkId;const msg=append(s,'user',f.text);if(msg){s._promptMsg=msg.id;if(typeof f.id==='string')s._promptId=f.id;}
   }
   // A hosted command still working after its run returned (/cleanse, /omfg): the dashboard offers Stop for it.
@@ -223,7 +223,7 @@ export function createRunner(ctx){
    for(const [key,thought] of subagentThoughts)if(thought.parentId===s.id)subagentThoughts.delete(key);
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
-   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!s.messages.some(m=>m.role==='user'))];
+   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!hasPrompt(s))];
    const args=s.native?[...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--session-dir',sessionDir,'--continue',...pick];
    const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!ctx.closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);if(!ctx.closing&&!ctx.pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
    runners.set(s.id,runner);
@@ -260,12 +260,14 @@ export function createRunner(ctx){
   s._backfilled=true;const before=s.messages;
   const r=await read().catch(()=>null),entries=Array.isArray(r?.entries)?r.entries:[],byId=new Map(entries.map(e=>[e?.id,e])),path=new Set();
   for(let id=r?.leafId;id&&!path.has(id);id=byId.get(id)?.parentId)path.add(id);
-  const rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)),400,stashImages);
+  const info={},rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)),400,stashImages,info);
   // A message sent (or any transcript change) while reading wins; the rebuild is dropped and tried again later.
   if(!rebuilt.some(m=>m.entryId))return;
   if(s.messages!==before||['running','queued'].includes(s.status)){s._backfilled=false;return;}
   const t=m=>new Date(m.at).getTime()||0;
-  s.messages=[...rebuilt,...before.filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)).slice(-600);delete s._entryCursor;scheduleSave(s);
+  // The rebuild is the same conversation: a prompt cut from it (or from the old transcript) still counts.
+  if(info.promptTrimmed)s.promptTrimmed=true;
+  s.messages=capMessages(s,[...rebuilt,...before.filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)));delete s._entryCursor;scheduleSave(s);
  }
  // The session file's entries and the leaf OMP resumes from when it loads them: the last entry, unless a model_usage entry
  // names another active leaf (OMP's own rule).
@@ -291,8 +293,11 @@ export function createRunner(ctx){
   const file=(await runner.state().catch(e=>{throw error(`OMP switched sessions but could not report its new session file: ${e.message}`);}))?.sessionFile;
   if(!file)throw error('OMP switched sessions but did not report its new session file.');
   s.sessionFile=file;await refresh(s,runner);
-  // OMP writes a new session's file lazily (after its first reply): none yet is an empty transcript.
-  s.messages=await importMessages(file,400,stashImages).catch(e=>{if(e.code==='ENOENT')return [];throw error(`Could not read OMP's new session file: ${e.message}`);});
+  // OMP writes a new session's file lazily (after its first reply): none yet is an empty transcript. The new
+  // transcript replaces the old one, so whether a prompt was trimmed comes from this import alone.
+  const info={};
+  s.messages=await importMessages(file,400,stashImages,info).catch(e=>{if(e.code==='ENOENT')return [];throw error(`Could not read OMP's new session file: ${e.message}`);});
+  if(info.promptTrimmed)s.promptTrimmed=true;else delete s.promptTrimmed;
   delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
  return {start,lock,refresh,autoApprove,reload,advisorStatus,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart};

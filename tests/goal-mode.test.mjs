@@ -19,9 +19,11 @@ async function fixture(t, support = 'enabled') {
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
   const log = [];
   let release = '';
-  const omp = fakeOmp(() => {
+  const omp = fakeOmp(runner => {
     let goal = structuredClone(restoredGoal), active = false, released = '', question;
-    log.push('launch');
+    // Session runners only: a second after start the companion reads provider accounts through a throwaway
+    // --no-session OMP, which a slow machine reaches while a test is still running.
+    if (!runner.args.includes('--no-session')) log.push('launch');
     const work = function ({ message }) {
       log.push('model:' + message);
       active = true; this.emit({ type: 'agent_start' }); return { agentInvoked: true };

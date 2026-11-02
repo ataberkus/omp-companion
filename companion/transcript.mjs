@@ -17,6 +17,19 @@ export function tanMessage(m,id,at){
 }
 // A collab guest's prompt as OMP stores it on the host (a `collab-prompt` custom message): a user message with its author.
 export const collabPrompt=(m,id,at)=>{if(m?.customType!=='collab-prompt')return null;const text=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');return text||hasImage?{id,role:'user',text:text.slice(-100000)||'Image attached',hasImage,at,from:String(m.details?.from||'Guest').slice(0,80)}:null;};
+// Transcripts keep only their newest messages; a long autonomous run can push the user's prompt out of that window.
+// capMessages returns a new array of the newest `limit` (callers such as backfillEntries detect a transcript change by
+// identity) and records a dropped message of the user's on `into` (promptTrimmed: a session, or an import's info
+// object), so hasPrompt still knows the session was prompted. Persisted on the session: it outlives restarts.
+export const MESSAGE_LIMIT=600;
+const isPrompt=m=>m?.role==='user';
+export function capMessages(into,list,limit=MESSAGE_LIMIT){
+ if(list.length>limit&&list.slice(0,-limit).some(isPrompt))into.promptTrimmed=true;
+ return list.slice(-limit);
+}
+// Whether the session has had a prompt of the user's: one in its transcript, or one trimmed out of it. Fresh sessions
+// (none sent, a /btw only) have neither. Mark done, Edit last / Regenerate and first-launch-only flags follow it.
+export const hasPrompt=s=>!!s.promptTrimmed||!!s.messages?.some(isPrompt);
 // Background jobs (async bash, task subagents) as recorded in a session transcript. Scans append-only files incrementally.
 // The 32 files scanned last are kept (each holds its jobs' task text and output, ~1-3 MB for a task-heavy session); an
 // evicted one is scanned again from the start, which gives the same jobs in the same order.
@@ -100,12 +113,14 @@ export async function lastContext(file){
 // 60-110 ms on a large file), and the rest only when those lines yield fewer and hold no context reset. Exact: a message
 // of the shorter tail is built from its own lines (a tool's result follows its call), and what they cannot see (calls,
 // results and context resets further up) touches only messages that are cut anyway, or cleared by a reset they hold.
-export async function importMessages(file,limit=400,stash){
+// A caller that asks whether a prompt was cut (info.promptTrimmed: a resume or a session switch, once each) gets the whole
+// 12 MB parsed, as before: a prompt further up is out of the shorter tail's sight. Previews and transcripts never ask.
+export async function importMessages(file,limit=400,stash,info){
  const parse=(buf,cut)=>{const frames=[];if(cut)buf=buf.subarray(buf.indexOf(10)+1);for(const line of buf.toString('utf8').split('\n')){try{frames.push(JSON.parse(line));}catch{}}return frames;};
  const fh=await fs.open(file,'r');try{
-  const {size}=await fh.stat(),start=Math.max(0,size-12*1024*1024),at=limit>0?Math.max(start,size-limit*8192):start;
+  const {size}=await fh.stat(),start=Math.max(0,size-12*1024*1024),at=limit>0&&!info?Math.max(start,size-limit*8192):start;
   const tail=Buffer.alloc(size-at);await fh.read(tail,0,tail.length,at);
-  if(at===start)return entryMessages(parse(tail,at>0),limit,stash);
+  if(at===start)return entryMessages(parse(tail,at>0),limit,stash,info);
   // The shorter tail starts after its first newline; the rest of the 12 MB ends there.
   const nl=tail.indexOf(10),end=nl<0?size:at+nl+1,frames=parse(tail.subarray(end-at),false);
   const kept=entryMessages(frames,limit);if(kept.length>=limit||frames.some(f=>f?.type==='reset_boundary'))return stash?entryMessages(frames,limit,stash):kept;
@@ -114,8 +129,9 @@ export async function importMessages(file,limit=400,stash){
  }finally{await fh.close();}
 }
 // OMP session entries (file lines or get_entries) as thread messages; user prompts keep their entry ID for branching.
-// stash stores tool-result images ([{mimeType,bytes}] → [{mimeType,id}]); without it they are left out.
-export function entryMessages(frames,limit=400,stash){
+// stash stores tool-result images ([{mimeType,bytes}] → [{mimeType,id}]); without it they are left out. info.promptTrimmed
+// is set when a prompt of the user's falls outside the newest `limit` messages (capMessages).
+export function entryMessages(frames,limit=400,stash,info={}){
  const out=[];const tools=new Map(),shots=new Map();
  for(const f of frames){
   // OMP's /clear: the model's context starts after the latest boundary, and so does the transcript (as in OMP's TUI).
@@ -131,7 +147,7 @@ export function entryMessages(frames,limit=400,stash){
   else if(m.role==='toolResult'){const msg=tools.get(m.toolCallId);if(msg){msg.tool.result=clip(contentText(m.content),8000);msg.tool.status=m.isError?'error':'done';const files=editFiles(m.details);if(files)msg.tool.files=files;msg.text=toolSummary(msg.tool);if(stash)shots.set(msg,m.content);}}
   else if(m.role==='bashExecution'){const tool=shellRecord(m.command,m);out.push({id:'tool-'+(f.id||randomUUID()),role:'tool',tool,text:toolSummary(tool),at});}
  }
- const kept=out.slice(-limit);
+ const kept=capMessages(info,out,limit);
  // Only messages that are kept get their images decoded and stored.
  for(const msg of kept){const content=shots.get(msg);if(!content)continue;const images=toolImages(content);if(images.length)msg.tool.images=stash(images);}
  return kept;

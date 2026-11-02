@@ -568,3 +568,103 @@ test('server: /api/state?session= sends messages only for that session and answe
   assert.equal(await again.text(), '');
   assert.equal((await get('/state?session=b', { 'If-None-Match': tag })).status, 200, 'another session is a different body');
 });
+
+// A dashboard page talking to a real companion over HTTP, as in the end-to-end test above.
+async function livePage(app, hash) {
+  const forward = async (url, opts) => {
+    const res = await fetch(`http://127.0.0.1:${app.server.address().port}${url}`, { method: opts.method, headers: opts.headers, body: opts.body });
+    if (res.status === 304) return { status: 304 };
+    const text = await res.text();
+    return { status: res.status, body: JSON.parse(text || '{}'), headers: { ETag: res.headers.get('etag') } };
+  };
+  const page = boot({ hash, token: app.token, respond: forward });
+  await until(() => page.loops().length);
+  await flush();
+  return page;
+}
+const markDone = /data-act="complete"/, editLast = /data-act="editLast"/;
+// Waits for a condition with a generous deadline: the full suite runs test files in parallel on a busy machine.
+async function until(ok, ms = 20000) { for (const end = Date.now() + ms; !ok() && Date.now() < end;) await new Promise(r => setTimeout(r, 10)); }
+
+test('a long autonomous run trims its only prompt out of the transcript; Mark done and Edit last stay, and the flag survives a restart', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'omp-trimmed-prompt-'));
+  let app;
+  t.after(async () => { await app?.close(); await rm(dataDir, { recursive: true, force: true }); });
+  // One prompt, then 701 tool and assistant messages (more than the 600 the companion keeps) before the turn settles.
+  const omp = fakeOmp({
+    prompt(c) {
+      setImmediate(() => {
+        for (let i = 0; i < 350; i++) {
+          this.emit({ type: 'tool_execution_start', toolCallId: 't' + i, toolName: 'read', args: { path: 'f' + i } });
+          this.emit({ type: 'tool_execution_end', toolCallId: 't' + i, toolName: 'read', result: { content: [{ type: 'text', text: 'ok' }] } });
+          this.emit({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'step ' + i }], stopReason: 'stop' } });
+        }
+        this.emit({ type: 'prompt_result', id: c.id, agentInvoked: true, status: 'completed', sessionSettled: true });
+        this.emit({ type: 'session_settled' });
+      });
+      return { agentInvoked: true };
+    },
+  });
+  await writeFile(join(dataDir, 'workspace.json'), JSON.stringify({ projects: [], activity: [], archived: [], sessions: [
+    session('s1', [], { launch: { planYolo: true } }),
+    // Never prompted (a /btw only): no Mark done, however its transcript looks.
+    session('s2', [{ id: 'n1', role: 'system', text: 'a note', at: at() }], { status: 'review' }),
+  ] }));
+  app = await createCompanion({ dataDir, omp, ompSessionsDir: join(dataDir, 'omp-sessions') });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const post = async (id, body) => (await fetch(`http://127.0.0.1:${app.server.address().port}/api/sessions/${id}/command`, { method: 'POST', headers: { Authorization: `Bearer ${app.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  await post('s1', { type: 'prompt', message: 'Implement the gaps' });
+  const s = app.store.sessions.find(x => x.id === 's1');
+  await until(() => s.status === 'review');
+  assert.equal(s.status, 'review');
+  assert.equal(s.messages.length, 600);
+  assert.ok(!s.messages.some(m => m.role === 'user'), 'the prompt is out of the kept window');
+  assert.equal(s.promptTrimmed, true);
+  assert.ok(omp.sessions[0].args.includes('--plan-yolo'), 'the first launch gets its first-launch-only flag');
+
+  const page = await livePage(app, '#/s/s1');
+  await until(() => markDone.test(page.els.get('topbar').innerHTML));
+  assert.match(page.els.get('topbar').innerHTML, markDone);
+  assert.match(page.els.get('topbar').innerHTML, editLast, 'edit_last reads OMP’s entries, not the trimmed transcript');
+  const act = { dataset: { act: 'complete' }, closest: () => null };
+  page.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-act]' ? act : null } });
+  await until(() => s.status === 'done');
+  assert.equal(s.status, 'done', 'clicking Mark done completes the session');
+  await page.go('#/s/s2');
+  await until(() => /Chat s2/.test(page.els.get('topbar').innerHTML));
+  assert.doesNotMatch(page.els.get('topbar').innerHTML, markDone, 'a session never prompted has no Mark done');
+  assert.doesNotMatch(page.els.get('topbar').innerHTML, editLast);
+
+  // Restarted: the flag comes back from workspace.json, and the session is no longer on its first launch.
+  await app.close();
+  const omp2 = fakeOmp();
+  app = await createCompanion({ dataDir, omp: omp2, ompSessionsDir: join(dataDir, 'omp-sessions') });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  assert.equal(app.store.sessions.find(x => x.id === 's1').promptTrimmed, true);
+  assert.equal(app.store.sessions.find(x => x.id === 's2').promptTrimmed, undefined);
+  await post('s1', { type: 'todos', phases: [] });
+  assert.ok(omp2.last && !omp2.last.args.includes('--plan-yolo'), 'a relaunch does not force plan mode again');
+});
+
+test('sessions saved before the trimmed-prompt flag existed: a full transcript without a prompt still shows Mark done', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'omp-trimmed-legacy-'));
+  const full = Array.from({ length: 600 }, (_, i) => i % 2 ? reply('a' + i, 'step ' + i, i) : { id: 't' + i, role: 'tool', text: 'Done · read', at: at(i), tool: { name: 'read', args: '{}', status: 'done', result: 'ok' } });
+  await writeFile(join(dataDir, 'workspace.json'), JSON.stringify({ projects: [], activity: [], archived: [], sessions: [
+    session('old', full, { status: 'review' }),
+    session('few', full.slice(0, 20), { status: 'paused' }),
+  ] }));
+  const app = await createCompanion({ dataDir, omp: fakeOmp(), ompSessionsDir: join(dataDir, 'omp-sessions') });
+  t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  assert.equal(app.store.sessions.find(x => x.id === 'old').promptTrimmed, true);
+  assert.equal(app.store.sessions.find(x => x.id === 'few').promptTrimmed, undefined, 'a window the cap never filled lost nothing');
+  const page = await livePage(app, '#/s/old');
+  await until(() => markDone.test(page.els.get('topbar').innerHTML));
+  assert.match(page.els.get('topbar').innerHTML, markDone);
+  await page.go('#/s/few');
+  await until(() => /Chat few/.test(page.els.get('topbar').innerHTML));
+  assert.doesNotMatch(page.els.get('topbar').innerHTML, markDone);
+});

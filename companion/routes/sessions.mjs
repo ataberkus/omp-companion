@@ -85,8 +85,8 @@ export function sessionRoutes(ctx){
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||head.preview.split('\n')[0]||'Resumed session').slice(0,120);
-    const messages=await importMessages(file,400,stashImages).catch(()=>[]);const contextTokens=await lastContext(file).catch(()=>undefined);messages.push({id:randomUUID(),role:'system',text:'Resumed from OMP session history. Avoid prompting it here while the same session is open in a terminal.',at:now()});
-    const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch});s.contextTokens=contextTokens;
+    const imported={},messages=await importMessages(file,400,stashImages,imported).catch(()=>[]);const contextTokens=await lastContext(file).catch(()=>undefined);messages.push({id:randomUUID(),role:'system',text:'Resumed from OMP session history. Avoid prompting it here while the same session is open in a terminal.',at:now()});
+    const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch});s.contextTokens=contextTokens;if(imported.promptTrimmed)s.promptTrimmed=true;
     if(!head.title&&!launch?.noTitle)s.autoTitle=true;
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
     if(!selector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}if(!thinking&&head.thinking)s.thinking=head.thinking;

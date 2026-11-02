@@ -62,7 +62,8 @@ const FAKE_OMP = (dir, { fail = false } = {}) => {
 };
 
 async function boot(t, { config = '', omp = {}, session = {} } = {}) {
-  // realpath expands 8.3 short names (CI's TEMP is C:\Users\RUNNER~1\...) to the long form the companion reports.
+  // The companion keeps folders as fs.realpath gives them: it expands 8.3 short names (CI's TEMP is C:\Users\RUNNER~1\...)
+  // and resolves macOS's temp folder, a symlink (/var/folders/… is /private/var/folders/…).
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'omp-enhance-')));
   const state = { app: null, base: '' };
   t.after(async () => { if (state.app) await state.app.close(); await rm(dir, { recursive: true, force: true }); });
