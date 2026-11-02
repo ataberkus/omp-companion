@@ -286,3 +286,63 @@ test('Working tree and Commits rebuild the page only when a reload brings someth
     assert.equal(loads(), 5, `${mode}: reloaded once shown`);
   }
 });
+
+// ---------- switching back to a session viewed before ----------
+// A companion's transcript sync, per session: an epoch, and a rev per message change. since=<epoch>.<rev> of that
+// session gets the messages changed after rev, with the order; anything else (no since, another epoch) the whole one.
+function txServer(ids) {
+  const tx = Object.fromEntries(ids.map(id => [id, { epoch: 'e-' + id, rev: 1, messages: [{ ...reply(id + '-1', 'first reply of ' + id), rev: 1 }] }]));
+  const strip = ({ rev, ...m }) => m;
+  const server = {
+    tx, sent: [],
+    add(id, text) { const t = tx[id]; t.rev++; t.messages.push({ ...reply(id + '-' + t.rev, text, t.rev), rev: t.rev }); },
+    restart(id) { tx[id].epoch += 'b'; },
+    respond(url) {
+      if (!url.startsWith('/api/state')) return;
+      const { session: view, since = '' } = query(url), t = tx[view], [epoch, rev] = since.split('.');
+      const delta = t && epoch === t.epoch;
+      server.sent.push(view ? (delta ? 'delta' : 'whole') : 'none');
+      const sessions = ids.map(id => session(id, id === view && !delta ? tx[id].messages.map(strip) : undefined));
+      return { body: { ...store(sessions), ...(t ? { tx: delta ? { session: view, epoch: t.epoch, rev: t.rev, order: t.messages.map(m => m.id), changed: t.messages.filter(m => m.rev > +rev).map(strip) } : { session: view, epoch: t.epoch, rev: t.rev } } : {}) } };
+    },
+  };
+  return server;
+}
+test('switching back to a session viewed before asks for its changes only, and shows what a full load shows', async () => {
+  const server = txServer(['s1', 's2']);
+  const app = boot({ respond: url => server.respond(url) });
+  await flush();
+  await app.go('#/s/s2');
+  server.add('s1', 'written while s2 was viewed');
+  await app.go('#/s/s1');
+  assert.equal(query(app.states().at(-1).url).since, 'e-s1.1', 'asked with the rev held from the earlier view');
+  assert.deepEqual(server.sent, ['whole', 'whole', 'delta']);
+  assert.match(app.thread(), /first reply of s1[\s\S]*written while s2 was viewed/);
+  const fresh = boot({ respond: url => server.respond(url) });
+  await flush();
+  assert.equal(app.thread(), fresh.thread(), 'the merged transcript renders exactly like a full load');
+  await app.poll();
+  assert.equal(query(app.states().at(-1).url).since, 'e-s1.2', 'and polls carry on from it');
+});
+
+test('a restarted companion (another epoch) and an evicted transcript are fetched whole; the phone layout keeps one', async () => {
+  const server = txServer(['s1', 's2', 's3']);
+  const app = boot({ respond: url => server.respond(url) });
+  await flush();
+  await app.go('#/s/s2');
+  server.restart('s1'); server.add('s1', 'after the restart');
+  await app.go('#/s/s1');
+  assert.equal(query(app.states().at(-1).url).since, 'e-s1.1');
+  assert.equal(server.sent.at(-1), 'whole', 'another epoch: the whole transcript');
+  assert.match(app.thread(), /after the restart/);
+  await app.poll();
+  assert.equal(query(app.states().at(-1).url).since, 'e-s1b.2');
+  // Desktop: the two sessions viewed before are kept; a phone keeps only the last one.
+  for (const [size, back] of [[{ width: 1360, height: 900 }, 'e-s1.1'], [{ width: 390, height: 844 }, '']]) {
+    const s = txServer(['s1', 's2', 's3']), page = boot({ size, respond: url => s.respond(url) });
+    await flush();
+    await page.go('#/s/s2'); await page.go('#/s/s3'); await page.go('#/s/s1');
+    assert.equal(query(page.states().at(-1).url).since, back, `${size.width} px wide`);
+    assert.match(page.thread(), /first reply of s1/);
+  }
+});

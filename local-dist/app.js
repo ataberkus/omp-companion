@@ -172,6 +172,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
     tx: null, // the viewed transcript as last merged: { session, epoch, rev, messages } (see mergeTx)
+    txPrev: new Map(), // session → its transcript as last merged, for the sessions viewed just before (see mergeTx)
     sx: null, // the session summaries and other store fields as last merged: { epoch, rev, top, order, sessions } (see mergeStore)
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     attachments: [], editQueue: null, queueOpen: null, view: '', lastSig: '', nativeAt: 0,
@@ -254,7 +255,7 @@
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.nativeTag = null; S.online = null; S.stateTag = ''; S.tx = null; S.sx = null; leaveScreen(); }
+    if (!t) { S.store = null; S.native = []; S.nativeTag = null; S.online = null; S.stateTag = ''; S.tx = null; S.txPrev.clear(); S.sx = null; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -4507,7 +4508,8 @@
     const top = x.top || held?.top, order = x.order || held?.order, sessions = top && order?.map(id => byId.get(id));
     if (!sessions || sessions.some(s => !s)) { S.sx = null; return null; }
     S.sx = { epoch: x.epoch, rev: x.rev, top, order, sessions };
-    // Only the viewed session holds its transcript (mergeTx) and /btw answers; a summary kept from an earlier view lets go of them.
+    // Only the viewed session holds its transcript (mergeTx) and /btw answers; a summary kept from an earlier view lets go of
+    // them (the last views' transcripts wait in S.txPrev, apart from the summaries).
     for (const s of sessions) if (s.id !== view && ('messages' in s || '_btw' in s)) { delete s.messages; delete s._btw; }
     const v = view && byId.get(view);
     if (v) { if (st.btw) v._btw = st.btw; else delete v._btw; }
@@ -4518,12 +4520,16 @@
   // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it:
   // tx.messages from a companion that sends the store as changes (summaries are kept across polls), else the session's own.
   // False when the delta doesn't fit what is held: the caller drops the reply and polls the full transcript instead.
+  // The transcripts of the sessions viewed just before (2, 1 in the phone layout) wait in S.txPrev: switching back to one
+  // asks for its changes the same way (refresh), instead of the whole transcript again (~0.5-0.9 MB gzipped at 600 messages).
   function mergeTx(st, view, kept) {
-    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null;
+    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null, held = S.tx?.session === view ? S.tx : S.txPrev.get(view);
+    S.txPrev.delete(view);
+    if (S.tx && S.tx.session !== view) { S.txPrev.set(S.tx.session, S.tx); trim(S.txPrev, innerWidth <= 820 ? 1 : 2); S.tx = null; }
     if (!t || !s || t.session !== view) { S.tx = null; return true; }
     const whole = kept ? t.messages : s.messages;
     if (whole) { s.messages = whole; S.tx = t.epoch ? { session: view, epoch: t.epoch, rev: t.rev, messages: whole } : null; return true; }
-    const base = S.tx?.session === view && S.tx.epoch === t.epoch ? S.tx.messages : null;
+    const base = held?.epoch === t.epoch ? held.messages : null;
     const byId = base && new Map(base.map(m => [m.id, m]));
     if (byId) for (const m of t.changed || []) byId.set(m.id, m);
     const messages = byId && (t.order || base.map(m => m.id)).map(id => byId.get(id));
@@ -4543,7 +4549,7 @@
   // refetch below) waits for the same request.
   let nativeLoad = null;
   async function refresh(poll = false) {
-    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null, online = S.online;
+    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : S.txPrev.get(view), online = S.online;
     let fresh = !poll;
     if (Date.now() - S.nativeAt > 20000) { S.nativeAt = Date.now(); const p = nativeLoad = api('/omp-sessions', undefined, { etag: S.nativeTag ||= { tag: '' } }).catch(() => null).finally(() => { if (nativeLoad === p) nativeLoad = null; }); }
     const nat = nativeLoad;
