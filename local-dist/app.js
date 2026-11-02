@@ -88,7 +88,15 @@
   // thread past the cap, where a full pass evicts every entry before it is reached again. 1200 covers the 600-message
   // transcript plus advisor reviews.
   const mdCache = new Map();
-  const md = (src, breaks = false, depth = 0) => depth ? mdRaw(src, breaks, depth) : memo(mdCache, (breaks ? '1' : '0') + String(src ?? ''), () => mdRaw(src, breaks), 1200);
+  // A streaming message (the tail, the live thought) misses once per poll with a longer text: the entry of the text before
+  // it, a prefix, is dropped, or 1200 such partials (up to 80 KB each) would fill the cache. mdNew: the last keys rendered.
+  const mdNew = [];
+  const md = (src, breaks = false, depth = 0) => {
+    if (depth) return mdRaw(src, breaks, depth);
+    const k = (breaks ? '1' : '0') + String(src ?? '');
+    if (!mdCache.has(k)) { const i = mdNew.findIndex(p => k.startsWith(p)); if (i >= 0) mdCache.delete(mdNew.splice(i, 1)[0]); mdNew.push(k); if (mdNew.length > 4) mdNew.shift(); }
+    return memo(mdCache, k, () => mdRaw(src, breaks), 1200);
+  };
   function mdRaw(src, breaks = false, depth = 0) {
     // Nesting past 20 levels (crafted '- - - …' or '>>>…') renders as plain text instead of overflowing the stack.
     if (depth > 20) return `<p>${inline(String(src ?? '').trim(), breaks)}</p>`;
@@ -1421,7 +1429,12 @@
   // part stale until its messages change. With localStorage omp-debug-parts=1 every hit is rebuilt and a stale one logged.
   // A reused part keeps the times of its first render, so a time-zone change shows on messages as they change.
   let debugParts = false; try { debugParts = localStorage.getItem('omp-debug-parts') === '1'; } catch {}
-  const groupParts = new WeakMap(), rowParts = new WeakMap(), msgParts = new WeakMap();
+  // One set of caches per thread owner, for the last 3 viewed (the shown one and S.txPrev's): keyed by message objects alone,
+  // they kept the markup of every transcript S.subs (30) and S.previews (20) still hold, ~2.5 MB per 300 messages.
+  const partSets = new Map();
+  let groupParts, rowParts, msgParts;
+  const useParts = owner => { const c = partSets.get(owner) || [new WeakMap(), new WeakMap(), new WeakMap()]; partSets.delete(owner); partSets.set(owner, c); trim(partSets, 3); [groupParts, rowParts, msgParts] = c; };
+  useParts('');
   function cachedPart(cache, members, ctx, build) {
     const c = cache.get(members[0]);
     if (c && c.ctx === ctx && c.members.length === members.length && c.members.every((m, i) => m === members[i])) {
@@ -1458,7 +1471,7 @@
   const groupCtx = group => [S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
 
   function renderThread(messages, status, ownerId, opts = {}) {
-    heldDiffMode = diffMode();
+    heldDiffMode = diffMode(); useParts(ownerId);
     try { threadPass(messages, status, ownerId, opts); } finally { heldDiffMode = ''; }
   }
   function threadPass(messages, status, ownerId, opts) {
