@@ -344,6 +344,24 @@ test('a thread render reads the thread width once for its diff layout, not per g
   assert.equal(reads, 1, `${reads} width reads for one render`);
 });
 
+test('home: workspace cards and recent sessions read as before (grouped by folder once, sorted on precomputed keys)', async () => {
+  const projects = [{ id: 'pa', name: 'Alpha', path: '/proj/a', color: 'red' }, { id: 'pb', name: 'Beta', path: 'C:\\Proj\\B', color: 'blue' }, { id: 'pc', name: 'Gamma', path: '/proj/c', color: 'green' }, { id: 'ph', name: 'Hidden', path: '/proj/h', color: 'gray', hidden: true }];
+  const s = (id, cwd, extra) => session(id, [], { cwd, ...extra });
+  const sessions = [s('s1', '/proj/a', { updatedAt: at(10) }), s('s2', '/PROJ/A', { status: 'running', updatedAt: at(20), createdAt: at(5) }), s('s3', 'c:/proj/b', { status: 'review', updatedAt: at(30) }),
+    s('s4', '/elsewhere', { projectId: 'pb', updatedAt: at(5) }), s('s5', '/other', { updatedAt: at(40) }), s('s6', '/proj/c', { updatedAt: 'garbage' }), s('s7', '/proj/c', { updatedAt: at(1) }), s('s8', '/proj/h', { updatedAt: at(50) }),
+    s('s9', '/proj/a', { status: 'error', updatedAt: at(15) }), s('s10', '/proj/c', { updatedAt: at(1) })];
+  const app = boot({ hash: '#/new', respond: stateOf(store(sessions, { projects })) });
+  await flush();
+  const home = app.els.get('home').innerHTML;
+  const cards = [...home.matchAll(/<button type="button" class="ws-card[^"]*" data-go="([^"]*)"[^>]*>.*?<span class="ws-card-stats">(.*?)<\/span><\/button>/g)].map(m => [m[1], m[2].replace(/<[^>]+>/g, '')]);
+  assert.deepEqual(cards, [['/proj/c', '3 sessions'], ['C:\\Proj\\B', '1 waiting for you'], ['/proj/a', '1 working · 1 waiting for you']]);
+  const recent = [...home.matchAll(/<button class="item[^"]*" data-key="s:([^"]*)"/g)].map(m => m[1]);
+  assert.deepEqual(recent, ['s3', 's9', 's2', 's8', 's5'], 'waiting and working first, then by time');
+  // The sidebar lists sessions in items() order within its groups.
+  const side = [...app.els.get('list').innerHTML.matchAll(/data-key="s:([^"]*)"/g)].map(m => m[1]);
+  assert.deepEqual(side, ['s2', 's3', 's9', 's8', 's5', 's1', 's4', 's7', 's10']);
+});
+
 test('omp-debug-parts catches a part whose input is missing from its ctx (here: a message edited in place)', async () => {
   for (const debug of [false, true]) {
     const srv = txServer(thread1()), c = counting('text');

@@ -4402,8 +4402,9 @@
   // Registered workspaces as cards (live branch, what works, what waits for you), most recently used first; folders known
   // only from OMP's history stay chips below.
   function homeWsHtml() {
-    const h = S.home, l = h.listing, all = items();
-    const ws = (S.store?.projects || []).filter(p => !p.hidden).map(p => { const mine = all.filter(it => norm(it.cwd) === norm(p.path)); return { p, mine, at: mine.reduce((a, it) => it.updatedAt > a ? it.updatedAt : a, '') }; }).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 9);
+    const h = S.home, l = h.listing, byCwd = new Map(); // items by folder, in items() order: one pass, not one per workspace
+    for (const it of items()) { const k = norm(it.cwd); (byCwd.get(k) || byCwd.set(k, []).get(k)).push(it); }
+    const ws = (S.store?.projects || []).filter(p => !p.hidden).map(p => { const mine = byCwd.get(norm(p.path)) || []; return { p, mine, at: mine.reduce((a, it) => it.updatedAt > a ? it.updatedAt : a, '') }; }).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 9);
     const cards = ws.map(({ p, mine, at }) => {
       const w = mine.filter(it => it.working && !it.needsReview).length, r = mine.filter(needsYou).length, branch = p.branch && p.branch !== 'workspace' ? p.branch : '';
       const sel = l && norm(l.path) === norm(p.path);
