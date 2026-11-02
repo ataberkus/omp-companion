@@ -43,6 +43,16 @@ export function createRunner(ctx){
    scheduleSave(s);
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist(s);}).finally(checkAutoShutdown);
  }
+ // A streamed thought or reply grows its own message, the last one bar unread steers: looked up from the end, since deltas
+ // are most of OMP's event stream and a 600-message transcript scanned from the front cost three scans per delta. Exact:
+ // the id is a fresh randomUUID, so it appears once. The copy keeps the 600 cap and backfillEntries' identity check.
+ function streamDelta(s,role,key,delta){
+  const id=s[key]??=randomUUID(),list=s.messages;let m;
+  for(let i=list.length-1;i>=0;i--)if(list[i].id===id){m=list[i];break;}
+  const value=(m?.text||'')+delta;
+  if(!m||!value){append(s,role,value,id);return;}
+  m.text=value.slice(-100000);s.messages=list.slice(-600);
+ }
  function event(s,f){
   // /btw side questions stream outside the transcript: kept on the session for the dashboard only (not persisted).
   if(f.type==='btw_record'&&f.record?.id){const r=btwView(f.record);s._btw=[r,...(s._btw||[]).filter(x=>x.id!==r.id)].slice(0,20);return;}
@@ -59,10 +69,10 @@ export function createRunner(ctx){
    if(!f.willRetry)append(s,'system',f.aborted?'Context compaction stopped.':f.skipped?'Context compaction skipped.':f.errorMessage?`Context compaction failed: ${f.errorMessage}`:'Context compacted.');
   }
   if(f.type==='message_update'&&f.assistantMessageEvent?.type==='thinking_delta'){
-   s._thinkId??=randomUUID();const m=s.messages.find(m=>m.id===s._thinkId);append(s,'thinking',(m?.text||'')+f.assistantMessageEvent.delta,s._thinkId);
+   streamDelta(s,'thinking','_thinkId',f.assistantMessageEvent.delta);
   }
   if(f.type==='message_update'&&f.assistantMessageEvent?.type==='text_delta'){
-   s._streamId??=randomUUID();const m=s.messages.find(m=>m.id===s._streamId);append(s,'assistant',(m?.text||'')+f.assistantMessageEvent.delta,s._streamId);
+   streamDelta(s,'assistant','_streamId',f.assistantMessageEvent.delta);
   }
   if(f.type==='message_start'&&f.message?.role==='user'&&f.mirrored){
    // A collab host's own prompt, mirrored into a guest's session: shown as it arrives. Its timestamp binds it to the
