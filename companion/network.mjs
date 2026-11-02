@@ -19,17 +19,21 @@ export async function tailscaleSelf(){
  }
  return null;
 }
+// A lookup that finds nothing while the last good one is under 5 minutes old (tailscaled reconnecting, a timeout) keeps that
+// answer: returns a function that takes each tailscaleSelf() result and gives the answer to use. Shared by the Host/Origin
+// gate below and the desktop app's tailnet listener, so both treat the same blips alike.
+export const TAILSCALE_GRACE=300000;
+export function tailscaleKeeper(graceMs=TAILSCALE_GRACE){let last=null,good=0;return v=>{const t=Date.now();if(v){good=t;last=v;}else if(t-good>=graceMs)last=null;return last;};}
 // Connect probe, not a bind: Windows lets 127.0.0.1:N bind beside another process's 0.0.0.0:N. No answer within timeoutMs counts as busy.
 export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promise(resolve=>{const s=connect(port,host);const done=busy=>{clearTimeout(t);s.destroy();resolve(busy);};const t=setTimeout(()=>done(true),timeoutMs);s.once('connect',()=>done(true));s.once('error',()=>done(false));});}
 export function createOriginCheck(ctx){
  const {options,publicHosts,allowedOrigins}=ctx;
  // This PC's Tailscale name and addresses, looked up at most once a minute; options.tailscale replaces the lookup (tests).
  // A known answer is used at once and refreshed in the background once a minute old: a phone on the MagicDNS name waited
- // for `tailscale status` once a minute. A refresh that finds nothing (tailscaled reconnecting, a timeout) keeps it until
- // the last good lookup is 5 minutes old; caching that null refused such phones for a minute. With no answer known
- // (Tailscale not running), a request waits for the lookup, as before.
- let tsCache=null,tsAt=0,tsGood=0,tsPending;
- const lookup=()=>tsPending??=(options.tailscale||tailscaleSelf)().catch(()=>null).then(v=>{const t=Date.now();if(v)tsGood=t;if(v||t-tsGood>=300000)tsCache=v;tsAt=t;tsPending=undefined;return tsCache;});
+ // for `tailscale status` once a minute. A refresh that finds nothing keeps it for the grace of tailscaleKeeper(); caching
+ // that null refused such phones for a minute. With no answer known (Tailscale not running), a request waits for the lookup, as before.
+ let tsCache=null,tsAt=0,tsPending;const keep=tailscaleKeeper();
+ const lookup=()=>tsPending??=(options.tailscale||tailscaleSelf)().catch(()=>null).then(v=>{tsCache=keep(v);tsAt=Date.now();tsPending=undefined;return tsCache;});
  const tailscale=()=>{if(Date.now()-tsAt<60000)return Promise.resolve(tsCache);if(!tsCache)return lookup();void lookup();return Promise.resolve(tsCache);};
  // Host/Origin gate for API requests and the screen WebSocket (CORS doesn't cover WebSockets, so its Origin check matters most),
  // against the address of the listener `srv` that took the request.

@@ -19,7 +19,7 @@ import { launchOptions, launchArgs } from './launch.mjs';
 import { ENHANCE_OVERLAY, ENHANCE_SYSTEM, ENHANCE_GUARD } from './enhance-prompts.mjs';
 import { createEnhance, enhanceModel, enhanceArgs, enhanceInput, stepLabel, cleanEnhanced } from './enhance.mjs';
 import { createScreen, screenCommands } from './screen.mjs';
-import { createOriginCheck, tailnetAddress, tailscaleSelf, portBusy } from './network.mjs';
+import { createOriginCheck, tailnetAddress, tailscaleKeeper, tailscaleSelf, portBusy } from './network.mjs';
 import { updateOmp, installOmp, defaultDataDir, startupUpdate } from './update.mjs';
 import { createCliJobs } from './cli-tools.mjs';
 import { createWorkspaces } from './workspaces.mjs';
@@ -40,7 +40,7 @@ import { createSpend } from './spend.mjs';
 import { busySessions, createLifecycle } from './lifecycle.mjs';
 import { createStatic } from './routes/static.mjs';
 import { createRouter } from './router.mjs';
-export { addInstallDirs, busySessions, installOmp, portBusy, startupUpdate, tailnetAddress, tailscaleSelf, updateOmp };
+export { addInstallDirs, busySessions, installOmp, portBusy, startupUpdate, tailnetAddress, tailscaleKeeper, tailscaleSelf, updateOmp };
 addInstallDirs();
 // Pure helpers, exported for tests.
 export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,ENHANCE_SYSTEM,ENHANCE_GUARD,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};
@@ -102,12 +102,21 @@ export async function createCompanion(options={}){
  const {store,persist,saveNow,commandProbes,armResume,resumeAfterRestart,discardDraft,restartWhenIdle,cliProcs,stopAllEnhance,refreshTimer,accountTimer,setScreen,dropViewer,onRequest,pauseSessions,onUpgrade}=ctx;
  // serve(): one more listener for this companion (the desktop app's tailnet address), sharing its sessions, token and screen;
  // Host/Origin follow the address each listener is bound to. close() closes every one.
- const servers=new Set();
- const serve=()=>{const srv=createServer((req,res)=>onRequest(req,res,srv));srv.on('upgrade',(req,socket,head)=>onUpgrade(req,socket,head,srv));servers.add(srv);return srv;};
+ // Each listener tracks every socket it accepted, upgraded ones included: closeAllConnections() skips a socket handed to
+ // 'upgrade', so a refused screen WebSocket whose phone went offline (no FIN ever comes) kept server.close() waiting forever.
+ const servers=new Set(),sockets=new WeakMap();
+ const serve=()=>{const srv=createServer((req,res)=>onRequest(req,res,srv)),open=new Set();sockets.set(srv,open);srv.on('connection',s=>{open.add(s);s.once('close',()=>open.delete(s));});srv.on('upgrade',(req,socket,head)=>onUpgrade(req,socket,head,srv));servers.add(srv);return srv;};
  const server=serve();
- // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever. Resolves with the IDs of the
- // visible sessions it paused (pauseSessions): the desktop app's update quit hands them to the new version to resume.
- const close=async()=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));const paused=await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;await ctx.storageRun;return paused;};
+ // closeServer(srv): stops one listener and ends all its connections; resolves once it is closed (at once if it was not listening).
+ // HTTP connections go at once (closeAllConnections). An upgraded one (the screen viewer's close frame may still be on its
+ // way) is ended and destroyed once that is flushed, at the latest after 2 s, the same limit as the screen's own close.
+ // unserve(srv): the same for a listener the desktop host replaces, which also leaves close()'s set.
+ const endSocket=s=>{if(s.destroyed)return;if(s.writableFinished)return void s.destroy();s.once('finish',()=>s.destroy());if(!s.writableEnded)s.end();setTimeout(()=>s.destroy(),2000).unref();};
+ const closeServer=srv=>new Promise(r=>{if(srv.listening)srv.close(()=>r());else r();srv.closeAllConnections();for(const s of sockets.get(srv)||[])endSocket(s);});
+ const unserve=srv=>{servers.delete(srv);return closeServer(srv);};
+ // The screen viewer goes first. Resolves with the IDs of the visible sessions it paused (pauseSessions): the desktop app's
+ // update quit hands them to the new version to resume.
+ const close=async()=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].map(closeServer));const paused=await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;await ctx.storageRun;return paused;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
@@ -116,9 +125,9 @@ export async function createCompanion(options={}){
  // or update note) carry on; a rate-limit wait is re-armed above instead. Normal starts, quits and crash recovery pass none, so they stay paused.
  {const resume=new Set(Array.isArray(options.resume)?options.resume:[]);
   for(const s of store.sessions)if(resume.has(s.id)&&s.status==='paused'&&!s.hidden&&!s.rateLimitResume)void resumeAfterRestart(s).catch(e=>console.error('Automatic resume failed:',e.message));}
-// closeScreen: the desktop host rebinds the server (LAN toggle), which an open screen WebSocket would block; the viewer reconnects if still allowed.
+// closeScreen: the desktop host rebinds a listener (LAN toggle, tailnet), and a device that lost access must not keep watching; the viewer reconnects if still allowed.
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
-await persist();return {server,serve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
+await persist();return {server,serve,closeServer,unserve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
 const mainEntry=process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url);
 // Sessions run OMP's SDK, which needs Bun: started by Node, the companion runs itself under Bun with the same arguments

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { connect } from 'node:net';
 import { request } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -89,4 +90,27 @@ test('an extra listener accepts its own address; the loopback listener keeps ref
   assert.equal((await get(port, '/api/state', auth, '127.0.0.2')).status, 200);
   assert.equal((await get(port, '/api/state', { ...auth, Host: `127.0.0.2:${port}` })).status, 403);
   assert.equal((await get(port, '/api/state', auth)).status, 200);
+});
+
+// closeAllConnections() skips a socket handed to 'upgrade': a refused screen WebSocket whose phone went offline (it never closes
+// its side) kept server.close() waiting, and with it the desktop app's tailnet rebind.
+test('closing an extra listener does not wait for a refused WebSocket whose peer never closes', { skip: process.platform === 'darwin' && 'macOS has no 127.0.0.2' }, async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'omp-remote-auth-'));
+  const app = await createCompanion({ dataDir, password: 'pw-1234', tailscale: async () => null });
+  t.after(async () => { await app.close(); await rm(dataDir, { recursive: true, force: true }); });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const port = app.server.address().port;
+  const extra = app.serve().listen(port, '127.0.0.2');
+  await once(extra, 'listening');
+  const phone = connect({ port, host: '127.0.0.2', allowHalfOpen: true });
+  t.after(() => phone.destroy());
+  phone.on('error', () => {});
+  await once(phone, 'connect');
+  phone.write(`GET /api/screen/ws HTTP/1.1\r\nHost: 127.0.0.2:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`);
+  const [reply] = await once(phone, 'data');
+  assert.match(String(reply), /^HTTP\/1\.1 4\d\d /);
+  const closed = await Promise.race([app.unserve(extra).then(() => true), new Promise(r => setTimeout(r, 1000, false))]);
+  assert.equal(closed, true);
+  assert.equal(extra.listening, false);
 });
