@@ -326,7 +326,11 @@
     else if (prev.st !== st) { if (!busy) prev.at = new Date().toISOString(); prev.st = st; }
     return rank.get(k).at;
   };
-  function items() {
+  // A render pass that lists the sessions more than once (the sidebar, then the home page's recent list and cards) holds
+  // one listing for the pass (heldItems): building it costs 1.6-4.6 ms on a desktop, and nothing in between changes it.
+  let heldItems = null;
+  function items() { return heldItems || listItems(); }
+  function listItems() {
     const panel = panelSessions(), sel = selKey();
     const out = panel.map(s => {
       const p = projectOf(s);
@@ -4657,10 +4661,15 @@
     }
     syncUi();
     checkAttention(); // first: the sidebar marks what checkAttention finds new
-    renderList(); renderAutoShutdown();
-    update();
-    void pullDraft();
-    if (current().kind === 'home') renderHomeRecent();
+    const home = current().kind === 'home';
+    // On the home page update() renders nothing, so the sidebar's listing is still current for the recent list and cards.
+    if (home) heldItems = listItems();
+    try {
+      renderList(); renderAutoShutdown();
+      update();
+      void pullDraft();
+      if (home) renderHomeRecent();
+    } finally { heldItems = null; }
     renderedAt = Date.now(); // only once rendered: a render that throws is retried on the next poll
   }
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
