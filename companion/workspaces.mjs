@@ -31,11 +31,15 @@ export function createWorkspaces(ctx){
   return changed;
  }
  // At most every 15 s, from dashboard polls; never blocks the poll, and saves only when a branch changed.
- // close() awaits the run in flight: a git child still sitting in a project folder holds it open on Windows.
- let branchesAt=0,branchRun=null;
+ // A project whose last lookup has not settled is skipped: on an unreachable share or mount each round added more hung
+ // fs calls until they filled the thread pool, which also serves saves, static files and the gzip of every reply.
+ // close() awaits every lookup in flight: a git child still sitting in a project folder holds it open on Windows.
+ let branchesAt=0,branchRun=null;const branchLookups=new Map();
  function refreshBranches(){
   if(ctx.closing||Date.now()-branchesAt<15000)return;branchesAt=Date.now();
-  branchRun=Promise.all(store.projects.filter(p=>!p.hidden).map(p=>refreshBranch(p).catch(()=>false))).then(r=>{if(r.some(Boolean)&&!ctx.closing)scheduleSave([],true);});
+  const round=Promise.all(store.projects.filter(p=>!p.hidden&&!branchLookups.has(p.id)).map(p=>{const run=refreshBranch(p).catch(()=>false).finally(()=>branchLookups.delete(p.id));branchLookups.set(p.id,run);return run;}))
+   .then(r=>{if(r.some(Boolean)&&!ctx.closing)scheduleSave([],true);});
+  branchRun=Promise.all([round,...branchLookups.values()]);
  }
  async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch,draft=false}){
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
