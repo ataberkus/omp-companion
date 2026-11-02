@@ -27,18 +27,24 @@ export async function openStore(ctx){
  // JSON itself, kept for that comparison, cost as much memory as the transcripts). A workspace.json from before the split
  // still embeds them; those sessions have no entry here, so the first save moves them out.
  const savedTranscripts=new Map(),textDigest=text=>createHash('sha1').update(text).digest('base64');
+ // The same digests as saved with workspace.json (persist), for the startup check below; kept out of the store, which
+ // /api/state sends.
+ const recorded=store.transcriptDigests&&typeof store.transcriptDigests==='object'?store.transcriptDigests:{};delete store.transcriptDigests;
  // Every transcript is read and checked at startup (one that does not parse stops the companion), eight at a time, but kept
  // only once something reads it: 400 sessions' transcripts held at once cost more memory than the rest of the companion
  // (~400 MB parsed for 160 MB of files) and slowed every garbage collection. Until then s.messages reads it from disk on
- // first use (deferTranscript).
- // Review sessions' edit/write tool file records ({path}) are noted on the way: markOverlaps checks them on every poll, and
- // reading s.messages for that read and kept every review transcript. An unread transcript is this file. Only review
- // sessions: running and queued ones load paused (below), and nothing makes a session active again without reading its
- // transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it would trip over leaves no
- // entry and markOverlaps reads the transcript then, as before.
+ // first use (deferTranscript). Parsing them all took most of a start (0.5-1 s for 100+ MB): a file whose bytes match the
+ // digest recorded when it was written is that valid JSON, so only the others are parsed (a changed, truncated or older file).
+ // Review sessions' edit/write tool file records ({path}) are noted on the way, so those are always parsed: markOverlaps
+ // checks them on every poll, and reading s.messages for that read and kept every review transcript. An unread transcript
+ // is this file. Only review sessions: running and queued ones load paused (below), and nothing makes a session active
+ // again without reading its transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it
+ // would trip over leaves no entry and markOverlaps reads the transcript then, as before.
  const editsAtStart=new WeakMap(),noteEdits=(s,list)=>{try{const out=[];for(const m of list||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path)out.push({path:f.path});editsAtStart.set(s,out);}catch{}};
  for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
-  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8'),list=JSON.parse(raw);savedTranscripts.set(s.id,textDigest(raw));if(s.status==='review')noteEdits(s,list);deferTranscript(s);}
+  try{const raw=await fs.readFile(transcriptFile(s.id)),sum=textDigest(raw);
+   if(sum!==recorded[s.id]||s.status==='review'){const list=JSON.parse(raw.toString('utf8'));if(s.status==='review')noteEdits(s,list);}
+   savedTranscripts.set(s.id,sum);deferTranscript(s);}
   catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
@@ -90,7 +96,10 @@ export async function openStore(ctx){
   try{
    const sessions=new Set(store.sessions),ids=new Set(store.sessions.map(s=>s.id)),changed=[];
    for(const s of sessions)if(!unread(s)&&(scoped===true||scoped.has(s)||!savedTranscripts.has(s.id))){const text=JSON.stringify(s.messages||[],omit),sum=textDigest(text);if(sum!==savedTranscripts.get(s.id))changed.push([s.id,text,sum]);}
-   const snapshot=JSON.stringify(store,function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
+   // Each transcript's digest as it is on disk once this save is done, for the next startup's check. A write that fails or
+   // races another companion only makes the file differ from it, and that file is parsed.
+   const due=new Map(changed.map(([id,,sum])=>[id,sum])),transcriptDigests={};for(const id of ids){const d=due.get(id)??savedTranscripts.get(id);if(d)transcriptDigests[id]=d;}
+   const snapshot=JSON.stringify({...store,transcriptDigests},function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
    const gone=[...savedTranscripts.keys()].filter(id=>!ids.has(id));
    if(changed.length)await fs.mkdir(transcriptDir,{recursive:true,mode:0o700});
    // A few at a time: the first save after an upgrade writes every transcript (hundreds of flushed files). All settle
