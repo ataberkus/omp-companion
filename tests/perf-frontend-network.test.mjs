@@ -222,3 +222,35 @@ test('session commands ask for lean replies, and a reply without the transcript 
   assert.deepEqual(sent, [['prompt', '/api/sessions/s1/command?lean=1'], ['steer', '/api/sessions/s1/command?lean=1'], ['follow_up', '/api/sessions/s1/command?lean=1'], ['abort', '/api/sessions/s1/command?lean=1']]);
   assert.match(app.thread(), /the transcript so far/, 'the lean replies did not blank the thread');
 });
+
+// ---------- background work and subagent transcripts: conditional (protocol P2) ----------
+// The companion's side: a 304 when If-None-Match names the body's ETag.
+const tagged = (call, body, tag) => call.inm === tag ? { status: 304 } : { body, headers: { ETag: tag } };
+test('the Activity panel and a subagent transcript poll conditionally and keep what they hold on a 304', async () => {
+  const bg = { tasks: [{ id: 'j1', type: 'bash', title: 'npm test', status: 'done', startedAt: at(1), finishedAt: at(2) }], agents: [], subagents: [], live: true };
+  const sub = { file: '/x/sub.jsonl', messages: [reply('r1', 'subagent reasoning shown')], updatedAt: at(3), active: true };
+  const app = boot({ respond: (url, call) => {
+    if (url.startsWith('/api/state')) return { body: store([session('s1', [reply('m1', 'hi')], { sessionFile: '/x/s1.jsonl', status: 'running' })]) };
+    if (url.startsWith('/api/background')) return tagged(call, bg, '"b1"');
+    if (url.startsWith('/api/transcript')) return tagged(call, sub, '"t1"');
+  } });
+  await flush();
+  const bgCalls = () => app.calls.filter(c => c.url.startsWith('/api/background'));
+  assert.match(app.els.get('tasks').innerHTML, /npm test/);
+  await app.advance(4000); await app.poll();
+  assert.equal(bgCalls().at(-1).inm, '"b1"');
+  assert.match(app.els.get('tasks').innerHTML, /npm test/, 'the 304 kept the jobs');
+  // Hidden: background work waits until the page is shown again.
+  app.document.hidden = true;
+  const n = bgCalls().length;
+  await app.advance(4000); await app.go('#/s/s1');
+  assert.equal(bgCalls().length, n, 'no reload while hidden');
+  await app.visible(true);
+  assert.equal(bgCalls().length, n + 1, 'reloaded once shown');
+
+  await app.go('#/sub/' + encodeURIComponent('/x/sub.jsonl'));
+  assert.match(app.thread(), /subagent reasoning shown/);
+  await app.advance(5000); await app.poll();
+  assert.equal(app.calls.filter(c => c.url.startsWith('/api/transcript')).at(-1).inm, '"t1"');
+  assert.match(app.thread(), /subagent reasoning shown/, 'the 304 kept the transcript');
+});

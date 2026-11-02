@@ -1964,9 +1964,10 @@
     const running = e.data && bgJobs(e.data).some(j => j.status === 'running');
     const live = current().kind === 'session' && ['running', 'queued'].includes(S.store?.sessions.find(x => x.id === current().id)?.status);
     const wait = live || running ? 3000 : 20000;
-    if (e.loading || (!force && e.at && Date.now() - e.at < wait)) return;
+    // Conditional (e.etag): an unchanged reply is a 304 that keeps e.data. A hidden page waits until it is shown.
+    if (e.loading || (!force && (document.hidden || e.at && Date.now() - e.at < wait))) return;
     e.loading = true; S.bg.set(file, e);
-    try { e.data = await api('/background?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
+    try { const d = await api('/background?file=' + encodeURIComponent(file), undefined, { etag: e.etag ||= { tag: '' } }); if (d) e.data = d; e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
     update();
   }
@@ -2050,7 +2051,8 @@
     const quiet = e.data && e.data.active !== true && Date.now() - new Date(e.data.updatedAt).getTime() > 120000;
     if (e.loading || (!force && e.at && Date.now() - e.at < (quiet ? 30000 : 4000))) return;
     e.loading = true; S.subs.set(file, e);
-    try { e.data = await api('/transcript?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
+    // Conditional (e.etag): a transcript that has not changed is a 304 that keeps e.data.
+    try { const d = await api('/transcript?file=' + encodeURIComponent(file), undefined, { etag: e.etag ||= { tag: '' } }); if (d) e.data = d; e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
     update();
   }
