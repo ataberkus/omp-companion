@@ -27,7 +27,7 @@ export async function openStore(ctx){
  // JSON itself, kept for that comparison, cost as much memory as the transcripts). A workspace.json from before the split
  // still embeds them; those sessions have no entry here, so the first save moves them out.
  const savedTranscripts=new Map(),textDigest=text=>createHash('sha1').update(text).digest('base64');
- // The same digests as saved with workspace.json (persist), for the startup check below; kept out of the store, which
+ // Those digests as workspace.json recorded them (persist), for the startup check below; taken out of the store, which
  // /api/state sends.
  const recorded=store.transcriptDigests&&typeof store.transcriptDigests==='object'?store.transcriptDigests:{};delete store.transcriptDigests;
  // Every transcript is read and checked at startup (one that does not parse stops the companion), eight at a time, but kept
@@ -35,11 +35,11 @@ export async function openStore(ctx){
  // (~400 MB parsed for 160 MB of files) and slowed every garbage collection. Until then s.messages reads it from disk on
  // first use (deferTranscript). Parsing them all took most of a start (0.5-1 s for 100+ MB): a file whose bytes match the
  // digest recorded when it was written is that valid JSON, so only the others are parsed (a changed, truncated or older file).
- // Review sessions' edit/write tool file records ({path}) are noted on the way, so those are always parsed: markOverlaps
- // checks them on every poll, and reading s.messages for that read and kept every review transcript. An unread transcript
- // is this file. Only review sessions: running and queued ones load paused (below), and nothing makes a session active
- // again without reading its transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it
- // would trip over leaves no entry and markOverlaps reads the transcript then, as before.
+ // Review sessions are always parsed, to note their edit/write tool file records ({path}): markOverlaps checks them on every
+ // poll, and reading s.messages for that read and kept every review transcript. An unread transcript is this file. Only
+ // review sessions: running and queued ones load paused (below), and nothing makes a session active again without reading
+ // its transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it would trip over leaves no
+ // entry and markOverlaps reads the transcript then, as before.
  const editsAtStart=new WeakMap(),noteEdits=(s,list)=>{try{const out=[];for(const m of list||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path)out.push({path:f.path});editsAtStart.set(s,out);}catch{}};
  for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
   try{const raw=await fs.readFile(transcriptFile(s.id)),sum=textDigest(raw);
