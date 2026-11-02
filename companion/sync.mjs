@@ -3,17 +3,21 @@ import { randomBytes } from 'node:crypto';
 // Content comparison without serializing: snapshot() copies a value's objects and arrays, sharing its leaves (strings
 // included), so a copy costs object headers only. same() compares a live value with a snapshot under JSON.stringify's
 // rules (own enumerable keys in order; undefined, functions and symbols left out, or null in arrays; non-finite numbers
-// as null; toJSON values by their JSON), so it is true exactly when their JSON is equal, and an unchanged string compares
+// as null; toJSON values by their JSON), so it is true only when their JSON is equal (for JSON-shaped values, exactly
+// then; a toJSON() that gives undefined counts as changed, one extra send), and an unchanged string compares
 // by reference without reading its text. A "__proto__" key (JSON.parse makes it an own key) is defined on the copy, not
 // set as its prototype, which never compared equal. fields() and sameFields() do an object's fields, leaving out the keys
-// in `drop` (a session summary's transcript and /btw answers).
+// in `drop` (a session summary's transcript and /btw answers). Kept as their JSON instead: toJSON values, other objects
+// that are not plain (a boxed 5 or a Map has no keys to compare), and values nested over 100 deep (the walk recurses,
+// and would overflow the stack at about 3,100 levels in Node, before JSON.stringify's 4,100).
 class Frozen{constructor(json){this.json=json;}}
 const skip=v=>v===undefined||typeof v==='function'||typeof v==='symbol',leaf=v=>(typeof v==='number'&&!Number.isFinite(v))||skip(v)?null:v,own=Object.prototype.hasOwnProperty;
-function snapshot(v){if(v===null||typeof v!=='object')return leaf(v);if(typeof v.toJSON==='function')return new Frozen(JSON.stringify(v));
- if(Array.isArray(v)){const a=new Array(v.length);for(let i=0;i<v.length;i++)a[i]=snapshot(v[i]);return a;}return fields(v);}
-function fields(v,drop){const o={};for(const k in v){if(!own.call(v,k)||drop?.has(k))continue;const x=v[k];if(skip(x))continue;if(k==='__proto__')Object.defineProperty(o,k,{value:snapshot(x),enumerable:true,writable:true,configurable:true});else o[k]=snapshot(x);}return o;}
+const byJson=(v,d,p)=>typeof v.toJSON==='function'||d>100||!Array.isArray(v)&&(p=Object.getPrototypeOf(v))!==Object.prototype&&p!==null;
+function snapshot(v,d=0){if(v===null||typeof v!=='object')return leaf(v);if(byJson(v,d))return new Frozen(JSON.stringify(v));
+ if(Array.isArray(v)){const a=new Array(v.length);for(let i=0;i<v.length;i++)a[i]=snapshot(v[i],d+1);return a;}return fields(v,undefined,d+1);}
+function fields(v,drop,d=0){const o={};for(const k in v){if(!own.call(v,k)||drop?.has(k))continue;const x=v[k];if(skip(x))continue;if(k==='__proto__')Object.defineProperty(o,k,{value:snapshot(x,d),enumerable:true,writable:true,configurable:true});else o[k]=snapshot(x,d);}return o;}
 function same(live,snap){if(live===null||typeof live!=='object')return (snap===null||typeof snap!=='object')&&leaf(live)===snap;
- if(snap===null||typeof snap!=='object')return false;if(typeof live.toJSON==='function')return snap instanceof Frozen&&JSON.stringify(live)===snap.json;if(snap instanceof Frozen)return false;
+ if(snap===null||typeof snap!=='object')return false;if(snap instanceof Frozen)return JSON.stringify(live)===snap.json;if(byJson(live,0))return false;
  if(Array.isArray(live)){if(!Array.isArray(snap)||snap.length!==live.length)return false;for(let i=0;i<live.length;i++)if(!same(live[i],snap[i]))return false;return true;}
  return !Array.isArray(snap)&&sameFields(live,snap);}
 function sameFields(live,snap,drop){let n=0;const sk=Object.keys(snap);
@@ -52,7 +56,9 @@ export function createSync(ctx){
  // which go out on their own) with its snapshot from the previous poll, like the viewed transcript, and the store's other
  // fields (top) with their previous JSON. A dashboard that sends store=<epoch>.<rev> gets the summaries that changed after
  // that rev, the order when it changed and top when it changed; an unknown epoch or rev gets everything. Returned
- // serialized; only the summaries that go out are serialized. Null when session IDs repeat, which only the full list can show.
+ // serialized; only the summaries that go out are serialized, each once while it is unchanged (a full reply, a dashboard's
+ // first, sends all 400: comparing and then serializing them all cost more than the old serialize-and-compare). Null when
+ // session IDs repeat, which only the full list can show.
  const storeSync={epoch:randomBytes(6).toString('base64url'),rev:0,top:'',topRev:0,order:[],orderRev:0,entries:new Map()},unsent=new Set(['messages','_btw']);
  function storeDelta(top,since){
   const c=storeSync,next=c.rev+1,entries=new Map(),order=[];let changed=false;
@@ -65,7 +71,7 @@ export function createSync(ctx){
   if(changed)c.rev=next;
   c.entries=entries;
   const held=/^([\w-]{1,32})\.(\d{1,15})$/.exec(since||''),rev=held?.[1]===c.epoch?Number(held[2]):-1,all=!(rev>=0&&rev<=c.rev),out=[];
-  for(const s of store.sessions)if(all||entries.get(s.id).rev>rev)out.push(JSON.stringify({...s,messages:undefined,_btw:undefined}));
+  for(const s of store.sessions){const e=entries.get(s.id);if(all||e.rev>rev)out.push(e.json??=JSON.stringify({...s,messages:undefined,_btw:undefined}));}
   return `{"epoch":"${c.epoch}","rev":${c.rev}${all||c.topRev>rev?`,"top":${c.top}`:''}${all||c.orderRev>rev?`,"order":${JSON.stringify(c.order)}`:''},"changed":[${out.join(',')}]}`;
  }
  return {transcriptDelta,storeDelta};
