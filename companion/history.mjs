@@ -37,7 +37,8 @@ export function createHistory(ctx){
    else if(e.name.endsWith('.async.log')){jobs.push({name:e.name,file:f,size:st.size,updatedAt:st.mtime.toISOString()});}
   }));
   subagentCache.delete(dir);if(seen.size){subagentCache.set(dir,seen);if(subagentCache.size>32)subagentCache.delete(subagentCache.keys().next().value);}
-  subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
+  // Names break ties: the lists fill in completion order, and an order that changes between identical polls changes the ETag.
+  subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt)||(a.name<b.name?-1:a.name>b.name?1:0));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)||(a.name<b.name?-1:a.name>b.name?1:0));
   const byName=new Map(subagents.map(x=>[x.name,x]));
   let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=liveSince===undefined&&Date.now()-mtime>30*60e3;
   const tasks=scanned.map(j=>{const sub=byName.get(j.id);const gone=liveSince===undefined?quiet:Date.parse(j.startedAt)<liveSince;const status=j.status==='running'?(sub?.result?'done':gone?'stale':'running'):j.status;return {...j,status,transcript:sub?.file||'',model:sub?.model||'',thinking:sub?.thinking||'',summary:sub?.result||'',cost:sub?.cost||0,updatedAt:sub?.updatedAt||j.finishedAt||j.startedAt};});
@@ -54,7 +55,7 @@ export function createHistory(ctx){
   await Promise.all(dirs.filter(d=>d.isDirectory()).map(async d=>{const dir=path.join(ompSessionsDir,d.name);let entries=[];try{entries=await fs.readdir(dir);}catch{return;}
    await Promise.all(entries.filter(n=>n.endsWith('.jsonl')).map(async n=>{const file=path.join(dir,n);try{const st=await fs.stat(file);if(st.size>0)files.push({file,mtime:st.mtimeMs,size:st.size});}catch{}}));}));
   const found=new Set(files.map(f=>f.file));for(const f of headCache.keys())if(!found.has(f))headCache.delete(f);
-  files.sort((a,b)=>b.mtime-a.mtime);
+  files.sort((a,b)=>b.mtime-a.mtime||(a.file<b.file?-1:a.file>b.file?1:0));
   // Panel sessions by file, built once: matching each of up to 200 files against every session cost files × sessions path resolutions.
   const managed=new Map();for(const s of store.sessions)if(s.sessionFile){const k=pathKey(s.sessionFile);if(!managed.has(k))managed.set(k,s);}
   return (await Promise.all(files.slice(0,limit).map(async f=>{

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { appendFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -63,4 +63,27 @@ test('polled history replies answer 304 while unchanged', async t => {
     assert.deepEqual(body.messages.map(m => [m.role, m.text]), [['user', 'Subtask']]);
   }, () => appendFile(sub, line({ type: 'message', id: 'a2', timestamp: '2026-01-01T00:00:03.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'On it' }] } })));
   assert.deepEqual(tx.messages.map(m => [m.role, m.text]), [['user', 'Subtask'], ['assistant', 'On it']]);
+});
+
+test('subagents and logs with the same modification time keep one order, so the background ETag holds', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-history-ties-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sessions = join(dir, 'sessions'), file = join(sessions, '--w--', 'parent.jsonl'), subs = join(sessions, '--w--', 'parent');
+  await mkdir(subs, { recursive: true });
+  await writeFile(file, transcript('parent', 'Hello'));
+  // Same mtime on every file (a filesystem with coarse timestamps, or several written in one millisecond).
+  const when = new Date('2026-01-01T00:00:05.000Z'), names = ['delta', 'alpha', 'charlie', 'bravo', 'echo'];
+  for (const n of names) { const f = join(subs, n + '.jsonl'); await writeFile(f, transcript(n, 'Task ' + n)); await utimes(f, when, when); }
+  for (const n of names) { const f = join(subs, n + '.async.log'); await writeFile(f, 'log ' + n); await utimes(f, when, when); }
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
+  const app = await createCompanion({ dataDir: dir, omp: fakeOmp(), ompSessionsDir: sessions });
+  t.after(() => app.close());
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const url = `http://127.0.0.1:${app.server.address().port}/api/background?file=` + encodeURIComponent(file);
+  const get = tag => fetch(url, { headers: { Authorization: 'Bearer ' + app.token, ...(tag ? { 'If-None-Match': tag } : {}) } });
+  const first = await get(), body = await first.json(), sorted = [...names].sort();
+  assert.deepEqual(body.subagents.map(s => s.name), sorted);
+  assert.deepEqual(body.logs.map(l => l.name), sorted.map(n => n + '.async.log'));
+  for (let i = 0; i < 5; i++) assert.equal((await get(first.headers.get('etag'))).status, 304);
 });
