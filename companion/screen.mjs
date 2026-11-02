@@ -138,7 +138,8 @@ export function createScreen(ctx){
    if(String(req.headers.upgrade).toLowerCase()!=='websocket'||req.headers['sec-websocket-version']!=='13'||!/^[A-Za-z0-9+/]{22}==$/.test(key))throw error('WebSocket handshake required.',400);
    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')}\r\n\r\n`);
    startViewer(socket,head,req.socket.remoteAddress);
-  }catch(e){const status=e.status||500;socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n${e.message}`);}
+  // Destroyed 2 s later as in wsClose: a peer that went offline never closes its side, which would keep the socket open forever.
+  }catch(e){const status=e.status||500;socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n${e.message}`);setTimeout(()=>socket.destroy(),2000).unref();}
  }
  return {setScreen,screenSupported,screenTickets,screenOff,dropViewer,onUpgrade,get viewer(){return viewer;},get screenOn(){return screenOn;}};
 }

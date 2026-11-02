@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { Agent, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -31,6 +32,8 @@ async function startHost(t, setup, env = {}, nodeArgs = []) {
     env: { ...process.env, OMP_WEB_PORT: String(port), OMP_WEB_DATA_DIR: dir, PI_CODING_AGENT_DIR: dir, OMP_SESSIONS_DIR: join(dir, 'sessions'), OMP_BIN: process.execPath, OMP_WEB_NO_UPDATE: '1', ...env },
   });
   const exited = new Promise(resolve => child.once('exit', code => resolve(code)));
+  let log = '';
+  child.stderr.setEncoding('utf8').on('data', d => { log += d; });
   t.after(async () => {
     if (child.exitCode === null) { child.kill(); await exited; }
     await rm(dir, { recursive: true, force: true });
@@ -45,7 +48,7 @@ async function startHost(t, setup, env = {}, nodeArgs = []) {
   };
   let id = 0;
   const request = async msg => { const req = { id: ++id, ...msg }; child.stdin.write(JSON.stringify(req) + '\n'); const res = await next(); assert.equal(res.id, req.id); return res; };
-  return { dir, port, child, exited, next, request };
+  return { dir, port, child, exited, next, request, stderr: () => log };
 }
 
 test('host reports ready, serves the dashboard, answers busy/lan/links and quits cleanly', async t => {
@@ -204,4 +207,75 @@ test('with OMP_WEB_HOST unset the host listens on this PC\'s Tailscale address w
   assert.equal(await portBusy(port), false);
   // A connect probe to the tailnet address can time out instead of being refused (portBusy counts that as busy), so bind it instead.
   if (host) { const s = createServer().listen(port, host); await once(s, 'listening'); s.close(); await once(s, 'close'); }
+});
+
+// The tailnet listener against a scripted Tailscale (tests/fake-tailscale-host.mjs): 127.0.0.2 and 127.0.0.3 stand in for this
+// PC's tailnet addresses. Scale 100: the 30 s recheck takes 0.3 s, the 10 s listen/close limit 0.1 s, the 5-minute grace 3 s.
+const loopbackAliases = { skip: process.platform === 'darwin' && 'macOS has no 127.0.0.2' };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function startTailnetHost(t, control) {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-fake-tailscale-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'tailscale.json');
+  const setTailscale = value => writeFile(file, JSON.stringify(value));
+  await setTailscale(control);
+  const host = await startHost(t, null, { OMP_WEB_HOST: '', FAKE_TAILSCALE: file, FAKE_TAILSCALE_SCALE: '100' }, ['--import', './tests/fake-tailscale-host.mjs']);
+  const { token } = await host.next();
+  // status 0: nothing answered. reused: the request went over a connection kept open from an earlier one.
+  const get = (address, agent) => new Promise(resolve => {
+    const req = httpRequest({ host: address, port: host.port, path: '/api/state?session=', agent, headers: { Authorization: `Bearer ${token}` } }, res => {
+      res.resume().on('end', () => resolve({ status: res.statusCode, reused: req.reusedSocket }));
+    });
+    req.on('error', () => resolve({ status: 0 })).setTimeout(2000, () => req.destroy()).end();
+  });
+  const answers = async (address, status = 200, ms = 5000) => waitFor(async () => (await get(address)).status === status, ms);
+  return { ...host, setTailscale, get, answers };
+}
+
+test('a Tailscale lookup that finds nothing keeps the tailnet listener and its open connections; the LAN toggle and quit still work', loopbackAliases, async t => {
+  const { port, exited, request, stderr, setTailscale, get, answers } = await startTailnetHost(t, { self: { name: '', ips: ['127.0.0.2'] } });
+  assert.ok(await answers('127.0.0.2'));
+  const agent = new Agent({ keepAlive: true });
+  t.after(() => agent.destroy());
+  assert.equal((await get('127.0.0.2', agent)).status, 200);
+  await setTailscale({ self: null });
+  await sleep(1500); // five checks, half the grace
+  assert.deepEqual(await get('127.0.0.2', agent), { status: 200, reused: true });
+  assert.match(stderr(), /keeping the listener on 127\.0\.0\.2/);
+  assert.doesNotMatch(stderr(), /Stopped listening/);
+  await setTailscale({ self: { name: '', ips: ['127.0.0.2'] } });
+  // The toggle closes the tailnet listener (0.0.0.0 covers it); once it is off, only that listener can answer on 127.0.0.2.
+  assert.equal((await request({ cmd: 'lan', on: true })).lan, true);
+  assert.equal((await request({ cmd: 'lan', on: false })).lan, false);
+  assert.ok(await answers('127.0.0.2'));
+  assert.deepEqual(await request({ cmd: 'quit' }), { id: 3, ok: true });
+  assert.equal(await exited, 0);
+  assert.equal(await portBusy(port), false);
+  assert.equal(await portBusy(port, '127.0.0.2'), false);
+});
+
+test('the tailnet listener closes once Tailscale stays gone or changes address, and comes back by itself', loopbackAliases, async t => {
+  const { stderr, setTailscale, get, answers } = await startTailnetHost(t, { self: { name: '', ips: ['127.0.0.2'] } });
+  assert.ok(await answers('127.0.0.2'));
+  await setTailscale({ self: null });
+  assert.ok(await answers('127.0.0.2', 0, 10000), 'closed after the grace');
+  assert.match(stderr(), /Stopped listening on 127\.0\.0\.2:\d+: Tailscale disconnected/);
+  await setTailscale({ self: { name: '', ips: ['127.0.0.2'] } });
+  assert.ok(await answers('127.0.0.2'), 'back when Tailscale is');
+  // A new address is no blip: the listener moves at the next check.
+  await setTailscale({ self: { name: '', ips: ['127.0.0.3'] } });
+  assert.ok(await answers('127.0.0.3'));
+  assert.equal((await get('127.0.0.2')).status, 0);
+});
+
+test('a tailnet listen() that never calls back does not stop later checks, the LAN toggle or quit', loopbackAliases, async t => {
+  const { port, exited, request, stderr, setTailscale, answers } = await startTailnetHost(t, { self: { name: '', ips: ['127.0.0.2'] }, hangListen: true });
+  assert.ok(await waitFor(() => /did not finish within 10 s/.test(stderr())));
+  assert.equal((await request({ cmd: 'lan', on: true })).lan, true);
+  assert.equal((await request({ cmd: 'lan', on: false })).lan, false);
+  await setTailscale({ self: { name: '', ips: ['127.0.0.2'] }, hangListen: false });
+  assert.ok(await answers('127.0.0.2'));
+  assert.deepEqual(await request({ cmd: 'quit' }), { id: 3, ok: true });
+  assert.equal(await exited, 0);
+  assert.equal(await portBusy(port), false);
 });
