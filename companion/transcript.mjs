@@ -92,9 +92,23 @@ export async function lastContext(file){
  for(let i=lines.length-1;i>=0;i--){if(!lines[i].includes('"usage"'))continue;let f;try{f=JSON.parse(lines[i]);}catch{continue;}const m=f.message||{};if(f.type==='message'&&m.role==='assistant'&&usageTokens(m.usage))return usageTokens(m.usage);if(f.type==='compaction')return undefined;}
  return undefined;
 }
+// The last `limit` messages of a session file, from its last 12 MB (readTail's lines). Read and parsed in two steps: the
+// last limit × 8 KB first, which usually holds them (reading and parsing all 12 MB to keep 150 blocked the event loop for
+// 60-110 ms on a large file), and the rest only when those lines yield fewer and hold no context reset. Exact: a message
+// of the shorter tail is built from its own lines (a tool's result follows its call), and what they cannot see (calls,
+// results and context resets further up) touches only messages that are cut anyway, or cleared by a reset they hold.
 export async function importMessages(file,limit=400,stash){
- const frames=[];for(const line of (await readTail(file,12*1024*1024)).split('\n')){try{frames.push(JSON.parse(line));}catch{}}
- return entryMessages(frames,limit,stash);
+ const parse=(buf,cut)=>{const frames=[];if(cut)buf=buf.subarray(buf.indexOf(10)+1);for(const line of buf.toString('utf8').split('\n')){try{frames.push(JSON.parse(line));}catch{}}return frames;};
+ const fh=await fs.open(file,'r');try{
+  const {size}=await fh.stat(),start=Math.max(0,size-12*1024*1024),at=limit>0?Math.max(start,size-limit*8192):start;
+  const tail=Buffer.alloc(size-at);await fh.read(tail,0,tail.length,at);
+  if(at===start)return entryMessages(parse(tail,at>0),limit,stash);
+  // The shorter tail starts after its first newline; the rest of the 12 MB ends there.
+  const nl=tail.indexOf(10),end=nl<0?size:at+nl+1,frames=parse(tail.subarray(end-at),false);
+  const kept=entryMessages(frames,limit);if(kept.length>=limit||frames.some(f=>f?.type==='reset_boundary'))return stash?entryMessages(frames,limit,stash):kept;
+  const head=Buffer.alloc(end-start);await fh.read(head,0,head.length,start);
+  return entryMessages([...parse(head,start>0),...frames],limit,stash);
+ }finally{await fh.close();}
 }
 // OMP session entries (file lines or get_entries) as thread messages; user prompts keep their entry ID for branching.
 // stash stores tool-result images ([{mimeType,bytes}] → [{mimeType,id}]); without it they are left out.
