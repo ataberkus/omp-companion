@@ -17,8 +17,8 @@ use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, Predefin
 #[cfg(not(target_os = "macos"))]
 use tauri::tray::{MouseButton, TrayIconEvent};
 use tauri::tray::TrayIconBuilder;
-use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
+use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, WebviewBuilder};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalSize, RunEvent, Url, Webview, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent, Wry};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
@@ -111,7 +111,9 @@ fn on_event(app: AppHandle) -> impl Fn(Value) + Send + 'static {
             let body = msg["body"].as_str().unwrap_or_default().to_owned();
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
-                let in_front = handle.get_webview_window("main").is_some_and(|w| {
+                // get_window: while the in-app browser is open, main holds two webviews and get_webview_window finds
+                // none. The browser covers the dashboard, so it can't show the session itself then.
+                let in_front = handle.get_webview(BROWSER).is_none() && handle.get_window("main").is_some_and(|w| {
                     w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
                 });
                 if !in_front {
@@ -278,8 +280,8 @@ fn adopt(app: &AppHandle, host: Host, log: Option<PathBuf>) {
     let url = main_url(&shell);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if let Some(window) = handle.get_webview_window("main") {
-            let _ = window.navigate(url);
+        if let Some(webview) = handle.get_webview("main") {
+            let _ = webview.navigate(url);
         }
     });
     let log = log.map(|p| format!(" Details: {}", p.display())).unwrap_or_default();
@@ -476,15 +478,134 @@ fn open_external(app: &AppHandle, url: &Url) {
     }
 }
 
-// Own-origin pages stay in the app (they inherit the token through sessionStorage),
-// web links go to the default browser, anything else is refused.
+// Own-origin pages stay in the app (they inherit the token through sessionStorage), web links open in the in-app
+// browser, anything else is refused. The dashboard's browser bar asks for its actions by navigating to
+// /__desktop/browser/<action>; the navigation is cancelled here, so the dashboard stays where it is.
 fn nav_guard(app: AppHandle, port: u16) -> impl Fn(&Url) -> bool + Send + 'static {
     move |url| {
-        if same_origin(url, port) || url.as_str() == "about:blank" {
+        if same_origin(url, port) {
+            let Some(action) = url.path().strip_prefix("/__desktop/browser/") else { return true };
+            let (app, action) = (app.clone(), action.to_owned());
+            thread::spawn(move || browser_action(&app, &action));
+            return false;
+        }
+        if url.as_str() == "about:blank" {
             return true;
         }
-        open_external(&app, url);
+        open_in_app_browser(&app, url);
         false
+    }
+}
+
+// The in-app browser: one webview laid over the dashboard in the main window, below the dashboard's browser bar
+// (BROWSER_BAR logical px; ompBrowser() in local-dist/app.js draws it). It is no popup of the dashboard: no opener, no
+// token (that lives in the dashboard's sessionStorage) and, like every webview here, no IPC (the app declares no
+// capabilities). A second link replaces its page. Other schemes are refused, as before.
+const BROWSER: &str = "browser";
+const BROWSER_BAR: f64 = 40.0;
+// The page the browser shows (url, title), for the dashboard's bar.
+static BROWSER_PAGE: Mutex<(String, String)> = parking_lot::const_mutex((String::new(), String::new()));
+
+// Built on its own thread: on Windows, building a webview inside a webview event handler deadlocks (WebView2 issue).
+fn open_in_app_browser(app: &AppHandle, url: &Url) {
+    if !matches!(url.scheme(), "http" | "https") {
+        return;
+    }
+    let (app, url) = (app.clone(), url.clone());
+    thread::spawn(move || {
+        let shown = match app.get_webview(BROWSER) {
+            Some(browser) => browser.navigate(url.clone()).map(|()| browser),
+            None => add_browser(&app, &url),
+        };
+        match shown {
+            Ok(browser) => {
+                show_main(&app);
+                let _ = browser.set_focus();
+                browser_state(&app);
+            }
+            // A link click must still go somewhere, and without a modal in the way.
+            Err(_) => open_external(&app, &url),
+        }
+    });
+}
+
+fn add_browser(app: &AppHandle, url: &Url) -> tauri::Result<Webview<Wry>> {
+    let window = app.get_window("main").ok_or(tauri::Error::WindowNotFound)?;
+    let (position, size) = browser_bounds(&window, window.inner_size()?)?;
+    *BROWSER_PAGE.lock() = (url.to_string(), String::new());
+    let builder = WebviewBuilder::new(BROWSER, WebviewUrl::External(url.clone()))
+        .disable_drag_drop_handler()
+        .on_navigation(browser_nav_guard())
+        .on_new_window(browser_new_window_handler(app.clone()))
+        .on_page_load(|browser, payload| {
+            let mut page = BROWSER_PAGE.lock();
+            if payload.event() == PageLoadEvent::Started {
+                page.1.clear();
+            }
+            page.0 = payload.url().to_string();
+            drop(page);
+            browser_state(browser.app_handle());
+        })
+        .on_document_title_changed(|browser, title| {
+            BROWSER_PAGE.lock().1 = title;
+            browser_state(browser.app_handle());
+        });
+    window.add_child(builder, position, size)
+}
+
+// Everything below the dashboard's browser bar.
+fn browser_bounds(window: &Window, inner: PhysicalSize<u32>) -> tauri::Result<(LogicalPosition<f64>, LogicalSize<f64>)> {
+    let inner = inner.to_logical::<f64>(window.scale_factor()?);
+    Ok((LogicalPosition::new(0.0, BROWSER_BAR), LogicalSize::new(inner.width, (inner.height - BROWSER_BAR).max(0.0))))
+}
+
+// Tells the dashboard what its browser bar shows; it has no bar while the browser is closed.
+fn browser_state(app: &AppHandle) {
+    let state = if app.get_webview(BROWSER).is_some() {
+        let (url, title) = BROWSER_PAGE.lock().clone();
+        json!({ "open": true, "url": url, "title": title })
+    } else {
+        json!({ "open": false })
+    };
+    if let Some(main) = app.get_webview("main") {
+        let _ = main.eval(format!("window.ompBrowser&&window.ompBrowser({state})"));
+    }
+}
+
+fn browser_action(app: &AppHandle, action: &str) {
+    let Some(browser) = app.get_webview(BROWSER) else { return browser_state(app) };
+    match action {
+        "back" => drop(browser.eval("history.back()")),
+        "forward" => drop(browser.eval("history.forward()")),
+        "reload" => drop(browser.reload()),
+        "external" => {
+            if let Ok(url) = Url::parse(&BROWSER_PAGE.lock().0) {
+                open_external(app, &url);
+            }
+        }
+        "close" => {
+            let _ = browser.close();
+            *BROWSER_PAGE.lock() = Default::default();
+            // The webview may still be registered until it is destroyed, so the bar is closed directly.
+            if let Some(main) = app.get_webview("main") {
+                let _ = main.eval("window.ompBrowser&&window.ompBrowser({\"open\":false})");
+                let _ = main.set_focus();
+            }
+        }
+        _ => {}
+    }
+}
+
+// The browser follows links itself, so browsing stays in it; schemes other than web ones are refused.
+fn browser_nav_guard() -> impl Fn(&Url) -> bool + Send + 'static {
+    |url| matches!(url.scheme(), "http" | "https") || url.as_str() == "about:blank"
+}
+
+// A page asking for a new window (target="_blank", window.open) loads in the browser instead, never in a dashboard popup.
+fn browser_new_window_handler(app: AppHandle) -> impl Fn(Url, NewWindowFeatures) -> NewWindowResponse<Wry> + Send + Sync + 'static {
+    move |url, _| {
+        open_in_app_browser(&app, &url);
+        NewWindowResponse::Deny
     }
 }
 
@@ -494,7 +615,7 @@ fn nav_guard(app: AppHandle, port: u16) -> impl Fn(&Url) -> bool + Send + 'stati
 fn new_window_handler(app: AppHandle, port: u16) -> impl Fn(Url, NewWindowFeatures) -> NewWindowResponse<Wry> + Send + Sync + 'static {
     move |url, features| {
         if !same_origin(&url, port) {
-            open_external(&app, &url);
+            open_in_app_browser(&app, &url);
             return NewWindowResponse::Deny;
         }
         let label = format!("popup-{}", POPUPS.fetch_add(1, Ordering::Relaxed) + 1);
@@ -540,7 +661,12 @@ fn create_main(app: &AppHandle) {
             }
         })
         .on_page_load(move |window, payload| {
-            if payload.event() == PageLoadEvent::Finished && !shown.swap(true, Ordering::SeqCst) {
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            // A reloaded dashboard redraws the bar of a browser that is still open.
+            browser_state(window.app_handle());
+            if !shown.swap(true, Ordering::SeqCst) {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -552,7 +678,8 @@ fn create_main(app: &AppHandle) {
 }
 
 fn show_main(app: &AppHandle) {
-    match app.get_webview_window("main") {
+    // get_window: get_webview_window finds no main window while it holds the in-app browser too.
+    match app.get_window("main") {
         Some(window) => {
             let _ = window.unminimize();
             let _ = window.show();
@@ -873,6 +1000,15 @@ fn quit_on_installer_request(app: AppHandle) {
 }
 
 fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
+    if let WindowEvent::Resized(inner) = event {
+        if let (true, Some(browser)) = (window.label() == "main", window.get_webview(BROWSER)) {
+            if let Ok((position, size)) = browser_bounds(window, *inner) {
+                let _ = browser.set_position(position);
+                let _ = browser.set_size(size);
+            }
+        }
+        return;
+    }
     let WindowEvent::CloseRequested { api, .. } = event else { return };
     if window.label() != "main" {
         return;
@@ -901,7 +1037,10 @@ fn main() {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_opener::init())
+        // Without this the plugin injects a click handler into every page that cancels <a target="_blank"> clicks and
+        // asks for opener's open_url over IPC, which no window here may call: the link did nothing and never reached
+        // new_window_handler. Off, the click raises a new-window request and the link opens in the in-app browser.
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
