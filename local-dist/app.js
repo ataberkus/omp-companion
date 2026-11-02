@@ -179,6 +179,7 @@
   const S = {
     token: '', store: null, native: [], online: null, filter: 'all', search: '', groupBy: 'time', groupDrag: null, groupDragEnd: 0,
     tx: null, // the viewed transcript as last merged: { session, epoch, rev, messages } (see mergeTx)
+    txPrev: new Map(), // session → its transcript as last merged, for the sessions viewed just before (see mergeTx)
     sx: null, // the session summaries and other store fields as last merged: { epoch, rev, top, order, sessions } (see mergeStore)
     previews: new Map(), home: { roots: null, recent: null, listing: null, filter: '', isolate: false, prompt: '' },
     attachments: [], editQueue: null, queueOpen: null, view: '', lastSig: '', nativeAt: 0,
@@ -207,25 +208,45 @@
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
+  // A reply's JSON body, calling `progress` as its chunks arrive. They are counted off a clone: Chromium reports a fetch
+  // whose body a stream reader read to the end as canceled (ERR_ABORTED) about half the time, never one read by res.json().
+  async function readJson(res, progress) {
+    const reader = res.body && res.clone?.().body?.getReader?.();
+    if (reader) (async () => { while (!(await reader.read()).done) progress(); })().catch(() => {});
+    return res.json();
+  }
   // `token` probes a pasted token without adopting it; `etag` ({ tag }) makes the GET conditional and resolves null on 304.
   // `keepalive` lets the request outlive the page (a closing tab); browsers cap such bodies at 64 KB, so larger ones go as usual.
   // A refused request's error carries its HTTP status.
+  // `timeout` covers the reply's headers, then each stretch of its body that brings nothing: a slow link that keeps
+  // delivering finishes a big first /state (1 MB takes 40 s at 200 kbit/s), a stalled one still fails. Where there is no
+  // AbortController (the tests' stand-ins), it covers the whole request.
   async function api(p, body, { timeout = 30000, token = S.token, etag, keepalive = false } = {}) {
     if (!token) throw Object.assign(new Error('Not connected.'), { auth: true });
     const json = body === undefined ? undefined : JSON.stringify(body);
-    let res;
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    let res, data, last = Date.now(), timer;
+    const idle = () => { const left = last + timeout - Date.now(); if (left > 0) timer = setTimeout(idle, left); else ac.abort(); };
+    const failed = e => new Error(/^(Timeout|Abort)Error$/.test(e?.name) ? 'The companion did not answer in time.' : 'The companion is not reachable.');
+    if (ac) timer = setTimeout(idle, timeout);
     try {
-      res = await fetch('/api' + p, {
-        method: body === undefined ? 'GET' : 'POST',
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
-        body: json,
-        signal: AbortSignal.timeout(timeout),
-        ...(keepalive && json && json.length < 60000 ? { keepalive: true } : {}),
-      });
-    } catch (e) { throw new Error(e.name === 'TimeoutError' ? 'The companion did not answer in time.' : 'The companion is not reachable.'); }
-    // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
-    if (res.status === 304) { await res.text().catch(() => {}); return null; }
-    const data = await res.json().catch(() => ({}));
+      try {
+        res = await fetch('/api' + p, {
+          method: body === undefined ? 'GET' : 'POST',
+          headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
+          body: json,
+          signal: ac ? ac.signal : AbortSignal.timeout(timeout),
+          ...(keepalive && json && json.length < 60000 ? { keepalive: true } : {}),
+        });
+      } catch (e) { throw failed(e); }
+      last = Date.now();
+      // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
+      if (res.status === 304) { await res.text().catch(() => {}); return null; }
+      // A body that does not arrive whole (timed out, the link dropped) fails the request: taken as an empty reply, an
+      // empty store would stick, its ETag making every later poll a 304. Only a body that is not JSON reads as {}.
+      try { data = await readJson(res, () => { last = Date.now(); }); }
+      catch (e) { if (res.ok && e?.name !== 'SyntaxError') throw failed(e); data = {}; }
+    } finally { if (ac) clearTimeout(timer); }
     if (res.status === 401) {
       if (token !== S.token) throw Object.assign(new Error('That password or token was not accepted. Check it and try again.'), { auth: true });
       // No-token mode: the page's embedded token goes stale when the companion restarts; a reload carries the new one.
@@ -239,7 +260,7 @@
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; S.sx = null; leaveScreen(); }
+    if (!t) { S.store = null; S.native = []; S.nativeTag = null; S.online = null; S.stateTag = ''; S.tx = null; S.txPrev.clear(); S.sx = null; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -1756,21 +1777,29 @@
   const relTo = (p, cwd) => { const n = x => String(x || '').replace(/\\/g, '/').replace(/\/+$/, ''); const a = n(p), b = n(cwd); return b && a.toLowerCase().startsWith(b.toLowerCase() + '/') ? a.slice(b.length + 1) : a; };
   // One message, one line per comment: "path:line: note". Removed lines carry their old line number.
   const reviewMessage = (notes, cwd) => [...notes].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line).map(n => `${relTo(n.path, cwd)}:${n.line}: ${n.side === 'o' ? '(removed line) ' : ''}${n.text.trim().replace(/\n/g, '\n  ')}`).join('\n');
+  // A reload that brings what is shown already (most of them while the agent only streams text) must render nothing:
+  // rebuilding a big diff costs the main thread 0.5-4 s and drops any text selection in it. e.ver moves only when the
+  // reply or its error does, and the render signatures follow it, not the load time.
+  async function loadGitView(e, id, body) {
+    try { const d = await api(`/sessions/${encodeURIComponent(id)}/command`, body, { timeout: 60000 }); if (!e.data || e.error || JSON.stringify(d) !== JSON.stringify(e.data)) { e.data = d; e.ver = (e.ver || 0) + 1; } e.error = ''; }
+    catch (err) { if (err.message !== e.error) e.ver = (e.ver || 0) + 1; e.error = err.message; }
+  }
   async function loadWorktree(id, force) {
     const s = S.store?.sessions.find(x => x.id === id), e = S.wt.get(id) || { base: 'start' };
-    // While the session works the folder changes under us: reload at most every 5 s; idle, only when asked.
-    if (e.loading || (!force && e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt))) return;
+    // While the session works the folder changes under us: reload at most every 5 s; idle, only when asked. A hidden page
+    // waits until it is shown.
+    if (e.loading || (!force && (document.hidden || e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt)))) return;
     e.loading = true; S.wt.set(id, e);
-    try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'changes_worktree', base: e.base }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
-    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
+    await loadGitView(e, id, { type: 'changes_worktree', base: e.base });
+    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; update();
   }
   // Commits: branch, upstream, ahead/behind and recent commits of the session folder; same reload policy as the working tree.
   async function loadGitLog(id, force) {
     const s = S.store?.sessions.find(x => x.id === id), e = S.gl.get(id) || { sel: '', commits: new Map() };
-    if (e.loading || (!force && e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt))) return;
+    if (e.loading || (!force && (document.hidden || e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt)))) return;
     e.loading = true; S.gl.set(id, e);
-    try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'git_log' }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
-    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
+    await loadGitView(e, id, { type: 'git_log' });
+    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; update();
   }
   // A commit's diff never changes, so it is fetched once per session view.
   async function loadCommit(id, sha) {
@@ -1794,7 +1823,7 @@
         <h1>Commits</h1><div class="meta">${d ? `<span title="${esc(d.cwd)}">⎇ ${d.branch ? esc(d.branch) : d.head ? `detached at ${esc(d.head.slice(0, 8))}` : 'no commits yet'}</span>${track}${d.dirty ? `<span>${d.dirty} uncommitted ${d.dirty === 1 ? 'change' : 'changes'}</span>` : ''}<span>${d.commits.length >= d.limit ? `latest ${d.limit} commits` : `${d.commits.length} ${d.commits.length === 1 ? 'commit' : 'commits'}`}</span>` : ''}</div></div>
       <div class="actions">${requestBtn(notes)}${modeSeg('commits')}<button class="btn sm ghost" data-act="glReload" aria-label="Reload commits" title="Read git log again">${g?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>${layoutSeg()}</div>`);
     const err = !d && g?.error;
-    const sig = ['commits', c.parent, diffMode(), g?.at || '', err || '', sel, ce ? (ce.loading ? 'l' : ce.error || 'd') : ''].join('|');
+    const sig = ['commits', c.parent, diffMode(), g?.ver || '', err || '', sel, ce ? (ce.loading ? 'l' : ce.error || 'd') : ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     if (!d && !err) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading git log…</div>'; return; }
@@ -1845,7 +1874,7 @@
       <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ changes</span></div>
         <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'}${tree ? '' : ` · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}`}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}${tree && wt?.data ? `<span title="${esc(wt.data.cwd)}">git diff vs ${esc(wt.data.baseLabel === 'session start' ? `session start (${wt.data.base.slice(0, 8)})` : wt.data.baseLabel)}${wt.data.untrackedOmitted ? ` · ${wt.data.untrackedOmitted} more untracked files not shown` : ''}</span>` : ''}</div></div>
       <div class="actions">${requestBtn(notes)}${src ? modeSeg(mode) : ''}${tree ? `<select data-wtbase aria-label="Compare with"><option value="start" ${wt?.base !== 'head' ? 'selected' : ''}>vs session start</option><option value="head" ${wt?.base === 'head' ? 'selected' : ''}>vs HEAD</option></select><button class="btn sm ghost" data-act="wtReload" aria-label="Reload working tree diff" title="Run git diff again">${wt?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>` : ''}${layoutSeg()}</div>`);
-    const sig = ['changes', c.parent, mode, diffMode(), waiting ? 'wait' : err || '', S.reviewVer, tree ? wt?.at : all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
+    const sig = ['changes', c.parent, mode, diffMode(), waiting ? 'wait' : err || '', S.reviewVer, tree ? wt?.ver : all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
     if (sig === S.lastSig) return;
     // A comment being typed must not be wiped by a poll; the page catches up once it is saved or cancelled.
     if (S.noteEdit && $('#thread')?.querySelector?.('[data-noteform]') && S.lastSig.startsWith(['changes', c.parent, mode, diffMode()].join('|'))) return;
@@ -1884,7 +1913,7 @@
     const live = ['running', 'queued'].includes(s.status);
     S.sending.set(view, {});
     try {
-      await api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: live ? 'steer' : 'prompt', message: reviewMessage(notes, s.cwd) });
+      await api(`/sessions/${encodeURIComponent(s.id)}/command?lean=1`, { type: live ? 'steer' : 'prompt', message: reviewMessage(notes, s.cwd) });
       delete notesAll[parent]; saveLS('omp-review-notes', notesAll); S.noteEdit = null; S.reviewVer++;
       toast(`Sent ${notes.length} ${notes.length === 1 ? 'comment' : 'comments'}${live ? ' as a steer' : ''}`);
       location.hash = '#/s/' + s.id; await refresh();
@@ -2011,7 +2040,7 @@
     const c = current();
     if (c.kind !== 'session') return;
     closeThinkMenu();
-    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action, model }); if (action === 'model') S.advCfg = null; await refresh(); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'advisor', action, model }); if (action === 'model') S.advCfg = null; await refresh(); }
     catch (err) { toast(err.message, 'err'); }
   }
   async function loadBg(file, force) {
@@ -2020,9 +2049,10 @@
     const running = e.data && bgJobs(e.data).some(j => j.status === 'running');
     const live = current().kind === 'session' && ['running', 'queued'].includes(S.store?.sessions.find(x => x.id === current().id)?.status);
     const wait = live || running ? 3000 : 20000;
-    if (e.loading || (!force && e.at && Date.now() - e.at < wait)) return;
+    // Conditional (e.etag): an unchanged reply is a 304 that keeps e.data. A hidden page waits until it is shown.
+    if (e.loading || (!force && (document.hidden || e.at && Date.now() - e.at < wait))) return;
     e.loading = true; S.bg.set(file, e);
-    try { e.data = await api('/background?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
+    try { const d = await api('/background?file=' + encodeURIComponent(file), undefined, { etag: e.etag ||= { tag: '' } }); if (d) e.data = d; e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
     update();
   }
@@ -2106,7 +2136,8 @@
     const quiet = e.data && e.data.active !== true && Date.now() - new Date(e.data.updatedAt).getTime() > 120000;
     if (e.loading || (!force && e.at && Date.now() - e.at < (quiet ? 30000 : 4000))) return;
     e.loading = true; S.subs.set(file, e);
-    try { e.data = await api('/transcript?file=' + encodeURIComponent(file)); e.error = ''; } catch (err) { e.error = err.message; }
+    // Conditional (e.etag): a transcript that has not changed is a 304 that keeps e.data.
+    try { const d = await api('/transcript?file=' + encodeURIComponent(file), undefined, { etag: e.etag ||= { tag: '' } }); if (d) e.data = d; e.error = ''; } catch (err) { e.error = err.message; }
     e.loading = false; e.at = Date.now();
     update();
   }
@@ -2488,7 +2519,7 @@
     const section = control.closest('.question');
     const controls = () => section.querySelectorAll('button,input,textarea');
     controls().forEach(el => { el.disabled = true; });
-    try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, ...answer }); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'answer', id, ...answer }); }
     catch (e) { toast(e.message, 'err'); }
     await refresh();
     // A re-render replaces the section once the question clears; if it didn't, make it usable again.
@@ -2580,7 +2611,7 @@
       while (panelKeys.keys.length) {
         const c = current(), id = panelKeys.id, input = panelKeys.keys.splice(0, 500);
         if (c.kind !== 'session') { panelKeys.keys = []; break; }
-        try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, input }); }
+        try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'answer', id, input }); }
         catch (e) { toast(e.message, 'err'); panelKeys.keys = []; }
       }
     } finally { panelKeys.busy = false; }
@@ -2607,7 +2638,7 @@
       const key = `${size.columns}x${size.rows}`;
       if (panelSent.get(id) === key) continue;
       panelSent.set(id, key);
-      api(`/sessions/${c.id}/command`, { type: 'answer', id, resize: size }).then(() => refresh(), e => { panelSent.delete(id); if (!/no longer pending/.test(e.message)) toast(e.message, 'err'); });
+      api(`/sessions/${c.id}/command?lean=1`, { type: 'answer', id, resize: size }).then(() => refresh(), e => { panelSent.delete(id); if (!/no longer pending/.test(e.message)) toast(e.message, 'err'); });
     }
   }
   let panelResizeTimer;
@@ -2647,7 +2678,7 @@
   async function steerCommand(type, id, message) {
     const c = current();
     if (c.kind !== 'session') return;
-    try { await api(`/sessions/${c.id}/command`, { type, id, ...(message ? { message } : {}) }); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type, id, ...(message ? { message } : {}) }); }
     catch (e) { toast(e.message, 'err'); }
     S.editSteer = null; S.lastSig = ''; await refresh();
   }
@@ -2661,7 +2692,7 @@
     const c = current();
     if (c.kind !== 'session') return;
     try {
-      await api(`/sessions/${c.id}/command`, { type, id, ...(type === 'edit_follow_up' ? { message } : {}) });
+      await api(`/sessions/${c.id}/command?lean=1`, { type, id, ...(type === 'edit_follow_up' ? { message } : {}) });
       S.editQueue = null;
       await refresh();
     } catch (e) { toast(e.message, 'err'); await refresh(); }
@@ -2819,15 +2850,13 @@
   }
   // Composer "Push to <base>": like "Commit related changes", it sends OMP a prompt (or queues it as a follow-up while
   // OMP is working) asking it to commit the worktree's changes on the omp-web/ branch, merge that into the branch checked
-  // out in the project folder and push it. The base name is fetched once per session.
-  S.wtBase = new Map();
+  // out in the project folder and push it. The base is that folder's branch as the store has it (the companion reads it
+  // again every 15 s), not a worktree_status run (7 git processes) per session; a detached HEAD or a folder outside git
+  // names none.
+  const pushBase = s => { const b = projectOf(s)?.branch || ''; return b === 'detached' || b === 'workspace' ? '' : b; };
   function pushButton(s) {
     if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
-    if (!S.wtBase.has(s.id)) {
-      S.wtBase.set(s.id, '');
-      api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {});
-    }
-    const base = S.wtBase.get(s.id) || 'main';
+    const base = pushBase(s) || 'main';
     return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder) and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.sending.has('session:' + s.id) ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
   }
   // ---------- finish an isolated session's worktree ----------
@@ -2854,7 +2883,6 @@
     if (!s) return;
     let st;
     try { st = await sessionApi({ type: 'worktree_status' }); } catch (e) { return toast(e.message, 'err'); }
-    S.wtBase.set(s.id, st.base || '');
     modal('Finish worktree', wtBody(s, st));
     const box = $('#modal')?.querySelector('[data-wtsession]'); if (box) box._st = st;
   }
@@ -2891,7 +2919,10 @@
     (el.querySelector('.modal-body textarea, .modal-body button:not([disabled])') || el.querySelector('[data-modal-close]')).focus();
   }
   const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected && focus.offsetParent !== null) focus.focus(); else if (el) $('#input')?.focus(); return true; };
-  const sessionApi = (body, opts) => api(`/sessions/${current().id}/command`, body, opts);
+  // ?lean=1 (here and on the other session commands whose reply is the session): the reply leaves out the transcript and
+  // /btw answers, which the poll that follows brings as changes; callers read only the session's other fields, if any.
+  // Replies that are not the session (branch_messages, stats, tree, ...) are the same either way.
+  const sessionApi = (body, opts) => api(`/sessions/${current().id}/command?lean=1`, body, opts);
   const COMMIT_RELATED = 'Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit.';
   const PUSH_TO_BASE = (branch, base) => `Commit this worktree's changes on its branch ${branch} with a clear commit message. Then merge ${branch} into ${base} in the project folder where ${base} is checked out (find it with \`git worktree list\`), and push ${base} to the remote. If the merge conflicts or the push fails, stop and tell me what happened. Report the commits, the merge and the push result.`;
   // Sends a prompt to session `id`, or queues it as a follow-up while OMP is working.
@@ -2900,7 +2931,7 @@
     if (S.sending.has(view)) return;
     const queue = s?.status === 'running' || s?.status === 'queued';
     S.sending.set(view, {}); update();
-    api(`/sessions/${encodeURIComponent(id)}/command`, { type: queue ? 'follow_up' : 'prompt', message })
+    api(`/sessions/${encodeURIComponent(id)}/command?lean=1`, { type: queue ? 'follow_up' : 'prompt', message })
       .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
       .finally(() => { S.sending.delete(view); update(); });
   }
@@ -2909,7 +2940,7 @@
     if (!s || s._planSupported === false || s.planMode?.available === false) return toast('Plan mode requires updated OMP RPC support.', 'err');
     if (S.planBusy.has(id)) return;
     S.planBusy.add(id); update();
-    try { await api(`/sessions/${id}/command`, { type: 'plan_mode', enabled: !s.planMode?.enabled }); await refresh(); }
+    try { await api(`/sessions/${id}/command?lean=1`, { type: 'plan_mode', enabled: !s.planMode?.enabled }); await refresh(); }
     catch (e) { toast(e.message, 'err'); }
     finally { S.planBusy.delete(id); update(); }
   }
@@ -2955,7 +2986,7 @@
         dialog.querySelectorAll('button,input,textarea').forEach(x => x.disabled = true); update();
         try {
           const savePath = action === 'save' ? form.elements.savePath.value.trim() : '';
-          await api(`/sessions/${id}/command`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' && action !== 'save' ? { executionModel } : {}), ...(savePath ? { savePath } : {}) });
+          await api(`/sessions/${id}/command?lean=1`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' && action !== 'save' ? { executionModel } : {}), ...(savePath ? { savePath } : {}) });
           S.planSubmitted.add(key);
           S.planBusy.delete(id);
           if ($('#modal') === dialog) closeModal();
@@ -3242,7 +3273,7 @@
         const s = S.store?.sessions.find(x => x.id === c.id);
         if (!s) throw new Error('This session no longer exists.');
         const type = kind === 'follow_up' ? kind : /^\/\S/.test(text) ? 'prompt' : kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
-        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command`, { type, message: text, ...imagePayload(attachment) });
+        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command?lean=1`, { type, message: text, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
         if (type === 'follow_up') toast((response.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now');
         await refresh();
@@ -3259,12 +3290,12 @@
   }
   async function sessionCommand(type, extra) {
     const c = current();
-    try { await api(`/sessions/${c.id}/command`, { type, ...extra }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type, ...extra }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
     catch (e) { toast(e.message, 'err'); return false; }
   }
   async function advisorCommand(action) {
     const c = current();
-    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action }); await refresh(); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'advisor', action }); await refresh(); }
     catch (e) { toast(e.message, 'err'); }
   }
 
@@ -3362,15 +3393,19 @@
       <div class="settings"><nav class="set-nav" id="toolNav"></nav><div class="set-main"><div id="toolForm"><div class="working"><span class="spinner"></span> Loading tools…</div></div><div id="toolJobs"></div></div></div>`;
     loadTools();
   }
+  // revs=1: every job carries its revision. Polls then name the jobs held at theirs (have=<id>.<rev>,…): one unchanged comes
+  // back as { id, rev, unchanged } instead of its output (up to 200 KB) again, and catalog=0 leaves out the tools. A job
+  // without a rev (a run just started here, or an older companion's) is sent whole.
   async function loadTools() {
-    try { const r = await api('/cli'); S.tools.catalog = r.tools; S.tools.jobs = r.jobs; S.tools.error = ''; }
+    try { const r = await api('/cli?revs=1'); S.tools.catalog = r.tools; S.tools.jobs = r.jobs; S.tools.error = ''; }
     catch (e) { S.tools.error = e.message; }
     if (current().kind === 'tools') renderTools();
   }
   async function refreshJobs() {
     const running = () => S.tools.jobs.filter(j => j.status === 'running').map(j => j.id).join();
-    const was = running();
-    try { S.tools.jobs = (await api('/cli')).jobs; } catch { return; }
+    const was = running(), held = new Map(S.tools.jobs.map(j => [j.id, j]));
+    const have = S.tools.jobs.filter(j => Number.isInteger(j.rev)).map(j => j.id + '.' + j.rev).join(',');
+    try { S.tools.jobs = (await api('/cli?revs=1&catalog=0&have=' + have)).jobs.map(j => j.unchanged ? held.get(j.id) : j); } catch { return; }
     if (current().kind !== 'tools') return;
     renderToolJobs();
     if (running() !== was) renderToolNav();
@@ -4551,7 +4586,8 @@
     const top = x.top || held?.top, order = x.order || held?.order, sessions = top && order?.map(id => byId.get(id));
     if (!sessions || sessions.some(s => !s)) { S.sx = null; return null; }
     S.sx = { epoch: x.epoch, rev: x.rev, top, order, sessions };
-    // Only the viewed session holds its transcript (mergeTx) and /btw answers; a summary kept from an earlier view lets go of them.
+    // Only the viewed session holds its transcript (mergeTx) and /btw answers; a summary kept from an earlier view lets go of
+    // them (the last views' transcripts wait in S.txPrev, apart from the summaries).
     for (const s of sessions) if (s.id !== view && ('messages' in s || '_btw' in s)) { delete s.messages; delete s._btw; }
     const v = view && byId.get(view);
     if (v) { if (st.btw) v._btw = st.btw; else delete v._btw; }
@@ -4562,12 +4598,16 @@
   // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it:
   // tx.messages from a companion that sends the store as changes (summaries are kept across polls), else the session's own.
   // False when the delta doesn't fit what is held: the caller drops the reply and polls the full transcript instead.
+  // The transcripts of the sessions viewed just before (2, 1 in the phone layout) wait in S.txPrev: switching back to one
+  // asks for its changes the same way (refresh), instead of the whole transcript again (~0.5-0.9 MB gzipped at 600 messages).
   function mergeTx(st, view, kept) {
-    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null;
+    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null, held = S.tx?.session === view ? S.tx : S.txPrev.get(view);
+    S.txPrev.delete(view);
+    if (S.tx && S.tx.session !== view) { S.txPrev.set(S.tx.session, S.tx); trim(S.txPrev, innerWidth <= 820 ? 1 : 2); S.tx = null; }
     if (!t || !s || t.session !== view) { S.tx = null; return true; }
     const whole = kept ? t.messages : s.messages;
     if (whole) { s.messages = whole; S.tx = t.epoch ? { session: view, epoch: t.epoch, rev: t.rev, messages: whole } : null; return true; }
-    const base = S.tx?.session === view && S.tx.epoch === t.epoch ? S.tx.messages : null;
+    const base = held?.epoch === t.epoch ? held.messages : null;
     const byId = base && new Map(base.map(m => [m.id, m]));
     if (byId) for (const m of t.changed || []) byId.set(m.id, m);
     const messages = byId && (t.order || base.map(m => m.id)).map(id => byId.get(id));
@@ -4578,14 +4618,23 @@
   // A reply that changes nothing: no summary, order or other store field, no transcript change and no /btw answers.
   const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
   let stateSeq = 0, stateShown = 0, renderedAt = 0;
-  // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works
-  // or nobody sees the page: only "ago" labels could change then, and those still render every 10 s. While something
-  // works its running timer ticks on every poll, as before. Other callers always render: they may have changed the page.
+  // OMP's own session list (the sidebar's history) loads every 20 s, alongside /state instead of after it, and conditionally:
+  // an unchanged list is a 304 that keeps S.native. A refresh that starts while it is in flight (the whole-transcript
+  // refetch in refresh) waits for the same request.
+  let nativeLoad = null;
+  // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works:
+  // only "ago" labels could change then, and those still render every 10 s. While something works its running timer ticks
+  // on every poll, as before. A poll of a hidden page renders nothing at all. Other callers always render: they may have
+  // changed the page.
   async function refresh(poll = false) {
-    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null, online = S.online;
+    const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : S.txPrev.get(view), online = S.online;
     let fresh = !poll;
+    if (Date.now() - S.nativeAt > 20000) { S.nativeAt = Date.now(); const p = nativeLoad = api('/omp-sessions', undefined, { etag: S.nativeTag ||= { tag: '' } }).catch(() => null).finally(() => { if (nativeLoad === p) nativeLoad = null; }); }
+    const nat = nativeLoad;
     try {
       const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
+      // A reply that is no store at all (a proxy's empty page, say) fails the poll; its ETag must not make the next one a 304.
+      if (st && !st.sx && !st.sessions) { S.stateTag = ''; throw new Error('The companion sent an incomplete reply.'); }
       S.online = true; S.fails = 0; retryDrafts();
       // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
       if (seq > stateShown) {
@@ -4595,11 +4644,12 @@
         else if (st) { S.stateTag = ''; void refresh(); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
-    if (Date.now() - S.nativeAt > 20000) {
-      S.nativeAt = Date.now();
-      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; fresh = true; } catch {}
-    }
-    if (!fresh && S.online === online && (document.hidden || !busyNow()) && Date.now() - renderedAt < 10000) {
+    const native = nat && await nat;
+    if (native) { S.native = native.sessions; S.nativeReady = true; fresh = true; }
+    // Hidden (a background tab, the desktop app in the tray): only the title badge and notifications follow (checkAttention);
+    // showing the page refreshes it (visibilitychange), and renderedAt = 0 has the first visible poll render regardless.
+    if (poll && document.hidden) { checkAttention(); renderedAt = 0; return; }
+    if (!fresh && S.online === online && !busyNow() && Date.now() - renderedAt < 10000) {
       // A tab looked at again still takes its sessions off the title badge and out of the sidebar marks.
       const unseen = [...attn.unseen.keys()].join();
       checkAttention();
@@ -4694,7 +4744,7 @@
       const s = S.store?.sessions.find(x => x.id === c.id);
       if (!s) return null;
       return { model: sessionModel(s), thinking: s.thinking, session: s, allowDefault: false, apply: async (sel, th) => {
-        try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); thinkSet(sel, th); }
+        try { await api(`/sessions/${s.id}/command?lean=1`, { type: 'set_model', model: sel, thinking: th }); await refresh(); thinkSet(sel, th); }
         catch (err) { toast(err.message, 'err'); }
         $('#input')?.focus();
       } };
@@ -4974,7 +5024,7 @@
     else if (act === 'btwHistory') btwHistory(c.id);
     else if (act === 'btwCancel') { const st = btwState(c.id); sessionApi({ type: 'btw_cancel', ...(st.topic ? { recordId: st.topic } : {}) }).then(refresh, err => toast(err.message, 'err')); }
     else if (act === 'commitRelated') sendOrQueue(c.id, COMMIT_RELATED);
-    else if (act === 'pushMain') { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, S.wtBase.get(c.id) || 'main')); }
+    else if (act === 'pushMain') { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, pushBase(s) || 'main')); }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }

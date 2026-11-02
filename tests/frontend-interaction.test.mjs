@@ -67,7 +67,7 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
   const act = (name, data = {}) => target({ '[data-act]': node('', { dataset: { act: name, ...data } }) });
   const key = (k, mods = {}, t = elements.get('input')) => fire('keydown', { target: t, key: k, code: '', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods });
   const go = async h => { location.hash = h; winListeners.get('hashchange')(); await flush(); };
-  const commands = () => calls.filter(c => /\/command$/.test(c.url)).map(c => ({ session: c.url.split('/')[3], ...c.body }));
+  const commands = () => calls.filter(c => /\/command(\?|$)/.test(c.url)).map(c => ({ session: c.url.split('/')[3], ...c.body }));
   // Runs the composer-draft saves waiting out their 700 ms debounce.
   const saveDrafts = async () => { for (const t of timers.filter(t => t.ms === 700 && !t.cleared && !t.ran)) { t.ran = true; t.fn(); } await flush(); };
   const draftPosts = () => calls.filter(c => c.url === '/api/draft' && c.body);

@@ -22,7 +22,7 @@ async function composer(status, saved) {
     localStorage: { getItem: key => key === 'omp-hotkeys' && saved ? JSON.stringify(saved) : null, setItem() {} }, sessionStorage: { getItem: () => 'test-token' },
     setTimeout() {}, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} },
     fetch: async (url, opts) => {
-      if (url === '/api/sessions/session/command') sent.push(JSON.parse(opts.body).type);
+      if (url.split('?')[0] === '/api/sessions/session/command') sent.push(JSON.parse(opts.body).type);
       return { ok: true, status: 200, json: async () => structuredClone(url.startsWith('/api/state') ? { projects: [], sessions: [session], archived: [] } : url === '/api/models' ? { models: [], roles: {} } : { sessions: [], queuedMessages: [] }) };
     },
   });
