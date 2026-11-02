@@ -1,5 +1,5 @@
-# Builds the macOS app for Apple silicon and Intel when the app's code changes (or from the Actions tab), runs the test
-# suite on macOS, smoke-tests each build (scripts/smoke-app.mjs) and keeps its .dmg as a run artifact. Those are ad-hoc
+# Builds the macOS app for Apple silicon and Intel when the app's code changes (or from the Actions tab), smoke-tests
+# each build (scripts/smoke-app.mjs) and keeps its .dmg as a run artifact; the test suite runs locally (npm test). Those are ad-hoc
 # signed test builds; release.yml publishes the releases installed apps update from.
 name: macOS app
 
@@ -32,22 +32,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-      - run: npm ci
-      # One test file at a time: tests/frontend-render.test.mjs times markdown rendering against a 50 ms budget, which
-      # parallel test files competing for the runner's few cores can exceed.
-      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
-
   build:
     strategy:
       fail-fast: false

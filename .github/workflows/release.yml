@@ -123,10 +123,6 @@ jobs:
           Write-Output "Releasing v$version (previous tag: $(if ($latest) { "v$latest" } else { 'none' }))"
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      # One test file at a time: tests/frontend-render.test.mjs times markdown rendering against a 50 ms budget, which
-      # parallel test files competing for the runner's few cores can exceed.
-      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
-
       # tauri.release.conf.json turns on createUpdaterArtifacts: the setup .exe is signed with the key below, and the
       # action uploads its .sig and a latest.json pointing at it.
       - uses: tauri-apps/tauri-action@v0
