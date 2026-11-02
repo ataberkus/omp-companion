@@ -1089,18 +1089,28 @@
   // <details> state the renderers don't track carry over into a rebuilt part, as in swapHtml. The container is rewritten
   // whole when it doesn't hold exactly the elements rendered last (first or empty render, or written elsewhere since),
   // when keys repeat, or when a changed part is not one element.
+  // A part may carry a nest, [key, html, { head, sum, kids }]: its markup is head (the element's start tag), a <summary>
+  // holding sum, then one element holding kids, [key, html] parts of their own. While head stays the same, a change patches
+  // the element in place, the summary's content and the kids through setKeyed: the live activity group changes every poll,
+  // mostly in its last row, and its other rows keep their elements (open diffs stay laid out, UI state carries per row).
+  const nested = n => n?.children?.length === 2 && n.firstElementChild.tagName === 'SUMMARY';
+  // The kids' elements as setKeyed's record, so the first patch of a nest doesn't rewrite them whole.
+  const nestInit = (n, x) => { const c = n?.lastElementChild; if (c?.children?.length === x.kids.length) { c._parts = x.kids; c._nodes = [...c.children]; } };
   function setKeyed(el, parts) {
     const prev = el._parts, nodes = el._nodes, kids = el.children, keys = new Set(parts.map(p => p[0])), unique = keys.size === parts.length;
     el._parts = parts; el._nodes = null;
     let built = null;
     if (unique && prev?.length && nodes?.length === prev.length && kids?.length === nodes.length && nodes.every((n, i) => kids[i] === n)) {
-      const old = new Map(prev.map(([k, h], i) => [k, { h, n: nodes[i] }]));
+      const old = new Map(prev.map(([k, h, x], i) => [k, { h, x, n: nodes[i] }])), patch = new Map();
       built = new Map();
-      for (const [k, h] of parts) {
-        if (old.get(k)?.h === h) continue;
+      for (const [k, h, x] of parts) {
+        const o = old.get(k);
+        if (o?.h === h) continue;
+        if (x && o?.x?.head === x.head && nested(o.n)) { patch.set(k, x); continue; }
         const t = document.createElement('template'); t.innerHTML = h;
         const c = t.content, n = c.firstElementChild;
         if (!n || c.children.length !== 1 || [...c.childNodes].some(x => x !== n && (x.nodeType !== 3 || x.data.trim()))) { built = null; break; }
+        if (x) nestInit(n, x);
         built.set(k, n);
       }
       if (built) {
@@ -1113,6 +1123,7 @@
             const f = built.get(k);
             let n = old.get(k)?.n;
             if (f) { if (n) { carry.push([f, uiState(n, true)]); if (n === next) next = n.nextElementSibling; n.remove(); } n = f; }
+            else if (patch.has(k)) { const x = patch.get(k); if (x.sum !== old.get(k).x.sum) n.firstElementChild.innerHTML = x.sum; setKeyed(n.lastElementChild, x.kids); }
             if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
             out.push(n);
           }
@@ -1124,6 +1135,7 @@
     }
     swapHtml(el, parts.map(p => p[1]).join(''));
     el._nodes = unique && el.children?.length === parts.length ? [...el.children] : null;
+    el._nodes?.forEach((n, i) => { if (parts[i][2]) nestInit(n, parts[i][2]); });
   }
   // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
   // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
@@ -1366,31 +1378,13 @@
     }
     return out;
   }
-  function activityBlock(group, live) {
-    const rows = legacyTools(group);
-    const gid = group[0].id;
-    const lines = rows.map(r => r.tool ? toolLine(r.tool, parseArgs(r.tool.args)) : { k: 'think' });
-    const failed = rows.filter(r => r.tool?.status === 'error').length;
-    const changed = rows.flatMap(r => realFiles(r.tool));
-    const cst = changed.length ? diffStat(changed) : null;
-    const lastRow = rows[rows.length - 1];
-    const now = live ? (lastRow.tool ? (lastRow.tool.intent || keyArg(lastRow.tool.name, parseArgs(lastRow.tool.args)) || lastRow.tool.name) : 'Thinking') : '';
-    const def = S.expandAll || live;
-    const open = groupOpen.has(gid) ? groupOpen.get(gid) : def;
-    return `<details class="activity ${live ? 'live' : ''}" data-gid="${esc(gid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary>${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}</summary>
-      <div class="rows">${rows.map((r, j) => activityRow(r, live, j === rows.length - 1, lines[j])).join('')}</div></details>`;
-  }
-  // Every input of activityBlock's markup besides the group's messages (see cachedPart).
-  const groupCtx = (group, live) => [live ? 1 : 0, S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
-
   // Thread parts reuse their markup while they are built from the same message objects and the same ctx. mergeTx keeps
   // unchanged messages across polls and nothing edits one in place (a change replaces it), so identity stands for content;
   // ctx holds every other input of the part's markup, written next to its builder. An input missing from a ctx leaves the
   // part stale until its messages change. With localStorage omp-debug-parts=1 every hit is rebuilt and a stale one logged.
   // A reused part keeps the times of its first render, so a time-zone change shows on messages as they change.
   let debugParts = false; try { debugParts = localStorage.getItem('omp-debug-parts') === '1'; } catch {}
-  const groupParts = new WeakMap(), msgParts = new WeakMap();
+  const groupParts = new WeakMap(), rowParts = new WeakMap(), msgParts = new WeakMap();
   function cachedPart(cache, members, ctx, build) {
     const c = cache.get(members[0]);
     if (c && c.ctx === ctx && c.members.length === members.length && c.members.every((m, i) => m === members[i])) {
@@ -1401,6 +1395,30 @@
     cache.set(members[0], { members, ctx, html });
     return html;
   }
+  // Every input of an activity row's markup besides its message (see cachedPart).
+  const rowCtx = (m, live, lastInLive) => [live ? 1 : 0, lastInLive ? 1 : 0, rowOpen.get(m.id), diffMode()].join('|');
+  // The group's markup, and its pieces as setKeyed's nest (the live group is patched in place, row by row).
+  function activityParts(group, live) {
+    const rows = legacyTools(group);
+    const gid = group[0].id;
+    const lines = rows.map(r => r.tool ? toolLine(r.tool, parseArgs(r.tool.args)) : { k: 'think' });
+    const failed = rows.filter(r => r.tool?.status === 'error').length;
+    const changed = rows.flatMap(r => realFiles(r.tool));
+    const cst = changed.length ? diffStat(changed) : null;
+    const lastRow = rows[rows.length - 1];
+    const now = live ? (lastRow.tool ? (lastRow.tool.intent || keyArg(lastRow.tool.name, parseArgs(lastRow.tool.args)) || lastRow.tool.name) : 'Thinking') : '';
+    const def = S.expandAll || live;
+    const open = groupOpen.has(gid) ? groupOpen.get(gid) : def;
+    const head = `<details class="activity ${live ? 'live' : ''}" data-gid="${esc(gid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>`;
+    const sum = `${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}`;
+    const kids = rows.map((r, j) => [r.id, cachedPart(rowParts, [r], rowCtx(r, live, j === rows.length - 1), () => activityRow(r, live, j === rows.length - 1, lines[j]))]);
+    return { head, sum, kids, html: `${head}
+      <summary>${sum}</summary>
+      <div class="rows">${kids.map(k => k[1]).join('')}</div></details>` };
+  }
+  const activityBlock = (group, live) => activityParts(group, live).html;
+  // Every input of a settled group's markup besides its messages (see cachedPart); the live one is built on every render.
+  const groupCtx = group => [S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
 
   function renderThread(messages, status, ownerId, opts = {}) {
     // Drop hidden advisor messages up front so they don't split activity groups.
@@ -1435,7 +1453,7 @@
     // [key, html] parts for setKeyed: a poll rebuilds only the parts whose markup changed (the streaming tail, mostly).
     // A key repeats only for messages without unique IDs, which then key by position.
     const parts = [], seen = new Map();
-    const add = (key, html) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html]); };
+    const add = (key, html, nest) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html, nest]); };
     if (opts.head) add('head', opts.head);
     else if (status === 'history') add('hist', `<div class="history-note">📜 Saved OMP session. Type below to continue it here. It picks up exactly where it left off.</div>`);
     for (let i = 0; i < messages.length; i++) {
@@ -1452,7 +1470,9 @@
         while (i < messages.length && !messages[i].adv && (messages[i].role === 'tool' || messages[i].role === 'thinking')) group.push(messages[i++]);
         i--;
         const live = status === 'running' && i === mainEnd;
-        add('act:' + group[0].id, cachedPart(groupParts, group, groupCtx(group, live), () => activityBlock(group, live)));
+        // The live group changes on every poll: it goes to setKeyed with its rows as parts, to be patched in place.
+        if (live) { const a = activityParts(group, true); add('act:' + group[0].id, a.html, a); }
+        else add('act:' + group[0].id, cachedPart(groupParts, group, groupCtx(group), () => activityBlock(group, false)));
         continue;
       }
       if (m.role === 'system') {

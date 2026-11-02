@@ -104,7 +104,7 @@ function boot({ hash = '#/s/s1', respond, ls = {}, intl, now, wrap = b => b } = 
   const clock = { offset: 0 };
   const FakeDate = class extends Date { constructor(...a) { super(...(a.length ? a : [Date.now() + clock.offset])); } static now() { return Date.now() + clock.offset; } };
   runInNewContext(source, {
-    document, window: { innerHeight: 900, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
+    document, Element, window: { innerHeight: 900, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
     location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: () => ({ matches: false }), Date: now ? FakeDate : Date, console: { ...console, error: (...a) => errors.push(a) }, confirm: () => true,
     localStorage: { getItem: k => ls[k] ?? null, setItem() {} }, sessionStorage: { getItem: () => 'tok', setItem() {}, removeItem() {} }, URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { constructor(fn) { ros.push(fn); } observe() {} disconnect() {} }, fetch,
@@ -221,6 +221,51 @@ test('cached thread parts follow every other input: toggles, expand-all, diff la
   await app.poll();
   assert.match(app.thread(), /data-msgact="regenerate"/, 'idle: history buttons appear on the parts that get them');
   assert.deepEqual(app.errors.filter(e => e[0] === 'Stale thread part'), [], 'no cached part differed from a fresh build');
+});
+
+test('the live activity group is patched in place: unchanged rows keep their elements, rebuilt ones their scroll offsets', async () => {
+  const head = thread1().slice(0, 6);
+  const srv = txServer([...head, tool('t7', 'read', 7), edit('e8', 8), think('k9', 'hmm', 9), tool('t10', 'bash', 10, { status: 'running', result: 'line 1', args: JSON.stringify({ command: 'make' }) })]);
+  const app = boot({ respond: srv.respond, ls: { 'omp-debug-parts': '1' } });
+  await flush();
+  const thread = app.els.get('thread'), group = () => thread.querySelector('details.activity.live'), rows = () => [...group().querySelectorAll('details.row')];
+  const G = group(), R = rows(), S0 = G.firstElementChild;
+  assert.deepEqual(R.map(r => r.dataset.rid), ['t7', 'e8', 'k9', 't10']);
+  // The running row's output was scrolled: the app records that from the scroll event.
+  const out = R[3].querySelector('pre');
+  out.scrollTop = 50;
+  for (const fn of app.listeners.scroll) fn({ target: out });
+  srv.set(srv.messages.map(m => m.id === 't10' ? { ...m, tool: { ...m.tool, result: 'line 1\nline 2' } } : m));
+  thread.writes = 0; app.doc.inserted = 0;
+  await app.poll();
+  assert.equal(app.thread(), await fullRender(srv.full()));
+  assert.equal(group(), G, 'the group keeps its element');
+  assert.equal(G.firstElementChild, S0, 'and its summary, which did not change');
+  assert.deepEqual(rows().map((r, i) => r === R[i]), [true, true, true, false], 'only the streaming row is rebuilt');
+  assert.equal(rows()[3].querySelector('pre').scrollTop, 50, 'its output keeps the scroll offset');
+  assert.equal(thread.writes, 0, 'nothing is rewritten whole');
+  // A new row: the previous one settles, the summary counts it.
+  srv.set([...srv.messages.map(m => m.id === 't10' ? { ...m, tool: { ...m.tool, status: 'done' } } : m), tool('t11', 'grep', 11, { status: 'running', args: JSON.stringify({ pattern: 'TODO' }) })]);
+  await app.poll();
+  assert.equal(app.thread(), await fullRender(srv.full()));
+  assert.equal(group(), G);
+  assert.deepEqual(rows().map((r, i) => r === R[i]), [true, true, true, false, false]);
+  assert.match(G.firstElementChild.innerHTML, /searched code/);
+  // A row the user closed stays closed; the rest stay put.
+  const e8 = rows()[1];
+  app.toggle(e8);
+  srv.set(srv.messages.map(m => m.id === 't11' ? { ...m, tool: { ...m.tool, result: 'a:1' } } : m));
+  await app.poll();
+  assert.equal(group(), G);
+  assert.ok(!rows()[1].open && !('open' in rows()[1].attrs), 'the closed edit row is rendered closed');
+  assert.equal(rows()[0], R[0]);
+  // The turn ends: the group is no longer live and is rebuilt once, as a settled group.
+  srv.set([...srv.messages.map(m => m.id === 't11' ? { ...m, tool: { ...m.tool, status: 'done' } } : m), reply('a12', 'done', 12)], { status: 'review' });
+  app.toggle(rows()[1]);
+  await app.poll();
+  assert.equal(app.thread(), await fullRender(srv.full()));
+  assert.notEqual(thread.querySelector('details.activity[data-gid="t7"]'), G);
+  assert.deepEqual(app.errors.filter(e => e[0] === 'Stale thread part'), []);
 });
 
 test('omp-debug-parts catches a part whose input is missing from its ctx (here: a message edited in place)', async () => {
