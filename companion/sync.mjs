@@ -39,9 +39,12 @@ export function createSync(ctx){
  // message sent it whole. A dashboard that sends od=1 gets an edit of the order it holds instead: drop its first `drop`
  // IDs, then replace the `del` IDs at `at` with `add`; n is the new length, for the dashboard to check. The order held at
  // rev r is the one recorded at the latest order change at or before r (also the order of a whole transcript sent at r).
- // The last 8 are kept (c.orders: the arrays c.order held, nothing copied), for a few changes between polls, dashboards
- // at different revs and a switch back to a session viewed before. One splice past a dropped front covers what streaming
- // does: appends, the 600 cap's drops, inserts before unread steers, a cancelled steer's removal, a read steer moved up.
+ // The last 24 are kept (c.orders: the arrays c.order held, nothing copied; ~5 KB each at 600 messages), for a few
+ // changes between polls, dashboards at different revs and a switch back to a session viewed before. Every poll that sees
+ // a new order records one, so the history drains as fast as dashboards poll: a hidden page polls every 8 s, and each
+ // visible dashboard on a streaming session records ~6.5 orders in that time (8 kept fell short with 2 of them).
+ // One splice past a dropped front covers what streaming does: appends, the 600 cap's drops, inserts before unread
+ // steers, a cancelled steer's removal, a read steer moved up.
  // The order goes out whole when the one held is older than the history, and when the edit would add a quarter of the
  // IDs or more (a reset, a reorder that moves many): not much smaller then.
  function orderEdit(h,n){const k=Math.max(0,h.indexOf(n[0])),len=h.length-k;let p=0,q=0;
@@ -57,7 +60,9 @@ export function createSync(ctx){
    if(prev&&same(m,prev.snap))entries.set(m.id,prev);else{entries.set(m.id,{snap:snapshot(m),rev:next});changed=true;}
    if(c.order[i]!==m.id)reordered=true;}
   if(changed||reordered)c.rev=next;
-  if(reordered){c.orderRev=next;c.order=[...ids];c.orders.push({rev:next,order:c.order});if(c.orders.length>8)c.orders.shift();}
+  // Kept orders the new one can't be reached from by an edit go first: one held there gets the whole order anyway, and
+  // after resets (all new IDs) they held thousands of IDs no message has (~2 MB for 8; randomUUID's are ~500 B each).
+  if(reordered){c.orderRev=next;c.order=[...ids];while(c.orders.length&&!orderEdit(c.orders[0].order,c.order))c.orders.shift();c.orders.push({rev:next,order:c.order});if(c.orders.length>24)c.orders.shift();}
   c.entries=entries;
   const held=/^([\w-]{1,32})\.(\d{1,15})$/.exec(since||''),rev=held?.[1]===c.epoch?Number(held[2]):-1;
   if(!(rev>=0&&rev<=c.rev))return {delta:false,tx:{session:s.id,epoch:c.epoch,rev:c.rev}};

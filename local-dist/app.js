@@ -4627,18 +4627,21 @@
   // The transcripts of the sessions viewed just before (2, 1 in the phone layout) wait in S.txPrev: switching back to one
   // asks for its changes the same way (refresh), instead of the whole transcript again (~0.5-0.9 MB gzipped at 600 messages).
   function mergeTx(st, view, kept, sent) {
-    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null, held = S.tx?.session === view ? S.tx : S.txPrev.get(view);
+    const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null;
     S.txPrev.delete(view);
     if (S.tx && S.tx.session !== view) { S.txPrev.set(S.tx.session, S.tx); trim(S.txPrev, innerWidth <= 820 ? 1 : 2); S.tx = null; }
     if (!t || !s || t.session !== view) { S.tx = null; return true; }
     const whole = kept ? t.messages : s.messages;
     if (whole) { s.messages = whole; S.tx = t.epoch ? { session: view, epoch: t.epoch, rev: t.rev, messages: whole } : null; return true; }
-    const base = held?.epoch === t.epoch ? held.messages : null;
+    // The changes are of the transcript this poll was sent with (sent, whose rev it sent): merged into that one they give the
+    // companion's at t.rev exactly. Not into the one held now: a poll out at the same time may have landed meanwhile, one
+    // the companion answered later (held moved on: an edit applied there can fit and be wrong) or earlier (held moved back
+    // under a later rev: kept as the base, its order and newer messages would be labelled with this rev, and the next edit,
+    // of this rev's order, would fit them and show a message twice).
+    const base = sent?.epoch === t.epoch ? sent.messages : null;
     const byId = base && new Map(base.map(m => [m.id, m]));
     if (byId) for (const m of t.changed || []) byId.set(m.id, m);
-    // The edit is of the order this poll was sent with: a poll that landed meanwhile may have moved held on (the changed
-    // messages, all those after the rev it was sent with, fit either).
-    const order = t.orderEdit ? editOrder(sent?.epoch === t.epoch ? sent.messages.map(m => m.id) : null, t.orderEdit) : t.order || base?.map(m => m.id);
+    const ids = base?.map(m => m.id), order = t.orderEdit ? editOrder(ids, t.orderEdit) : t.order || ids;
     const messages = byId && order?.map(id => byId.get(id));
     if (!messages || messages.some(m => !m)) { S.tx = null; return false; }
     s.messages = messages; S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages };

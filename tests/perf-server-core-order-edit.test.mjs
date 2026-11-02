@@ -108,14 +108,31 @@ test('the order goes out whole for a reset, a reorder that moves many, a big cha
   assert.deepEqual(d.poll().tx.orderEdit, { drop: 0, at: n - 2, del: 2, add: ids(s).slice(-2), n });
   // Without od: the order, every time.
   const r2 = plain.poll(); assert.equal(r2.tx.orderEdit, undefined); assert.deepEqual(r2.tx.order, ids(s));
-  // History: 8 order changes are kept. A dashboard that holds the order from 7 changes ago gets an edit; from 8, the order.
-  const other = dashboard(sync, s), late = dashboard(sync, s), later = dashboard(sync, s);
+  // History: 24 order changes are kept (on a 600-message session, so that 23 added stay under a quarter). A dashboard
+  // that holds the order from 23 changes ago gets an edit; from 24, the order.
+  const h = setup(600), other = dashboard(h.sync, h.s), late = dashboard(h.sync, h.s), later = dashboard(h.sync, h.s);
   other.poll(); late.poll(); later.poll();
-  append(s, 'assistant', 'x', 'h0'); other.poll(); const lateRev = late.held.rev; later.poll();
-  for (let i = 1; i < 8; i++) { append(s, 'assistant', 'x', 'h' + i); other.poll(); }
-  assert.ok(later.poll().tx.orderEdit, 'the order held 7 changes ago is still kept');
+  h.append(h.s, 'assistant', 'x', 'h0'); other.poll(); const lateRev = late.held.rev; later.poll();
+  for (let i = 1; i < 24; i++) { h.append(h.s, 'assistant', 'x', 'h' + i); other.poll(); }
+  assert.ok(later.poll().tx.orderEdit, 'the order held 23 changes ago is still kept');
   assert.equal(late.held.rev, lateRev);
-  const old = late.poll(); assert.equal(old.tx.orderEdit, undefined, '8 changes ago: no longer kept'); assert.deepEqual(late.held.ids, ids(s));
+  const old = late.poll(); assert.equal(old.tx.orderEdit, undefined, '24 changes ago: no longer kept'); assert.deepEqual(late.held.ids, ids(h.s));
+});
+
+// A page in the background polls every 8 s (app.js loop), a visible one on a working session every 1.2 s. Each visible
+// dashboard's poll records the order it sees, so while 2 or 3 of them watch a streaming session a hidden page falls
+// 13-20 orders behind between its polls (seen in Chromium: with 8 kept it got the whole order). Steps of 0.4 s, a
+// message every step at the 600 cap: the hidden page's polls are all edits.
+test('a hidden page beside visible dashboards on a streaming session still gets edits', () => {
+  const { s, sync, append } = setup(600), visible = [dashboard(sync, s), dashboard(sync, s), dashboard(sync, s)], hidden = dashboard(sync, s);
+  for (const d of [...visible, hidden]) d.poll();
+  const got = { edit: 0, order: 0 };
+  for (let step = 1; step <= 200; step++) {
+    append(s, step % 3 ? 'assistant' : 'tool', 'x', 'live' + step);
+    visible.forEach((d, i) => { if (step % 3 === i) d.poll(); });
+    if (step % 20 === 0) { const r = hidden.poll(); got[r.tx.orderEdit ? 'edit' : 'order']++; assert.deepEqual(hidden.held.ids, ids(s)); }
+  }
+  assert.deepEqual(got, { edit: 10, order: 0 });
 });
 
 test('dashboards at different revs each get an edit of the order they hold', () => {
