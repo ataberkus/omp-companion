@@ -2890,16 +2890,17 @@
     const off = (ok, why) => ok ? '' : ` disabled title="${esc(why)}"`, base = esc(st.base || 'its branch'), n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
     return `<div class="wt-finish" data-wtsession="${esc(s.id)}">
       <dl class="wt-facts"><dt>Branch</dt><dd><code>${esc(st.branch)}</code>${st.upstream ? ` → <code>${esc(st.upstream)}</code>` : ''}</dd>
-        <dt>Merges into</dt><dd>${st.base ? `<code>${esc(st.base)}</code>, checked out in ${esc(st.root)}` : `<span class="err">${esc(st.root)} is not on a branch</span>`}</dd>
-        <dt>Commits</dt><dd>${st.ahead} ahead, ${st.behind} behind</dd>
-        <dt>Worktree</dt><dd>${!st.exists ? 'folder already removed' : st.dirty ? `${n(st.dirty, 'uncommitted change', 'uncommitted changes')}, not part of the branch yet` : 'clean'}</dd></dl>
+        <dt>Merges into</dt><dd>${st.base ? `<code>${esc(st.base)}</code>, checked out in ${esc(st.root)}` : st.rootDirty == null ? 'unknown' : `<span class="err">${esc(st.root)} is not on a branch</span>`}</dd>
+        <dt>Commits</dt><dd>${st.ahead == null ? 'unknown' : `${st.ahead} ahead, ${st.behind} behind`}</dd>
+        <dt>Worktree</dt><dd>${!st.exists ? 'folder already removed' : st.dirty == null ? 'unreadable' : st.dirty ? `${n(st.dirty, 'uncommitted change', 'uncommitted changes')}, not part of the branch yet` : 'clean'}</dd></dl>
+      ${st.problem ? `<p class="err">${esc(st.problem)} Deleting still removes the folder.</p>` : ''}
       ${st.commits.length ? `<ul class="wt-commits">${st.commits.map(c => { const i = c.indexOf(' '); return `<li><code>${esc(c.slice(0, i))}</code> ${esc(c.slice(i + 1))}</li>`; }).join('')}</ul>` : ''}
       ${st.rootDirty ? `<p class="muted">${esc(st.root)} has ${n(st.rootDirty, 'uncommitted change', 'uncommitted changes')}; commit or stash them before merging.</p>` : ''}
       <div class="wt-acts">
         ${st.dirty ? '<button class="btn sm" data-wtact="commit">Commit worktree changes…</button>' : ''}
         <button class="btn sm primary" data-wtact="merge"${off(st.base && st.ahead && !st.rootDirty, 'Needs commits on the branch and a clean project folder')}>Merge into ${base}</button>
         <button class="btn sm" data-wtact="squash"${off(st.base && st.ahead && !st.rootDirty, 'Needs commits on the branch and a clean project folder')}>Squash-merge into ${base}</button>
-        <button class="btn sm" data-wtact="rebase"${off(st.base && st.exists && !st.dirty, 'Needs a clean worktree')}>Rebase onto ${base}</button>
+        <button class="btn sm" data-wtact="rebase"${off(st.base && st.exists && st.dirty === 0, 'Needs a clean worktree')}>Rebase onto ${base}</button>
         <button class="btn sm" data-wtact="push"${off(st.remote, 'This repository has no remote')}>Push to ${esc(st.remote || 'remote')}</button>
         <button class="btn sm danger" data-wtact="delete">Delete worktree and branch</button>
       </div></div>`;
@@ -2913,12 +2914,12 @@
     const box = $('#modal')?.querySelector('[data-wtsession]'); if (box) box._st = st;
   }
   // What deleting an isolated session's worktree loses, from its worktree_status: unmerged commits and uncommitted changes.
-  const wtDeleteText = st => `Delete the worktree folder and branch ${st.branch}?${st.ahead ? `\n\n${st.ahead} ${st.ahead === 1 ? 'commit is' : 'commits are'} not in ${st.base || 'the project branch'} and will be lost unless pushed.` : ''}${st.dirty ? `\n\n${st.dirty} uncommitted ${st.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`;
+  // Unknown when git could not read them (st.problem), or when worktree_status failed (st has only the branch).
+  const wtDeleteText = st => `Delete the worktree folder and branch ${st.branch}?${st.ahead ? `\n\n${st.ahead} ${st.ahead === 1 ? 'commit is' : 'commits are'} not in ${st.base || 'the project branch'} and will be lost unless pushed.` : ''}${st.dirty ? `\n\n${st.dirty} uncommitted ${st.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}${st.problem || st.ahead === undefined ? `\n\n${st.problem || 'Git could not read the worktree.'} Any commits not in the project branch and any uncommitted changes in it will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`;
   // Sidebar row trash button: the same delete as Finish worktree › Delete, confirmed with what it would lose.
   async function deleteRowWorktree(id) {
     const path = `/sessions/${encodeURIComponent(id)}/command`;
-    let st;
-    try { st = await api(path, { type: 'worktree_status' }); } catch (e) { return toast(e.message, 'err'); }
+    const st = await api(path, { type: 'worktree_status' }).catch(() => ({ branch: S.store?.sessions.find(x => x.id === id)?.branch || '' }));
     if (!confirm(wtDeleteText(st))) return;
     try { await api(path, { type: 'worktree_finish', action: 'delete' }, { timeout: 150000 }); } catch (e) { return toast(e.message, 'err'); }
     toast(`Deleted the worktree and ${st.branch}`);
@@ -3555,8 +3556,9 @@
   }
   const diskState = r => r.error ? `<span class="err">${esc(r.error)}</span>` : [
     r.busy ? '<b>working</b>' : esc(r.status), r.archived ? 'archived' : '', r.hidden ? 'hidden' : '',
-    !r.exists ? 'folder missing' : r.dirty ? `<span class="err">${r.dirty} uncommitted</span>` : 'clean',
-    r.ahead ? `<span class="err">${r.ahead} ${r.ahead === 1 ? 'commit' : 'commits'} not in ${esc(r.base)}</span>` : r.base ? `merged into ${esc(r.base)}` : '<span class="err">project folder not on a branch</span>',
+    r.problem ? `<span class="err">${esc(r.problem)}</span>` : '',
+    !r.exists ? 'folder missing' : r.dirty == null ? '' : r.dirty ? `<span class="err">${r.dirty} uncommitted</span>` : 'clean',
+    r.ahead == null ? '' : r.ahead ? `<span class="err">${r.ahead} ${r.ahead === 1 ? 'commit' : 'commits'} not in ${esc(r.base)}</span>` : r.base ? `merged into ${esc(r.base)}` : '<span class="err">project folder not on a branch</span>',
   ].filter(Boolean).join(' · ');
   function renderDisk() {
     const el = $('#toolForm'), D = S.disk, d = D.data;
@@ -3599,8 +3601,8 @@
       return diskStart('remove', { sessions: sel.map(x => x.id) });
     }
     if (act === 'remove' && r) {
-      const loses = r.dirty || r.ahead || !r.base;
-      if (!confirm(`Delete the worktree folder (${fmtSize(r.bytes)}) and branch ${r.branch}?${r.ahead ? `\n\n${r.ahead} ${r.ahead === 1 ? 'commit is' : 'commits are'} not in ${r.base} and will be lost unless pushed.` : ''}${r.base ? '' : '\n\nThe project folder is not on a branch, so whether its commits were merged is unknown; they will be lost unless pushed.'}${r.dirty ? `\n\n${r.dirty} uncommitted ${r.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`)) return;
+      const loses = r.dirty || r.ahead || !r.base || r.problem;
+      if (!confirm(`Delete the worktree folder (${fmtSize(r.bytes)}) and branch ${r.branch}?${r.ahead ? `\n\n${r.ahead} ${r.ahead === 1 ? 'commit is' : 'commits are'} not in ${r.base} and will be lost unless pushed.` : ''}${r.problem ? `\n\n${r.problem} Any commits not in the project branch and any uncommitted changes in it will be lost.` : r.base ? '' : '\n\nThe project folder is not on a branch, so whether its commits were merged is unknown; they will be lost unless pushed.'}${r.dirty ? `\n\n${r.dirty} uncommitted ${r.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`)) return;
       return diskStart('remove', { sessions: [r.id], confirm: !!loses });
     }
     if (act === 'clean' && r) {

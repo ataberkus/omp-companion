@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, readFile, mkdir, access, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, mkdir, access, realpath, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -194,6 +194,46 @@ test('finishing a worktree: merge, squash, rebase and push act on the branch; re
   assert.equal(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
   const s = app().store.sessions.find(x => x.id === 'w');
   assert.deepEqual([s.hidden, s.status], [true, 'done']);
+});
+
+// Deleting must not depend on git being able to read the worktree: its link to the repository can break (the project
+// folder moved, git's record of it pruned, its .git file gone) or the project folder can stop being a repository.
+for (const [name, breakIt, problem] of [
+  ['the project folder moved', async ({ root, app }) => { const to = join(root, '..', 'moved'); await rename(root, to); app().store.projects[0].path = to; return to; }, /no longer linked/],
+  ['git\'s record of the worktree is gone', ({ root }) => rm(join(root, '.git', 'worktrees'), { recursive: true, force: true }), /no longer linked/],
+  ['the worktree folder lost its .git file', ({ wt }) => rm(join(wt, '.git'), { force: true }), /no longer linked/],
+  ['the project folder is no longer a Git repository', ({ root }) => rm(join(root, '.git'), { recursive: true, force: true }), /no longer a Git repository/],
+]) test(`finishing a worktree when ${name}: status reports it in a sentence, delete still removes the folder and session`, async t => {
+  const env = await setup(t), { wt, command, app } = env;
+  await writeFile(join(wt, 'feature.txt'), 'feature\n');
+  const root = await breakIt(env) || env.root;
+  const [code, st] = await command('w', { type: 'worktree_status' });
+  assert.equal(code, 200);
+  assert.match(st.problem, problem); assert.doesNotMatch(st.problem, /fatal:/);
+  assert.deepEqual([st.exists, st.dirty], [true, null]);
+  for (const action of ['merge', 'rebase', 'push']) {
+    const [c, e] = await command('w', { type: 'worktree_finish', action });
+    assert.equal(c, 409, action); assert.doesNotMatch(e.error, /fatal:/, action);
+  }
+  assert.deepEqual((await command('w', { type: 'worktree_finish', action: 'delete' }))[1], { action: 'delete', deleted: true });
+  assert.equal(await exists(wt), false);
+  if (await exists(join(root, '.git'))) {
+    assert.equal(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
+    assert.equal((await git(root, 'worktree', 'list', '--porcelain')).split('\n').filter(l => l.startsWith('worktree ')).length, 1, 'git\'s record pruned');
+  }
+  const s = app().store.sessions.find(x => x.id === 'w');
+  assert.deepEqual([s.hidden, s.status, !!s.worktreeRemoved], [true, 'done', true]);
+});
+
+test('finishing a worktree whose folder was deleted by hand: delete drops git\'s leftover record and the branch', async t => {
+  const { root, wt, command, app } = await setup(t);
+  await rm(wt, { recursive: true, force: true });
+  const st = (await command('w', { type: 'worktree_status' }))[1];
+  assert.deepEqual([st.exists, st.ahead, st.problem], [false, 0, undefined]);
+  assert.deepEqual((await command('w', { type: 'worktree_finish', action: 'delete' }))[1], { action: 'delete', deleted: true });
+  assert.equal(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
+  assert.equal((await git(root, 'worktree', 'list', '--porcelain')).split('\n').filter(l => l.startsWith('worktree ')).length, 1);
+  assert.equal(app().store.sessions.find(x => x.id === 'w').hidden, true);
 });
 
 test('Push to main: merge with commit first commits the worktree\'s uncommitted changes on its branch', async t => {

@@ -103,12 +103,18 @@ export async function removeWorktreeFolder(dir,root){
   try{await gitRun(root,['worktree','remove','--force',dir],{timeout:WORKTREE_TIMEOUT});return true;}
   // On Windows `remove` can drop git's record and the files yet fail on the empty folder a dying process still holds;
   // retries then say "not a working tree". Once git no longer lists it, only the leftover folder remains.
+  // git also refuses a folder no longer linked to root's repository: the repository moved, its .git/worktrees record or
+  // the folder's .git file is gone, or root stopped being a repository. Then the folder is deleted directly and the
+  // stale record (now pointing at nothing) pruned.
   catch(e){
    if(e.status===504)throw error(`git worktree remove did not finish within ${WORKTREE_TIMEOUT/60000} minutes.`,504);
-   if(!await worktreeListed(root,dir)){await git(root,['worktree','prune']).catch(()=>{});await fs.rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});return true;}if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
+   if(!await worktreeListed(root,dir)||!await linkedWorkTree(dir)){await fs.rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});await git(root,['worktree','prune']).catch(()=>{});return true;}
+   if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
  }
  return false;
 }
+// Whether git can still read dir through its own .git file (not just as part of some enclosing repository).
+const linkedWorkTree=dir=>fs.access(path.join(dir,'.git')).then(()=>git(dir,['rev-parse','--git-dir'])).then(()=>true,()=>false);
 // Changes › Working tree: the real `git diff` of the session's folder against the commit it started from (or HEAD),
 // plus untracked files, in OMP's diff format with absolute paths.
 export async function worktreeChanges(s,which){
