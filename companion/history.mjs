@@ -49,7 +49,7 @@ export function createHistory(ctx){
   return {dir,tasks,agents,subagents:subagents.filter(x=>!linked.has(x.name)&&!linkedFiles.some(f=>samePath(f,x.file))),logs:jobs};
  }
  const sessionFileParam=value=>{const file=path.resolve(text(value,'Session file',4000));if(!file.endsWith('.jsonl')||!samePath(path.dirname(path.dirname(file)),ompSessionsDir))throw error('Not an OMP session file.');return file;};
- async function listNativeSessions(limit=200){
+ async function readNativeSessions(limit=200){
   const files=[];let dirs=[];try{dirs=await fs.readdir(ompSessionsDir,{withFileTypes:true});}catch{return [];}
   await Promise.all(dirs.filter(d=>d.isDirectory()).map(async d=>{const dir=path.join(ompSessionsDir,d.name);let entries=[];try{entries=await fs.readdir(dir);}catch{return;}
    await Promise.all(entries.filter(n=>n.endsWith('.jsonl')).map(async n=>{const file=path.join(dir,n);try{const st=await fs.stat(file);if(st.size>0)files.push({file,mtime:st.mtimeMs,size:st.size});}catch{}}));}));
@@ -63,5 +63,9 @@ export function createHistory(ctx){
    return {file:f.file,title:head.title||head.preview.split('\n')[0].slice(0,80)||'Untitled session',cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
   }))).filter(Boolean);
  }
+ // The first listing reads up to 200 heads (~125 ms for 150 files) on the first dashboard load's path, so it starts with
+ // the companion; a request meanwhile waits for it rather than reading the same heads again, then lists from the cache.
+ let warming=readNativeSessions().catch(()=>{});
+ const listNativeSessions=async limit=>{if(warming){await warming;warming=undefined;}return readNativeSessions(limit);};
  return {background,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions};
 }
