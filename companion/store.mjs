@@ -31,8 +31,14 @@ export async function openStore(ctx){
  // only once something reads it: 400 sessions' transcripts held at once cost more memory than the rest of the companion
  // (~400 MB parsed for 160 MB of files) and slowed every garbage collection. Until then s.messages reads it from disk on
  // first use (deferTranscript).
+ // Review sessions' edit/write tool file records ({path}) are noted on the way: markOverlaps checks them on every poll, and
+ // reading s.messages for that read and kept every review transcript. An unread transcript is this file. Only review
+ // sessions: running and queued ones load paused (below), and nothing makes a session active again without reading its
+ // transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it would trip over leaves no
+ // entry and markOverlaps reads the transcript then, as before.
+ const editsAtStart=new WeakMap(),noteEdits=(s,list)=>{try{const out=[];for(const m of list||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path)out.push({path:f.path});editsAtStart.set(s,out);}catch{}};
  for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
-  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');JSON.parse(raw);savedTranscripts.set(s.id,textDigest(raw));deferTranscript(s);}
+  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8'),list=JSON.parse(raw);savedTranscripts.set(s.id,textDigest(raw));if(s.status==='review')noteEdits(s,list);deferTranscript(s);}
   catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
@@ -62,8 +68,10 @@ export async function openStore(ctx){
  // then on it is an ordinary array. Not enumerable until then, so a summary or workspace.json never reads it. Its file is
  // what was last saved, so saves skip it (unread).
  function deferTranscript(s){Object.defineProperty(s,'messages',{configurable:true,enumerable:false,get(){const list=readTranscript(s);holdTranscript(s,list);return list;},set(list){holdTranscript(s,list);}});}
- function holdTranscript(s,list){Object.defineProperty(s,'messages',{value:list,writable:true,enumerable:true,configurable:true});}
+ function holdTranscript(s,list){editsAtStart.delete(s);Object.defineProperty(s,'messages',{value:list,writable:true,enumerable:true,configurable:true});}
  function unread(s){return !!Object.getOwnPropertyDescriptor(s,'messages')?.get;}
+ // The file records noted at startup while the transcript is unread; null once read or replaced, or when none were noted.
+ function unreadEdits(s){return unread(s)?editsAtStart.get(s)??null:null;}
  function readTranscript(s){try{return JSON.parse(readFileSync(transcriptFile(s.id),'utf8'));}catch(e){if(e.code==='ENOENT')return [];throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}
  // Save scope: the sessions whose transcripts may have changed; undefined = all of them, [] = workspace.json only.
  // Scopes union: true = every session, else a Set of sessions.
@@ -95,5 +103,5 @@ export async function openStore(ctx){
    for(const id of gone){await fs.rm(transcriptFile(id),{force:true});savedTranscripts.delete(id);}
   }catch(e){nextScope=widen(nextScope,scoped===true?undefined:[...scoped]);throw e;}
  });saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
- return {store,uiKeys,persist,saveNow,scheduleSave,unread,readTranscript,get saveTimer(){return saveTimer;}};
+ return {store,uiKeys,persist,saveNow,scheduleSave,unread,unreadEdits,readTranscript,get saveTimer(){return saveTimer;}};
 }

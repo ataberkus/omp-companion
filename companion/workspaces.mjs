@@ -11,7 +11,7 @@ import { git, gitRun, currentBranch, addWorktree, removeWorktree } from './git.m
 export const colors=['oklch(.74 .14 50)','oklch(.72 .13 265)','oklch(.74 .12 165)','oklch(.7 .15 310)','oklch(.78 .13 95)','oklch(.7 .14 20)','oklch(.74 .11 215)','oklch(.72 .15 135)','oklch(.7 .14 345)','oklch(.74 .1 240)'];
 export const projectColor=v=>typeof v==='string'&&(/^#[0-9a-f]{6}$/i.test(v)||/^oklch\(\s*[\d.]+%?\s+[\d.]+\s+[\d.]+\s*\)$/.test(v))?v:null;
 export function createWorkspaces(ctx){
- const {command,append,store,dataDir,activity,persist,scheduleSave,runners,enhanceJobs,stopEnhance,dropDraft}=ctx;
+ const {command,append,store,dataDir,activity,persist,scheduleSave,unreadEdits,runners,enhanceJobs,stopEnhance,dropDraft}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
  const listNativeSessions=(...args)=>ctx.listNativeSessions(...args);
  async function ensureProject(dir,name){
@@ -123,10 +123,13 @@ export function createWorkspaces(ctx){
   await persist(s);return {action,...await worktreeStatus(s)};
  }
  // Files edited (edit/write tool records) by two active sessions that share a folder rather than separate worktrees.
- // Set as _overlaps on both sessions before each /api/state reply.
+ // Set as _overlaps on both sessions before each /api/state reply. A transcript nothing has read yet contributes the
+ // records store.mjs noted at startup (unreadEdits) instead of being read here.
  function markOverlaps(){
   const key=p=>process.platform==='win32'?p.toLowerCase():p;
-  const active=store.sessions.filter(s=>!s.hidden&&!s.isolated&&['running','queued','review'].includes(s.status)).map(s=>{const files=new Map();for(const m of s.messages||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}return {s,files};});
+  const active=store.sessions.filter(s=>!s.hidden&&!s.isolated&&['running','queued','review'].includes(s.status)).map(s=>{const files=new Map(),kept=unreadEdits(s);
+   const add=list=>{for(const f of list)if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}};
+   if(kept)add(kept);else for(const m of s.messages||[])add(m.tool?.files||[]);return {s,files};});
   for(const s of store.sessions)delete s._overlaps;
   for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++){
    const a=active[i],b=active[j],shared=[...a.files.keys()].filter(k=>b.files.has(k)).map(k=>a.files.get(k));if(!shared.length)continue;
