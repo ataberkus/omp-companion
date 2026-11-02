@@ -9,22 +9,29 @@ export async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}
 // `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
 // so the dashboard renders it with the same diff view as edit-tool records. Paths are as git prints them (b/ side).
 const unquoteGitPath=p=>/^".*"$/.test(p)?p.slice(1,-1).replace(/\\(["\\])/g,'$1').replace(/\\t/g,'\t').replace(/\\n/g,'\n'):p;
+// A file's lines stop being formatted once its text is past perFile (only the first perFile characters are kept), and a
+// file past the budget is read only up to its first hunk (path and op come before it): a regenerated lockfile or bundle
+// formatted megabytes of lines it then dropped, on every Working tree reload.
 export function gitDiffFiles(out,{budget=2*1024*1024,perFile=200*1024}={}){
  const files=[];
  for(const chunk of String(out||'').split(/^diff --git /m).slice(1)){
-  const lines=chunk.split('\n');let from='',to='',op='modify';const body=[];let o=0,n=0,inHunk=false,binary=false;
-  for(const l of lines.slice(1)){
+  // len: the length of body.join('\n').
+  const lines=chunk.split('\n');let from='',to='',op='modify';const body=[];let len=-1,o=0,n=0,inHunk=false,binary=false;const omitted=budget<=0;
+  for(let i=1;i<lines.length;i++){const l=lines[i];
    if(!inHunk){
     if(l.startsWith('new file mode'))op='create';else if(l.startsWith('deleted file mode'))op='delete';
     else if(l.startsWith('--- '))from=l.slice(4);else if(l.startsWith('+++ '))to=l.slice(4);
     else if(l.startsWith('Binary files '))binary=true;
    }
-   const h=l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-   if(h){if(body.length)body.push('');o=+h[1];n=+h[2];inHunk=true;continue;}
-   if(!inHunk)continue;
-   if(l.startsWith(' ')){body.push(` ${o}|${l.slice(1)}`);o++;n++;}
-   else if(l.startsWith('-')){body.push(`-${o}|${l.slice(1)}`);o++;}
-   else if(l.startsWith('+')){body.push(`+${n}|${l.slice(1)}`);n++;}
+   const h=l.charCodeAt(0)===64&&l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+   if(h){if(omitted)break;if(body.length){body.push('');len++;}o=+h[1];n=+h[2];inHunk=true;continue;}
+   if(!inHunk||len>perFile)continue;
+   const c=l.charCodeAt(0);let t;
+   if(c===32){t=` ${o}|${l.slice(1)}`;o++;n++;}
+   else if(c===45){t=`-${o}|${l.slice(1)}`;o++;}
+   else if(c===43){t=`+${n}|${l.slice(1)}`;n++;}
+   else continue;
+   body.push(t);len+=t.length+1;
   }
   // Git ends ---/+++ paths that contain spaces with a tab.
   const side=to&&to!=='/dev/null'?to:from;let p=unquoteGitPath(side.replace(/\t$/,'')).replace(/^[ab]\//,'');
