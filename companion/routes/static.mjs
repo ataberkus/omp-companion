@@ -14,6 +14,8 @@ export function createStatic(ctx){
  // plain HTTP, where browsers offer only gzip and deflate, and loaded app.js and app.css raw (556 KB, 160 KB gzipped) on
  // every first visit and after every update. The page stays raw: it is small and carries the per-client token. A failed
  // gzip sends the file raw.
+ // q=0 refuses a coding (RFC 9110 12.4.2): "gzip;q=0, identity" gets the file raw.
+ const acceptsGzip=h=>String(h||'').split(',').some(p=>{const [c,...ps]=p.split(';').map(x=>x.trim().toLowerCase());return (c==='gzip'||c==='x-gzip')&&!ps.some(x=>/^q=0(?:\.0*)?$/.test(x));});
  const gz=new Map();const gzOf=(hash,data)=>{let p=gz.get(hash);if(!p){p=new Promise(r=>gzip(data,{level:9},(e,z)=>r(e?null:z)));gz.set(hash,p);if(gz.size>32)gz.delete(gz.keys().next().value);}return p;};
  const staticFile=async file=>{const st=await fs.stat(file);let c=staticFiles.get(file);if(c?.mtime!==st.mtimeMs||c.size!==st.size){const data=await fs.readFile(file);c={mtime:st.mtimeMs,size:st.size,data,hash:digest(data)};staticFiles.set(file,c);}return c;};
  const serveStatic=async({req,res,url,host})=>{
@@ -30,7 +32,7 @@ export function createStatic(ctx){
     const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.zip':'application/zip'};
     const headers={'Content-Type':mime[ext]||'application/octet-stream','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':csp(host),'Cache-Control':ext!=='.html'&&url.searchParams.get('v')===hash?'public, max-age=31536000, immutable':'no-cache',ETag:`"${hash}"`};
     // Each encoding has its own validator, so If-None-Match is compared once the encoding is chosen. Vary keeps CORS's Origin.
-    let body=data;if(['.js','.css','.svg'].includes(ext)&&data.length>=1024){headers.Vary=[res.getHeader('Vary'),'Accept-Encoding'].filter(Boolean).join(', ');if(/\bgzip\b/.test(req.headers['accept-encoding']||'')){const z=await gzOf(hash,data);if(z&&z.length<data.length){body=z;headers['Content-Encoding']='gzip';headers.ETag=`"${hash}-gz"`;}}}
+    let body=data;if(['.js','.css','.svg'].includes(ext)&&data.length>=1024){headers.Vary=[res.getHeader('Vary'),'Accept-Encoding'].filter(Boolean).join(', ');if(acceptsGzip(req.headers['accept-encoding'])){const z=await gzOf(hash,data);if(z&&z.length<data.length){body=z;headers['Content-Encoding']='gzip';headers.ETag=`"${hash}-gz"`;}}}
     if(req.headers['if-none-match']===headers.ETag){res.writeHead(304,headers);res.end();return;}
     res.writeHead(200,headers);res.end(body);return;
    };
