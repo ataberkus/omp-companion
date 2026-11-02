@@ -44,3 +44,20 @@ test('job scans: incremental, evicted and repeated tool-call ids give the same j
   assert.deepEqual(rescanned.slice(0, 3), jobs);
   assert.deepEqual(rescanned.map(j => j.id), ['x', 'job-1', 'y', 'job-2']);
 });
+
+test('job scans: two overlapping scans of one file apply its new lines once', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-job-scans-race-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'session.jsonl');
+  await writeFile(file, line({ type: 'session', id: 's', timestamp: at(0) }));
+  assert.deepEqual(await scanJobs(file), []);
+  // Both scans start from the same offset; before the fix both advanced it, so the next lines were read from past them.
+  await appendFile(file, bashCall('call_1', 1) + bashResult('call_1', 2, 'job-1'));
+  const [a, b] = await Promise.all([scanJobs(file), scanJobs(file)]);
+  assert.deepEqual(a.map(j => j.id), ['job-1']);
+  assert.deepEqual(b.map(j => j.id), ['job-1']);
+  await appendFile(file, bashCall('call_2', 3) + bashResult('call_2', 4, 'job-2') + asyncDone(5, 'job-1'));
+  const after = await scanJobs(file);
+  assert.deepEqual(after, await once(file));
+  assert.deepEqual(after.map(j => [j.id, j.status]), [['job-1', 'done'], ['job-2', 'running']]);
+});
