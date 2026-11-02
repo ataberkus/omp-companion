@@ -39,7 +39,11 @@ test('gitLog from one status run matches the separate git runs', { timeout: 6000
   await same('in step with its upstream', { cwd: clone }, r => { assert.equal(r.upstream, 'origin/main'); assert.equal(r.dirty, 0); });
   commit(clone, 'c.txt'); commit(clone, 'd.txt');
   commit(other, 'e.txt'); git(other, 'push', '-q', 'origin', 'main'); git(clone, 'fetch', '-q');
-  await writeFile(join(clone, 'a.txt'), 'changed\n'); await writeFile(join(clone, 'new.txt'), 'untracked\n'); await writeFile(join(clone, 'tab\tname.txt'), 'quoted\n');
+  // The tab-named file is staged straight into the index (Windows file names cannot hold a tab, and Git for Windows
+  // refuses such index paths unless core.protectNTFS is off): status quotes its path.
+  git(clone, 'config', 'core.protectNTFS', 'false');
+  await writeFile(join(clone, 'a.txt'), 'changed\n'); await writeFile(join(clone, 'new.txt'), 'untracked\n');
+  git(clone, 'update-index', '--add', '--cacheinfo', `100644,${execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: clone, input: 'quoted\n' }).toString().trim()},tab\tname.txt`);
   git(clone, 'mv', 'b.txt', 'renamed.txt');
   await same('ahead, behind and dirty', { cwd: clone, baseSha: base }, r => { assert.deepEqual([r.ahead, r.behind], [2, 1]); assert.equal(r.dirty, 4); assert.deepEqual(r.commits.map(c => c.session), [true, true, false, false]); });
   await mkdir(join(clone, 'sub', 'dir'), { recursive: true });

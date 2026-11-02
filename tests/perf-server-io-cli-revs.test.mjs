@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -14,14 +14,14 @@ import { fakeOmp } from './fake-omp.mjs';
 test('Tools jobs carry revisions for polls that ask for them', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-cli-revs-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const cli = join(dir, 'omp'), go = join(dir, 'go');
+  // A .ts entry runs as `bun omp.ts …` (the companion's OMP-source path): a shebang script without an extension does not
+  // run on Windows, where only .exe/.com files spawn without a shell.
+  const cli = join(dir, 'omp.ts'), go = join(dir, 'go');
   // Prints a line, then the second one and exits once the test creates `go`.
-  await writeFile(cli, `#!${process.execPath}
-const fs = require('node:fs');
+  await writeFile(cli, `const fs = require('node:fs');
 console.log('first');
 const wait = setInterval(() => { if (fs.existsSync(${JSON.stringify(go)})) { clearInterval(wait); console.log('second'); } }, 20);
 `);
-  await chmod(cli, 0o755);
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
   const app = await createCompanion({ dataDir: dir, omp: fakeOmp(), ompCommand: cli });
   t.after(() => app.close());
