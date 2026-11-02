@@ -14,7 +14,7 @@ if not exist node_modules\@oh-my-pi\pi-coding-agent\package.json (
   call npm ci || (echo npm ci failed. & pause & exit /b 1)
 )
 if defined OMP_BIN echo Using OMP: %OMP_BIN%
-if not defined OMP_BIN where omp >nul 2>nul || echo Warning: omp was not found on PATH. Updates, usage and the Tools page need the OMP CLI.
+if not defined OMP_BIN where omp >nul 2>nul || echo omp was not found on PATH: the companion installs OMP when it starts ^(set OMP_WEB_NO_INSTALL=1 to skip^).
 rem Reachable from your network (and your tailnet, if Tailscale runs) with a login. Set OMP_WEB_PASSWORD to choose the password;
 rem without it the console prints a random connection token per launch. Set OMP_WEB_HOST=127.0.0.1 to keep it on this PC only,
 rem or to this PC's Tailscale address (100.x.y.z) to accept only tailnet devices (see "Away from home with Tailscale" in README.md).

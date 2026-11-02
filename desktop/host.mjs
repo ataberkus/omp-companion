@@ -186,7 +186,8 @@ async function main() {
   // Taken before the OMP update below, which can use up to 45 s of the note's freshness.
   const resume = await takeUpdateNote();
   // The shell gives up on a host that is not ready within 60 s, reading the login shell included; an update cut short
-  // starts with the installed OMP. stdout carries the protocol, so update progress goes to stderr.
+  // starts with the installed OMP, and an OMP install (no omp found) cut short finishes in the background while the
+  // companion starts without the CLI. stdout carries the protocol, so update and install progress go to stderr.
   await startupUpdate({ timeout: 45000 - (shellEnv.ms || 0), log: m => console.error(m) });
   // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
   // Attention events become native notifications in the shell; it skips them while the main window has focus.

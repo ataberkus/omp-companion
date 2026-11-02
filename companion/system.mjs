@@ -1,19 +1,30 @@
 // This PC: PATH repair for OMP and Bun, terminals, shutdown and restart handoff, and opening files in an editor.
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { exec, error } from './util.mjs';
 // Apps started from Explorer can get a PATH without the user's entries (Windows drops an oversized user Path), so the
 // default install folders of OMP and Bun are appended when they exist and are missing: `omp` and `bun` still resolve.
-export function addInstallDirs(env=process.env,{home=os.homedir(),localAppData=env.LOCALAPPDATA,exists=existsSync}={}){
+// OMP's installer puts omp in PI_INSTALL_DIR when set, else %LOCALAPPDATA%\omp (Windows) or ~/.local/bin; `bun install -g`
+// in ~/.bun/bin. Called again after the companion installs OMP (installOmp), so a folder created since start is picked up.
+export function addInstallDirs(env=process.env,{home=os.homedir(),localAppData=env.LOCALAPPDATA,exists=existsSync,platform=process.platform}={}){
  const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';
  const dirs=String(env[key]||'').split(path.delimiter).filter(Boolean);
  const norm=d=>path.resolve(d).replace(/[\\/]+$/,'').toLowerCase();
  const have=new Set(dirs.map(norm));
- const add=[localAppData&&path.join(localAppData,'omp'),path.join(home,'.bun','bin')].filter(d=>d&&!have.has(norm(d))&&exists(d));
+ const add=[...new Set([env.PI_INSTALL_DIR,localAppData&&path.join(localAppData,'omp'),platform!=='win32'&&path.join(home,'.local','bin'),path.join(home,'.bun','bin')].filter(Boolean))].filter(d=>!have.has(norm(d))&&exists(d));
  if(add.length)env[key]=[...dirs,...add].join(path.delimiter);
  return add;
+}
+// The file `name` runs from when spawned without a shell (execFile): the first PATH folder holding it, with libuv's
+// .com/.exe search on Windows. null when it is nowhere on PATH. `exists` decides whether a candidate file is there.
+const isFile=p=>{try{return statSync(p).isFile();}catch{return false;}};
+export function onPath(name,env=process.env,{exists=isFile,platform=process.platform}={}){
+ const key=Object.keys(env).find(k=>k.toLowerCase()==='path')||'PATH';
+ const exts=platform==='win32'&&!path.extname(name)?['.com','.exe']:[''];
+ for(const dir of String(env[key]||'').split(path.delimiter).filter(Boolean))for(const ext of exts){const file=path.join(dir,name+ext);if(exists(file))return file;}
+ return null;
 }
 // Opens a console window on this machine in `dir` (a phone using the panel opens it on the computer, not the phone).
 // `dir` is only the working directory, never part of a command line. Windows: `start` gives the new cmd its own
