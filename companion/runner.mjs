@@ -43,6 +43,8 @@ export function createRunner(ctx){
    scheduleSave(s);
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist(s);}).finally(checkAutoShutdown);
  }
+ // Transcript-neutral frames (see the end of event()).
+ const NEUTRAL=new Set(['subagent_event','subagent_progress','subagent_lifecycle','turn_start','turn_end']),NEUTRAL_UI=new Set(['setStatus','setWidget','custom','cancel']);
  // A streamed thought or reply grows its own message, the last one bar unread steers: looked up from the end, since deltas
  // are most of OMP's event stream and a 600-message transcript scanned from the front cost three scans per delta. Exact:
  // the id is a fresh randomUUID, so it appears once. The copy keeps the 600 cap and backfillEntries' identity check.
@@ -163,7 +165,9 @@ export function createRunner(ctx){
    else if(f.method==='open_url'){const url=[f.launchUrl,f.url].find(u=>typeof u==='string'&&/^https?:\/\//i.test(u));if(url)s._openUrl={id:f.id,url:url.slice(0,4000),instructions:String(f.instructions||'').slice(0,1000)};}
    else if(f.method!=='setTitle'){try{runners.get(s.id)?.answer(f.id,{cancelled:true});}catch{}}
   }
-  if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);if(msg?.tool?.status==='running'){if(out)msg.tool.result=out.length>8000?'…'+out.slice(-8000):out;const images=toolImages(f.partialResult?.content);if(images.length)msg.tool.images=stashImages(images);}}
+  // A task tool repeats the same progress line while its subagents work: an update that changed nothing is neutral (below).
+  let neutral=false;
+  if(f.type==='tool_execution_update'){const msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);const out=contentText(f.partialResult?.content);neutral=true;if(msg?.tool?.status==='running'){if(out){const r=out.length>8000?'…'+out.slice(-8000):out;if(r!==msg.tool.result){msg.tool.result=r;neutral=false;}}const images=toolImages(f.partialResult?.content);if(images.length){msg.tool.images=stashImages(images);neutral=false;}}}
   if(f.type==='extension_error')notice(s,'error',`Extension ${path.basename(String(f.extensionPath||'extension'))} failed${f.event?` in ${f.event}`:''}: ${f.error}`);
   if(f.type==='notice')notice(s,f.level,f.source?`${f.source}: ${f.message}`:f.message);
   // A hosted command replaced the transcript outside a command (a collab room ended or resynced): show it as OMP has it.
@@ -192,7 +196,11 @@ export function createRunner(ctx){
   // A prompt OMP accepted and then failed (say, the provider rejected it).
   if(f.type==='prompt_error'&&f.id===s._promptId){s.error=f.error;s.status='error';delete s._interrupt;}
   // Streaming deltas, tool output and the like arrive many times a second: batched lazily unless the status moved.
-  scheduleSave(s,s.status===status);
+  // Frames that cannot change the transcript save workspace.json only (updatedAt, lastActivityAt, subagentList; _status,
+  // _widgets and uiRequests are not saved), so a parent waiting on its streaming subagents doesn't re-serialize its
+  // transcript (megabytes) every 5 s to find it unchanged. A handler here that starts changing s.messages leaves the list.
+  if(NEUTRAL.has(f.type)||(f.type==='message_update'&&!['thinking_delta','text_delta'].includes(f.assistantMessageEvent?.type))||(f.type==='extension_ui_request'&&NEUTRAL_UI.has(f.method)))neutral=true;
+  scheduleSave(neutral?[]:s,s.status===status);
  }
  // OMP's tool-approval dialogs: select('Allow tool: …',['Approve','Deny']) from its tool wrapper and eval preludes, and the
  // computer tool's foreground-control confirm. Prompts listing provider safety checks always go to the user: OMP lets no
