@@ -18,7 +18,10 @@ async function setup(t) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-wt-'));
   const root = join(dir, 'repo'), wt = join(dir, 'wt'), data = join(dir, 'data');
   let app;
-  t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
+  // OMP's agent dir and session store are measured by Disk space scans: this test's own, never the developer's.
+  const agentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
+  t.after(async () => { if (app) await app.close(); if (agentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = agentDir; await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
   await mkdir(root); await mkdir(data);
   await git(root, 'init', '-b', 'main');
   await git(root, 'config', 'core.autocrlf', 'false'); // byte-exact checkouts whatever the machine's git config says
@@ -33,7 +36,7 @@ async function setup(t) {
     { id: 'w', projectId: 'p', title: 'Add feature', cwd: wt, branch: 'omp-web/abcd1234', isolated: true, baseSha: start, status: 'review', native: false, messages: [], todos: [], createdAt: at, updatedAt: at },
     { id: 'plain', projectId: 'p', title: 'Plain', cwd: root, branch: 'main', status: 'review', native: false, messages: [], todos: [], createdAt: at, updatedAt: at },
   ], activity: [] }));
-  app = await createCompanion({ dataDir: data });
+  app = await createCompanion({ dataDir: data, ompSessionsDir: join(dir, 'omp-sessions') });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const command = async (id, body) => {
@@ -334,6 +337,60 @@ test('Disk space: a clean archived worktree is removed; dirty, ahead and running
   assert.ok(s.worktreeRemoved);
   assert.deepEqual([s.hidden, s.status], [true, 'done']);
   assert.deepEqual((await storageRun(app(), '/scan')).worktrees, []);
+});
+
+test('Disk space: removing all archived worktrees takes the safe ones, refuses ones with unmerged work and leaves the rest', async t => {
+  const { root, wt, app } = await setup(t);
+  // Nothing archived: nothing to remove.
+  const [code, r] = await storage(app(), '/remove', { archived: true });
+  assert.equal(code, 400); assert.match(r.error, /No archived session has a worktree/);
+
+  // Two more worktrees, never scanned: one archived with uncommitted work, one with unmerged commits, one not archived.
+  const extra = {};
+  for (const id of ['dirty', 'ahead', 'kept']) {
+    extra[id] = join(root, '..', id);
+    await git(root, 'worktree', 'add', '-b', `omp-web/${id}`, extra[id]);
+    const at = new Date().toISOString();
+    app().store.sessions.push({ id, projectId: 'p', title: id, cwd: extra[id], branch: `omp-web/${id}`, isolated: true, status: 'review', native: false, messages: [], todos: [], createdAt: at, updatedAt: at });
+  }
+  await writeFile(join(extra.dirty, 'wip.txt'), 'wip\n');
+  await writeFile(join(extra.ahead, 'b.txt'), 'b\n');
+  await git(extra.ahead, 'add', '.'); await git(extra.ahead, 'commit', '-m', 'Unmerged');
+  app().store.archived.push('s:w', 's:dirty', 's:ahead');
+
+  const v = await storageRun(app(), '/remove', { archived: true });
+  const by = Object.fromEntries(v.results.map(x => [x.key, x]));
+  assert.deepEqual(Object.keys(by).sort(), ['ahead', 'dirty', 'w'], 'only archived worktrees are targeted');
+  assert.deepEqual([by.w.ok, by.w.freed], [true, 0], 'no scan row, so nothing counted as freed');
+  assert.equal(await exists(wt), false);
+  assert.equal(await git(root, 'branch', '--list', 'omp-web/abcd1234'), '');
+  assert.equal(by.dirty.ok, false); assert.match(by.dirty.error, /1 uncommitted change/);
+  assert.equal(by.ahead.ok, false); assert.match(by.ahead.error, /1 commit not in main/);
+  for (const d of Object.values(extra)) assert.ok(await exists(d), d);
+  assert.notEqual(await git(root, 'branch', '--list', 'omp-web/kept'), '');
+});
+
+test('Disk space: the scan also sizes every OMP data location; a missing one is reported, not an error', async t => {
+  const { data, app } = await setup(t);
+  assert.deepEqual((await storage(app()))[1].locations, [], 'nothing measured before a scan');
+  await mkdir(join(data, 'transcripts'), { recursive: true });
+  await writeFile(join(data, 'transcripts', 'x.json'), 'x'.repeat(3000));
+  await writeFile(join(data, 'stray.bin'), 'y'.repeat(700));
+  await storageRun(app(), '/scan');
+  const [, v] = await storage(app());
+  assert.equal(v.error, '');
+  const by = Object.fromEntries(v.locations.map(l => [l.key, l]));
+  for (const l of v.locations) assert.equal(typeof l.bytes, 'number', l.key);
+  assert.deepEqual([by['data:transcripts'].bytes >= 3000, by['data:transcripts'].missing, by['data:transcripts'].path], [true, false, join(data, 'transcripts')]);
+  assert.ok(by['data:worktrees']);
+  assert.deepEqual([by['data:exports'].missing, by['data:exports'].bytes], [true, 0], 'never created');
+  assert.deepEqual([by['omp:blobs'].missing, by['omp:blobs'].bytes], [true, 0], 'no agent dir at all');
+  assert.ok(by['data:other'].bytes >= 700, 'files no other row covers');
+  await writeFile(join(data, 'transcripts', 'big.json'), 'z'.repeat(50000));
+  await storageRun(app(), '/scan');
+  const again = Object.fromEntries((await storage(app()))[1].locations.map(l => [l.key, l]));
+  assert.ok(again['data:transcripts'].bytes - by['data:transcripts'].bytes >= 50000);
+  assert.ok(again['data:other'].bytes - by['data:other'].bytes < 50000, 'named folders are not counted again as Other');
 });
 
 test('Disk space: folders no session uses are listed as orphans and removed with git\'s record pruned; their branch stays', async t => {
