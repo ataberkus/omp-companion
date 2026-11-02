@@ -30,7 +30,7 @@ function chunked(text) {
 // The real app.js in a vm with just enough DOM (as frontend-render.test.mjs boots it), plus what these tests drive:
 // document.hidden, a clock the api() timers run on (advance()), AbortController/TextDecoder for api()'s own timeout,
 // replies with headers, a status or a chunked body, and a count of every innerHTML write per element.
-function boot({ hash = '#/s/s1', respond, size = { width: 1360, height: 900 } } = {}) {
+function boot({ hash = '#/s/s1', respond, size = { width: 1360, height: 900 }, storage = {} } = {}) {
   const calls = [], timers = [], writes = new Map(), listeners = {}, winListeners = {}, clock = { now: Date.UTC(2026, 0, 1, 12) };
   const node = id => {
     let html = '';
@@ -70,7 +70,7 @@ function boot({ hash = '#/s/s1', respond, size = { width: 1360, height: 900 } } 
     document, window: { innerHeight: size.height, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: size.width, innerHeight: size.height,
     location, history: { replaceState() {} }, URLSearchParams, AbortSignal: { timeout: timeoutSignal }, AbortController, TextDecoder, CSS: { escape: s => String(s) }, matchMedia: () => ({ matches: false }),
     Date: FakeDate, console: { ...console, error() {} }, confirm: () => true,
-    localStorage: { getItem: () => null, setItem() {} }, sessionStorage: { getItem: () => 'tok', setItem() {}, removeItem() {} },
+    localStorage: { getItem: k => storage[k] ?? null, setItem: (k, v) => { storage[k] = String(v); } }, sessionStorage: { getItem: () => 'tok', setItem() {}, removeItem() {} },
     setTimeout: (fn, ms = 0) => { timers.push({ fn, ms, due: clock.now + ms }); return timers.length; }, clearTimeout: id => { if (timers[id - 1]) timers[id - 1].cleared = true; },
     requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, fetch,
   });
@@ -253,4 +253,36 @@ test('the Activity panel and a subagent transcript poll conditionally and keep w
   await app.advance(5000); await app.poll();
   assert.equal(app.calls.filter(c => c.url.startsWith('/api/transcript')).at(-1).inm, '"t1"');
   assert.match(app.thread(), /subagent reasoning shown/, 'the 304 kept the transcript');
+});
+
+// ---------- Changes > Working tree / Commits ----------
+test('Working tree and Commits rebuild the page only when a reload brings something new, and a hidden page does not reload', async () => {
+  for (const mode of ['tree', 'commits']) {
+    let n = 0, edit = 'TWO';
+    const tree = () => ({ cwd: '/project', base: 'abc123456789', baseLabel: 'HEAD', files: [{ path: '/project/a.txt', op: 'modify', diff: ` 1|one\n-2|two\n+2|${edit}` }] });
+    const log = () => ({ cwd: '/project', branch: 'main', head: 'h', upstream: '', ahead: 0, behind: 0, dirty: edit === 'TWO' ? 1 : 2, limit: 50, commits: [{ sha: 'a'.repeat(40), short: 'aaaaaaa', subject: 'Commit ' + edit, author: 'T', date: at(-60), merge: false, session: true }] });
+    const app = boot({ hash: '#/changes/s:s1', storage: { 'omp-changes': JSON.stringify({ mode }) }, respond: (url, call) => {
+      // The session works: its updatedAt moves on every poll, so the view reloads once 5 s have passed.
+      if (url.startsWith('/api/state')) return { body: store([session('s1', [], { status: 'running', updatedAt: at(++n) })]) };
+      if (call.body?.type === 'changes_worktree') return { body: tree() };
+      if (call.body?.type === 'git_log') return { body: log() };
+    } });
+    await flush();
+    const loads = () => app.calls.filter(c => c.body?.type === (mode === 'tree' ? 'changes_worktree' : 'git_log')).length;
+    const shown = mode === 'tree' ? /TWO/ : /Commit TWO/;
+    assert.match(app.thread(), shown);
+    const writes = app.writes.get('thread');
+    await app.advance(6000); await app.poll();
+    await app.advance(6000); await app.poll();
+    assert.equal(loads(), 3, `${mode}: reloaded while the session works`);
+    assert.equal(app.writes.get('thread'), writes, `${mode}: identical replies rebuild nothing`);
+    edit = 'THREE';
+    await app.advance(6000); await app.poll();
+    assert.match(app.thread(), mode === 'tree' ? /THREE/ : /Commit THREE/, `${mode}: a changed reply renders`);
+    app.document.hidden = true;
+    await app.advance(6000); await app.go('#/changes/s:s1');
+    assert.equal(loads(), 4, `${mode}: no reload while hidden`);
+    await app.visible(true);
+    assert.equal(loads(), 5, `${mode}: reloaded once shown`);
+  }
 });

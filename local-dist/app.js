@@ -1700,21 +1700,29 @@
   const relTo = (p, cwd) => { const n = x => String(x || '').replace(/\\/g, '/').replace(/\/+$/, ''); const a = n(p), b = n(cwd); return b && a.toLowerCase().startsWith(b.toLowerCase() + '/') ? a.slice(b.length + 1) : a; };
   // One message, one line per comment: "path:line: note". Removed lines carry their old line number.
   const reviewMessage = (notes, cwd) => [...notes].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line).map(n => `${relTo(n.path, cwd)}:${n.line}: ${n.side === 'o' ? '(removed line) ' : ''}${n.text.trim().replace(/\n/g, '\n  ')}`).join('\n');
+  // A reload that brings what is shown already (most of them while the agent only streams text) must render nothing:
+  // rebuilding a big diff costs the main thread 0.5-4 s and drops any text selection in it. e.ver moves only when the
+  // reply or its error does, and the render signatures follow it, not the load time.
+  async function loadGitView(e, id, body) {
+    try { const d = await api(`/sessions/${encodeURIComponent(id)}/command`, body, { timeout: 60000 }); if (!e.data || e.error || JSON.stringify(d) !== JSON.stringify(e.data)) { e.data = d; e.ver = (e.ver || 0) + 1; } e.error = ''; }
+    catch (err) { if (err.message !== e.error) e.ver = (e.ver || 0) + 1; e.error = err.message; }
+  }
   async function loadWorktree(id, force) {
     const s = S.store?.sessions.find(x => x.id === id), e = S.wt.get(id) || { base: 'start' };
-    // While the session works the folder changes under us: reload at most every 5 s; idle, only when asked.
-    if (e.loading || (!force && e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt))) return;
+    // While the session works the folder changes under us: reload at most every 5 s; idle, only when asked. A hidden page
+    // waits until it is shown.
+    if (e.loading || (!force && (document.hidden || e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt)))) return;
     e.loading = true; S.wt.set(id, e);
-    try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'changes_worktree', base: e.base }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
-    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
+    await loadGitView(e, id, { type: 'changes_worktree', base: e.base });
+    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; update();
   }
   // Commits: branch, upstream, ahead/behind and recent commits of the session folder; same reload policy as the working tree.
   async function loadGitLog(id, force) {
     const s = S.store?.sessions.find(x => x.id === id), e = S.gl.get(id) || { sel: '', commits: new Map() };
-    if (e.loading || (!force && e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt))) return;
+    if (e.loading || (!force && (document.hidden || e.at && (Date.now() - e.at < 5000 || e.updatedAt === s?.updatedAt)))) return;
     e.loading = true; S.gl.set(id, e);
-    try { e.data = await api(`/sessions/${encodeURIComponent(id)}/command`, { type: 'git_log' }, { timeout: 60000 }); e.error = ''; } catch (err) { e.error = err.message; }
-    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; S.lastSig = ''; update();
+    await loadGitView(e, id, { type: 'git_log' });
+    e.loading = false; e.at = Date.now(); e.updatedAt = s?.updatedAt; update();
   }
   // A commit's diff never changes, so it is fetched once per session view.
   async function loadCommit(id, sha) {
@@ -1738,7 +1746,7 @@
         <h1>Commits</h1><div class="meta">${d ? `<span title="${esc(d.cwd)}">⎇ ${d.branch ? esc(d.branch) : d.head ? `detached at ${esc(d.head.slice(0, 8))}` : 'no commits yet'}</span>${track}${d.dirty ? `<span>${d.dirty} uncommitted ${d.dirty === 1 ? 'change' : 'changes'}</span>` : ''}<span>${d.commits.length >= d.limit ? `latest ${d.limit} commits` : `${d.commits.length} ${d.commits.length === 1 ? 'commit' : 'commits'}`}</span>` : ''}</div></div>
       <div class="actions">${requestBtn(notes)}${modeSeg('commits')}<button class="btn sm ghost" data-act="glReload" aria-label="Reload commits" title="Read git log again">${g?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>${layoutSeg()}</div>`);
     const err = !d && g?.error;
-    const sig = ['commits', c.parent, diffMode(), g?.at || '', err || '', sel, ce ? (ce.loading ? 'l' : ce.error || 'd') : ''].join('|');
+    const sig = ['commits', c.parent, diffMode(), g?.ver || '', err || '', sel, ce ? (ce.loading ? 'l' : ce.error || 'd') : ''].join('|');
     if (sig === S.lastSig) return;
     S.lastSig = sig;
     if (!d && !err) { $('#thread').innerHTML = '<div class="working"><span class="spinner"></span> Reading git log…</div>'; return; }
@@ -1789,7 +1797,7 @@
       <div class="title-block"><div class="crumb"><a href="${esc(back)}">← ${esc(title)}</a> <span>/ changes</span></div>
         <h1>Changes</h1><div class="meta"><span>${byFile.size} ${byFile.size === 1 ? 'file' : 'files'}${tree ? '' : ` · ${all.length} ${all.length === 1 ? 'edit' : 'edits'}`}</span><span class="fd-stat"><span class="plus">+${tot.adds}</span> <span class="minus">−${tot.dels}</span></span>${pv && !src ? '<span>from the last 150 messages</span>' : ''}${tree && wt?.data ? `<span title="${esc(wt.data.cwd)}">git diff vs ${esc(wt.data.baseLabel === 'session start' ? `session start (${wt.data.base.slice(0, 8)})` : wt.data.baseLabel)}${wt.data.untrackedOmitted ? ` · ${wt.data.untrackedOmitted} more untracked files not shown` : ''}</span>` : ''}</div></div>
       <div class="actions">${requestBtn(notes)}${src ? modeSeg(mode) : ''}${tree ? `<select data-wtbase aria-label="Compare with"><option value="start" ${wt?.base !== 'head' ? 'selected' : ''}>vs session start</option><option value="head" ${wt?.base === 'head' ? 'selected' : ''}>vs HEAD</option></select><button class="btn sm ghost" data-act="wtReload" aria-label="Reload working tree diff" title="Run git diff again">${wt?.loading ? '<span class="spinner" style="width:10px;height:10px"></span>' : '↻'}</button>` : ''}${layoutSeg()}</div>`);
-    const sig = ['changes', c.parent, mode, diffMode(), waiting ? 'wait' : err || '', S.reviewVer, tree ? wt?.at : all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
+    const sig = ['changes', c.parent, mode, diffMode(), waiting ? 'wait' : err || '', S.reviewVer, tree ? wt?.ver : all.map(f => f.path + ':' + f.op + ':' + (f.diff?.length || 0) + ':' + f.at).join('\n')].join('|');
     if (sig === S.lastSig) return;
     // A comment being typed must not be wiped by a poll; the page catches up once it is saved or cancelled.
     if (S.noteEdit && $('#thread')?.querySelector?.('[data-noteform]') && S.lastSig.startsWith(['changes', c.parent, mode, diffMode()].join('|'))) return;
