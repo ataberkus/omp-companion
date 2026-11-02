@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { cliCatalog } from '../companion/cli-tools.mjs';
 
 const source = await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8');
 const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(setImmediate); };
@@ -345,4 +346,29 @@ test('a restarted companion (another epoch) and an evicted transcript are fetche
     assert.equal(query(page.states().at(-1).url).since, back, `${size.width} px wide`);
     assert.match(page.thread(), /first reply of s1/);
   }
+});
+
+// ---------- Tools page: job revisions (protocol P3) ----------
+test('the Tools page polls its jobs by revision: unchanged ones keep what is held, the catalog is fetched once', async () => {
+  const job = (id, rev, extra) => ({ id, rev, tool: 'commit', action: 'run', command: 'omp commit', cwd: '/project', startedAt: at(1), ...extra });
+  let jobs = [job('j1', 3, { status: 'running', output: 'line one' }), job('j2', 1, { status: 'done', output: 'finished earlier', finishedAt: at(2) })];
+  const app = boot({ hash: '#/tools', respond: url => {
+    if (!url.startsWith('/api/cli')) return;
+    const q = query(url), have = new Set((q.have || '').split(',').filter(Boolean));
+    if (q.revs !== '1') return { body: { tools: cliCatalog(), jobs: jobs.map(({ rev, ...j }) => j) } };
+    return { body: { ...(q.catalog === '0' ? {} : { tools: cliCatalog() }), jobs: jobs.map(j => have.has(j.id + '.' + j.rev) ? { id: j.id, rev: j.rev, unchanged: true } : j) } };
+  } });
+  await flush();
+  const cli = () => app.calls.filter(c => c.url.startsWith('/api/cli')).map(c => c.url);
+  assert.equal(cli()[0], '/api/cli?revs=1', 'the first load gets the catalog and the jobs with their revisions');
+  assert.ok(cli().slice(1).every(u => u === '/api/cli?revs=1&catalog=0&have=j1.3,j2.1'), 'later polls name what they hold');
+  assert.match(app.els.get('toolJobs').innerHTML, /line one[\s\S]*finished earlier/);
+  jobs[0] = job('j1', 4, { status: 'running', output: 'line one\nline two' });
+  await app.poll();
+  assert.equal(cli().at(-1), '/api/cli?revs=1&catalog=0&have=j1.3,j2.1');
+  const html = app.els.get('toolJobs').innerHTML;
+  assert.match(html, /line two/, 'the changed job is replaced');
+  assert.match(html, /finished earlier/, 'the unchanged one keeps what was held');
+  await app.poll();
+  assert.equal(cli().at(-1), '/api/cli?revs=1&catalog=0&have=j1.4,j2.1');
 });

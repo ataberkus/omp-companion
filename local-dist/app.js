@@ -3320,15 +3320,19 @@
       <div class="settings"><nav class="set-nav" id="toolNav"></nav><div class="set-main"><div id="toolForm"><div class="working"><span class="spinner"></span> Loading tools…</div></div><div id="toolJobs"></div></div></div>`;
     loadTools();
   }
+  // revs=1: every job carries its revision. Polls then name the jobs held at theirs (have=<id>.<rev>,…): one unchanged comes
+  // back as { id, rev, unchanged } instead of its output (up to 200 KB) again, and catalog=0 leaves out the tools. A job
+  // without a rev (a run just started here, or an older companion's) is sent whole.
   async function loadTools() {
-    try { const r = await api('/cli'); S.tools.catalog = r.tools; S.tools.jobs = r.jobs; S.tools.error = ''; }
+    try { const r = await api('/cli?revs=1'); S.tools.catalog = r.tools; S.tools.jobs = r.jobs; S.tools.error = ''; }
     catch (e) { S.tools.error = e.message; }
     if (current().kind === 'tools') renderTools();
   }
   async function refreshJobs() {
     const running = () => S.tools.jobs.filter(j => j.status === 'running').map(j => j.id).join();
-    const was = running();
-    try { S.tools.jobs = (await api('/cli')).jobs; } catch { return; }
+    const was = running(), held = new Map(S.tools.jobs.map(j => [j.id, j]));
+    const have = S.tools.jobs.filter(j => Number.isInteger(j.rev)).map(j => j.id + '.' + j.rev).join(',');
+    try { S.tools.jobs = (await api('/cli?revs=1&catalog=0&have=' + have)).jobs.map(j => j.unchanged ? held.get(j.id) : j); } catch { return; }
     if (current().kind !== 'tools') return;
     renderToolJobs();
     if (running() !== was) renderToolNav();
