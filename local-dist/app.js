@@ -472,7 +472,7 @@
       <button class="item ${it.status === 'history' ? 'history' : ''} ${it.key === sel ? 'sel' : ''}${it.unseen ? ' unseen' : ''}" data-key="${esc(it.key)}" title="${esc(it.title + '\n' + it.cwd)}"${it.key === sel ? ' aria-current="page"' : ''}>
         <span class="dot ${it.needsReview ? 'review' : it.status}"></span><span class="t">${esc(it.title)}${it.unseen ? '<span class="sr-only"> (new)</span>' : ''}</span><span class="ago">${esc(ago(it.updatedAt))}</span>
         <span></span><span class="m">${meta}</span>${workTime(it)}
-      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>`}<button type="button" class="row-more${it.pinned ? ' on' : ''}" data-rowmenu="${esc(it.key)}" aria-haspopup="menu" title="Session actions" aria-label="Session actions: ${esc(it.title)}${it.pinned ? ' (pinned)' : ''}">${it.pinned ? ICON_PIN : ICON_MORE}</button></span></div>`];
+      </button><span class="row-acts"><button type="button" class="pin${it.pinned ? ' on' : ''}" data-pin="${esc(it.key)}" data-unpin="${it.pinned ? '1' : ''}" title="${it.pinned ? 'Unpin' : 'Pin to top'}" aria-label="${it.pinned ? 'Unpin' : 'Pin to top'}: ${esc(it.title)}">${it.pinned ? ICON_UNPIN : ICON_PIN}</button>${it.status === 'running' || it.status === 'queued' ? '' : `<button type="button" class="arch" data-archive="${esc(it.key)}" data-restore="${it.archived ? '1' : ''}" title="${it.archived ? 'Restore to sidebar' : 'Archive'}" aria-label="${it.archived ? 'Restore to sidebar' : 'Archive'}: ${esc(it.title)}">${it.archived ? ICON_RESTORE : ICON_ARCHIVE}</button>${it.key.startsWith('s:') && it.isolated && it.branch?.startsWith('omp-web/') ? `<button type="button" class="del" data-wtdelete="${esc(it.key.slice(2))}" title="Delete worktree and branch (frees its disk space)" aria-label="Delete worktree and branch: ${esc(it.title)}">${ICON_TRASH}</button>` : ''}`}<button type="button" class="row-more${it.pinned ? ' on' : ''}" data-rowmenu="${esc(it.key)}" aria-haspopup="menu" title="Session actions" aria-label="Session actions: ${esc(it.title)}${it.pinned ? ' (pinned)' : ''}">${it.pinned ? ICON_PIN : ICON_MORE}</button></span></div>`];
   }
 
   function renderList() {
@@ -543,6 +543,7 @@
   const ICON_RESTORE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
   const ICON_PIN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v7"/></svg>';
   const ICON_UNPIN = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v7"/><path d="M3 3l18 18"/></svg>';
+  const ICON_TRASH = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12"/><path d="M9 7V4h6v3"/></svg>';
   // Archived and pinned exclude each other (the server clears one when the other is set). Undo restores the
   // previous mark: re-setting the other one when it was on, otherwise reverting this one.
   const MARKS = { archived: { path: '/archive', other: 'pinned', msg: on => on ? 'Session archived' : 'Session restored' }, pinned: { path: '/pin', other: 'archived', msg: on => on ? 'Session pinned' : 'Session unpinned' } };
@@ -2911,11 +2912,24 @@
     modal('Finish worktree', wtBody(s, st));
     const box = $('#modal')?.querySelector('[data-wtsession]'); if (box) box._st = st;
   }
+  // What deleting an isolated session's worktree loses, from its worktree_status: unmerged commits and uncommitted changes.
+  const wtDeleteText = st => `Delete the worktree folder and branch ${st.branch}?${st.ahead ? `\n\n${st.ahead} ${st.ahead === 1 ? 'commit is' : 'commits are'} not in ${st.base || 'the project branch'} and will be lost unless pushed.` : ''}${st.dirty ? `\n\n${st.dirty} uncommitted ${st.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`;
+  // Sidebar row trash button: the same delete as Finish worktree › Delete, confirmed with what it would lose.
+  async function deleteRowWorktree(id) {
+    const path = `/sessions/${encodeURIComponent(id)}/command`;
+    let st;
+    try { st = await api(path, { type: 'worktree_status' }); } catch (e) { return toast(e.message, 'err'); }
+    if (!confirm(wtDeleteText(st))) return;
+    try { await api(path, { type: 'worktree_finish', action: 'delete' }, { timeout: 150000 }); } catch (e) { return toast(e.message, 'err'); }
+    toast(`Deleted the worktree and ${st.branch}`);
+    if (current().kind === 'session' && current().id === id) location.hash = '#/new';
+    await refresh();
+  }
   async function worktreeAct(btn) {
     const box = btn.closest('[data-wtsession]'), st = box._st, action = btn.dataset.wtact, s = S.store?.sessions.find(x => x.id === box.dataset.wtsession);
     if (!s || !st) return;
     if (action === 'commit') { closeModal(); openTool('commit', 'run', { dryRun: true }, s.cwd); return; }
-    if (action === 'delete' && !confirm(`Delete the worktree folder and branch ${st.branch}?${st.ahead ? `\n\n${st.ahead} ${st.ahead === 1 ? 'commit is' : 'commits are'} not in ${st.base || 'the project branch'} and will be lost unless pushed.` : ''}${st.dirty ? `\n\n${st.dirty} uncommitted ${st.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`)) return;
+    if (action === 'delete' && !confirm(wtDeleteText(st))) return;
     box.querySelectorAll('button').forEach(b => { b.disabled = true; });
     try {
       const r = await api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_finish', action }, { timeout: 150000 });
@@ -5099,6 +5113,8 @@
     if (ar) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); setArchived(ar.dataset.archive, !ar.dataset.restore); return; }
     const pn = t.closest('[data-pin]');
     if (pn) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); setPinned(pn.dataset.pin, !pn.dataset.unpin); return; }
+    const wd = t.closest('[data-wtdelete]');
+    if (wd) { e.preventDefault(); if (t.closest('#ctxMenu')) closeCtx(); deleteRowWorktree(wd.dataset.wtdelete); return; }
     const nt = t.closest('[data-newtab]');
     if (nt) { closeCtx(); openItemTab(nt.dataset.newtab); return; }
     closeCtx();
@@ -5231,7 +5247,7 @@
   });
   document.addEventListener('auxclick', e => {
     const item = e.button === 1 && e.target.closest('.item[data-key]');
-    if (item && !e.target.closest('[data-archive],[data-pin]')) { e.preventDefault(); openItemTab(item.dataset.key); }
+    if (item && !e.target.closest('[data-archive],[data-pin],[data-wtdelete]')) { e.preventDefault(); openItemTab(item.dataset.key); }
   });
   document.addEventListener('contextmenu', e => {
     closeCtx();
@@ -5254,12 +5270,13 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#ctxMenu')) { const item = $('#ctxMenu')._item; closeCtx(); if (item?.isConnected) item.focus(); } });
   // Touch screens cannot hover a row to reveal its pin and archive buttons: the row's ⋯ (a pin when pinned) lists them.
   function openRowMenu(btn) {
-    const key = btn.dataset.rowmenu, row = btn.closest('.item-row'), pin = row?.querySelector('[data-pin]'), arch = row?.querySelector('[data-archive]');
+    const key = btn.dataset.rowmenu, row = btn.closest('.item-row'), pin = row?.querySelector('[data-pin]'), arch = row?.querySelector('[data-archive]'), del = row?.querySelector('[data-wtdelete]');
     const m = document.createElement('div');
     m.id = 'ctxMenu'; m.className = 'menu-pop ctx-menu row-menu'; m._item = btn; m._row = key; m.setAttribute('role', 'menu'); m.setAttribute('aria-label', btn.getAttribute('aria-label'));
     m.innerHTML = (pin ? `<button role="menuitem" data-pin="${esc(key)}" data-unpin="${esc(pin.dataset.unpin)}">${esc(pin.title)}</button>` : '')
       + (arch ? `<button role="menuitem" data-archive="${esc(key)}" data-restore="${esc(arch.dataset.restore)}">${esc(arch.title)}</button>` : '')
-      + `<button role="menuitem" data-newtab="${esc(key)}">Open in new tab</button>`;
+      + `<button role="menuitem" data-newtab="${esc(key)}">Open in new tab</button>`
+      + (del ? `<button role="menuitem" class="danger" data-wtdelete="${esc(del.dataset.wtdelete)}">Delete worktree and branch…</button>` : '');
     document.body.appendChild(m);
     const r = btn.getBoundingClientRect(), h = m.offsetHeight;
     m.style.left = Math.max(4, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 4)) + 'px';
