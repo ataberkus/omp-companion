@@ -56,8 +56,11 @@ class Element extends Node {
     this.dataset = Object.fromEntries(Object.entries(this.attrs).filter(([k]) => k.startsWith('data-')).map(([k, v]) => [k.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase()), v]));
     const cls = () => (this.attrs.class || '').split(/\s+/).filter(Boolean);
     this.classList = { contains: c => cls().includes(c), add() {}, remove() {}, toggle() {} };
-    this.open = 'open' in this.attrs;
   }
+  get src() { return this.attrs.src ?? ''; }
+  set src(v) { this.attrs.src = String(v); }
+  get open() { return 'open' in this.attrs; }
+  set open(v) { if (v) this.attrs.open = ''; else delete this.attrs.open; }
   get outerHTML() { return this.start + (VOID.has(this.name.toLowerCase()) ? '' : this.innerHTML + `</${this.name}>`); }
   get id() { return this.attrs.id || ''; }
   get attributes() { return Object.entries(this.attrs).map(([name, value]) => ({ name, value })); }
@@ -266,6 +269,65 @@ test('the live activity group is patched in place: unchanged rows keep their ele
   assert.equal(app.thread(), await fullRender(srv.full()));
   assert.notEqual(thread.querySelector('details.activity[data-gid="t7"]'), G);
   assert.deepEqual(app.errors.filter(e => e[0] === 'Stale thread part'), []);
+});
+
+test('tool images: every open row\'s images load after a render, a transient failure in a kept part is retried, closed rows wait', async () => {
+  const shot = (id, s, extra) => tool(id, 'screenshot', s, { images: [{ id: 'img-' + id }], ...extra });
+  const srv = txServer([user('u0', 'look', 0), shot('t1', 1), shot('t2', 2), reply('a3', 'seen', 3), edit('t4', 4, { status: 'running' })]);
+  const asked = [];
+  let failOnce = new Set(['img-t2']);
+  const respond = url => {
+    if (!url.startsWith('/api/tool-image')) return srv.respond(url);
+    const id = new URL(url, 'http://x').searchParams.get('id');
+    asked.push(id);
+    if (failOnce.delete(id)) return { status: 500 };
+    return { body: {} };
+  };
+  const app = boot({ respond });
+  await flush();
+  const imgs = () => [...app.els.get('thread').querySelectorAll('img[data-tool-image]')];
+  // The settled group and its tool rows are closed by default: nothing loads until they are opened.
+  assert.deepEqual(asked, []);
+  for (const d of app.els.get('thread').querySelectorAll('details.activity,details.row')) if (!d.open) app.toggle(d);
+  await flush();
+  assert.deepEqual(asked.sort(), ['img-t1', 'img-t2']);
+  assert.deepEqual(imgs().map(i => i.getAttribute('src') ? 'src' : ''), ['src', ''], 't2 failed once');
+  // Rows opened by the user stay open across the next render, which keeps t1/t2's group element: t2 is still retried.
+  streamT8(srv, ''); srv.set(srv.messages.map(m => m.id === 't4' ? { ...m, tool: { ...m.tool, result: 'more' } } : m));
+  await app.poll();
+  assert.deepEqual(asked.filter(x => x === 'img-t2').length, 2, 'retried on the next render');
+  assert.deepEqual(imgs().map(i => i.getAttribute('src') ? 'src' : ''), ['src', 'src']);
+  assert.equal(asked.filter(x => x === 'img-t1').length, 1, 'a loaded image is not fetched again');
+  // An image that lands on a finished row later shows too.
+  srv.set(srv.messages.map(m => m.id === 't1' ? { ...m, tool: { ...m.tool, images: [{ id: 'img-t1' }, { id: 'img-late' }] } } : m));
+  await app.poll();
+  for (const d of app.els.get('thread').querySelectorAll('details.activity,details.row')) if (!d.open) app.toggle(d);
+  await app.poll();
+  assert.ok(asked.includes('img-late'));
+});
+
+test('the prompt rail reads each prompt\'s tip once per element, and lists every prompt in order', async () => {
+  const srv = txServer([user('u0', 'first   prompt\nwith lines', 0), reply('a1', 'ok', 1), user('u2', 'second prompt', 2), edit('t3', 3, { status: 'running' })]);
+  const app = boot({ respond: srv.respond });
+  await flush();
+  const sc = app.els.get('scroller'); sc.scrollHeight = 2000; sc.clientHeight = 500;
+  let reads = 0;
+  const qs = Element.prototype.querySelector;
+  Element.prototype.querySelector = function (sel) { if (sel === '.bubble') reads++; return qs.call(this, sel); };
+  try {
+    const tick = () => { for (const fn of app.ros) fn([]); };
+    tick();
+    const tips = () => [...app.els.get('promptRail').children].map(b => [b.attrs['data-prompt'], b.attrs['data-tip']]);
+    assert.deepEqual(tips(), [['msg:u0', 'first promptwith lines'], ['msg:u2', 'second prompt']], 'whitespace folded; a <br> adds nothing, as in textContent');
+    assert.equal(reads, 2);
+    tick(); tick();
+    assert.equal(reads, 2, 'resize ticks reuse the tips');
+    srv.set([...srv.messages, user('u4', 'third', 4, { steer: 'pending' })]);
+    await app.poll();
+    tick();
+    assert.deepEqual(tips().map(t => t[0]), ['msg:u0', 'msg:u2', 'msg:u4']);
+    assert.equal(reads, 3, 'only the new prompt is read');
+  } finally { Element.prototype.querySelector = qs; }
 });
 
 test('omp-debug-parts catches a part whose input is missing from its ctx (here: a message edited in place)', async () => {

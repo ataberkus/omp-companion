@@ -1320,15 +1320,26 @@
     for (const [k, old] of toolImageUrls) { if (toolImageUrls.size <= 40) break; toolImageUrls.delete(k); old.then(u => u?.startsWith('blob:') && URL.revokeObjectURL(u)); }
     return p;
   }
-  function showToolImages(root) {
-    for (const img of root?.querySelectorAll?.('img[data-tool-image]') || []) {
-      if (img.closest('details:not([open])')) continue;
-      toolImageUrl(img.dataset.toolImage).then(u => {
-        if (!u || !img.isConnected) return;
-        if (u === 'gone') img.closest('.attach-item')?.replaceWith(Object.assign(document.createElement('span'), { className: 'msg-image-label', textContent: 'Image no longer stored' }));
-        else if (img.getAttribute('src') !== u) img.src = u;
-      });
-    }
+  function showToolImage(img) {
+    if (!img.isConnected || img.closest('details:not([open])')) return;
+    toolImageUrl(img.dataset.toolImage).then(u => {
+      if (!u || !img.isConnected) return;
+      if (u === 'gone') img.closest('.attach-item')?.replaceWith(Object.assign(document.createElement('span'), { className: 'msg-image-label', textContent: 'Image no longer stored' }));
+      else if (img.getAttribute('src') !== u) img.src = u;
+    });
+  }
+  function showToolImages(root) { for (const img of root?.querySelectorAll?.('img[data-tool-image]') || []) showToolImage(img); }
+  // The thread's images are listed per part element and markup: a poll keeps most parts' elements, so it visits every image
+  // in document order, as a scan would, without walking the whole thread (tens of thousands of nodes) to find them.
+  const partImages = new WeakMap();
+  function showThreadImages(el) {
+    if (!el._nodes) return showToolImages(el);
+    el._nodes.forEach((n, i) => {
+      const h = el._parts[i][1];
+      let c = partImages.get(n);
+      if (c?.h !== h) partImages.set(n, c = { h, imgs: [...(n.querySelectorAll?.('img[data-tool-image]') || [])] });
+      for (const img of c.imgs) showToolImage(img);
+    });
   }
   // Group state survives re-renders; values only exist when the user overrides the default.
   const groupOpen = new Map(), rowOpen = new Map(), bodyCache = new Map();
@@ -1530,7 +1541,7 @@
     if (draft && S.editSteer) S.editSteer.text = draft.value;
     setKeyed($('#thread'), parts);
     S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
-    showToolImages($('#thread'));
+    showThreadImages($('#thread'));
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { if (fresh !== draft) fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -1539,12 +1550,16 @@
   // ---------- prompt rail: one tick per user prompt, placed like a scrollbar annotation ----------
   // Heights change on re-render, image load, details toggle and resize; the observer covers all of them.
   const railObserver = new ResizeObserver(() => renderPromptRail());
+  // A prompt's tip is read once per element: a changed message is rendered as a new one, and nothing edits it in place.
+  const promptTips = new WeakMap();
+  const promptTip = u => { let t = promptTips.get(u); if (t == null) promptTips.set(u, t = (u.querySelector('.bubble')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140) || 'Prompt'); return t; };
   function renderPromptRail() {
     const rail = $('#promptRail'), sc = $('#scroller');
     if (!rail || !sc) return;
     const base = sc.getBoundingClientRect().top - sc.scrollTop, h = sc.scrollHeight;
-    const users = h > sc.clientHeight ? [...$('#thread').querySelectorAll('.msg.user[data-key]')] : [];
-    const ticks = users.map(u => ({ key: u.dataset.key, y: Math.round(u.getBoundingClientRect().top - base), tip: (u.querySelector('.bubble')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140) || 'Prompt' }));
+    // Prompts are top-level parts of the thread: its children are a few hundred, its nodes tens of thousands.
+    const users = h > sc.clientHeight ? [...$('#thread').children].filter(n => n.matches('.msg.user[data-key]')) : [];
+    const ticks = users.map(u => ({ key: u.dataset.key, y: Math.round(u.getBoundingClientRect().top - base), tip: promptTip(u) }));
     // Streaming resizes the thread every chunk; only move existing buttons so a click or hover in progress isn't lost to a rebuild.
     const sig = ticks.map(t => t.key + '\n' + t.tip).join('\n\n');
     if (rail._sig !== sig) {
