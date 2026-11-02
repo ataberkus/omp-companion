@@ -21,11 +21,11 @@ const edit = (id, s = 0, extra = {}) => tool(id, 'edit', s, { files: [{ path: 's
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
 const TAG = /<(\/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^'">])*)>/g;
 const attrsOf = start => Object.fromEntries([...start.matchAll(/([\w-]+)(?:="([^"]*)")?/g)].slice(1).map(m => [m[1], m[2] ?? '']));
-function compound(sel) { // tag, .class, [attr], [attr="v"], :not([attr]): enough for the app's thread selectors
-  const tag = /^[a-z][\w-]*/i.exec(sel)?.[0], classes = [...sel.matchAll(/\.([\w-]+)/g)].map(m => m[1]);
+function compound(sel) { // tag, #id, .class, [attr], [attr="v"], :not([attr]): enough for the app's thread selectors
+  const bare = sel.replace(/\[[^\]]*\]/g, ''), tag = /^[a-z][\w-]*/i.exec(sel)?.[0], id = /#([\w-]+)/.exec(bare)?.[1], classes = [...bare.matchAll(/\.([\w-]+)/g)].map(m => m[1]);
   const has = [...sel.replace(/:not\([^)]*\)/g, '').matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)].map(m => [m[1], m[2]]);
   const not = [...sel.matchAll(/:not\(\[([\w-]+)\]\)/g)].map(m => m[1]);
-  return n => n.nodeType === 1 && (!tag || n.tagName === tag.toUpperCase()) && classes.every(c => n.classList.contains(c))
+  return n => n.nodeType === 1 && (!tag || n.tagName === tag.toUpperCase()) && (!id || n.attrs.id === id) && classes.every(c => n.classList.contains(c))
     && has.every(([k, v]) => k in n.attrs && (v === undefined || n.attrs[k] === v)) && not.every(k => !(k in n.attrs));
 }
 const matcher = sel => { const parts = sel.split(',').map(s => compound(s.trim())); return n => parts.some(f => f(n)); };
