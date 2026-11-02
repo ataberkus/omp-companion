@@ -15,9 +15,14 @@ test('a boxed value whose JSON changes goes out, in the transcript and in the se
 });
 
 // The comparison recurses; deep values are compared by their JSON, so a poll handles any depth JSON.stringify does
-// (Node: ~4,100 levels; the walk alone overflowed at ~3,100).
+// (the walk alone overflowed at ~3,100 levels in Node). 3,500 levels, or as deep as this runtime's JSON.stringify goes
+// if that is less (Node 22 on Windows: ~1,700), where no reply could carry the message anyway.
+const nested = n => { const leaf = { x: 1 }; let v = leaf; for (let i = 0; i < n; i++) v = { k: v }; return [v, leaf]; };
+const serializes = n => { try { JSON.stringify(nested(n)[0]); return true; } catch { return false; } };
 test('a message nested 3,500 deep polls without throwing, and a change deep inside it goes out', () => {
-  let leaf = { x: 1 }, v = leaf; for (let i = 0; i < 3500; i++) v = { k: v };
+  let depth = 3500;
+  if (!serializes(depth)) { let lo = 0; while (lo < depth) { const m = (lo + depth + 1) >> 1; if (serializes(m)) lo = m; else depth = m - 1; } }
+  const [v, leaf] = nested(depth);
   const s = { id: 's', messages: [{ id: 'm', role: 'tool', args: v }, { id: 'n', role: 'user', text: 'hi' }] }, sync = createSync({ store: { sessions: [s] } });
   const first = sync.transcriptDelta(s, '');
   const idle = sync.transcriptDelta(s, `${first.tx.epoch}.${first.tx.rev}`);

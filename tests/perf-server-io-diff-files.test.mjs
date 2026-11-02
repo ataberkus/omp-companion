@@ -42,7 +42,11 @@ test('gitDiffFiles matches formatting every line, over and under its limits', as
   t.after(() => rm(dir, { recursive: true, force: true }));
   const env = { ...process.env, GIT_AUTHOR_NAME: 'A', GIT_AUTHOR_EMAIL: 'a@example.com', GIT_COMMITTER_NAME: 'A', GIT_COMMITTER_EMAIL: 'a@example.com' };
   const git = (...args) => execFileSync('git', ['-c', 'init.defaultBranch=main', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, env, maxBuffer: 64 << 20 }).toString();
+  // Staged straight into the index: Windows file names cannot hold a tab or a quote (and Git for Windows refuses such
+  // index paths unless core.protectNTFS is off).
+  const stage = (name, text) => git('update-index', '--add', '--cacheinfo', `100644,${execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: text }).toString().trim()},${name}`);
   git('init', '-q');
+  git('config', 'core.protectNTFS', 'false');
   const many = (k, f) => Array.from({ length: k }, (_, i) => f(i)).join('\n') + '\n';
   await writeFile(join(dir, 'code.js'), many(400, i => `line ${i} ü😀`));
   await writeFile(join(dir, 'gone.txt'), 'bye\n');
@@ -52,10 +56,10 @@ test('gitDiffFiles matches formatting every line, over and under its limits', as
   git('add', '-A'); git('commit', '-q', '-m', 'base');
   await writeFile(join(dir, 'code.js'), many(400, i => i % 37 ? `line ${i} ü😀` : `changed ${i}`) + 'no newline');
   await rm(join(dir, 'gone.txt')); await rm(join(dir, 'old name.txt'));
-  await writeFile(join(dir, 'new\tname "q".txt'), 'hello\n');
   await writeFile(join(dir, 'image.bin'), Buffer.from([0, 9, 9, 9, 0, 255]));
   await writeFile(join(dir, 'lock.json'), many(20000, i => `  "dep-${i}": "1.${i}.1",`));
   git('add', '-A');
+  stage('new\tname "q".txt', 'hello\n');
   const real = git('-c', 'core.quotepath=off', 'diff', '--cached', '--no-color', '--no-ext-diff', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', '-U3');
   const big = before(real).find(f => f.path === 'lock.json');
   assert.ok(big.diff.endsWith('… (diff truncated)'), 'the lockfile is past perFile');

@@ -14,7 +14,7 @@ import { createCompanion } from '../companion/server.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 const source = await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8');
-const editOrder = new Function(source.match(/\n {2}function editOrder\([\s\S]*?\n {2}\}\n/)[0] + 'return editOrder;')();
+const editOrder = new Function(source.match(/\n {2}function editOrder\([\s\S]*?\r?\n {2}\}\r?\n/)[0] + 'return editOrder;')();
 
 // transcriptDelta as it was before order edits (serializing to compare, which gives the same revs: see
 // perf-server-core-sync.test.mjs).

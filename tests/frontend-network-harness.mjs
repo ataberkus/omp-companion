@@ -3,10 +3,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 
 
-export const APP = process.env.APP || new URL('../local-dist/app.js', import.meta.url).pathname; const source = await readFile(APP, 'utf8');
+export const APP = process.env.APP || fileURLToPath(new URL('../local-dist/app.js', import.meta.url)); const source = await readFile(APP, 'utf8');
 export const flush = async (n = 12) => { for (let i = 0; i < n; i++) await new Promise(setImmediate); };
 export const at = (s = 0) => new Date(Date.UTC(2026, 0, 1) + s * 1000).toISOString();
 export const session = (id, messages, extra = {}) => ({ id, title: 'Chat ' + id, cwd: '/project', status: 'paused', messages, updatedAt: at(), ...extra });

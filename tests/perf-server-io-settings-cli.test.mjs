@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -15,10 +15,11 @@ test('settings routes start only the omp CLI runs they need', async t => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   // No WATCHDOG.yml or config.yml of this machine's OMP.
   process.env.PI_CODING_AGENT_DIR = join(dir, 'agent');
-  const log = join(dir, 'calls.log'), state = join(dir, 'state.json'), cli = join(dir, 'omp');
+  // A .ts entry runs as `bun omp.ts …` (the companion's OMP-source path): a shebang script without an extension does not
+  // run on Windows, where only .exe/.com files spawn without a shell.
+  const log = join(dir, 'calls.log'), state = join(dir, 'state.json'), cli = join(dir, 'omp.ts');
   await writeFile(state, JSON.stringify({ foo: false, pathFails: 1 }));
-  await writeFile(cli, `#!${process.execPath}
-const fs = require('node:fs'), args = process.argv.slice(2), st = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
+  await writeFile(cli, `const fs = require('node:fs'), args = process.argv.slice(2), st = JSON.parse(fs.readFileSync(${JSON.stringify(state)}, 'utf8'));
 const defaults = String(process.env.PI_CODING_AGENT_DIR || '').includes('omp-web-defaults-');
 if (args[0] === 'config' || args[0] === 'models') fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(defaults ? ['defaults', ...args] : args) + '\\n');
 const key = args.join(' ');
@@ -28,7 +29,6 @@ else if (key === 'config path') { if (st.pathFails-- > 0) { fs.writeFileSync(${J
 else if (args[0] === 'config' && args[1] === 'set') { st[args[2]] = JSON.parse(args[3]); fs.writeFileSync(${JSON.stringify(state)}, JSON.stringify(st)); }
 else if (key === 'models --json') setTimeout(() => console.log(JSON.stringify({ models: [{ provider: 'p', id: 'm', name: 'M' }] })), 300);
 `);
-  await chmod(cli, 0o755);
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));
   const app = await createCompanion({ dataDir: dir, omp: fakeOmp(), ompCommand: cli });
   t.after(() => app.close());
