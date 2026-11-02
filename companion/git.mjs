@@ -115,13 +115,23 @@ async function gitTop(cwd){let prefix;try{prefix=(await gitRun(cwd,['rev-parse',
 export async function gitLog(s,limit=50){
  const cwd=s.cwd,lines=o=>o.split('\n').filter(Boolean),opt={timeout:15000};
  const top=await gitTop(cwd);
- const head=await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(o=>o.trim(),()=>'');
- const [branch,upstream,dirty]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'',gitRun(cwd,['status','--porcelain'],opt).then(o=>lines(o).length,()=>null)]);
- let ahead=0,behind=0,commits=[];
+ // One `status --porcelain=v2 --branch` instead of five git runs in three rounds: HEAD (branch.oid; '(initial)' while
+ // unborn), the branch (branch.head; '(detached)'), the upstream with ahead/behind (branch.ab, printed only while the
+ // upstream ref exists, as when @{u} resolves) and one line per changed path, as --porcelain prints. Should it fail (a
+ // huge repository's timeout, a broken index), the separate reads still show the branch and commits, with dirty unknown.
+ const st=await gitRun(cwd,['status','--porcelain=v2','--branch'],opt).then(o=>{const h={};let n=0;for(const l of lines(o)){if(l.startsWith('# ')){const i=l.indexOf(' ',2);h[l.slice(2,i)]=l.slice(i+1);}else n++;}return {h,n};},()=>null);
+ let head,branch,upstream,dirty=null,ahead=0,behind=0,commits=[];
+ if(st){const {h}=st,ab=/^\+(\d+) -(\d+)$/.exec(h['branch.ab']||'');
+  head=/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(h['branch.oid']||'')?h['branch.oid']:'';branch=h['branch.head']==='(detached)'?'':h['branch.head']||'';
+  upstream=head&&ab?h['branch.upstream']||'':'';if(upstream){ahead=+ab[1];behind=+ab[2];}dirty=st.n;}
+ else{
+  head=await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(o=>o.trim(),()=>'');
+  [branch,upstream]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'']);
+  if(head&&upstream)[behind,ahead]=(await gitRun(cwd,['rev-list','--left-right','--count',`${upstream}...HEAD`],opt)).trim().split(/\s+/).map(Number);
+ }
  if(head){
-  if(upstream)[behind,ahead]=(await gitRun(cwd,['rev-list','--left-right','--count',`${upstream}...HEAD`],opt)).trim().split(/\s+/).map(Number);
-  const mine=new Set(s.baseSha?await gitRun(cwd,['rev-list',`${s.baseSha}..HEAD`],opt).then(lines,()=>[]):[]);
-  commits=lines(await gitRun(cwd,['log','--no-color',`--format=%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%s`,'-n',String(limit),'HEAD'],opt)).map(l=>{const [sha,short,author,date,parents,subject]=l.split('\x1f');return {sha,short,author,date,merge:parents.split(' ').length>1,subject,session:mine.has(sha)};});
+  const [mine,log]=await Promise.all([s.baseSha?gitRun(cwd,['rev-list',`${s.baseSha}..HEAD`],opt).then(o=>new Set(lines(o)),()=>new Set()):new Set(),gitRun(cwd,['log','--no-color',`--format=%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%s`,'-n',String(limit),'HEAD'],opt)]);
+  commits=lines(log).map(l=>{const [sha,short,author,date,parents,subject]=l.split('\x1f');return {sha,short,author,date,merge:parents.split(' ').length>1,subject,session:mine.has(sha)};});
  }
  return {cwd,top,branch,head:head.slice(0,12),upstream,ahead,behind,dirty,commits,limit};
 }
