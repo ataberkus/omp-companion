@@ -5,6 +5,10 @@
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const base = p => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p || '');
   const norm = p => String(p || '').replace(/\//g, '\\').toLowerCase();
+  // toLocale*String with options builds a new ICU formatter on every call (50-250 µs; a render makes hundreds), so ago() and
+  // clock() share one each. One older than a second is rebuilt, so a time-zone or locale change still shows within a second.
+  const fmts = {};
+  const dateFmt = (k, locale, opts) => { const f = fmts[k], now = Date.now(); return f && now - f.at < 1000 ? f.fmt : (fmts[k] = { fmt: new Intl.DateTimeFormat(locale, opts), at: now }).fmt; };
   const ago = iso => {
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
     if (!isFinite(s)) return '';
@@ -12,11 +16,11 @@
     if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
     if (s < 86400) return Math.round(s / 3600) + 'h';
     if (s < 86400 * 7) return Math.round(s / 86400) + 'd';
-    return new Date(iso).toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    return dateFmt('ago', 'en', { month: 'short', day: 'numeric' }).format(new Date(iso));
   };
   // ago() yields '5m' or a date; only relative units read well with "ago".
   const agoText = iso => { const a = ago(iso); return /\d[mhd]$/.test(a) ? a + ' ago' : a === 'now' ? 'just now' : a ? 'on ' + a : ''; };
-  const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }; // numeric only, so the system's 12/24h choice stays
+  const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : dateFmt('clock', undefined, { hour: '2-digit', minute: '2-digit' }).format(d); }; // numeric only, so the system's 12/24h choice stays
   // Bounded memo: a hit moves the key to the newest end, the oldest entry falls out past `cap`.
   function memo(cache, key, fn, cap = 400) {
     if (cache.has(key)) { const v = cache.get(key); cache.delete(key); cache.set(key, v); return v; }
@@ -79,9 +83,12 @@
   const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
   const cells = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
 
-  // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread.
+  // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread. Only
+  // top-level calls: nested list items and quotes render inside their parent's entry, and caching them too pushed a long
+  // thread past the cap, where a full pass evicts every entry before it is reached again. 1200 covers the 600-message
+  // transcript plus advisor reviews.
   const mdCache = new Map();
-  const md = (src, breaks = false, depth = 0) => memo(mdCache, (breaks ? '1' : '0') + depth + '\u0000' + String(src ?? ''), () => mdRaw(src, breaks, depth), 800);
+  const md = (src, breaks = false, depth = 0) => depth ? mdRaw(src, breaks, depth) : memo(mdCache, (breaks ? '1' : '0') + String(src ?? ''), () => mdRaw(src, breaks), 1200);
   function mdRaw(src, breaks = false, depth = 0) {
     // Nesting past 20 levels (crafted '- - - …' or '>>>…') renders as plain text instead of overflowing the stack.
     if (depth > 20) return `<p>${inline(String(src ?? '').trim(), breaks)}</p>`;
@@ -314,7 +321,8 @@
     const arch = archivedKeys(), pins = pinnedKeys();
     for (const it of out) { it.archived = arch.has(it.key); it.pinned = pins.has(it.key); }
     const live = it => it.needsReview || it.working || ['review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
-    return out.sort((a, b) => live(a) - live(b) || new Date(b.at) - new Date(a.at));
+    // Keys computed once per item: the comparator runs ~10 times per item and built two Dates each time.
+    return out.map(it => ({ it, l: live(it), t: new Date(it.at).getTime() })).sort((a, b) => a.l - b.l || b.t - a.t).map(x => x.it);
   }
   const reviewish = it => it.needsReview || it.status === 'review' || it.status === 'error';
   // Waits for you: a question, a failure, finished work to review, or news since you last looked. Archived sessions and
@@ -1082,18 +1090,28 @@
   // <details> state the renderers don't track carry over into a rebuilt part, as in swapHtml. The container is rewritten
   // whole when it doesn't hold exactly the elements rendered last (first or empty render, or written elsewhere since),
   // when keys repeat, or when a changed part is not one element.
+  // A part may carry a nest, [key, html, { head, sum, kids }]: its markup is head (the element's start tag), a <summary>
+  // holding sum, then one element holding kids, [key, html] parts of their own. While head stays the same, a change patches
+  // the element in place, the summary's content and the kids through setKeyed: the live activity group changes every poll,
+  // mostly in its last row, and its other rows keep their elements (open diffs stay laid out, UI state carries per row).
+  const nested = n => n?.children?.length === 2 && n.firstElementChild.tagName === 'SUMMARY';
+  // The kids' elements as setKeyed's record, so the first patch of a nest doesn't rewrite them whole.
+  const nestInit = (n, x) => { const c = n?.lastElementChild; if (c?.children?.length === x.kids.length) { c._parts = x.kids; c._nodes = [...c.children]; } };
   function setKeyed(el, parts) {
     const prev = el._parts, nodes = el._nodes, kids = el.children, keys = new Set(parts.map(p => p[0])), unique = keys.size === parts.length;
     el._parts = parts; el._nodes = null;
     let built = null;
     if (unique && prev?.length && nodes?.length === prev.length && kids?.length === nodes.length && nodes.every((n, i) => kids[i] === n)) {
-      const old = new Map(prev.map(([k, h], i) => [k, { h, n: nodes[i] }]));
+      const old = new Map(prev.map(([k, h, x], i) => [k, { h, x, n: nodes[i] }])), patch = new Map();
       built = new Map();
-      for (const [k, h] of parts) {
-        if (old.get(k)?.h === h) continue;
+      for (const [k, h, x] of parts) {
+        const o = old.get(k);
+        if (o?.h === h) continue;
+        if (x && o?.x?.head === x.head && nested(o.n)) { patch.set(k, x); continue; }
         const t = document.createElement('template'); t.innerHTML = h;
         const c = t.content, n = c.firstElementChild;
         if (!n || c.children.length !== 1 || [...c.childNodes].some(x => x !== n && (x.nodeType !== 3 || x.data.trim()))) { built = null; break; }
+        if (x) nestInit(n, x);
         built.set(k, n);
       }
       if (built) {
@@ -1106,6 +1124,7 @@
             const f = built.get(k);
             let n = old.get(k)?.n;
             if (f) { if (n) { carry.push([f, uiState(n, true)]); if (n === next) next = n.nextElementSibling; n.remove(); } n = f; }
+            else if (patch.has(k)) { const x = patch.get(k); if (x.sum !== old.get(k).x.sum) n.firstElementChild.innerHTML = x.sum; setKeyed(n.lastElementChild, x.kids); }
             if (n === next) next = n.nextElementSibling; else el.insertBefore(n, next);
             out.push(n);
           }
@@ -1117,6 +1136,7 @@
     }
     swapHtml(el, parts.map(p => p[1]).join(''));
     el._nodes = unique && el.children?.length === parts.length ? [...el.children] : null;
+    el._nodes?.forEach((n, i) => { if (parts[i][2]) nestInit(n, parts[i][2]); });
   }
   // Rebuilding innerHTML resets scroll offsets and <details> the renderers don't track themselves.
   // Carry them over, keyed by the nearest keyed ancestor plus the child-index path below it.
@@ -1301,15 +1321,26 @@
     for (const [k, old] of toolImageUrls) { if (toolImageUrls.size <= 40) break; toolImageUrls.delete(k); old.then(u => u?.startsWith('blob:') && URL.revokeObjectURL(u)); }
     return p;
   }
-  function showToolImages(root) {
-    for (const img of root?.querySelectorAll?.('img[data-tool-image]') || []) {
-      if (img.closest('details:not([open])')) continue;
-      toolImageUrl(img.dataset.toolImage).then(u => {
-        if (!u || !img.isConnected) return;
-        if (u === 'gone') img.closest('.attach-item')?.replaceWith(Object.assign(document.createElement('span'), { className: 'msg-image-label', textContent: 'Image no longer stored' }));
-        else if (img.getAttribute('src') !== u) img.src = u;
-      });
-    }
+  function showToolImage(img) {
+    if (!img.isConnected || img.closest('details:not([open])')) return;
+    toolImageUrl(img.dataset.toolImage).then(u => {
+      if (!u || !img.isConnected) return;
+      if (u === 'gone') img.closest('.attach-item')?.replaceWith(Object.assign(document.createElement('span'), { className: 'msg-image-label', textContent: 'Image no longer stored' }));
+      else if (img.getAttribute('src') !== u) img.src = u;
+    });
+  }
+  function showToolImages(root) { for (const img of root?.querySelectorAll?.('img[data-tool-image]') || []) showToolImage(img); }
+  // The thread's images are listed per part element and markup: a poll keeps most parts' elements, so it visits every image
+  // in document order, as a scan would, without walking the whole thread (tens of thousands of nodes) to find them.
+  const partImages = new WeakMap();
+  function showThreadImages(el) {
+    if (!el._nodes) return showToolImages(el);
+    el._nodes.forEach((n, i) => {
+      const h = el._parts[i][1];
+      let c = partImages.get(n);
+      if (c?.h !== h) partImages.set(n, c = { h, imgs: [...(n.querySelectorAll?.('img[data-tool-image]') || [])] });
+      for (const img of c.imgs) showToolImage(img);
+    });
   }
   // Group state survives re-renders; values only exist when the user overrides the default.
   const groupOpen = new Map(), rowOpen = new Map(), bodyCache = new Map();
@@ -1359,7 +1390,27 @@
     }
     return out;
   }
-  function activityBlock(group, live) {
+  // Thread parts reuse their markup while they are built from the same message objects and the same ctx. mergeTx keeps
+  // unchanged messages across polls and nothing edits one in place (a change replaces it), so identity stands for content;
+  // ctx holds every other input of the part's markup, written next to its builder. An input missing from a ctx leaves the
+  // part stale until its messages change. With localStorage omp-debug-parts=1 every hit is rebuilt and a stale one logged.
+  // A reused part keeps the times of its first render, so a time-zone change shows on messages as they change.
+  let debugParts = false; try { debugParts = localStorage.getItem('omp-debug-parts') === '1'; } catch {}
+  const groupParts = new WeakMap(), rowParts = new WeakMap(), msgParts = new WeakMap();
+  function cachedPart(cache, members, ctx, build) {
+    const c = cache.get(members[0]);
+    if (c && c.ctx === ctx && c.members.length === members.length && c.members.every((m, i) => m === members[i])) {
+      if (debugParts) { const fresh = build(); if (fresh !== c.html) console.error('Stale thread part', { ctx, cached: c.html, fresh }); }
+      return c.html;
+    }
+    const html = build();
+    cache.set(members[0], { members, ctx, html });
+    return html;
+  }
+  // Every input of an activity row's markup besides its message (see cachedPart).
+  const rowCtx = (m, live, lastInLive) => [live ? 1 : 0, lastInLive ? 1 : 0, rowOpen.get(m.id), diffMode()].join('|');
+  // The group's markup, and its pieces as setKeyed's nest (the live group is patched in place, row by row).
+  function activityParts(group, live) {
     const rows = legacyTools(group);
     const gid = group[0].id;
     const lines = rows.map(r => r.tool ? toolLine(r.tool, parseArgs(r.tool.args)) : { k: 'think' });
@@ -1370,12 +1421,22 @@
     const now = live ? (lastRow.tool ? (lastRow.tool.intent || keyArg(lastRow.tool.name, parseArgs(lastRow.tool.args)) || lastRow.tool.name) : 'Thinking') : '';
     const def = S.expandAll || live;
     const open = groupOpen.has(gid) ? groupOpen.get(gid) : def;
-    return `<details class="activity ${live ? 'live' : ''}" data-gid="${esc(gid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
-      <summary>${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}</summary>
-      <div class="rows">${rows.map((r, j) => activityRow(r, live, j === rows.length - 1, lines[j])).join('')}</div></details>`;
+    const head = `<details class="activity ${live ? 'live' : ''}" data-gid="${esc(gid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>`;
+    const sum = `${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}`;
+    const kids = rows.map((r, j) => [r.id, cachedPart(rowParts, [r], rowCtx(r, live, j === rows.length - 1), () => activityRow(r, live, j === rows.length - 1, lines[j]))]);
+    return { head, sum, kids, html: `${head}
+      <summary>${sum}</summary>
+      <div class="rows">${kids.map(k => k[1]).join('')}</div></details>` };
   }
+  const activityBlock = (group, live) => activityParts(group, live).html;
+  // Every input of a settled group's markup besides its messages (see cachedPart); the live one is built on every render.
+  const groupCtx = group => [S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
 
   function renderThread(messages, status, ownerId, opts = {}) {
+    heldDiffMode = diffMode();
+    try { threadPass(messages, status, ownerId, opts); } finally { heldDiffMode = ''; }
+  }
+  function threadPass(messages, status, ownerId, opts) {
     // Drop hidden advisor messages up front so they don't split activity groups.
     if (S.advHidden) messages = messages.filter(m => m.role !== 'advisor' && m.role !== 'advisor-update');
     const p = S.sending.get(S.view), pending = p && 'text' in p && !p.queued ? p : null;
@@ -1408,7 +1469,7 @@
     // [key, html] parts for setKeyed: a poll rebuilds only the parts whose markup changed (the streaming tail, mostly).
     // A key repeats only for messages without unique IDs, which then key by position.
     const parts = [], seen = new Map();
-    const add = (key, html) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html]); };
+    const add = (key, html, nest) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html, nest]); };
     if (opts.head) add('head', opts.head);
     else if (status === 'history') add('hist', `<div class="history-note">📜 Saved OMP session. Type below to continue it here. It picks up exactly where it left off.</div>`);
     for (let i = 0; i < messages.length; i++) {
@@ -1424,7 +1485,10 @@
         const group = [];
         while (i < messages.length && !messages[i].adv && (messages[i].role === 'tool' || messages[i].role === 'thinking')) group.push(messages[i++]);
         i--;
-        add('act:' + group[0].id, activityBlock(group, status === 'running' && i === mainEnd));
+        const live = status === 'running' && i === mainEnd;
+        // The live group changes on every poll: it goes to setKeyed with its rows as parts, to be patched in place.
+        if (live) { const a = activityParts(group, true); add('act:' + group[0].id, a.html, a); }
+        else add('act:' + group[0].id, cachedPart(groupParts, group, groupCtx(group), () => activityBlock(group, false)));
         continue;
       }
       if (m.role === 'system') {
@@ -1445,7 +1509,6 @@
         continue;
       }
       const user = m.role === 'user';
-      const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
       const editing = user && m.steer === 'pending' && S.editSteer?.id === m.id;
       const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
         : user && m.steer === 'received' ? '<span class="steer-state" title="OMP has taken this steer; it can no longer be edited or cancelled">Steering · delivery started</span>'
@@ -1454,10 +1517,15 @@
         : i === lastUser ? '<button class="steer-btn" data-msgact="edit" title="Go back to before this message in a new OMP session file and put it in the composer">Edit &amp; resend</button>'
         : i === lastReply ? '<button class="steer-btn" data-msgact="regenerate" title="Go back to before your last message in a new OMP session file and send it again">Regenerate</button>'
         : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
-      const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
-        : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
-      add('msg:' + m.id, `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
-        ${body}</div>`);
+      // Every input of the message's markup besides the message itself (see cachedPart).
+      const ctx = [steer, history, editing ? S.editSteer.text : '\u0002', opts.speaker || '', !user && m.model ? modelName(m.model) : ''].join('\u0001');
+      add('msg:' + m.id, cachedPart(msgParts, [m], ctx, () => {
+        const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
+        const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
+          : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
+        return `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
+        ${body}</div>`;
+      }));
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
       add('pending', `<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
@@ -1478,7 +1546,7 @@
     if (draft && S.editSteer) S.editSteer.text = draft.value;
     setKeyed($('#thread'), parts);
     S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
-    showToolImages($('#thread'));
+    showThreadImages($('#thread'));
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { if (fresh !== draft) fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -1487,12 +1555,19 @@
   // ---------- prompt rail: one tick per user prompt, placed like a scrollbar annotation ----------
   // Heights change on re-render, image load, details toggle and resize; the observer covers all of them.
   const railObserver = new ResizeObserver(() => renderPromptRail());
+  // A prompt's tip is read once per element: a changed message is rendered as a new one, and nothing edits it in place.
+  const promptTips = new WeakMap();
+  const promptTip = u => { let t = promptTips.get(u); if (t == null) promptTips.set(u, t = (u.querySelector('.bubble')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140) || 'Prompt'); return t; };
   function renderPromptRail() {
     const rail = $('#promptRail'), sc = $('#scroller');
     if (!rail || !sc) return;
     const base = sc.getBoundingClientRect().top - sc.scrollTop, h = sc.scrollHeight;
-    const users = h > sc.clientHeight ? [...$('#thread').querySelectorAll('.msg.user[data-key]')] : [];
-    const ticks = users.map(u => ({ key: u.dataset.key, y: Math.round(u.getBoundingClientRect().top - base), tip: (u.querySelector('.bubble')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140) || 'Prompt' }));
+    // The current prompt's line, read with the rest before the buttons move: read after, it laid the page out again (the
+    // rail is a fixed-width sibling of the scroller, so moving its buttons can't change what is read here).
+    const at = sc.scrollTop + sc.clientHeight * 0.3;
+    // Prompts are top-level parts of the thread: its children are a few hundred, its nodes tens of thousands.
+    const users = h > sc.clientHeight ? [...$('#thread').children].filter(n => n.matches('.msg.user[data-key]')) : [];
+    const ticks = users.map(u => ({ key: u.dataset.key, y: Math.round(u.getBoundingClientRect().top - base), tip: promptTip(u) }));
     // Streaming resizes the thread every chunk; only move existing buttons so a click or hover in progress isn't lost to a rebuild.
     const sig = ticks.map(t => t.key + '\n' + t.tip).join('\n\n');
     if (rail._sig !== sig) {
@@ -1500,12 +1575,12 @@
       rail.innerHTML = ticks.map((t, i) => `<button type="button" tabindex="-1" data-prompt="${esc(t.key)}" data-tip="${esc(t.tip)}" aria-label="Prompt ${i + 1}: ${esc(t.tip)}"></button>`).join('');
     }
     ticks.forEach((t, i) => { const b = rail.children[i]; b.dataset.y = t.y; b.style.top = (t.y / h * 100).toFixed(2) + '%'; });
-    markPromptRail();
+    markPromptRail(at);
   }
-  function markPromptRail() {
+  function markPromptRail(at) {
     const sc = $('#scroller'), ticks = $('#promptRail')?.children;
     if (!sc || !ticks?.length) return;
-    const at = sc.scrollTop + sc.clientHeight * 0.3;
+    at ??= sc.scrollTop + sc.clientHeight * 0.3;
     let cur = null;
     for (const b of ticks) if (+b.dataset.y <= at) cur = b;
     for (const b of ticks) b.classList.toggle('on', b === cur);
@@ -1625,7 +1700,10 @@
     return `<div class="diff-scroll"><table class="diff ${mode}${review ? ' commentable' : ''}" aria-label="${mode === 'split' ? 'Side-by-side' : 'Unified'} diff: old line, new line, code${review ? '. Click a line to comment on it' : ''}">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
   }
   // Split panes need room: decide from the thread's width (the chat column is ~860px, the Changes page is wide), not the window's.
-  const diffMode = () => S.diffMode || (($('#thread')?.clientWidth || innerWidth) > 1000 ? 'split' : 'unified');
+  // A thread render holds its first answer for the whole pass (heldDiffMode): the width can't change while it builds
+  // strings, and it asks per group and tool row (a querySelector and a layout read each).
+  let heldDiffMode = '';
+  const diffMode = () => heldDiffMode || S.diffMode || (($('#thread')?.clientWidth || innerWidth) > 1000 ? 'split' : 'unified');
   const fdCache = new Map();
   const fileDiff = (f, opts = {}) => memo(fdCache, [diffMode(), f.op, f.path, opts.meta || '', opts.edit ?? '', opts.reviewSig || '', f.diff].join('\u0000'), () => fileDiffRaw(f, opts), 400);
   // First changed line of a diff, where Open in editor puts the cursor.
@@ -4327,8 +4405,9 @@
   // Registered workspaces as cards (live branch, what works, what waits for you), most recently used first; folders known
   // only from OMP's history stay chips below.
   function homeWsHtml() {
-    const h = S.home, l = h.listing, all = items();
-    const ws = (S.store?.projects || []).filter(p => !p.hidden).map(p => { const mine = all.filter(it => norm(it.cwd) === norm(p.path)); return { p, mine, at: mine.reduce((a, it) => it.updatedAt > a ? it.updatedAt : a, '') }; }).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 9);
+    const h = S.home, l = h.listing, byCwd = new Map(); // items by folder, in items() order: one pass, not one per workspace
+    for (const it of items()) { const k = norm(it.cwd); (byCwd.get(k) || byCwd.set(k, []).get(k)).push(it); }
+    const ws = (S.store?.projects || []).filter(p => !p.hidden).map(p => { const mine = byCwd.get(norm(p.path)) || []; return { p, mine, at: mine.reduce((a, it) => it.updatedAt > a ? it.updatedAt : a, '') }; }).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 9);
     const cards = ws.map(({ p, mine, at }) => {
       const w = mine.filter(it => it.working && !it.needsReview).length, r = mine.filter(needsYou).length, branch = p.branch && p.branch !== 'workspace' ? p.branch : '';
       const sel = l && norm(l.path) === norm(p.path);
