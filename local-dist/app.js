@@ -4541,14 +4541,14 @@
   // A reply that changes nothing: no summary, order or other store field, no transcript change and no /btw answers.
   const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
   let stateSeq = 0, stateShown = 0, renderedAt = 0;
+  // OMP's own session list (the sidebar's history) loads every 20 s, alongside /state instead of after it, and conditionally:
+  // an unchanged list is a 304 that keeps S.native. A refresh that starts while it is in flight (the whole-transcript
+  // refetch in refresh) waits for the same request.
+  let nativeLoad = null;
   // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works:
   // only "ago" labels could change then, and those still render every 10 s. While something works its running timer ticks
   // on every poll, as before. A poll of a hidden page renders nothing at all. Other callers always render: they may have
   // changed the page.
-  // OMP's own session list (the sidebar's history) loads every 20 s, alongside /state instead of after it, and conditionally:
-  // an unchanged list is a 304 that keeps S.native. A refresh that starts while it is in flight (the whole-transcript
-  // refetch below) waits for the same request.
-  let nativeLoad = null;
   async function refresh(poll = false) {
     const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : S.txPrev.get(view), online = S.online;
     let fresh = !poll;
