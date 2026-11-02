@@ -1828,7 +1828,7 @@
     const live = ['running', 'queued'].includes(s.status);
     S.sending.set(view, {});
     try {
-      await api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: live ? 'steer' : 'prompt', message: reviewMessage(notes, s.cwd) });
+      await api(`/sessions/${encodeURIComponent(s.id)}/command?lean=1`, { type: live ? 'steer' : 'prompt', message: reviewMessage(notes, s.cwd) });
       delete notesAll[parent]; saveLS('omp-review-notes', notesAll); S.noteEdit = null; S.reviewVer++;
       toast(`Sent ${notes.length} ${notes.length === 1 ? 'comment' : 'comments'}${live ? ' as a steer' : ''}`);
       location.hash = '#/s/' + s.id; await refresh();
@@ -1955,7 +1955,7 @@
     const c = current();
     if (c.kind !== 'session') return;
     closeThinkMenu();
-    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action, model }); if (action === 'model') S.advCfg = null; await refresh(); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'advisor', action, model }); if (action === 'model') S.advCfg = null; await refresh(); }
     catch (err) { toast(err.message, 'err'); }
   }
   async function loadBg(file, force) {
@@ -2432,7 +2432,7 @@
     const section = control.closest('.question');
     const controls = () => section.querySelectorAll('button,input,textarea');
     controls().forEach(el => { el.disabled = true; });
-    try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, ...answer }); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'answer', id, ...answer }); }
     catch (e) { toast(e.message, 'err'); }
     await refresh();
     // A re-render replaces the section once the question clears; if it didn't, make it usable again.
@@ -2524,7 +2524,7 @@
       while (panelKeys.keys.length) {
         const c = current(), id = panelKeys.id, input = panelKeys.keys.splice(0, 500);
         if (c.kind !== 'session') { panelKeys.keys = []; break; }
-        try { await api(`/sessions/${c.id}/command`, { type: 'answer', id, input }); }
+        try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'answer', id, input }); }
         catch (e) { toast(e.message, 'err'); panelKeys.keys = []; }
       }
     } finally { panelKeys.busy = false; }
@@ -2551,7 +2551,7 @@
       const key = `${size.columns}x${size.rows}`;
       if (panelSent.get(id) === key) continue;
       panelSent.set(id, key);
-      api(`/sessions/${c.id}/command`, { type: 'answer', id, resize: size }).then(() => refresh(), e => { panelSent.delete(id); if (!/no longer pending/.test(e.message)) toast(e.message, 'err'); });
+      api(`/sessions/${c.id}/command?lean=1`, { type: 'answer', id, resize: size }).then(() => refresh(), e => { panelSent.delete(id); if (!/no longer pending/.test(e.message)) toast(e.message, 'err'); });
     }
   }
   let panelResizeTimer;
@@ -2591,7 +2591,7 @@
   async function steerCommand(type, id, message) {
     const c = current();
     if (c.kind !== 'session') return;
-    try { await api(`/sessions/${c.id}/command`, { type, id, ...(message ? { message } : {}) }); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type, id, ...(message ? { message } : {}) }); }
     catch (e) { toast(e.message, 'err'); }
     S.editSteer = null; S.lastSig = ''; await refresh();
   }
@@ -2605,7 +2605,7 @@
     const c = current();
     if (c.kind !== 'session') return;
     try {
-      await api(`/sessions/${c.id}/command`, { type, id, ...(type === 'edit_follow_up' ? { message } : {}) });
+      await api(`/sessions/${c.id}/command?lean=1`, { type, id, ...(type === 'edit_follow_up' ? { message } : {}) });
       S.editQueue = null;
       await refresh();
     } catch (e) { toast(e.message, 'err'); await refresh(); }
@@ -2835,7 +2835,10 @@
     (el.querySelector('.modal-body textarea, .modal-body button:not([disabled])') || el.querySelector('[data-modal-close]')).focus();
   }
   const closeModal = () => { const el = $('#modal'); if (el?._planOwner && S.planBusy.has(el._planOwner)) return false; const focus = el?._returnFocus; el?.remove(); if (focus?.isConnected && focus.offsetParent !== null) focus.focus(); else if (el) $('#input')?.focus(); return true; };
-  const sessionApi = (body, opts) => api(`/sessions/${current().id}/command`, body, opts);
+  // ?lean=1 (here and on the other session commands whose reply is the session): the reply leaves out the transcript and
+  // /btw answers, which the poll that follows brings as changes; callers read only the session's other fields, if any.
+  // Replies that are not the session (branch_messages, stats, tree, ...) are the same either way.
+  const sessionApi = (body, opts) => api(`/sessions/${current().id}/command?lean=1`, body, opts);
   const COMMIT_RELATED = 'Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit.';
   const PUSH_TO_BASE = (branch, base) => `Commit this worktree's changes on its branch ${branch} with a clear commit message. Then merge ${branch} into ${base} in the project folder where ${base} is checked out (find it with \`git worktree list\`), and push ${base} to the remote. If the merge conflicts or the push fails, stop and tell me what happened. Report the commits, the merge and the push result.`;
   // Sends a prompt to session `id`, or queues it as a follow-up while OMP is working.
@@ -2844,7 +2847,7 @@
     if (S.sending.has(view)) return;
     const queue = s?.status === 'running' || s?.status === 'queued';
     S.sending.set(view, {}); update();
-    api(`/sessions/${encodeURIComponent(id)}/command`, { type: queue ? 'follow_up' : 'prompt', message })
+    api(`/sessions/${encodeURIComponent(id)}/command?lean=1`, { type: queue ? 'follow_up' : 'prompt', message })
       .then(r => { if (queue) toast((r.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now'); return refresh(); }, e => toast(e.message, 'err'))
       .finally(() => { S.sending.delete(view); update(); });
   }
@@ -2853,7 +2856,7 @@
     if (!s || s._planSupported === false || s.planMode?.available === false) return toast('Plan mode requires updated OMP RPC support.', 'err');
     if (S.planBusy.has(id)) return;
     S.planBusy.add(id); update();
-    try { await api(`/sessions/${id}/command`, { type: 'plan_mode', enabled: !s.planMode?.enabled }); await refresh(); }
+    try { await api(`/sessions/${id}/command?lean=1`, { type: 'plan_mode', enabled: !s.planMode?.enabled }); await refresh(); }
     catch (e) { toast(e.message, 'err'); }
     finally { S.planBusy.delete(id); update(); }
   }
@@ -2899,7 +2902,7 @@
         dialog.querySelectorAll('button,input,textarea').forEach(x => x.disabled = true); update();
         try {
           const savePath = action === 'save' ? form.elements.savePath.value.trim() : '';
-          await api(`/sessions/${id}/command`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' && action !== 'save' ? { executionModel } : {}), ...(savePath ? { savePath } : {}) });
+          await api(`/sessions/${id}/command?lean=1`, { type: 'plan_approve', proposalId: proposal.id, action, ...(feedback ? { feedback } : {}), ...(executionModel && action !== 'refine' && action !== 'save' ? { executionModel } : {}), ...(savePath ? { savePath } : {}) });
           S.planSubmitted.add(key);
           S.planBusy.delete(id);
           if ($('#modal') === dialog) closeModal();
@@ -3186,7 +3189,7 @@
         const s = S.store?.sessions.find(x => x.id === c.id);
         if (!s) throw new Error('This session no longer exists.');
         const type = kind === 'follow_up' ? kind : /^\/\S/.test(text) ? 'prompt' : kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
-        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command`, { type, message: text, ...imagePayload(attachment) });
+        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command?lean=1`, { type, message: text, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
         if (type === 'follow_up') toast((response.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now');
         await refresh();
@@ -3203,12 +3206,12 @@
   }
   async function sessionCommand(type, extra) {
     const c = current();
-    try { await api(`/sessions/${c.id}/command`, { type, ...extra }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type, ...extra }); await refresh(); if (type === 'complete') toast('Marked done'); return true; }
     catch (e) { toast(e.message, 'err'); return false; }
   }
   async function advisorCommand(action) {
     const c = current();
-    try { await api(`/sessions/${c.id}/command`, { type: 'advisor', action }); await refresh(); }
+    try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'advisor', action }); await refresh(); }
     catch (e) { toast(e.message, 'err'); }
   }
 
@@ -4647,7 +4650,7 @@
       const s = S.store?.sessions.find(x => x.id === c.id);
       if (!s) return null;
       return { model: sessionModel(s), thinking: s.thinking, session: s, allowDefault: false, apply: async (sel, th) => {
-        try { await api(`/sessions/${s.id}/command`, { type: 'set_model', model: sel, thinking: th }); await refresh(); thinkSet(sel, th); }
+        try { await api(`/sessions/${s.id}/command?lean=1`, { type: 'set_model', model: sel, thinking: th }); await refresh(); thinkSet(sel, th); }
         catch (err) { toast(err.message, 'err'); }
         $('#input')?.focus();
       } };

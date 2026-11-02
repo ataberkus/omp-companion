@@ -86,8 +86,11 @@ function boot({ hash = '#/s/s1', respond, size = { width: 1360, height: 900 } } 
   const go = async h => { location.hash = h; winListeners.hashchange.forEach(fn => fn()); await flush(); };
   const visible = async on => { document.hidden = !on; for (const fn of listeners.visibilitychange || []) fn(); await flush(); };
   const states = () => calls.filter(c => c.url.startsWith('/api/state'));
+  els.get('input').tagName = 'TEXTAREA';
+  const type = async (text, mods = {}) => { const input = els.get('input'); input.value = text; for (const fn of listeners.keydown || []) fn({ target: input, key: 'Enter', code: 'Enter', ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, preventDefault() {}, stopPropagation() {}, ...mods }); await flush(); };
+  const click = async (act, data = {}) => { const el = node(''); el.dataset = { act, ...data }; for (const fn of listeners.click || []) fn({ target: { ...node(''), closest: sel => sel === '[data-act]' ? el : null }, preventDefault() {}, stopPropagation() {} }); await flush(); };
   const connect = async token => { els.get('tokenInput').value = token; listeners.submit[0]({ target: { id: 'connectForm', hasAttribute: () => false, dataset: {} }, preventDefault() {} }); await flush(); };
-  return { els, calls, timers, writes, states, loops, poll, advance, go, visible, connect, document, location, clock, thread: () => els.get('thread').innerHTML, list: () => els.get('list').innerHTML };
+  return { els, calls, timers, writes, states, loops, poll, advance, go, visible, connect, type, click, document, location, clock, thread: () => els.get('thread').innerHTML, list: () => els.get('list').innerHTML };
 }
 
 // ---------- api(): body failures and the timeout ----------
@@ -198,4 +201,24 @@ test('the OMP session list loads alongside /state, and conditionally: a 304 keep
   unauthorized = false; await app.connect('tok');
   assert.equal(listings().at(-1).inm, undefined);
   assert.match(app.list(), /History 1/);
+});
+
+// ---------- session commands: ?lean=1 (protocol P1) ----------
+test('session commands ask for lean replies, and a reply without the transcript leaves the shown one alone', async () => {
+  const s1 = session('s1', [reply('m1', 'the transcript so far')], { queuedMessages: [] });
+  const app = boot({ respond: url => {
+    if (url.startsWith('/api/state')) return { body: store([s1]) };
+    // As the companion answers: ?lean=1 leaves out the transcript (and /btw answers).
+    if (/\/command(\?|$)/.test(url)) return { body: url.endsWith('?lean=1') ? { ...s1, messages: undefined } : s1 };
+  } });
+  await flush();
+  await app.type('a prompt');
+  s1.status = 'running';
+  await app.poll();
+  await app.type('a steer');
+  await app.click('commitRelated'); // queued as a follow-up while it works (sendOrQueue)
+  await app.click('abort');
+  const sent = app.calls.filter(c => c.body?.type).map(c => [c.body.type, c.url]);
+  assert.deepEqual(sent, [['prompt', '/api/sessions/s1/command?lean=1'], ['steer', '/api/sessions/s1/command?lean=1'], ['follow_up', '/api/sessions/s1/command?lean=1'], ['abort', '/api/sessions/s1/command?lean=1']]);
+  assert.match(app.thread(), /the transcript so far/, 'the lean replies did not blank the thread');
 });
