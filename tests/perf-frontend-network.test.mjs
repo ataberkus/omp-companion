@@ -372,3 +372,20 @@ test('the Tools page polls its jobs by revision: unchanged ones keep what is hel
   await app.poll();
   assert.equal(cli().at(-1), '/api/cli?revs=1&catalog=0&have=j1.4,j2.1');
 });
+
+// ---------- composer: Push to <base> ----------
+test('Push to <base> names the project folder’s branch from the store, without asking git for the worktree status', async () => {
+  for (const [branch, base] of [['develop', 'develop'], ['detached', 'main'], ['workspace', 'main'], [undefined, 'main']]) {
+    const s1 = session('s1', [reply('m1', 'done')], { projectId: 'p1', isolated: true, branch: 'omp-web/abcd1234', queuedMessages: [] });
+    const app = boot({ respond: url => {
+      if (url.startsWith('/api/state')) return { body: { ...store([s1]), projects: [{ id: 'p1', name: 'proj', path: '/project', branch, color: 'x' }] } };
+      if (url.includes('/command')) return { body: s1 };
+    } });
+    await flush();
+    assert.match(app.els.get('commitSlot').innerHTML, new RegExp(`>Push to ${base}</button>`), String(branch));
+    await app.click('pushMain');
+    const sent = app.calls.filter(c => c.body?.type);
+    assert.deepEqual(sent.map(c => c.body.type), ['prompt'], 'no worktree_status');
+    assert.match(sent[0].body.message, new RegExp(`merge omp-web/abcd1234 into ${base} in the project folder`));
+  }
+});

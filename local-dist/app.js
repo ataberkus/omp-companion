@@ -2774,15 +2774,13 @@
   }
   // Composer "Push to <base>": like "Commit related changes", it sends OMP a prompt (or queues it as a follow-up while
   // OMP is working) asking it to commit the worktree's changes on the omp-web/ branch, merge that into the branch checked
-  // out in the project folder and push it. The base name is fetched once per session.
-  S.wtBase = new Map();
+  // out in the project folder and push it. The base is that folder's branch as the store has it (the companion reads it
+  // again every 15 s), not a worktree_status run (7 git processes) per session; a detached HEAD or a folder outside git
+  // names none.
+  const pushBase = s => { const b = projectOf(s)?.branch || ''; return b === 'detached' || b === 'workspace' ? '' : b; };
   function pushButton(s) {
     if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
-    if (!S.wtBase.has(s.id)) {
-      S.wtBase.set(s.id, '');
-      api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {});
-    }
-    const base = S.wtBase.get(s.id) || 'main';
+    const base = pushBase(s) || 'main';
     return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder) and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.sending.has('session:' + s.id) ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
   }
   // ---------- finish an isolated session's worktree ----------
@@ -2809,7 +2807,6 @@
     if (!s) return;
     let st;
     try { st = await sessionApi({ type: 'worktree_status' }); } catch (e) { return toast(e.message, 'err'); }
-    S.wtBase.set(s.id, st.base || '');
     modal('Finish worktree', wtBody(s, st));
     const box = $('#modal')?.querySelector('[data-wtsession]'); if (box) box._st = st;
   }
@@ -4950,7 +4947,7 @@
     else if (act === 'btwHistory') btwHistory(c.id);
     else if (act === 'btwCancel') { const st = btwState(c.id); sessionApi({ type: 'btw_cancel', ...(st.topic ? { recordId: st.topic } : {}) }).then(refresh, err => toast(err.message, 'err')); }
     else if (act === 'commitRelated') sendOrQueue(c.id, COMMIT_RELATED);
-    else if (act === 'pushMain') { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, S.wtBase.get(c.id) || 'main')); }
+    else if (act === 'pushMain') { const s = S.store?.sessions.find(x => x.id === c.id); if (s?.branch) sendOrQueue(c.id, PUSH_TO_BASE(s.branch, pushBase(s) || 'main')); }
     else if (act === 'abortRetry') sessionAction({ type: 'abort_retry' });
     else if (act === 'abortBash') sessionAction({ type: 'abort_bash' });
     else if (act === 'dismissUrl') { S.urlDismissed = a.dataset.id; update(); }
