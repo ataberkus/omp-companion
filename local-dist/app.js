@@ -2869,8 +2869,13 @@
   // OMP is working) asking it to commit the worktree's changes on the omp-web/ branch, merge that into the branch checked
   // out in the project folder and push it. The base is that folder's branch as the store has it (the companion reads it
   // again every 15 s), not a worktree_status run (7 git processes) per session; a detached HEAD or a folder outside git
-  // names none.
-  const pushBase = s => { const b = projectOf(s)?.branch || ''; return b === 'detached' || b === 'workspace' ? '' : b; };
+  // names none. The companion skips hidden workspaces' folders, so their sessions still ask git once per page.
+  S.wtBase = new Map();
+  const pushBase = s => {
+    const p = projectOf(s);
+    if (p?.hidden) { if (!S.wtBase.has(s.id)) { S.wtBase.set(s.id, ''); api(`/sessions/${encodeURIComponent(s.id)}/command`, { type: 'worktree_status' }).then(st => { S.wtBase.set(s.id, st.base || ''); update(); }, () => {}); } return S.wtBase.get(s.id); }
+    const b = p?.branch || ''; return b === 'detached' || b === 'workspace' ? '' : b;
+  };
   function pushButton(s) {
     if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
     const base = pushBase(s) || 'main';
@@ -4636,18 +4641,18 @@
   const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
   let stateSeq = 0, stateShown = 0, renderedAt = 0;
   // OMP's own session list (the sidebar's history) loads every 20 s, alongside /state instead of after it, and conditionally:
-  // an unchanged list is a 304 that keeps S.native. A refresh that starts while it is in flight (the whole-transcript
-  // refetch in refresh) waits for the same request.
-  let nativeLoad = null;
+  // an unchanged list is a 304 that keeps S.native. The list is taken when its reply lands, with the ETag api() just kept:
+  // a refresh that drops its /state reply must not drop the list too, or every later load is a 304 for a list never shown.
+  // Only the refresh that started the load waits for it (and hands it, nat, to its whole-transcript refetch): any other
+  // refresh (a view switch, the one after a send) renders on its own /state reply.
   // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works:
   // only "ago" labels could change then, and those still render every 10 s. While something works its running timer ticks
   // on every poll, as before. A poll of a hidden page renders nothing at all. Other callers always render: they may have
   // changed the page.
-  async function refresh(poll = false) {
+  async function refresh(poll = false, nat = null) {
     const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : S.txPrev.get(view), online = S.online;
     let fresh = !poll;
-    if (Date.now() - S.nativeAt > 20000) { S.nativeAt = Date.now(); const p = nativeLoad = api('/omp-sessions', undefined, { etag: S.nativeTag ||= { tag: '' } }).catch(() => null).finally(() => { if (nativeLoad === p) nativeLoad = null; }); }
-    const nat = nativeLoad;
+    if (Date.now() - S.nativeAt > 20000) { S.nativeAt = Date.now(); const tag = S.nativeTag ||= { tag: '' }; nat = api('/omp-sessions', undefined, { etag: tag }).then(d => { if (!d || S.nativeTag !== tag) return false; S.native = d.sessions; S.nativeReady = true; return true; }, () => false); }
     try {
       const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
       // A reply that is no store at all (a proxy's empty page, say) fails the poll; its ETag must not make the next one a 304.
@@ -4658,14 +4663,15 @@
         stateShown = seq;
         const merged = st && mergeStore(st, view);
         if (merged && mergeTx(merged, view, !!st.sx)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; checkOwnDrafts(seq); }
-        else if (st) { S.stateTag = ''; void refresh(); return; }
+        else if (st) { S.stateTag = ''; void refresh(false, nat); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
-    const native = nat && await nat;
-    if (native) { S.native = native.sessions; S.nativeReady = true; fresh = true; }
+    if (nat && await nat) fresh = true;
     // Hidden (a background tab, the desktop app in the tray): only the title badge and notifications follow (checkAttention);
     // showing the page refreshes it (visibilitychange), and renderedAt = 0 has the first visible poll render regardless.
-    if (poll && document.hidden) { checkAttention(); renderedAt = 0; return; }
+    // Sort ranks (settleAt) and the viewed session's subagent starts (firstSeen) are still noted, as a render would: what
+    // settled or started while hidden keeps its order and its running time.
+    if (poll && document.hidden) { for (const s of panelSessions()) settleAt(s); if (current().kind === 'session') for (const a of S.store?.sessions.find(x => x.id === view)?.subagentList || []) if (a.id) firstSeen(a.id); checkAttention(); renderedAt = 0; return; }
     if (!fresh && S.online === online && !busyNow() && Date.now() - renderedAt < 10000) {
       // A tab looked at again still takes its sessions off the title badge and out of the sidebar marks.
       const unseen = [...attn.unseen.keys()].join();

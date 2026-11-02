@@ -391,3 +391,49 @@ test('Push to <base> names the project folder’s branch from the store, without
     assert.match(sent[0].body.message, new RegExp(`merge omp-web/abcd1234 into ${base} in the project folder`));
   }
 });
+
+test('Push to <base> of a hidden workspace’s session asks git once: the companion does not refresh a hidden folder’s branch', async () => {
+  const s1 = session('s1', [reply('m1', 'done')], { projectId: 'p1', isolated: true, branch: 'omp-web/abcd1234', queuedMessages: [] });
+  const app = boot({ respond: (url, call) => {
+    if (url.startsWith('/api/state')) return { body: { ...store([s1]), projects: [{ id: 'p1', name: 'proj', path: '/project', branch: 'main', color: 'x', hidden: true }] } };
+    if (url.includes('/command')) return { body: call.body.type === 'worktree_status' ? { base: 'release/2.0' } : s1 };
+  } });
+  await flush(); await app.poll();
+  assert.match(app.els.get('commitSlot').innerHTML, />Push to release\/2\.0<\/button>/, 'the folder’s branch, not the store’s stale one');
+  await app.click('pushMain');
+  const sent = app.calls.filter(c => c.body?.type);
+  assert.deepEqual(sent.map(c => c.body.type), ['worktree_status', 'prompt'], 'one lookup per page');
+  assert.match(sent[1].body.message, /merge omp-web\/abcd1234 into release\/2\.0 in the project folder/);
+});
+
+// ---------- hidden page: settle order ----------
+test('sessions that settle while the page is hidden keep the order they settled in', async () => {
+  const run = (id, status) => session(id, [reply('m-' + id, 'x')], { status, createdAt: at(-100), updatedAt: at(-50) });
+  let sessions = [run('x', 'running'), run('y', 'running')];
+  const app = boot({ hash: '', respond: url => url.startsWith('/api/state') ? { body: store(sessions) } : undefined });
+  await flush(); await app.poll();
+  await app.visible(false);
+  sessions = [run('x', 'review'), run('y', 'running')]; app.clock.now += 1000; await app.poll();
+  sessions = [run('x', 'review'), run('y', 'review')]; app.clock.now += 25000; await app.poll();
+  app.clock.now += 25000; await app.visible(true); await app.poll();
+  const keys = [...app.list().matchAll(/data-key="s:([^"]+)"/g)].map(m => m[1]);
+  assert.ok(keys.indexOf('y') < keys.indexOf('x'), `y settled last, so it lists first: ${keys}`);
+});
+
+test('a view switch while the OMP session list downloads renders without waiting for it; the poll that asked for it shows it', async () => {
+  let release = null, list = nativeList(1);
+  const app = boot({ hash: '#/s/s1', respond: async url => {
+    // Only the viewed session carries its transcript, as the companion sends it.
+    if (url.startsWith('/api/state')) { const v = query(url).session; return { body: store([session('s1', v === 's1' ? [reply('m1', 'first session')] : undefined), session('s2', v === 's2' ? [reply('m2', 'second session')] : undefined)]) }; }
+    if (url.startsWith('/api/omp-sessions')) { if (release) await new Promise(r => { release = r; }); return { body: list }; }
+  } });
+  await flush();
+  assert.match(app.thread(), /first session/);
+  release = true; list = nativeList(2); await app.advance(21000);
+  const tick = app.poll(); await flush(); // the poll asks for the list (a slow download), with /state
+  await app.go('#/s/s2');
+  assert.match(app.thread(), /second session/, 'rendered with its own /state');
+  assert.doesNotMatch(app.list(), /History 1/);
+  release(); await tick;
+  assert.match(app.list(), /History 1/, 'the poll that asked for the list renders it');
+});
