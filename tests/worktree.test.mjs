@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, readFile, mkdir, access } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, mkdir, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -308,7 +308,9 @@ test('Disk space: folders no session uses are listed as orphans and removed with
   assert.deepEqual(worktrees, []);
   const by = Object.fromEntries(orphans.map(o => [o.name, o]));
   assert.deepEqual(Object.keys(by).sort(), ['gone-session', 'stray', 'wt']);
-  assert.deepEqual([by['gone-session'].kind, by['gone-session'].branch, by['gone-session'].dirty, by['gone-session'].root], ['unknown', 'omp-web/gone1234', 0, root]);
+  assert.deepEqual([by['gone-session'].kind, by['gone-session'].branch, by['gone-session'].dirty], ['unknown', 'omp-web/gone1234', 0]);
+  // The root comes from git's .git file, which spells the path in long form even when TEMP is an 8.3 short name (RUNNER~1 on CI).
+  assert.equal(await realpath(by['gone-session'].root), await realpath(root));
   assert.deepEqual([by.wt.kind, by.wt.sessionId], ['removed', 'w']);
   assert.ok(by.stray.bytes >= 2000);
 
