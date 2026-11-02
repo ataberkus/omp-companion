@@ -6,8 +6,9 @@
 ; started again at the end. Settings, sessions and saved data live outside the install folder and are kept. The same or
 ; a newer installed version, the updater (/UPDATE), passive (/P) and silent (/S) runs keep the template's behaviour.
 ;
-; Graceful stop. Before files are replaced or removed, a running app is asked to quit the way the tray's Quit does
-; (sessions paused and saved, OMP stopped, the bundled Bun ended) through the named event it waits on
+; Graceful stop. Before files are replaced or removed, a running app is asked to quit as for an in-app update
+; (sessions paused and saved, OMP stopped, the bundled Bun ended, and the working ones noted so the next launch resumes
+; them) through the named event it waits on
 ; (quit_on_installer_request in src-tauri/src/main.rs). Only an app still running after OMP_QUIT_WAIT, or one too old to
 ; be asked, is closed by the template's check (asks first, except in passive and silent runs). The companion's Bun
 ; saves sessions when the app goes away, so it gets OMP_BUN_WAIT to end on its own before that check closes it too.
@@ -69,7 +70,7 @@ Function OmpUpdateInPlace
     Return
   ${EndIf}
   ${WordFind} $1 "." "-1{" $1
-  MessageBox MB_OKCANCEL|MB_ICONQUESTION "Update $(^Name) $0 to $1?$\n$\nIt is updated where it is installed, without uninstalling it first. Your settings, sessions and saved data are kept.$\n$\nIf $(^Name) is running, it closes first (working sessions are paused and saved, as on Quit) and starts again when the update is done." IDOK omp_update
+  MessageBox MB_OKCANCEL|MB_ICONQUESTION "Update $(^Name) $0 to $1?$\n$\nIt is updated where it is installed, without uninstalling it first. Your settings, sessions and saved data are kept.$\n$\nIf $(^Name) is running, it closes first and starts again when the update is done; sessions that were working pause for the update and carry on by themselves." IDOK omp_update
   Quit
   omp_update:
   Exec '"$EXEPATH" /P /UPDATE /R'

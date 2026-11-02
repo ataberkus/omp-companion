@@ -384,8 +384,9 @@ fn busy_sessions(shell: &Shell) -> u64 {
     shell.host().request(json!({ "cmd": "busy" }), Duration::from_secs(10)).ok().and_then(|r| r["busy"].as_u64()).unwrap_or(0)
 }
 
-// Download first (the app keeps working meanwhile), then stop the companion as on Quit, then run the installer,
-// which closes the app, replaces its files and starts the new version.
+// Download first (the app keeps working meanwhile), then stop the companion as on Quit but with the update note (the new
+// version resumes the sessions that were working), then run the installer, which closes the app, replaces its files and
+// starts the new version.
 fn install_update(app: &AppHandle) {
     let shell = app.state::<Shell>();
     let Some(update) = shell.update.lock().clone() else { return };
@@ -395,8 +396,12 @@ fn install_update(app: &AppHandle) {
     let busy = busy_sessions(&shell);
     let mut message = format!("Install OMP Control Room {}? The app closes, installs the update and starts again.", update.version);
     if busy > 0 {
-        let working = if busy == 1 { "1 session is still working; it".to_owned() } else { format!("{busy} sessions are still working; they") };
-        message.push_str(&format!(" {working} will be paused, and you can continue by sending a message after the update."));
+        let working = if busy == 1 {
+            "1 session is still working; it pauses for the update and carries on by itself when the new version starts.".to_owned()
+        } else {
+            format!("{busy} sessions are still working; they pause for the update and carry on by themselves when the new version starts.")
+        };
+        message.push_str(&format!(" {working}"));
     }
     if let Some(notes) = update.body.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         let notes: String = notes.chars().take(1500).collect();
@@ -439,7 +444,7 @@ fn install_update(app: &AppHandle) {
     if shell.quitting.swap(true, Ordering::SeqCst) {
         return;
     }
-    stop_companion(app);
+    stop_companion(app, true);
     // On success the installer takes over and this process exits.
     if let Err(e) = update.install(bytes) {
         error_dialog(app, format!("Could not install the update. Sessions were paused and saved; start OMP Control Room again to keep using this version.\n\n{e}"));
@@ -658,7 +663,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     thread::spawn(move || match id.as_str() {
         "lan" => toggle_lan(&app),
         "screen" => toggle_screen(&app),
-        "quit" => quit(&app, true),
+        "quit" => quit(&app, false),
         "update" => install_update(&app),
         "check_update" => check_now(&app),
         _ => {
@@ -689,12 +694,14 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn quit(app: &AppHandle, confirm: bool) {
+// for_update: a newer installer asked (quit_on_installer_request), so there is no prompt and the new version resumes the
+// sessions that were working. The tray's Quit asks first and leaves them paused.
+fn quit(app: &AppHandle, for_update: bool) {
     let shell = app.state::<Shell>();
     if shell.quitting.swap(true, Ordering::SeqCst) {
         return;
     }
-    if confirm {
+    if !for_update {
         let busy = busy_sessions(&shell);
         if busy > 0 {
             let message = if busy == 1 {
@@ -716,23 +723,26 @@ fn quit(app: &AppHandle, confirm: bool) {
             }
         }
     }
-    stop_companion(app);
+    stop_companion(app, for_update);
     app.exit(0);
 }
 
 // Quit and updates: the tray goes first so nothing starts new work, then close() pauses running sessions, saves
-// workspace.json and stops every OMP session.
-fn stop_companion(app: &AppHandle) {
+// workspace.json and stops every OMP session. For an update (resume) the host also writes the IDs of the sessions it
+// paused to its update note before replying, and the next launch resumes them; Quit, sign-out and crash recovery don't.
+fn stop_companion(app: &AppHandle, resume: bool) {
     let shell = app.state::<Shell>();
     let _ = app.remove_tray_by_id("main");
     let host = shell.host();
-    let _ = host.request(json!({ "cmd": "quit" }), Duration::from_secs(120));
+    let _ = host.request(json!({ "cmd": "quit", "resume": resume }), Duration::from_secs(120));
     host.wait_exit(Duration::from_secs(10));
     shell.host_closed.store(true, Ordering::SeqCst);
 }
 
 // A newer installer started by hand sets this event before it replaces the app's files (installer-hooks.nsh,
-// OMP_STOP_APP): quit as from the tray, without asking, so sessions are paused and saved and Bun's files come free.
+// OMP_STOP_APP): quit without asking, so sessions are paused and saved and Bun's files come free, and leave the update
+// note so the version it installs resumes the sessions that were working. The uninstaller sets it too; its note goes
+// stale unread unless the app is installed and started again within minutes.
 // The installer waits for this process to end and closes it by force only after that times out.
 fn quit_on_installer_request(app: AppHandle) {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
@@ -747,7 +757,7 @@ fn quit_on_installer_request(app: AppHandle) {
     let signaled = unsafe { WaitForSingleObject(event, INFINITE) } == WAIT_OBJECT_0;
     unsafe { CloseHandle(event) };
     if signaled {
-        quit(&app, false);
+        quit(&app, true);
     }
 }
 

@@ -22,11 +22,11 @@ async function freePort() {
   return port;
 }
 
-async function startHost(t, setup, env = {}) {
+async function startHost(t, setup, env = {}, nodeArgs = []) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-desktop-host-'));
   const port = await freePort();
   if (setup) await setup(dir, port);
-  const child = spawn(process.execPath, ['desktop/host.mjs'], {
+  const child = spawn(process.execPath, [...nodeArgs, 'desktop/host.mjs'], {
     cwd: repoRoot, stdio: 'pipe', windowsHide: true,
     env: { ...process.env, OMP_WEB_PORT: String(port), OMP_WEB_DATA_DIR: dir, PI_CODING_AGENT_DIR: dir, OMP_SESSIONS_DIR: join(dir, 'sessions'), OMP_BIN: process.execPath, OMP_WEB_NO_UPDATE: '1', ...env },
   });
@@ -132,6 +132,52 @@ test('closing stdin shuts the companion down and frees the port', async t => {
   const code = await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('host did not exit within 10s')), 10000).unref())]);
   assert.equal(code, 0);
   assert.equal(await portBusy(port), false);
+});
+
+// The app update path: sessions run on fakeOmp (tests/fake-omp-host.mjs), so a resumed one is working until the host quits.
+const fakeOmpHost = ['--import', './tests/fake-omp-host.mjs'];
+const seedSessions = note => async dir => {
+  const at = new Date().toISOString();
+  const session = id => ({ id, projectId: 'project', title: id, status: 'paused', cwd: dir, model: 'OMP default', native: false, messages: [], todos: [], createdAt: at, updatedAt: at });
+  await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'project', path: dir, name: 'Project' }], sessions: [session('run'), session('idle')], activity: [] }));
+  if (note) await writeFile(join(dir, 'update-resume.json'), JSON.stringify(note));
+};
+const noteOf = async dir => readFile(join(dir, 'update-resume.json'), 'utf8').then(JSON.parse, e => e.code);
+const statuses = async (port, token) => Object.fromEntries((await (await fetch(`http://127.0.0.1:${port}/api/state?session=`, { headers: { Authorization: `Bearer ${token}` } })).json()).sessions.map(s => [s.id, s.status]));
+const waitFor = async (check, ms = 5000) => { for (const end = Date.now() + ms; !(await check()) && Date.now() < end;) await new Promise(r => setTimeout(r, 20)); return check(); };
+
+test('a fresh update note resumes its sessions at launch and is deleted; an update quit writes the working ones for the next version', async t => {
+  const { dir, port, exited, next, request } = await startHost(t, seedSessions({ at: Date.now(), resume: ['run'] }), {}, fakeOmpHost);
+  const { token } = await next();
+  assert.equal(await noteOf(dir), 'ENOENT', 'used up at launch, so a later launch or crash recovery resumes nothing');
+  assert.ok(await waitFor(async () => (await statuses(port, token)).run === 'running'), 'the listed session carries on');
+  assert.equal((await statuses(port, token)).idle, 'paused', 'a session not in the note stays paused');
+  assert.deepEqual(await request({ cmd: 'quit', resume: true }), { id: 1, ok: true });
+  assert.equal(await exited, 0);
+  const note = await noteOf(dir);
+  assert.deepEqual(Object.keys(note).sort(), ['at', 'resume'], 'no token: the app gets a new one at every launch');
+  assert.deepEqual(note.resume, ['run']);
+  assert.ok(Date.now() - note.at < 60_000);
+  assert.equal(JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions.find(s => s.id === 'run').status, 'paused');
+});
+
+test('a plain quit (tray Quit, sign-out) leaves no update note, so its sessions come back paused', async t => {
+  const { dir, port, exited, next, request } = await startHost(t, seedSessions({ at: Date.now(), resume: ['run'] }), {}, fakeOmpHost);
+  const { token } = await next();
+  assert.ok(await waitFor(async () => (await statuses(port, token)).run === 'running'));
+  assert.deepEqual(await request({ cmd: 'quit' }), { id: 1, ok: true });
+  assert.equal(await exited, 0);
+  assert.equal(await noteOf(dir), 'ENOENT');
+  assert.equal(JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions.find(s => s.id === 'run').status, 'paused');
+});
+
+// An install that failed tells the user to start the app again; that much later the sessions stay paused.
+test('a stale update note is ignored and deleted', async t => {
+  const { dir, port, next } = await startHost(t, seedSessions({ at: Date.now() - 11 * 60 * 1000, resume: ['run'] }), {}, fakeOmpHost);
+  const { token } = await next();
+  assert.equal(await noteOf(dir), 'ENOENT');
+  await new Promise(r => setTimeout(r, 300));
+  assert.deepEqual(await statuses(port, token), { run: 'paused', idle: 'paused' });
 });
 
 // OMP_WEB_HOST unset: the host looks up this PC's Tailscale address itself. Without Tailscale it simply stays on 127.0.0.1;

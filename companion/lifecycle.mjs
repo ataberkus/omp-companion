@@ -24,7 +24,8 @@ export function createLifecycle(ctx){
    refreshing.add(id);void refresh(s,r).then(()=>{if(!ctx.closing)scheduleSave([],true);},e=>console.error('Background refresh failed:',e.message)).finally(()=>{refreshing.delete(id);checkAutoShutdown();checkAutoRestart();});}
   checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
  // Every session stops as on quit: running (or queued) ones become paused, the rest keep their status; workspace.json is saved.
- // Resolves with the IDs of the visible sessions it paused: the ones a restart resumes. Shutdown and quit ignore them.
+ // Resolves with the IDs of the visible sessions it paused: the ones a restart, or the desktop app's update, resumes. close()
+ // resolves with them too; shutdown and a plain quit ignore them.
  const pauseSessions=async()=>{ctx.pausing++;try{const paused=[];const stops=[...runners.values()].map(r=>r.kill());for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);return paused;}finally{ctx.pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
  // Work left: a running or queued turn, or a compaction/handoff/shell command in progress. Queued messages of a running
