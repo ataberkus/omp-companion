@@ -66,3 +66,21 @@ test('workspace.json records each transcript\'s digest, startup parses only file
   await writeFile(join(dir, 'transcripts', 'a.json'), '[{"id":"a1",');
   await assert.rejects(createCompanion({ dataDir: dir, omp: fakeOmp() }), /Cannot read the transcript of session a/);
 });
+
+// Every start rewrote (and flushed) workspace.json, though after a clean quit the loaded store saves to the same bytes.
+test('a start whose store loads unchanged leaves workspace.json alone; one that changes it on load saves it', async t => {
+  const dir = await dataDir(t, [session('a', 'paused'), session('b', 'running')], { a: '[]', b: JSON.stringify([edit('b1', 'x.js')]) });
+  const file = join(dir, 'workspace.json'), id = async () => { const s = await stat(file); return `${s.ino}:${s.mtimeMs}`; };
+  let before = await id(), app = await open(t, dir);
+  assert.notEqual(await id(), before, 'the running session loads paused, and that is saved');
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).sessions[1].status, 'paused');
+  await app.close();
+  before = await id();
+  const text = await readFile(file, 'utf8');
+  app = await open(t, dir);
+  assert.equal(await id(), before, 'nothing changed: not rewritten');
+  app.store.sessions[0].title = 'renamed';
+  await app.close();
+  assert.notEqual(await readFile(file, 'utf8'), text);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).sessions[0].title, 'renamed');
+});

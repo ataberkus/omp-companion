@@ -21,8 +21,8 @@ export async function openStore(ctx){
  const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
  for(const f of await fs.readdir(dataDir)){const m=/^workspace\.json\.(?:(\d+)\.)?tmp$/.exec(f);if(m&&!(m[1]&&alive(Number(m[1]))))await fs.rm(path.join(dataDir,f),{force:true}).catch(()=>{});}
  for(const f of await fs.readdir(transcriptDir).catch(()=>[])){const m=/\.json\.(\d+)\.tmp$/.exec(f);if(m&&!alive(Number(m[1])))await fs.rm(path.join(transcriptDir,f),{force:true}).catch(()=>{});}
- let store;
- try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
+ let store,stateText;
+ try{stateText=await fs.readFile(stateFile,'utf8');store=JSON.parse(stateText);}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
  // Transcripts as last written, by session ID: a digest of each one's JSON, so a save rewrites only those that changed (the
  // JSON itself, kept for that comparison, cost as much memory as the transcripts). A workspace.json from before the split
  // still embeds them; those sessions have no entry here, so the first save moves them out.
@@ -89,8 +89,9 @@ export async function openStore(ctx){
  // and serializes when it starts. Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save,
  // and a slow disk ran the heap out. Everything is serialized at one instant, so the files on disk match one state.
  // Transcripts are written before workspace.json lists their session, and deleted only once it no longer does.
- // A failed save's scope joins the next one.
- let lastSaved,nextSave,nextScope;
+ // A failed save's scope joins the next one. workspace.json is written only when its JSON changed, starting from the file
+ // as loaded: the startup save of a store that loads unchanged (a clean quit) rewrote and flushed the same bytes.
+ let lastSaved=stateText,nextSave,nextScope;
  const persist=scope=>{nextScope=widen(nextScope,scope);if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{
   const scoped=nextScope;nextSave=nextScope=undefined;
   try{
