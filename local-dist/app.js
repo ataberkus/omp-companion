@@ -1381,6 +1381,26 @@
       <summary>${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}</summary>
       <div class="rows">${rows.map((r, j) => activityRow(r, live, j === rows.length - 1, lines[j])).join('')}</div></details>`;
   }
+  // Every input of activityBlock's markup besides the group's messages (see cachedPart).
+  const groupCtx = (group, live) => [live ? 1 : 0, S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
+
+  // Thread parts reuse their markup while they are built from the same message objects and the same ctx. mergeTx keeps
+  // unchanged messages across polls and nothing edits one in place (a change replaces it), so identity stands for content;
+  // ctx holds every other input of the part's markup, written next to its builder. An input missing from a ctx leaves the
+  // part stale until its messages change. With localStorage omp-debug-parts=1 every hit is rebuilt and a stale one logged.
+  // A reused part keeps the times of its first render, so a time-zone change shows on messages as they change.
+  let debugParts = false; try { debugParts = localStorage.getItem('omp-debug-parts') === '1'; } catch {}
+  const groupParts = new WeakMap(), msgParts = new WeakMap();
+  function cachedPart(cache, members, ctx, build) {
+    const c = cache.get(members[0]);
+    if (c && c.ctx === ctx && c.members.length === members.length && c.members.every((m, i) => m === members[i])) {
+      if (debugParts) { const fresh = build(); if (fresh !== c.html) console.error('Stale thread part', { ctx, cached: c.html, fresh }); }
+      return c.html;
+    }
+    const html = build();
+    cache.set(members[0], { members, ctx, html });
+    return html;
+  }
 
   function renderThread(messages, status, ownerId, opts = {}) {
     // Drop hidden advisor messages up front so they don't split activity groups.
@@ -1431,7 +1451,8 @@
         const group = [];
         while (i < messages.length && !messages[i].adv && (messages[i].role === 'tool' || messages[i].role === 'thinking')) group.push(messages[i++]);
         i--;
-        add('act:' + group[0].id, activityBlock(group, status === 'running' && i === mainEnd));
+        const live = status === 'running' && i === mainEnd;
+        add('act:' + group[0].id, cachedPart(groupParts, group, groupCtx(group, live), () => activityBlock(group, live)));
         continue;
       }
       if (m.role === 'system') {
@@ -1452,7 +1473,6 @@
         continue;
       }
       const user = m.role === 'user';
-      const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
       const editing = user && m.steer === 'pending' && S.editSteer?.id === m.id;
       const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
         : user && m.steer === 'received' ? '<span class="steer-state" title="OMP has taken this steer; it can no longer be edited or cancelled">Steering · delivery started</span>'
@@ -1461,10 +1481,15 @@
         : i === lastUser ? '<button class="steer-btn" data-msgact="edit" title="Go back to before this message in a new OMP session file and put it in the composer">Edit &amp; resend</button>'
         : i === lastReply ? '<button class="steer-btn" data-msgact="regenerate" title="Go back to before your last message in a new OMP session file and send it again">Regenerate</button>'
         : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
-      const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
-        : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
-      add('msg:' + m.id, `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
-        ${body}</div>`);
+      // Every input of the message's markup besides the message itself (see cachedPart).
+      const ctx = [steer, history, editing ? S.editSteer.text : '\u0002', opts.speaker || '', !user && m.model ? modelName(m.model) : ''].join('\u0001');
+      add('msg:' + m.id, cachedPart(msgParts, [m], ctx, () => {
+        const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
+        const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
+          : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
+        return `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
+        ${body}</div>`;
+      }));
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
       add('pending', `<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);

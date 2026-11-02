@@ -81,8 +81,9 @@ function parseInto(parent, html) {
   text(html.slice(last));
 }
 
-// The real app.js in a vm, its page elements from the small DOM above. ros: ResizeObserver callbacks; ls: localStorage.
-function boot({ hash = '#/s/s1', respond, ls = {}, intl, now } = {}) {
+// The real app.js in a vm, its page elements from the small DOM above. ros: ResizeObserver callbacks; ls: localStorage;
+// wrap: applied to every JSON body the app reads (the objects it then holds).
+function boot({ hash = '#/s/s1', respond, ls = {}, intl, now, wrap = b => b } = {}) {
   const timers = [], listeners = {}, winListeners = {}, ros = [], errors = [];
   const doc = { inserted: 0 };
   const els = new Map();
@@ -98,7 +99,7 @@ function boot({ hash = '#/s/s1', respond, ls = {}, intl, now } = {}) {
   const fetch = async (url, opts = {}) => {
     const r = (await respond?.(url, opts)) ?? (url.startsWith('/api/models') ? { body: { models: [], roles: {} } } : { body: { sessions: [] } });
     const status = r.status || 200;
-    return { ok: status < 400, status, headers: { get: k => r.headers?.[k] ?? null }, json: async () => structuredClone(r.body ?? {}), text: async () => '', blob: async () => ({}) };
+    return { ok: status < 400, status, headers: { get: k => r.headers?.[k] ?? null }, json: async () => wrap(structuredClone(r.body ?? {}), url), text: async () => '', blob: async () => ({}) };
   };
   const clock = { offset: 0 };
   const FakeDate = class extends Date { constructor(...a) { super(...(a.length ? a : [Date.now() + clock.offset])); } static now() { return Date.now() + clock.offset; } };
@@ -138,4 +139,99 @@ test('ago() and clock() read exactly like toLocale*String, from formatters rebui
   st = store([session('s1', [...messages, reply('later', 'and more', 200001)], { status: 'running' }), ...old]);
   await app.poll();
   assert.ok(built > before, 'a second later they are built again, so a time-zone change shows');
+});
+
+// The companion's delta protocol for the viewed session s1: a poll gets the messages changed since the rev it holds, so the
+// app keeps the objects of unchanged ones (as mergeTx does with the real companion). set() replaces the transcript.
+function txServer(initial, extra = {}) {
+  let rev = 1, held = initial.map(m => ({ m, rev })), models = { models: [], roles: {} };
+  const sess = { status: 'running', ...extra };
+  return {
+    set(list, patch = {}) { rev++; const old = new Map(held.map(x => [x.m.id, x])); held = list.map(m => { const o = old.get(m.id); return o && JSON.stringify(o.m) === JSON.stringify(m) ? o : { m, rev }; }); Object.assign(sess, patch); },
+    get messages() { return held.map(x => x.m); },
+    models(m) { models = m; },
+    respond: url => {
+      if (url.startsWith('/api/models')) return { body: models };
+      if (!url.startsWith('/api/state')) return;
+      const since = new URL(url, 'http://x').searchParams.get('since'), n = since?.startsWith('e1.') ? +since.slice(3) : 0;
+      const tx = { session: 's1', epoch: 'e1', rev, ...(n ? { changed: held.filter(x => x.rev > n).map(x => x.m), order: held.map(x => x.m.id) } : {}) };
+      return { body: { ...store([session('s1', n ? undefined : held.map(x => x.m), sess)]), tx } };
+    },
+    full: () => store([session('s1', held.map(x => x.m), sess)]),
+  };
+}
+// Counts reads of one message field (per message id) on the objects the app holds; targets: those objects, unwrapped.
+function counting(field) {
+  const reads = new Map(), targets = new Map();
+  const wrapMsg = m => { targets.set(m.id, m); return new Proxy(m, { get(t, k) { if (k === field) reads.set(t.id, (reads.get(t.id) || 0) + 1); return t[k]; } }); };
+  const wrap = b => { for (const s of b.sessions || []) if (s.messages) s.messages = s.messages.map(wrapMsg); if (b.tx?.changed) b.tx.changed = b.tx.changed.map(wrapMsg); return b; };
+  return { reads, targets, wrap };
+}
+const thread1 = () => [user('u0', 'first question', 0, { entryId: 'e0' }), reply('a1', 'an **answer** with\n\n- a list\n- of items', 1, { model: 'prov/m1' }), edit('t2', 2), think('k3', 'pondering\n\n- nested *list*', 3), tool('t4', 'bash', 4, { args: JSON.stringify({ command: 'npm test' }) }),
+  user('u5', 'second question', 5, { entryId: 'e5' }), reply('a6', 'another answer', 6), tool('t7', 'read', 7), edit('t8', 8, { status: 'running', result: 'partial' })];
+const streamT8 = (srv, result, extra = {}) => srv.set(srv.messages.map(m => m.id === 't8' ? { ...m, tool: { ...m.tool, result, ...extra } } : m));
+
+test('a streaming poll reuses the markup of unchanged thread parts, and the thread still reads like a full render', async () => {
+  const srv = txServer(thread1()), c = counting('text');
+  const app = boot({ respond: srv.respond, wrap: c.wrap });
+  await flush();
+  assert.equal(app.thread(), await fullRender(srv.full()));
+  for (let k = 1; k <= 3; k++) {
+    c.reads.clear();
+    streamT8(srv, 'partial' + '.'.repeat(k));
+    await app.poll();
+    assert.equal(app.thread(), await fullRender(srv.full()), `poll ${k}`);
+    assert.deepEqual(['u0', 'a1', 'k3', 'u5', 'a6'].filter(id => c.reads.get(id)), [], `poll ${k}: unchanged messages are not rendered again`);
+  }
+  srv.set([...srv.messages.map(m => m.id === 't8' ? { ...m, tool: { ...m.tool, status: 'done', result: 'all done' } } : m), reply('a9', 'finished', 9)], { status: 'review' });
+  await app.poll();
+  assert.equal(app.thread(), await fullRender(srv.full()), 'the turn ends: the live group settles, history buttons appear');
+});
+
+test('cached thread parts follow every other input: toggles, expand-all, diff layout, model names, history buttons, steer edits', async () => {
+  const srv = txServer(thread1());
+  let models;
+  const respond = url => url.startsWith('/api/models') ? new Promise(r => { models = () => r({ body: { models: [{ selector: 'prov/m1', name: 'Model One' }], roles: {} } }); }) : srv.respond(url);
+  // omp-debug-parts: every cache hit is built again and compared; a stale part is logged.
+  const app = boot({ respond, ls: { 'omp-debug-parts': '1' } });
+  await flush();
+  const thread = app.els.get('thread');
+  assert.match(app.thread(), /who-model">m1</);
+  models(); await flush(); streamT8(srv, 'out 1'); await app.poll();
+  assert.match(app.thread(), /who-model">Model One</, 'model names arrive: the reply that names one is rebuilt');
+  app.click({ closest: sel => sel === '[data-act]' ? { dataset: { act: 'expandAll' }, closest: () => null } : null }); await flush();
+  assert.match(app.thread(), /data-gid="t2" data-def="1" open/, 'expand-all opens the settled group');
+  app.click({ closest: sel => sel === '[data-diffmode]' ? { dataset: { diffmode: 'unified' } } : null }); await flush();
+  assert.match(app.thread(), /class="diff unified/);
+  streamT8(srv, 'out 2'); await app.poll();
+  srv.models({ models: [{ selector: 'prov/m1', name: 'Model One' }], roles: {} });
+  assert.equal(app.thread(), await fullRender(srv.full(), { respond: srv.respond, ls: { 'omp-expand-activity': '1', 'omp-diff-mode': 'unified' } }), 'reads like a full render with the same settings');
+  // Toggle a group and a row the way a click would; the next render keeps them that way.
+  app.toggle(thread.querySelector('details.activity'));
+  app.toggle(thread.querySelectorAll('details.row')[1]);
+  streamT8(srv, 'out 3'); await app.poll();
+  assert.doesNotMatch(app.thread(), /data-gid="t2" data-def="1" open/, 'the closed group stays closed');
+  srv.set([...srv.messages.map(m => m.id === 't8' ? { ...m, tool: { ...m.tool, status: 'done' } } : m), user('u9', 'steer this', 9, { steer: 'pending' })]);
+  await app.poll();
+  app.click({ closest: sel => sel === '[data-steeract]' ? { dataset: { steeract: 'edit_steer', id: 'u9' } } : null }); await flush();
+  assert.match(app.thread(), /data-steerinput[^>]*>steer this</, 'the steer being edited shows its text box');
+  app.click({ closest: sel => sel === '[data-steerclose]' ? {} : null }); await flush();
+  assert.doesNotMatch(app.thread(), /data-steerinput/);
+  srv.set(srv.messages.filter(m => m.id !== 'u9'), { status: 'review' });
+  await app.poll();
+  assert.match(app.thread(), /data-msgact="regenerate"/, 'idle: history buttons appear on the parts that get them');
+  assert.deepEqual(app.errors.filter(e => e[0] === 'Stale thread part'), [], 'no cached part differed from a fresh build');
+});
+
+test('omp-debug-parts catches a part whose input is missing from its ctx (here: a message edited in place)', async () => {
+  for (const debug of [false, true]) {
+    const srv = txServer(thread1()), c = counting('text');
+    const app = boot({ respond: srv.respond, wrap: c.wrap, ls: debug ? { 'omp-debug-parts': '1' } : {} });
+    await flush();
+    c.targets.get('a6').text = 'edited in place';
+    streamT8(srv, 'more');
+    await app.poll();
+    assert.doesNotMatch(app.thread(), /edited in place/, 'the cached markup is what shows');
+    assert.equal(app.errors.filter(e => e[0] === 'Stale thread part').length, debug ? 1 : 0);
+  }
 });
