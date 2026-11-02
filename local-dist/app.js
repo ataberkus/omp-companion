@@ -83,9 +83,12 @@
   const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
   const cells = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
 
-  // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread.
+  // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread. Only
+  // top-level calls: nested list items and quotes render inside their parent's entry, and caching them too pushed a long
+  // thread past the cap, where a full pass evicts every entry before it is reached again. 1200 covers the 600-message
+  // transcript plus advisor reviews.
   const mdCache = new Map();
-  const md = (src, breaks = false, depth = 0) => memo(mdCache, (breaks ? '1' : '0') + depth + '\u0000' + String(src ?? ''), () => mdRaw(src, breaks, depth), 800);
+  const md = (src, breaks = false, depth = 0) => depth ? mdRaw(src, breaks, depth) : memo(mdCache, (breaks ? '1' : '0') + String(src ?? ''), () => mdRaw(src, breaks), 1200);
   function mdRaw(src, breaks = false, depth = 0) {
     // Nesting past 20 levels (crafted '- - - …' or '>>>…') renders as plain text instead of overflowing the stack.
     if (depth > 20) return `<p>${inline(String(src ?? '').trim(), breaks)}</p>`;
