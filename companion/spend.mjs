@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 export function createSpend(ctx){
- const {execOmp}=ctx;
+ const {execOmp,statsFile=path.join(os.homedir(),'.omp','stats.db')}=ctx;
 // Keyed by path so a growing transcript replaces its entry instead of adding one per poll. Session files only grow, so a
 // changed one is summed from where the last read ended, like scanJobs: complete lines add onto the running sum in file
 // order (the same float a full read gives) and the offset stays at the last newline; a partial last line counts, as in a
@@ -29,14 +29,20 @@ function syncStats(){
   .then(()=>{statsSync.error='';},e=>{statsSync.error=(e.killed?'omp stats ran for 30 minutes and was stopped.':String(e.stderr||e.message).trim()).slice(0,500)||'omp stats failed.';})
   .finally(()=>{statsSync.running=null;});
 }
+// The companion runs under Bun, which has bun:sqlite but no node:sqlite; Node (the test runner) has only node:sqlite.
+async function openStatsDb(file){
+ if(process.versions.bun){const {Database}=await import('bun:sqlite');return new Database(file,{readonly:true});}
+ const {DatabaseSync}=await import('node:sqlite');return new DatabaseSync(file,{readOnly:true});
+}
 // Spend per model from OMP's hourly rollups; `sync` starts an ingest unless one is already running.
 async function spend(sync){
  if(sync)syncStats();
- const file=path.join(os.homedir(),'.omp','stats.db');
  let rows=[];
- if(await fs.access(file).then(()=>true,()=>false)){
-  const {DatabaseSync}=await import('node:sqlite');const db=new DatabaseSync(file,{readOnly:true});
-  try{rows=db.prepare("SELECT bucket AS at,provider||'/'||model AS model,TOTAL(cost_total) AS cost FROM message_rollup GROUP BY bucket,provider,model ORDER BY bucket").all();}finally{db.close();}
+ if(await fs.access(statsFile).then(()=>true,()=>false)){
+  // bun:sqlite's close() keeps the file open (locked on Windows) while a prepared statement is unfinalized; node:sqlite
+  // statements have no finalize() and are released by close().
+  const db=await openStatsDb(statsFile);let st;
+  try{st=db.prepare("SELECT bucket AS at,provider||'/'||model AS model,TOTAL(cost_total) AS cost FROM message_rollup GROUP BY bucket,provider,model ORDER BY bucket");rows=st.all();}finally{st?.finalize?.();db.close();}
  }
  return {rows,syncing:!!statsSync.running,syncError:statsSync.error};
 }
