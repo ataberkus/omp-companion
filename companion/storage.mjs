@@ -19,7 +19,7 @@ export function createStorage(ctx){
  const busy=s=>['running','queued'].includes(s.status)||!!s._task||!!s._bash;
  const listed=s=>s.isolated&&s.branch?.startsWith('omp-web/')&&!s.worktreeRemoved;
  // Archived, hidden or done, nothing uncommitted and every commit already in the project's branch: removing loses nothing.
- const safe=r=>!r.error&&!r.busy&&(r.archived||r.hidden||r.status==='done')&&!r.dirty&&r.ahead===0&&!!r.base;
+ const safe=r=>!r.error&&!r.problem&&!r.busy&&(r.archived||r.hidden||r.status==='done')&&!r.dirty&&r.ahead===0&&!!r.base;
  // Bytes of every file under dir, symlinks and junctions not followed (a linked node_modules would count twice).
  // tracked: bytes of the files `git ls-files` lists (null outside git); linked: bytes of hardlinked files (a package
  // manager's store can share them), which deleting this folder alone does not free.
@@ -43,7 +43,7 @@ export function createStorage(ctx){
  async function sessionRow(s){
   const p=store.projects.find(x=>x.id===s.projectId);
   const row={id:s.id,title:s.title,project:p?.name||'',cwd:s.cwd,branch:s.branch,status:s.status,archived:store.archived.includes('s:'+s.id),hidden:!!s.hidden,busy:busy(s)};
-  try{const st=await worktreeStatus(s);Object.assign(row,{exists:st.exists,base:st.base,ahead:st.ahead,behind:st.behind,dirty:st.dirty});}
+  try{const st=await worktreeStatus(s);Object.assign(row,{exists:st.exists,base:st.base,ahead:st.ahead,behind:st.behind,dirty:st.dirty},st.problem?{problem:st.problem}:{});}
   catch(e){Object.assign(row,{error:e.message,exists:await exists(s.cwd)});}
   Object.assign(row,row.exists?await measure(s.cwd):{bytes:0,tracked:0,linked:0});
   row.safe=safe(row);return row;
@@ -96,7 +96,7 @@ export function createStorage(ctx){
    state.scannedAt=now();
   });
  }
- const lostWork=st=>[st.dirty?`${st.dirty} uncommitted ${st.dirty===1?'change':'changes'}`:'',st.ahead?`${st.ahead} ${st.ahead===1?'commit':'commits'} not in ${st.base}`:'',st.base?'':`commits ${st.root} cannot be compared with (it is not on a branch)`].filter(Boolean);
+ const lostWork=st=>st.rootDirty===null?['commits and changes git cannot read']:[st.dirty===null&&st.exists?'uncommitted changes git cannot read':st.dirty?`${st.dirty} uncommitted ${st.dirty===1?'change':'changes'}`:'',st.ahead?`${st.ahead} ${st.ahead===1?'commit':'commits'} not in ${st.base}`:'',st.base?'':`commits ${st.root} cannot be compared with (it is not on a branch)`].filter(Boolean);
  async function removeSession(id,confirm){
   const s=store.sessions.find(x=>x.id===id);
   if(!s)throw error('Session not found.',404);

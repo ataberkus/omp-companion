@@ -80,13 +80,22 @@ export function createWorkspaces(ctx){
  async function stopRunner(s){await runners.get(s.id)?.kill();}
  const worktreeRoot=s=>{const root=store.projects.find(p=>p.id===s.projectId)?.path;if(!s.isolated||!root||!s.branch?.startsWith('omp-web/'))throw error('Only sessions in their own worktree can be finished this way.',409);return root;};
  // What finishing an isolated session would do: the branch checked out in the project folder is the merge target.
+ // When git cannot read the project folder or the worktree (moved repository, pruned record, lost .git), the unreadable
+ // counts are null and problem says why in a sentence, so deleting can still be offered instead of git's "fatal: …".
  async function worktreeStatus(s){
   const root=worktreeRoot(s),lines=o=>o.split('\n').filter(Boolean),here=await exists(s.cwd);
+  const st={root,cwd:s.cwd,exists:here,branch:s.branch,base:'',ahead:null,behind:null,commits:[],dirty:null,rootDirty:null,remote:'',upstream:''};
   const [base,rootDirty,remotes,dirty,upstream]=await Promise.all([gitRun(root,['branch','--show-current'],{timeout:10000}).then(o=>o.trim()),gitRun(root,['status','--porcelain','--untracked-files=no'],{timeout:15000}).then(o=>lines(o).length),gitRun(root,['remote'],{timeout:10000}).then(lines),
-   here?gitRun(s.cwd,['status','--porcelain'],{timeout:15000}).then(o=>lines(o).length):null,here?gitRun(s.cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],{timeout:10000}).then(o=>o.trim(),()=>''):'']);
-  let ahead=0,behind=0,commits=[];
-  if(base){[behind,ahead]=(await gitRun(root,['rev-list','--left-right','--count',`${base}...${s.branch}`],{timeout:15000})).trim().split(/\s+/).map(Number);commits=lines(await gitRun(root,['log','--format=%h %s','-n','20',`${base}..${s.branch}`],{timeout:15000}));}
-  return {root,cwd:s.cwd,exists:here,branch:s.branch,base,ahead,behind,commits,dirty,rootDirty,remote:remotes.includes('origin')?'origin':remotes[0]||'',upstream};
+   here?gitRun(s.cwd,['status','--porcelain'],{timeout:15000}).then(o=>lines(o).length,e=>{if(e.status===504)throw e;return null;}):null,here?gitRun(s.cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],{timeout:10000}).then(o=>o.trim(),()=>''):'']).catch(e=>{
+   if(e.status===504)throw e;
+   st.problem=/not a git repository/i.test(e.message)?`${root} is no longer a Git repository, so the worktree's commits and changes can't be read.`:`Git could not read ${root}, so the worktree's commits and changes can't be read.`;
+   return [];
+  });
+  if(st.problem)return st;
+  Object.assign(st,{base,rootDirty,dirty,upstream,remote:remotes.includes('origin')?'origin':remotes[0]||'',ahead:0,behind:0});
+  if(here&&dirty===null)st.problem=`The worktree folder ${s.cwd} is no longer linked to the repository in ${root}, so its uncommitted changes can't be read.`;
+  if(base){[st.behind,st.ahead]=(await gitRun(root,['rev-list','--left-right','--count',`${base}...${s.branch}`],{timeout:15000})).trim().split(/\s+/).map(Number);st.commits=lines(await gitRun(root,['log','--format=%h %s','-n','20',`${base}..${s.branch}`],{timeout:15000}));}
+  return st;
  }
  // Merge (merge commit or fast-forward) / squash into the project's branch, rebase onto it, push it, or delete worktree and branch.
  // With commit, merge/squash first commit the worktree's uncommitted changes on its branch.
@@ -94,10 +103,14 @@ export function createWorkspaces(ctx){
  async function finishWorktree(s,action,{commit=false}={}){
   if(!['merge','squash','rebase','push','delete'].includes(action))throw error('Choose merge, squash, rebase, push or delete.');
   if(['running','queued'].includes(s.status)||s._task||s._bash)throw error('Wait for OMP to finish first.');
+  // Deleting needs only the project folder and the branch name, so an unreadable repository or worktree cannot block it.
+  if(action==='delete'){await deleteWorktree(s,worktreeRoot(s));return {action,deleted:true};}
   let st=await worktreeStatus(s);const {root,branch,base}=st;
+  if(st.rootDirty===null)throw error(st.problem,409);
   if(['merge','squash','rebase'].includes(action)&&!base)throw error(`${root} is not on a branch (detached HEAD). Check out the branch to merge into first.`,409);
   if(action==='merge'||action==='squash'){
    if(st.rootDirty)throw error(`${root} has uncommitted changes. Commit or stash them before merging.`,409);
+   if(commit&&st.exists&&st.dirty===null)throw error(st.problem,409);
    if(commit&&st.exists&&st.dirty){
     const head=(await gitRun(s.cwd,['branch','--show-current'],{timeout:10000})).trim();
     if(head!==branch)throw error(`The worktree has ${head||'a detached HEAD'} checked out, not ${branch}. Commit its changes by hand.`,409);
@@ -113,16 +126,16 @@ export function createWorkspaces(ctx){
   }
   if(action==='rebase'){
    if(!st.exists)throw error('The worktree folder no longer exists.',409);
+   if(st.dirty===null)throw error(st.problem,409);
    if(st.dirty)throw error('The worktree has uncommitted changes. Commit them before rebasing.',409);
    try{await gitRun(s.cwd,['rebase',base]);}catch(e){await gitRun(s.cwd,['rebase','--abort']).catch(()=>{});throw error(`Rebase failed and was undone: ${e.message}`,409);}
    activity(s,`Rebased ${branch} onto ${base}`,'update');
   }
   if(action==='push'){
    if(!st.remote)throw error('This repository has no remote to push to.',409);
-   await gitRun(st.exists?s.cwd:root,['push','-u',st.remote,branch],{timeout:120000,env:{GIT_TERMINAL_PROMPT:'0'}});
+   await gitRun(st.exists&&st.dirty!==null?s.cwd:root,['push','-u',st.remote,branch],{timeout:120000,env:{GIT_TERMINAL_PROMPT:'0'}});
    activity(s,`Pushed ${branch} to ${st.remote}`,'update');
   }
-  if(action==='delete'){await deleteWorktree(s,root);return {action,deleted:true};}
   await persist(s);return {action,...await worktreeStatus(s)};
  }
  // Stops the session's OMP, removes its worktree folder and omp-web/ branch, and takes the session off the panel; its OMP
