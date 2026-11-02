@@ -25,9 +25,10 @@ export async function scanJobs(file){
  let st;try{st=await fs.stat(file);}catch{return [];}
  let c=jobScans.get(file);if(!c||st.size<c.offset)c={offset:0,calls:new Map(),jobs:new Map(),order:0};
  // Two scans of one file can overlap (two dashboards polling it): each reads from the same offset, and only the first to
- // finish applies its lines, or the second would apply them again and move the offset past lines it never read.
- if(st.size>c.offset){const fh=await fs.open(file,'r');try{
-  const from=c.offset,n=st.size-from;const buf=Buffer.alloc(n);await fh.read(buf,0,n,from);const end=buf.lastIndexOf(10);
+ // finish applies its lines, or the second would apply them again and move the offset past lines it never read. The
+ // offset is taken before the open: one moved meanwhile, past this scan's older stat, made a negative length (RangeError).
+ if(st.size>c.offset){const from=c.offset,n=st.size-from;const fh=await fs.open(file,'r');try{
+  const buf=Buffer.alloc(n);await fh.read(buf,0,n,from);const end=buf.lastIndexOf(10);
   if(end>=0&&c.offset===from){for(const line of buf.subarray(0,end).toString('utf8').split('\n'))scanJobLine(c,line);c.offset=from+end+1;}
  }finally{await fh.close();}}
  jobScans.delete(file);jobScans.set(file,c);if(jobScans.size>32)jobScans.delete(jobScans.keys().next().value);
