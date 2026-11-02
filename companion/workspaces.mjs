@@ -124,15 +124,26 @@ export function createWorkspaces(ctx){
  }
  // Files edited (edit/write tool records) by two active sessions that share a folder rather than separate worktrees.
  // Set as _overlaps on both sessions before each /api/state reply. A transcript nothing has read yet contributes the
- // records store.mjs noted at startup (unreadEdits) instead of being read here.
+ // records store.mjs noted at startup (unreadEdits) instead of being read here. Resolving every record and comparing
+ // every pair on each poll cost 2-15 ms with 50-150 sessions in review: resolved keys are kept per tool.files array
+ // (redone when the session's cwd or the array's length changes) and only pairs sharing a file are compared. So tool.files
+ // arrays and their {path} records are replaced whole, never edited in place (as runner.mjs, transcript.mjs and store.mjs
+ // do), or the kept keys go stale.
+ const resolvedFiles=new WeakMap();
  function markOverlaps(){
   const key=p=>process.platform==='win32'?p.toLowerCase():p;
   const active=store.sessions.filter(s=>!s.hidden&&!s.isolated&&['running','queued','review'].includes(s.status)).map(s=>{const files=new Map(),kept=unreadEdits(s);
-   const add=list=>{for(const f of list)if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}};
-   if(kept)add(kept);else for(const m of s.messages||[])add(m.tool?.files||[]);return {s,files};});
+   const add=list=>{if(!Array.isArray(list)){for(const f of list)if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}return;}
+    let c=resolvedFiles.get(list);if(!c||c.cwd!==s.cwd||c.n!==list.length){c={cwd:s.cwd,n:list.length,keys:[]};for(const f of list)if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);c.keys.push(key(abs),abs);}resolvedFiles.set(list,c);}
+    for(let i=0;i<c.keys.length;i+=2)files.set(c.keys[i],c.keys[i+1]);};
+   if(kept)add(kept);else for(const m of s.messages||[]){const list=m.tool?.files;if(list)add(list);}return {s,files};});
   for(const s of store.sessions)delete s._overlaps;
-  for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++){
-   const a=active[i],b=active[j],shared=[...a.files.keys()].filter(k=>b.files.has(k)).map(k=>a.files.get(k));if(!shared.length)continue;
+  // Each file's holders (ascending indexes into active), then each session's later partners: pairs in the order the
+  // i<j loop over all of them visited them, so every _overlaps list keeps its order.
+  const holders=new Map();active.forEach(({files},i)=>{for(const k of files.keys()){const h=holders.get(k);if(h)h.push(i);else holders.set(k,[i]);}});
+  const partners=active.map(()=>new Set());for(const h of holders.values())if(h.length>1)for(let x=0;x<h.length;x++)for(let y=x+1;y<h.length;y++)partners[h[x]].add(h[y]);
+  for(let i=0;i<active.length;i++)for(const j of [...partners[i]].sort((x,y)=>x-y)){
+   const a=active[i],b=active[j],shared=[...a.files.keys()].filter(k=>b.files.has(k)).map(k=>a.files.get(k));
    (a.s._overlaps??=[]).push({id:b.s.id,title:b.s.title,files:shared.slice(0,20),count:shared.length});(b.s._overlaps??=[]).push({id:a.s.id,title:a.s.title,files:shared.slice(0,20),count:shared.length});
   }
  }
