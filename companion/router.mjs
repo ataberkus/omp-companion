@@ -13,7 +13,10 @@ export function createRouter(ctx){
  const routes={...sessionRoutes(ctx),...historyRoutes(ctx),...workspaceRoutes(ctx),...settingsRoutes(ctx),...toolRoutes(ctx),...systemRoutes(ctx)};
  async function onRequest(req,res,srv){
  // Big JSON (the viewed session's messages, transcripts, settings) goes out gzipped when the client accepts it; zlib runs off the event loop.
- const send=(status,headers,body)=>{if(body.length<1024||!/\bgzip\b/.test(req.headers['accept-encoding']||'')){res.writeHead(status,headers);res.end(body);return;}gzip(body,{level:1},(e,z)=>{if(res.headersSent)return;res.writeHead(status,e?headers:{...headers,'Content-Encoding':'gzip'});res.end(e?body:z);});};
+ // Level 2 under Bun (the desktop app's runtime), 1 under Node: Bun's level 1 made bodies 28-45% larger than Node's (a
+ // 2.7 MB first poll: 1095 vs 853 KB), and its level 2 matches Node's 1 for less CPU. Loopback replies are compressed
+ // too: tailscale serve, SSH tunnels and reverse proxies all arrive from 127.0.0.1.
+ const send=(status,headers,body)=>{if(body.length<1024||!/\bgzip\b/.test(req.headers['accept-encoding']||'')){res.writeHead(status,headers);res.end(body);return;}gzip(body,{level:process.versions.bun?2:1},(e,z)=>{if(res.headersSent)return;res.writeHead(status,e?headers:{...headers,'Content-Encoding':'gzip'});res.end(e?body:z);});};
  const json=(value,status=200)=>send(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY'},JSON.stringify(value));
   try{
    const {origin,host}=await checkOrigin(req,srv),port=srv.address()?.port;
