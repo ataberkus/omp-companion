@@ -20,35 +20,41 @@ export function createSettings(ctx){
   if(sdk?.status==='installed')restartWhenIdle();
   const note=sdk?.status==='installed'?`${sdk.output} ${canRestart?'The companion restarts by itself once no session is working.':'Restart the companion to run new sessions on it.'}`:sdk?.status==='error'?sdk.output:'';
   ctx.updateState={...result,output:cleanUpdateOutput(result.output,note),startedAt,finishedAt:now()};
-  if(result.status==='done'){modelCache=undefined;configDefaults=undefined;}
+  if(result.status==='done'){modelCache=modelRun=undefined;configDefaults=undefined;configPath=undefined;}
  }
  // Matched on the last key segment's suffix, so thresholdTokens or redactSecrets are not treated as secrets.
  const SECRET=/(token|secret|password|apikey|api_key|credentials?)$/i;
  const isSecret=key=>SECRET.test(key.split('.').pop());
  // OMP settings: `omp config list --json` has values, types and descriptions; the plain listing adds groups and enum options.
+ // Validating a change, the advisor and the defaults need only the first: one CLI start instead of two (fresh each time,
+ // so a setting a plugin added a moment ago is known).
+ const runConfig=(args,env)=>execOmp(args,{timeout:30000,maxBuffer:16*1024*1024,windowsHide:true,env:env?{...process.env,...env}:process.env});
+ const configSchema=async env=>JSON.parse((await runConfig(['config','list','--json'],env)).stdout);
  async function configList(env){
-  const run=args=>execOmp(args,{timeout:30000,maxBuffer:16*1024*1024,windowsHide:true,env:env?{...process.env,...env}:process.env});
-  const [j,t]=await Promise.all([run(['config','list','--json']),run(['config','list'])]);
+  const [schema,t]=await Promise.all([configSchema(env),runConfig(['config','list'],env)]);
   const meta=new Map();let group='other';
   for(const line of t.stdout.split(/\r?\n/)){const g=line.match(/^\[(.+)\]$/);if(g){group=g[1];continue;}const m=line.match(/^\s{2}(\S+) = .* \(([^()]*)\)\s*$/);if(m&&!meta.has(m[1]))meta.set(m[1],{group,options:m[2].includes('|')?m[2].split('|'):undefined});}
-  return {schema:JSON.parse(j.stdout),meta};
+  return {schema,meta};
  }
  let configDefaults;
  async function settingDefaults(){
   // Listing against an empty agent directory yields OMP's built-in defaults.
-  if(!configDefaults)configDefaults=(async()=>{const dir=await fs.mkdtemp(path.join(os.tmpdir(),'omp-web-defaults-'));try{return (await configList({PI_CODING_AGENT_DIR:dir})).schema;}finally{await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});}})().catch(e=>{configDefaults=undefined;throw e;});
+  if(!configDefaults)configDefaults=(async()=>{const dir=await fs.mkdtemp(path.join(os.tmpdir(),'omp-web-defaults-'));try{return await configSchema({PI_CODING_AGENT_DIR:dir});}finally{await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});}})().catch(e=>{configDefaults=undefined;throw e;});
   return configDefaults;
  }
+ // The settings file's path (`omp config path`) cannot change while the CLI stays the same: asked once, alongside the
+ // listings, and again after a failure or an `omp update`.
+ let configPath;
+ const settingsFile=()=>configPath??=execOmp(['config','path'],{timeout:15000,windowsHide:true}).then(r=>r.stdout.trim()).catch(e=>{configPath=undefined;throw e;});
  async function listSettings(){
-  const [{schema,meta},defaults]=await Promise.all([configList(),settingDefaults().catch(()=>({}))]);
+  const [{schema,meta},defaults,file]=await Promise.all([configList(),settingDefaults().catch(()=>({})),settingsFile().catch(()=>'')]);
   const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
   const settings=Object.entries(schema).map(([key,e])=>{const sensitive=!!e.redacted||isSecret(key);const d=defaults[key];const m=meta.get(key)||{};
    return {key,type:e.type,group:m.group||'other',options:m.options,description:e.description||'',sensitive,value:sensitive?undefined:e.value,isSet:e.value!==undefined&&e.value!==''&&e.value!==null,default:sensitive?undefined:d?.value,modified:d?!same(e.value,d.value):e.value!==undefined};});
-  let file='';try{file=(await execOmp(['config','path'],{timeout:15000,windowsHide:true})).stdout.trim();}catch{}
   return {file,settings};
  }
  async function changeSetting(body,reset){
-  const key=text(body.key,'Setting',200);const {schema}=await configList();const e=schema[key];if(!e)throw error('Unknown OMP setting.');
+  const key=text(body.key,'Setting',200);const schema=await configSchema();const e=schema[key];if(!e)throw error('Unknown OMP setting.');
   let args;
   if(reset)args=['config','reset',key];
   else{const v=body.value;let out;
@@ -60,7 +66,7 @@ export function createSettings(ctx){
    args=['config','set',key,out];}
   try{await execOmp(args,{timeout:30000,windowsHide:true});}
   catch(err){throw error(String(err.stderr||err.stdout||err.message).replace(/^Error:\s*/,'').trim().slice(0,500)||'OMP rejected the setting.');}
-  modelCache=undefined;
+  modelCache=modelRun=undefined;
   const all=await listSettings();return {...all,changed:key};
  }
  // Advisors come from WATCHDOG.yml (advisors[].model); without one OMP falls back to the 'advisor' model role.
@@ -68,7 +74,7 @@ export function createSettings(ctx){
  async function watchdogFile(){for(const n of ['WATCHDOG.yml','WATCHDOG.yaml']){const f=path.join(agentDir(),n);try{return {file:f,text:await fs.readFile(f,'utf8')};}catch{}}return null;}
  async function advisorConfig(){
   const w=await watchdogFile();const m=w?.text.match(/^advisors:[\s\S]*?^\s+model:\s*["']?([^"'\s#]+)/m);
-  let schema={};try{schema=(await configList()).schema;}catch{}
+  let schema={};try{schema=await configSchema();}catch{}
   const enabled=schema['advisor.enabled']?.value!==false;
   if(m)return {model:m[1],source:'WATCHDOG.yml',file:w.file,enabled};
   return {model:schema.modelRoles?.value?.advisor||'',source:'advisor role',file:w?.file,enabled};
@@ -81,13 +87,19 @@ export function createSettings(ctx){
    const i=w.text.search(/^advisors:/m);const head=w.text.slice(0,i),tail=w.text.slice(i).replace(/^(\s+model:\s*)["']?[^"'\s#]+["']?/m,(_,a)=>a+sel);
    await fs.writeFile(w.file+'.tmp',head+tail);await fs.rename(w.file+'.tmp',w.file);return 'WATCHDOG.yml';
   }
-  const {schema}=await configList();await changeSetting({key:'modelRoles',value:{...(schema.modelRoles?.value||{}),advisor:sel}},false);return 'advisor role';
+  const schema=await configSchema();await changeSetting({key:'modelRoles',value:{...(schema.modelRoles?.value||{}),advisor:sel}},false);return 'advisor role';
  }
 // Mirrors OMP's serviceTierFamily(); `omp models --json` omits the api field, so custom OpenAI relays read as unsupported.
 function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|openai)\//.test(m.id);return ['anthropic','openai','openai-codex','google','google-vertex'].includes(m.provider);}
- let modelCache;
+ // Concurrent misses share one `omp models --json`; clearing the cache also lets go of a run in flight, so a call after
+ // a change starts its own.
+ let modelCache,modelRun;
  async function listModels(){
   if(modelCache&&Date.now()-modelCache.at<10*60000)return modelCache.data;
+  if(!modelRun){const run=modelRun=readModels().finally(()=>{if(modelRun===run)modelRun=undefined;});}
+  return modelRun;
+ }
+ async function readModels(){
   const {stdout}=await execOmp(['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true});
   const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow,fast:fastCapable(m)}));
   const {roles,defaultThinking}=await modelRoles();
