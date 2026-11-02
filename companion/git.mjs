@@ -125,15 +125,16 @@ export async function gitLog(s,limit=50){
  // One `status --porcelain=v2 --branch` instead of five git runs in three rounds: HEAD (branch.oid; '(initial)' while
  // unborn), the branch (branch.head; '(detached)'), the upstream with ahead/behind (branch.ab, printed only while the
  // upstream ref exists, as when @{u} resolves) and one line per changed path, as --porcelain prints. Should it fail (a
- // huge repository's timeout, a broken index), the separate reads still show the branch and commits, with dirty unknown.
- const st=await gitRun(cwd,['status','--porcelain=v2','--branch'],opt).then(o=>{const h={};let n=0;for(const l of lines(o)){if(l.startsWith('# ')){const i=l.indexOf(' ',2);h[l.slice(2,i)]=l.slice(i+1);}else n++;}return {h,n};},()=>null);
+ // huge repository's timeout, a broken index), the separate reads still show the branch and commits, with dirty unknown
+ // after a timeout and counted by `status --porcelain` otherwise (git before 2.11 has no v2).
+ let slow=false;const st=await gitRun(cwd,['status','--porcelain=v2','--branch'],opt).then(o=>{const h={};let n=0;for(const l of lines(o)){if(l.startsWith('# ')){const i=l.indexOf(' ',2);h[l.slice(2,i)]=l.slice(i+1);}else n++;}return {h,n};},e=>{slow=e.status===504;return null;});
  let head,branch,upstream,dirty=null,ahead=0,behind=0,commits=[];
  if(st){const {h}=st,ab=/^\+(\d+) -(\d+)$/.exec(h['branch.ab']||'');
   head=/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(h['branch.oid']||'')?h['branch.oid']:'';branch=h['branch.head']==='(detached)'?'':h['branch.head']||'';
   upstream=head&&ab?h['branch.upstream']||'':'';if(upstream){ahead=+ab[1];behind=+ab[2];}dirty=st.n;}
  else{
   head=await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(o=>o.trim(),()=>'');
-  [branch,upstream]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'']);
+  [branch,upstream,dirty]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'',slow?null:gitRun(cwd,['status','--porcelain'],opt).then(o=>lines(o).length,()=>null)]);
   if(head&&upstream)[behind,ahead]=(await gitRun(cwd,['rev-list','--left-right','--count',`${upstream}...HEAD`],opt)).trim().split(/\s+/).map(Number);
  }
  if(head){
