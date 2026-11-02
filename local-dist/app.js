@@ -5,6 +5,10 @@
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const base = p => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(p || '');
   const norm = p => String(p || '').replace(/\//g, '\\').toLowerCase();
+  // toLocale*String with options builds a new ICU formatter on every call (50-250 µs; a render makes hundreds), so ago() and
+  // clock() share one each. One older than a second is rebuilt, so a time-zone or locale change still shows within a second.
+  const fmts = {};
+  const dateFmt = (k, locale, opts) => { const f = fmts[k], now = Date.now(); return f && now - f.at < 1000 ? f.fmt : (fmts[k] = { fmt: new Intl.DateTimeFormat(locale, opts), at: now }).fmt; };
   const ago = iso => {
     const s = (Date.now() - new Date(iso).getTime()) / 1000;
     if (!isFinite(s)) return '';
@@ -12,11 +16,11 @@
     if (s < 3600) return Math.max(1, Math.round(s / 60)) + 'm';
     if (s < 86400) return Math.round(s / 3600) + 'h';
     if (s < 86400 * 7) return Math.round(s / 86400) + 'd';
-    return new Date(iso).toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    return dateFmt('ago', 'en', { month: 'short', day: 'numeric' }).format(new Date(iso));
   };
   // ago() yields '5m' or a date; only relative units read well with "ago".
   const agoText = iso => { const a = ago(iso); return /\d[mhd]$/.test(a) ? a + ' ago' : a === 'now' ? 'just now' : a ? 'on ' + a : ''; };
-  const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }; // numeric only, so the system's 12/24h choice stays
+  const clock = iso => { const d = new Date(iso); return isNaN(d) ? '' : dateFmt('clock', undefined, { hour: '2-digit', minute: '2-digit' }).format(d); }; // numeric only, so the system's 12/24h choice stays
   // Bounded memo: a hit moves the key to the newest end, the oldest entry falls out past `cap`.
   function memo(cache, key, fn, cap = 400) {
     if (cache.has(key)) { const v = cache.get(key); cache.delete(key); cache.set(key, v); return v; }
