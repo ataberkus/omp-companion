@@ -197,7 +197,7 @@ export function createSessionCommand(ctx){
     if(body.type==='plan_approve'){if(s._planReview?.id===body.proposalId)delete s._planReview;if(body.action!=='refine'&&body.action!=='save'||body.feedback?.trim())s.status='running';}
     // Save and quit (OMP's TUI): the plan was saved and OMP started a fresh session, as the ⋯ menu's new session does.
     if(body.type==='plan_approve'&&body.action==='save'){
-     if(result?.sessionChanged){s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);}
+     if(result?.sessionChanged){s.messages=[];delete s.promptTrimmed;s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);}
      append(s,'system',result?.note||'Saved the plan.');s.status='paused';await persist(s);return s;
     }
     await refresh(s,runner);await persist(s);return body.type==='plan_review'?{proposal:s._planReview}:s;
@@ -252,7 +252,7 @@ export function createSessionCommand(ctx){
    const runner=await start(s);
    const r=body.type==='new_session'?await runner.newSession():await runner.switchSession(file);
    if(r?.cancelled)throw error('An extension cancelled the session change.');
-   s.messages=[];s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);
+   s.messages=[];delete s.promptTrimmed;s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);
    if(body.type==='switch_session'){const head=await readSessionHead(file).catch(()=>null);if(head?.title)s.title=head.title.slice(0,120);}
    append(s,'system',body.type==='new_session'?'Started a fresh OMP session. The previous conversation stays in its own session file.':'Switched to another saved OMP session.');
    s.status='paused';await persist(s);return s;

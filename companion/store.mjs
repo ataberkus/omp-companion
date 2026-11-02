@@ -8,6 +8,7 @@ import { now, replaceFile } from './util.mjs';
 import { finishWork } from './session-views.mjs';
 import { EDITOR_CHOICES } from './system.mjs';
 import { colors, projectColor } from './workspaces.mjs';
+import { MESSAGE_LIMIT } from './transcript.mjs';
 export async function openStore(ctx){
  const {dataDir}=ctx;
  const stateFile=path.join(dataDir,'workspace.json');
@@ -31,8 +32,11 @@ export async function openStore(ctx){
  // only once something reads it: 400 sessions' transcripts held at once cost more memory than the rest of the companion
  // (~400 MB parsed for 160 MB of files) and slowed every garbage collection. Until then s.messages reads it from disk on
  // first use (deferTranscript).
- for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
-  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');JSON.parse(raw);savedTranscripts.set(s.id,textDigest(raw));deferTranscript(s);}
+ // Transcripts trimmed before promptTrimmed existed: a full window (only the cap fills one) without a message of the
+ // user's lost its prompt to the cap, since agent output only follows a prompt. Such sessions get the flag now.
+ const trimmedBefore=(s,list)=>{if(s.promptTrimmed===undefined&&Array.isArray(list)&&list.length>=MESSAGE_LIMIT&&!list.some(m=>m?.role==='user'))s.promptTrimmed=true;};
+ for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages)){trimmedBefore(s,s.messages);return;}s.messages=[];
+  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');trimmedBefore(s,JSON.parse(raw));savedTranscripts.set(s.id,textDigest(raw));deferTranscript(s);}
   catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
