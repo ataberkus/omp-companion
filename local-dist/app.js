@@ -5679,6 +5679,27 @@
     route();
   });
 
+  // Desktop app only: the shell lays its in-app browser over this page below this bar and calls ompBrowser() with what it
+  // shows ({open, url, title}). The buttons navigate to /__desktop/browser/<action>, which the shell acts on and cancels
+  // (nav_guard in src-tauri/src/main.rs), so this page stays as it is. Browsers and phones never get the call or the bar.
+  window.ompBrowser = state => {
+    let bar = $('#browserBar');
+    if (!state?.open) { bar?.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'browserBar'; bar.className = 'browser-bar'; bar.setAttribute('role', 'toolbar'); bar.setAttribute('aria-label', 'In-app browser');
+      const btn = (act, label, text) => `<button type="button" class="btn sm ghost" data-browser="${act}" aria-label="${label}" title="${label}">${text}</button>`;
+      bar.innerHTML = `${btn('back', 'Back', '←')}${btn('forward', 'Forward', '→')}${btn('reload', 'Reload', '⟳')}<span class="browser-page"><span class="browser-title"></span><span class="browser-url"></span></span>${btn('external', 'Open in your default browser', 'Open in browser')}${btn('close', 'Close and go back to the dashboard', '✕ Close')}`;
+      bar.addEventListener('click', e => { const act = e.target.closest('[data-browser]')?.dataset.browser; if (act) location.assign(`/__desktop/browser/${act}`); });
+      document.body.appendChild(bar);
+    }
+    let host = '';
+    try { host = new URL(state.url).host; } catch {}
+    $('.browser-title', bar).textContent = state.title || host || 'Loading…';
+    const url = $('.browser-url', bar);
+    url.textContent = url.title = state.url || '';
+  };
+
   try { if (sessionStorage.getItem(RESTARTED) === '1') { sessionStorage.removeItem(RESTARTED); toast('The companion restarted. Paused sessions continue when you send a message.'); } } catch {}
   route();
   loop();

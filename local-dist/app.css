@@ -1251,3 +1251,9 @@ img.msg-image,.attach-preview img,.queued-image img{cursor:zoom-in}
 /* Extension panels draw ANSI colours meant for a dark terminal: keep them dark in the light theme. */
 :root[data-theme="light"] .custom-panel{background:#09090b;color:oklch(.97 0 0);border-color:transparent}
 @media (prefers-color-scheme:light){:root:not([data-theme="dark"]) .custom-panel{background:#09090b;color:oklch(.97 0 0);border-color:transparent}}
+/* The desktop app's in-app browser bar (ompBrowser in app.js). The browser is a native webview the shell lays over the
+   page below it, so the height must match BROWSER_BAR in src-tauri/src/main.rs. */
+.browser-bar{position:fixed;top:0;left:0;right:0;height:40px;box-sizing:border-box;z-index:2147483000;display:flex;align-items:center;gap:2px;padding:0 8px;background:var(--panel);border-bottom:1px solid var(--border)}
+.browser-page{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;padding:0 8px;white-space:nowrap;overflow:hidden}
+.browser-title{flex:0 1 auto;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.browser-url{flex:1 1 0;min-width:0;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis}
