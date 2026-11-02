@@ -61,3 +61,19 @@ test('job scans: two overlapping scans of one file apply its new lines once', as
   assert.deepEqual(after, await once(file));
   assert.deepEqual(after.map(j => [j.id, j.status]), [['job-1', 'done'], ['job-2', 'running']]);
 });
+
+// Killing a job (`write proc://<id>/kill`) records its new state under details.proc.jobs, not details.jobs, and no
+// async-result follows: read only from details.jobs, cancelled jobs stayed "running" in the Activity panel for good.
+test('job scans: a job cancelled through proc:// kill is no longer running', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-job-scans-kill-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'session.jsonl');
+  const killCall = (id, s) => line({ type: 'message', id: 'k' + s, timestamp: at(s), message: { role: 'assistant', content: [{ type: 'toolCall', id, name: 'write', arguments: { path: 'proc://job-1/kill' } }] } });
+  const killResult = (id, s, job) => line({ type: 'message', id: 'kr' + s, timestamp: at(s), message: { role: 'toolResult', toolCallId: id, toolName: 'write', content: [{ type: 'text', text: `Cancelled background job ${job}.` }], details: { proc: { op: 'cancel', jobs: [{ id: job, type: 'bash', status: 'cancelled', durationMs: 7 }], cancelled: [{ id: job, status: 'cancelled' }] } } } });
+  await writeFile(file, line({ type: 'session', id: 's', timestamp: at(0) }) + bashCall('call_1', 1) + bashResult('call_1', 2, 'job-1') + bashCall('call_2', 3) + bashResult('call_2', 4, 'job-2'));
+  assert.deepEqual((await scanJobs(file)).map(j => j.status), ['running', 'running']);
+  await appendFile(file, killCall('call_3', 5) + killResult('call_3', 6, 'job-1'));
+  const jobs = await scanJobs(file);
+  assert.deepEqual(jobs, await once(file));
+  assert.deepEqual(jobs.map(j => [j.id, j.status, j.finishedAt, j.durationMs]), [['job-1', 'cancelled', at(6), 7], ['job-2', 'running', undefined, undefined]]);
+});
