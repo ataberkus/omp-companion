@@ -27,16 +27,17 @@ export function sessionRoutes(ctx){
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
     // A viewed session with no OMP process running gets its prompts' entry IDs from the session file (live ones from refresh).
     {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive&&needsBackfill(s))void lock(s.id,async()=>{if(!runners.get(s.id)?.alive&&needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));}).catch(()=>{});}
-    const id=url.searchParams.get('session'),since=url.searchParams.get('since'),viewed=store.sessions.find(s=>s.id===id);
+    const id=url.searchParams.get('session'),since=url.searchParams.get('since'),od=url.searchParams.get('od')==='1',viewed=store.sessions.find(s=>s.id===id);
     const top={...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined};
     // store=<epoch>.<rev>, or empty while it holds none: the session list and the rest of the store as changes (storeDelta),
-    // the viewed transcript as changes after since=<epoch>.<rev> (transcriptDelta) or whole in tx.messages, its /btw answers in btw.
+    // the viewed transcript as changes after since=<epoch>.<rev> (transcriptDelta; with od=1, a changed order as an edit of
+    // the one held) or whole in tx.messages, its /btw answers in btw.
     const sx=url.searchParams.has('store')?storeDelta({...top,sessions:undefined},url.searchParams.get('store')):null;
     let body;
-    if(sx!==null){const tx=viewed&&transcriptDelta(viewed,since??''),t=viewed&&(tx?.delta?tx.tx:{...(tx?.tx||{session:viewed.id}),messages:viewed.messages});
+    if(sx!==null){const tx=viewed&&transcriptDelta(viewed,since??'',od),t=viewed&&(tx?.delta?tx.tx:{...(tx?.tx||{session:viewed.id}),messages:viewed.messages});
      body=`{"sx":${sx}${t?`,"tx":${JSON.stringify(t)}`:''}${viewed?._btw?`,"btw":${JSON.stringify(viewed._btw)}`:''}}`;}
     // Without store (a page loaded from an older companion): the whole list. With since, the viewed transcript as deltas.
-    else{const tx=since!==null&&viewed?transcriptDelta(viewed,since):null;
+    else{const tx=since!==null&&viewed?transcriptDelta(viewed,since,od):null;
      body=JSON.stringify({...top,...(tx?{tx:tx.tx}:{}),sessions:store.sessions.map(s=>s.id===id?(tx?.delta?{...s,messages:undefined}:{...s,messages:s.messages}):{...s,messages:undefined,_btw:undefined})});}
     const tag=`"${digest(body)}"`;
     if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}

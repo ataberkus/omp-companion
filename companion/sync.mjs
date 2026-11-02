@@ -27,28 +27,42 @@ export function createSync(ctx){
  // A viewed transcript (up to 600 messages, megabytes) changes on almost every poll while its session streams, and the
  // poll's ETag covers the whole store, so any session streaming anywhere made every dashboard download the transcript it
  // views again, every 1.2 s. Dashboards that send since=<epoch>.<rev> get only the messages that changed after that rev,
- // plus the message order when it changed, and merge them into their copy. Each poll compares the viewed session's
- // messages one by one with their snapshots from the previous poll of that session (by any dashboard): changed and new
- // messages take the next rev. Comparing content means no change slips by, wherever in the companion it was made.
+ // plus the message order when it changed (with od=1, an edit of the order they hold: see orderEdit), and merge them
+ // into their copy. Each poll compares the viewed session's messages one by one with their snapshots from the previous
+ // poll of that session (by any dashboard): changed and new messages take the next rev. Comparing content means no
+ // change slips by, wherever in the companion it was made.
  // Serializing every message for it instead cost 5-6 ms a poll and 2 MB of garbage on a 600-message transcript.
  // An unknown epoch (first poll, an evicted entry, a restarted companion) gets the full transcript. Null when message IDs
  // are missing or repeated: that transcript is sent whole.
  const txSync=new Map();
- function transcriptDelta(s,since){
+ // The order (600 IDs: ~23 KB, ~12 KB gzipped) was most of a streaming poll's bytes: nearly every poll that adds a
+ // message sent it whole. A dashboard that sends od=1 gets an edit of the order it holds instead: drop its first `drop`
+ // IDs, then replace the `del` IDs at `at` with `add`; n is the new length, for the dashboard to check. The order held at
+ // rev r is the one recorded at the latest order change at or before r (also the order of a whole transcript sent at r).
+ // The last 8 are kept (c.orders: the arrays c.order held, nothing copied), for a few changes between polls, dashboards
+ // at different revs and a switch back to a session viewed before. One splice past a dropped front covers what streaming
+ // does: appends, the 600 cap's drops, inserts before unread steers, a cancelled steer's removal, a read steer moved up.
+ // The order goes out whole when the one held is older than the history, and when the edit would add a quarter of the
+ // IDs or more (a reset, a reorder that moves many): not much smaller then.
+ function orderEdit(h,n){const k=Math.max(0,h.indexOf(n[0])),len=h.length-k;let p=0,q=0;
+  while(p<len&&p<n.length&&h[k+p]===n[p])p++;while(q<len-p&&q<n.length-p&&h[h.length-1-q]===n[n.length-1-q])q++;
+  const add=n.slice(p,n.length-q);return add.length*4<n.length?{drop:k,at:p,del:len-p-q,add,n:n.length}:null;}
+ function transcriptDelta(s,since,od=false){
   const list=s.messages||[],ids=new Set();
   for(const m of list){if(typeof m?.id!=='string'||ids.has(m.id)){txSync.delete(s.id);return null;}ids.add(m.id);}
-  const c=txSync.get(s.id)||{epoch:randomBytes(6).toString('base64url'),rev:0,orderRev:0,order:[],entries:new Map()};
+  const c=txSync.get(s.id)||{epoch:randomBytes(6).toString('base64url'),rev:0,orderRev:0,order:[],orders:[],entries:new Map()};
   txSync.delete(s.id);txSync.set(s.id,c);if(txSync.size>8)txSync.delete(txSync.keys().next().value);
   const entries=new Map(),next=c.rev+1;let changed=false,reordered=list.length!==c.order.length;
   for(let i=0;i<list.length;i++){const m=list[i],prev=c.entries.get(m.id);
    if(prev&&same(m,prev.snap))entries.set(m.id,prev);else{entries.set(m.id,{snap:snapshot(m),rev:next});changed=true;}
    if(c.order[i]!==m.id)reordered=true;}
   if(changed||reordered)c.rev=next;
-  if(reordered){c.orderRev=next;c.order=[...ids];}
+  if(reordered){c.orderRev=next;c.order=[...ids];c.orders.push({rev:next,order:c.order});if(c.orders.length>8)c.orders.shift();}
   c.entries=entries;
   const held=/^([\w-]{1,32})\.(\d{1,15})$/.exec(since||''),rev=held?.[1]===c.epoch?Number(held[2]):-1;
   if(!(rev>=0&&rev<=c.rev))return {delta:false,tx:{session:s.id,epoch:c.epoch,rev:c.rev}};
-  return {delta:true,tx:{session:s.id,epoch:c.epoch,rev:c.rev,...(c.orderRev>rev?{order:c.order}:{}),changed:list.filter(m=>entries.get(m.id).rev>rev)}};
+  let edit=null;if(od&&c.orderRev>rev)for(let i=c.orders.length-1;i>=0;i--)if(c.orders[i].rev<=rev){edit=orderEdit(c.orders[i].order,c.order);break;}
+  return {delta:true,tx:{session:s.id,epoch:c.epoch,rev:c.rev,...(c.orderRev>rev?edit?{orderEdit:edit}:{order:c.order}:{}),changed:list.filter(m=>entries.get(m.id).rev>rev)}};
  }
  // The session list and the rest of the store go out as changes too. A full reply with 400 sessions was ~600 KB (~180 KB
  // gzipped) and went out on every poll, every 1.2 s per dashboard while any session worked, though only the working

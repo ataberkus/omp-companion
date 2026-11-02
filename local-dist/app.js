@@ -4619,13 +4619,14 @@
     return { ...top, sessions, tx: st.tx };
   }
   // Once this page holds the viewed transcript, polls ask only for what changed (since=<epoch>.<rev>): the reply's tx lists
-  // the messages changed after that rev, and the message order when it changed; the rest are the objects already held.
+  // the messages changed after that rev, and the message order when it changed (od=1: tx.orderEdit, an edit of the order
+  // held when the poll was sent, see editOrder; whole from an older companion); the rest are the objects already held.
   // A reply with the full transcript (first poll, a restarted companion, or an older one that ignores since) replaces it:
   // tx.messages from a companion that sends the store as changes (summaries are kept across polls), else the session's own.
   // False when the delta doesn't fit what is held: the caller drops the reply and polls the full transcript instead.
   // The transcripts of the sessions viewed just before (2, 1 in the phone layout) wait in S.txPrev: switching back to one
   // asks for its changes the same way (refresh), instead of the whole transcript again (~0.5-0.9 MB gzipped at 600 messages).
-  function mergeTx(st, view, kept) {
+  function mergeTx(st, view, kept, sent) {
     const t = st.tx, s = view ? st.sessions?.find(x => x.id === view) : null, held = S.tx?.session === view ? S.tx : S.txPrev.get(view);
     S.txPrev.delete(view);
     if (S.tx && S.tx.session !== view) { S.txPrev.set(S.tx.session, S.tx); trim(S.txPrev, innerWidth <= 820 ? 1 : 2); S.tx = null; }
@@ -4635,13 +4636,24 @@
     const base = held?.epoch === t.epoch ? held.messages : null;
     const byId = base && new Map(base.map(m => [m.id, m]));
     if (byId) for (const m of t.changed || []) byId.set(m.id, m);
-    const messages = byId && (t.order || base.map(m => m.id)).map(id => byId.get(id));
+    // The edit is of the order this poll was sent with: a poll that landed meanwhile may have moved held on (the changed
+    // messages, all those after the rev it was sent with, fit either).
+    const order = t.orderEdit ? editOrder(sent?.epoch === t.epoch ? sent.messages.map(m => m.id) : null, t.orderEdit) : t.order || base?.map(m => m.id);
+    const messages = byId && order?.map(id => byId.get(id));
     if (!messages || messages.some(m => !m)) { S.tx = null; return false; }
     s.messages = messages; S.tx = { session: view, epoch: t.epoch, rev: t.rev, messages };
     return true;
   }
+  // tx.orderEdit { drop, at, del, add, n }: the held order's IDs with the first `drop` dropped, then the `del` at `at`
+  // replaced with `add`, n in all (companion/sync.mjs). Null when it does not fit them: out of bounds, or another length.
+  function editOrder(ids, e) {
+    const ok = x => Number.isInteger(x) && x >= 0;
+    if (!ids || !e || !Array.isArray(e.add) || ![e.drop, e.at, e.del, e.n].every(ok) || e.drop + e.at + e.del > ids.length) return null;
+    const out = [...ids.slice(e.drop, e.drop + e.at), ...e.add, ...ids.slice(e.drop + e.at + e.del)];
+    return out.length === e.n ? out : null;
+  }
   // A reply that changes nothing: no summary, order or other store field, no transcript change and no /btw answers.
-  const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
+  const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order || st.tx.orderEdit));
   let stateSeq = 0, stateShown = 0, renderedAt = 0;
   // OMP's own session list (the sidebar's history) loads every 20 s, alongside /state instead of after it, and conditionally:
   // an unchanged list is a 304 that keeps S.native. The list is taken when its reply lands, with the ETag api() just kept:
@@ -4657,7 +4669,8 @@
     let fresh = !poll;
     if (Date.now() - S.nativeAt > 20000) { S.nativeAt = Date.now(); const tag = S.nativeTag ||= { tag: '' }; nat = api('/omp-sessions', undefined, { etag: tag }).then(d => { if (!d || S.nativeTag !== tag) return false; S.native = d.sessions; S.nativeReady = true; return true; }, () => false); }
     try {
-      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
+      // od=1: a changed order comes as an edit of the one held (mergeTx), not all its IDs (~23 KB at 600 messages).
+      const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev + '&od=1' : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
       // A reply that is no store at all (a proxy's empty page, say) fails the poll; its ETag must not make the next one a 304.
       if (st && !st.sx && !st.sessions) { S.stateTag = ''; throw new Error('The companion sent an incomplete reply.'); }
       S.online = true; S.fails = 0; retryDrafts();
@@ -4665,7 +4678,7 @@
       if (seq > stateShown) {
         stateShown = seq;
         const merged = st && mergeStore(st, view);
-        if (merged && mergeTx(merged, view, !!st.sx)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; checkOwnDrafts(seq); }
+        if (merged && mergeTx(merged, view, !!st.sx, held)) { S.store = merged; S.stateTag = etag.tag; if (!quiet(st)) fresh = true; checkOwnDrafts(seq); }
         else if (st) { S.stateTag = ''; void refresh(false, nat); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }

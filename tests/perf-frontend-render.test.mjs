@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { createSync } from '../companion/sync.mjs';
+import { createMessages } from '../companion/messages.mjs';
 
 const source = await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8');
 const flush = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise(setImmediate); };
@@ -189,6 +191,35 @@ test('a streaming poll reuses the markup of unchanged thread parts, and the thre
   srv.set([...srv.messages.map(m => m.id === 't8' ? { ...m, tool: { ...m.tool, status: 'done', result: 'all done' } } : m), reply('a9', 'finished', 9)], { status: 'review' });
   await app.poll();
   assert.equal(app.thread(), await fullRender(srv.full()), 'the turn ends: the live group settles, history buttons appear');
+});
+
+// The same on the companion's own sync (companion/sync.mjs) and transcript writers: messages added after the last and
+// before an unread steer come as order edits (od=1), and the messages those leave alone keep their objects and parts.
+test('a poll whose order comes as an edit keeps the unchanged messages, and reuses their parts', async () => {
+  const s = session('s1', thread1(), { status: 'running' }), held = { sessions: [s], activity: [] }, sync = createSync({ store: held }), { append } = createMessages({ options: {}, store: held, scheduleSave() {} });
+  const sent = [], c = counting('text');
+  const respond = url => {
+    if (!url.startsWith('/api/state')) return;
+    const q = new URL(url, 'http://x').searchParams, tx = sync.transcriptDelta(s, q.get('since') ?? '', q.get('od') === '1');
+    sent.push(tx.tx.orderEdit ? 'edit' : tx.delta ? 'delta' : 'whole');
+    return { body: JSON.parse(JSON.stringify({ ...store([{ ...s, messages: tx.delta ? undefined : s.messages }]), tx: tx.tx })) };
+  };
+  const app = boot({ respond, wrap: c.wrap });
+  await flush();
+  const steps = [
+    ['a reply', () => append(s, 'assistant', 'a new reply', 'n1')],
+    ['a steer', () => { append(s, 'user', 'and the docs', 'st').steer = 'pending'; }],
+    ['the turn goes on before it', () => { append(s, 'thinking', 'and so', 'n2'); append(s, 'assistant', 'more', 'n3'); }],
+  ];
+  for (const [label, step] of steps) {
+    c.reads.clear();
+    step();
+    await app.poll();
+    assert.equal(sent.at(-1), 'edit', label);
+    assert.equal(app.thread(), await fullRender(store([structuredClone(s)])), `${label}: reads like a full render`);
+    assert.deepEqual(['u0', 'a1', 'k3', 'u5', 'a6'].filter(id => c.reads.get(id)), [], `${label}: unchanged messages are not rendered again`);
+  }
+  assert.deepEqual(s.messages.slice(-4).map(m => m.id), ['n1', 'n2', 'n3', 'st']);
 });
 
 test('cached thread parts follow every other input: toggles, expand-all, diff layout, model names, history buttons, steer edits', async () => {
