@@ -200,25 +200,47 @@
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
+  // A reply's JSON body, calling `progress` as its chunks arrive (res.json() where the reply has no stream to read).
+  async function readJson(res, progress) {
+    const reader = res.body?.getReader?.();
+    if (!reader) return res.json();
+    const dec = new TextDecoder();
+    let text = '';
+    for (let r; !(r = await reader.read()).done;) { progress(); text += dec.decode(r.value, { stream: true }); }
+    return JSON.parse(text + dec.decode());
+  }
   // `token` probes a pasted token without adopting it; `etag` ({ tag }) makes the GET conditional and resolves null on 304.
   // `keepalive` lets the request outlive the page (a closing tab); browsers cap such bodies at 64 KB, so larger ones go as usual.
   // A refused request's error carries its HTTP status.
+  // `timeout` covers the reply's headers, then each stretch of its body that brings nothing: a slow link that keeps
+  // delivering finishes a big first /state (1 MB takes 40 s at 200 kbit/s), a stalled one still fails. Where there is no
+  // AbortController (the tests' stand-ins), it covers the whole request.
   async function api(p, body, { timeout = 30000, token = S.token, etag, keepalive = false } = {}) {
     if (!token) throw Object.assign(new Error('Not connected.'), { auth: true });
     const json = body === undefined ? undefined : JSON.stringify(body);
-    let res;
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    let res, data, last = Date.now(), timer;
+    const idle = () => { const left = last + timeout - Date.now(); if (left > 0) timer = setTimeout(idle, left); else ac.abort(); };
+    const failed = e => new Error(/^(Timeout|Abort)Error$/.test(e?.name) ? 'The companion did not answer in time.' : 'The companion is not reachable.');
+    if (ac) timer = setTimeout(idle, timeout);
     try {
-      res = await fetch('/api' + p, {
-        method: body === undefined ? 'GET' : 'POST',
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
-        body: json,
-        signal: AbortSignal.timeout(timeout),
-        ...(keepalive && json && json.length < 60000 ? { keepalive: true } : {}),
-      });
-    } catch (e) { throw new Error(e.name === 'TimeoutError' ? 'The companion did not answer in time.' : 'The companion is not reachable.'); }
-    // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
-    if (res.status === 304) { await res.text().catch(() => {}); return null; }
-    const data = await res.json().catch(() => ({}));
+      try {
+        res = await fetch('/api' + p, {
+          method: body === undefined ? 'GET' : 'POST',
+          headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(etag?.tag ? { 'If-None-Match': etag.tag } : {}) },
+          body: json,
+          signal: ac ? ac.signal : AbortSignal.timeout(timeout),
+          ...(keepalive && json && json.length < 60000 ? { keepalive: true } : {}),
+        });
+      } catch (e) { throw failed(e); }
+      last = Date.now();
+      // Drain the empty body: Chrome cancels a fetch whose body is never read (DevTools/Puppeteer log every 304 as ERR_ABORTED).
+      if (res.status === 304) { await res.text().catch(() => {}); return null; }
+      // A body that does not arrive whole (timed out, the link dropped) fails the request: taken as an empty reply, an
+      // empty store would stick, its ETag making every later poll a 304. Only a body that is not JSON reads as {}.
+      try { data = await readJson(res, () => { last = Date.now(); }); }
+      catch (e) { if (res.ok && e?.name !== 'SyntaxError') throw failed(e); data = {}; }
+    } finally { if (ac) clearTimeout(timer); }
     if (res.status === 401) {
       if (token !== S.token) throw Object.assign(new Error('That password or token was not accepted. Check it and try again.'), { auth: true });
       // No-token mode: the page's embedded token goes stale when the companion restarts; a reload carries the new one.
@@ -4507,6 +4529,8 @@
     let fresh = !poll;
     try {
       const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
+      // A reply that is no store at all (a proxy's empty page, say) fails the poll; its ETag must not make the next one a 304.
+      if (st && !st.sx && !st.sessions) { S.stateTag = ''; throw new Error('The companion sent an incomplete reply.'); }
       S.online = true; S.fails = 0; retryDrafts();
       // A slower, older poll (say, for the session viewed before) must not overwrite a newer one; null = 304, unchanged.
       if (seq > stateShown) {
