@@ -14,6 +14,11 @@ export function createHistory(ctx){
  // that keeps growing replaces its entry instead of adding one per listing (every dashboard lists every 20 s, so a
  // long-running companion grew this without bound); files that left the folder drop theirs.
  const headCache=new Map();
+ // Subagent transcripts' heads and results (.md) by folder, then name, each read again when its own file's mtime or size
+ // moves: every dashboard viewing a live session calls background() every 3 s, and it read and parsed 320 KB of every
+ // subagent transcript each time. A folder's entries are rebuilt from its listing, so files that left drop theirs; the
+ // 32 folders viewed last are kept. A failed read is not kept, so the next call tries again.
+ const subagentCache=new Map();
  const pathKey=p=>{const r=path.resolve(p);return process.platform==='win32'?r.toLowerCase():r;};
  const insideSessions=(value,exts)=>{const file=path.resolve(text(value,'File',4000));const rel=path.relative(ompSessionsDir,file);if(!rel||rel.startsWith('..')||path.isAbsolute(rel)||!exts.some(x=>file.endsWith(x)))throw error('Not an OMP session file.');return file;};
  // `liveSince`: when the jobs still running now started at the earliest. Async jobs die with the OMP process that spawned them,
@@ -21,12 +26,17 @@ export function createHistory(ctx){
  // with no OMP process has none running. Undefined (a file the companion does not run): fall back to transcript quiet time.
  async function background(file,liveSince,registry=[]){
   const dir=file.replace(/\.jsonl$/,'');const scanned=await scanJobs(file);let entries=[];try{entries=await fs.readdir(dir,{withFileTypes:true});}catch{}
-  const subagents=[],jobs=[];
+  const subagents=[],jobs=[],known=subagentCache.get(dir),seen=new Map();
   await Promise.all(entries.filter(e=>e.isFile()).map(async e=>{const f=path.join(dir,e.name);let st;try{st=await fs.stat(f);}catch{return;}
-   if(e.name.endsWith('.jsonl')){const name=e.name.slice(0,-6);let head={};try{head=await readSessionHead(f);}catch{}let result='';try{result=(await fs.readFile(path.join(dir,name+'.md'),'utf8')).slice(0,4000);}catch{}
+   if(e.name.endsWith('.jsonl')){const name=e.name.slice(0,-6),md=path.join(dir,name+'.md');let c=known?.get(name);
+    if(!c?.head||c.mtime!==st.mtimeMs||c.size!==st.size){let head;try{head=await readSessionHead(f);}catch{}c={mtime:st.mtimeMs,size:st.size,head,md:c?.md};}
+    const ms=await fs.stat(md).catch(()=>null);let r=ms&&c.md?.mtime===ms.mtimeMs&&c.md.size===ms.size?c.md:undefined;
+    if(ms&&!r)try{r={mtime:ms.mtimeMs,size:ms.size,result:(await fs.readFile(md,'utf8')).slice(0,4000)};}catch{}
+    c={...c,md:r};seen.set(name,c);const head=c.head||{},result=r?.result||'';
     subagents.push({name,file:f,size:st.size,startedAt:head.createdAt||'',updatedAt:st.mtime.toISOString(),model:head.model||'',thinking:head.reasoning||'',preview:head.preview||'',result,cost:await transcriptCost(f,st),advisor:name==='__advisor'||name.startsWith('__advisor.')});}
    else if(e.name.endsWith('.async.log')){jobs.push({name:e.name,file:f,size:st.size,updatedAt:st.mtime.toISOString()});}
   }));
+  subagentCache.delete(dir);if(seen.size){subagentCache.set(dir,seen);if(subagentCache.size>32)subagentCache.delete(subagentCache.keys().next().value);}
   subagents.sort((a,b)=>a.updatedAt.localeCompare(b.updatedAt));jobs.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   const byName=new Map(subagents.map(x=>[x.name,x]));
   let mtime=0;try{mtime=(await fs.stat(file)).mtimeMs;}catch{}const quiet=liveSince===undefined&&Date.now()-mtime>30*60e3;
