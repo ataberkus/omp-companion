@@ -1,8 +1,8 @@
-// HTTP routes for the Tools page, Enhance prompt and Spend page.
+// HTTP routes for the Tools page (including its Disk space pane), Enhance prompt and Spend page.
 import { error } from '../util.mjs';
 import { cliCatalog } from '../cli-tools.mjs';
 export function toolRoutes(ctx){
- const {spend,enhanceJobs,stopEnhance,cliJobs,cliProcs,startEnhance,runCli,cliRev,bumpCliRev}=ctx;
+ const {spend,enhanceJobs,stopEnhance,cliJobs,cliProcs,startEnhance,runCli,cliRev,bumpCliRev,storageView,scanStorage,removeWorktrees,cleanWorktrees}=ctx;
  return {
    // revs=1: each job carries its revision, and one named in have=<id>.<rev>,… comes back as {id,rev,unchanged:true};
    // catalog=0 leaves out the tools, which only change with the companion. Without revs=1, the reply as before.
@@ -17,5 +17,10 @@ export function toolRoutes(ctx){
    'POST /api/cli/stop':async({body,json})=>{const job=cliJobs.find(j=>j.id===body.id);if(!job)throw error('Command not found.',404);const child=cliProcs.get(job.id);if(child){job.stopped=true;bumpCliRev(job);child.kill();}json(job);return;},
    'POST /api/enhance':async({body,json})=>{json(await startEnhance(body),202);return;},
    'POST /api/enhance/stop':async({body,json})=>{const job=enhanceJobs.get(body.id);if(!job)throw error('Enhance not found.',404);await stopEnhance(job);json({status:job.status});return;},
+   // Disk space: GET returns what the last scan or cleanup found (and the one running); the POSTs start one in the background.
+   'GET /api/storage':async({json})=>{json(storageView());return;},
+   'POST /api/storage/scan':async({json})=>{json(scanStorage(),202);return;},
+   'POST /api/storage/remove':async({body,json})=>{json(removeWorktrees(body),202);return;},
+   'POST /api/storage/clean':async({body,json})=>{json(cleanWorktrees(body),202);return;},
  };
 }

@@ -3457,6 +3457,7 @@
   function renderTools() {
     const T = S.tools, cat = T.catalog;
     if (!cat) { $('#toolForm').innerHTML = T.error ? `<div class="msg system err"><div class="bubble">${esc(T.error)}</div></div>` : ''; return; }
+    if (T.tool === DISK) { renderToolNav(); $('#toolForm')._html = null; renderDisk(); renderToolJobs(); if (S.disk.data?.job) loadDisk(); return; }
     if (!cat[T.tool]) T.tool = Object.keys(cat)[0];
     const tool = cat[T.tool];
     if (!tool.actions[T.action]) T.action = Object.keys(tool.actions)[0];
@@ -3483,7 +3484,8 @@
   }
   function renderToolNav() {
     const T = S.tools, running = id => T.jobs.filter(j => j.tool === id && j.status === 'running').length;
-    $('#toolNav').innerHTML = Object.entries(T.catalog).map(([id, t]) => `<a href="#" data-tool="${esc(id)}" class="${id === T.tool ? 'on' : ''}" ${id === T.tool ? 'aria-current="page"' : ''}>${esc(t.title)}<span>${running(id) ? '<i title="Running" aria-hidden="true">●</i><span class="sr-only">Running</span>' : ''}</span></a>`).join('');
+    $('#toolNav').innerHTML = Object.entries(T.catalog).map(([id, t]) => `<a href="#" data-tool="${esc(id)}" class="${id === T.tool ? 'on' : ''}" ${id === T.tool ? 'aria-current="page"' : ''}>${esc(t.title)}<span>${running(id) ? '<i title="Running" aria-hidden="true">●</i><span class="sr-only">Running</span>' : ''}</span></a>`).join('')
+      + `<a href="#" data-tool="${DISK}" class="${T.tool === DISK ? 'on' : ''}" ${T.tool === DISK ? 'aria-current="page"' : ''}>Disk space<span>${S.disk.data?.job ? '<i title="Running" aria-hidden="true">●</i><span class="sr-only">Running</span>' : ''}</span></a>`;
   }
   function toolValues(form) {
     const a = S.tools.catalog[S.tools.tool].actions[S.tools.action], values = {};
@@ -3507,6 +3509,95 @@
       renderTools();
     } catch (e) { toast(e.message, 'err'); }
     finally { btn.disabled = false; }
+  }
+
+  // ---------- Tools › Disk space: isolated sessions' worktrees ----------
+  // The companion measures in the background (POST /storage/scan) and the pane polls GET /storage while a scan or cleanup
+  // runs. Bulk removal preselects only safe worktrees: archived, hidden or done, nothing uncommitted, every commit merged.
+  const DISK = '__disk';
+  S.disk = { data: null, error: '', sel: new Set(), scannedAt: null, loading: false };
+  let diskPoll;
+  const fmtSize = n => n >= 1073741824 ? (n / 1073741824).toFixed(n >= 10737418240 ? 0 : 1) + ' GB' : n >= 1048576 ? Math.round(n / 1048576) + ' MB' : Math.round(n / 1024) + ' KB';
+  async function loadDisk() {
+    clearTimeout(diskPoll); S.disk.loading = true;
+    try { setDisk(await api('/storage')); } catch (e) { S.disk.error = e.message; }
+    S.disk.loading = false;
+    if (current().kind !== 'tools' || S.tools.tool !== DISK) return;
+    renderDisk(); renderToolNav();
+  }
+  function setDisk(d) {
+    const D = S.disk, was = D.data?.job;
+    D.data = d; D.error = '';
+    // A new scan resets the selection to its safe worktrees.
+    if (d.scannedAt !== D.scannedAt) { D.scannedAt = d.scannedAt; D.sel = new Set(d.worktrees.filter(r => r.safe).map(r => r.id)); }
+    for (const id of D.sel) if (!d.worktrees.some(r => r.id === id && r.safe)) D.sel.delete(id);
+    clearTimeout(diskPoll);
+    if (d.job) diskPoll = setTimeout(() => { if (current().kind === 'tools' && S.tools.tool === DISK) loadDisk(); }, 1000);
+    else if (was && was.kind !== 'scan') { const ok = d.results.filter(r => r.ok), freed = ok.reduce((n, r) => n + (r.freed || 0), 0), failed = d.results.length - ok.length; toast(`${was.kind === 'clean' ? 'Cleaned' : 'Removed'} ${ok.length} · freed ${fmtSize(freed)}${failed ? ` · ${failed} refused` : ''}`, failed ? 'err' : undefined); }
+  }
+  async function diskStart(path, body) {
+    try { setDisk(await api('/storage/' + path, body)); } catch (e) { toast(e.message, 'err'); }
+    renderDisk(); renderToolNav();
+  }
+  const diskState = r => r.error ? `<span class="err">${esc(r.error)}</span>` : [
+    r.busy ? '<b>working</b>' : esc(r.status), r.archived ? 'archived' : '', r.hidden ? 'hidden' : '',
+    !r.exists ? 'folder missing' : r.dirty ? `<span class="err">${r.dirty} uncommitted</span>` : 'clean',
+    r.ahead ? `<span class="err">${r.ahead} ${r.ahead === 1 ? 'commit' : 'commits'} not in ${esc(r.base)}</span>` : r.base ? `merged into ${esc(r.base)}` : '<span class="err">project folder not on a branch</span>',
+  ].filter(Boolean).join(' · ');
+  function renderDisk() {
+    const el = $('#toolForm'), D = S.disk, d = D.data;
+    if (!el) return;
+    if (!d) { if (!D.loading && !D.error) loadDisk(); setIfChanged(el, D.error ? `<div class="msg system err"><div class="bubble">${esc(D.error)}</div></div>` : '<div class="working"><span class="spinner"></span> Loading…</div>'); return; }
+    const job = d.job, off = job ? ' disabled' : '', rows = [...d.worktrees].sort((a, b) => b.bytes - a.bytes), orphans = [...d.orphans].sort((a, b) => b.bytes - a.bytes);
+    const sum = (list, f) => list.reduce((n, r) => n + (f(r) || 0), 0), all = [...rows, ...orphans];
+    const sel = rows.filter(r => D.sel.has(r.id)), safe = rows.filter(r => r.safe);
+    const failed = d.results.filter(r => !r.ok), label = k => rows.find(r => r.id === k)?.title || orphans.find(o => o.dir === k)?.name || k;
+    setIfChanged(el, `<section class="set-group tool-pane"><h2>Disk space</h2>
+      <p class="set-desc">Each isolated session works in its own Git worktree: a full checkout of the project plus whatever was installed or built in it (node_modules, target/…). Archiving or finishing a session keeps that folder, so they pile up. Measure them here, then remove the ones you are done with, or delete only their ignored build output.</p>
+      <div class="disk-acts"><button class="btn sm primary" data-disk="scan"${off}>${d.scannedAt ? 'Measure again' : 'Measure worktrees'}</button>
+        <span class="muted">${job ? `<span class="spinner"></span> ${job.kind === 'scan' ? 'Measuring' : job.kind === 'clean' ? 'Cleaning' : 'Removing'} ${job.done} of ${job.total}…` : d.scannedAt ? `Measured ${esc(ago(d.scannedAt))}` : 'Not measured yet: walking big worktrees can take a few minutes.'}</span></div>
+      ${d.error ? `<div class="msg system err"><div class="bubble">${esc(d.error)}</div></div>` : ''}
+      ${failed.length ? `<div class="msg system err"><div class="bubble">${failed.map(r => `${esc(label(r.key))}: ${esc(r.error)}`).join('<br>')}</div></div>` : ''}
+      ${all.length ? `<div class="spend-cards"><div><span>${all.length} worktree ${all.length === 1 ? 'folder' : 'folders'}</span><b>${fmtSize(sum(all, r => r.bytes))}</b></div>
+        <div><span>Build output and untracked files</span><b>${fmtSize(sum(all, r => r.bytes - (r.tracked ?? 0)))}</b></div>
+        <div><span>Safe to remove (${safe.length})</span><b>${fmtSize(sum(safe, r => r.bytes))}</b></div></div>` : ''}
+      </section>
+      ${rows.length ? `<section class="set-group"><h2>Session worktrees</h2>
+        <div class="disk-acts"><button class="btn sm danger" data-disk="removeSelected"${off || (sel.length ? '' : ' disabled')}>Remove selected (${sel.length}, ${fmtSize(sum(sel, r => r.bytes))})</button><span class="muted">Only safe worktrees can be selected: archived, hidden or done, with nothing uncommitted and every commit already in the project's branch. Others have their own Remove, which says what would be lost.</span></div>
+        <div class="md"><div class="table-wrap"><table><thead><tr><th></th><th>Session</th><th>State</th><th class="num">Size</th><th class="num">Build output</th><th></th></tr></thead><tbody>
+        ${rows.map(r => `<tr><td><input type="checkbox" data-disksel="${esc(r.id)}" aria-label="Select ${esc(r.title)}"${D.sel.has(r.id) ? ' checked' : ''}${r.safe && !job ? '' : ' disabled'}></td>
+          <td><a href="#/s/${encodeURIComponent(r.id)}">${esc(r.title || r.id)}</a><div class="muted">${esc(r.project)} · <code>${esc(r.branch)}</code></div></td>
+          <td>${diskState(r)}</td><td class="num" title="${r.linked ? `${fmtSize(r.linked)} of it is hardlinked from elsewhere and is not freed` : ''}">${fmtSize(r.bytes)}</td><td class="num">${r.tracked == null ? '' : fmtSize(r.bytes - r.tracked)}</td>
+          <td class="num"><button class="btn sm ghost" data-disk="clean" data-id="${esc(r.id)}"${off || (r.busy || !r.exists || r.error ? ' disabled' : '')} title="Delete only files .gitignore matches; keep the worktree and branch">Clean build output</button> <button class="btn sm danger" data-disk="remove" data-id="${esc(r.id)}"${off || (r.busy || r.error ? ' disabled' : '')}>Remove</button></td></tr>`).join('')}
+        </tbody></table></div></div></section>` : ''}
+      ${orphans.length ? `<section class="set-group"><h2>Orphaned folders</h2><p class="set-desc">Worktree folders no session uses: left behind when Windows held a folder during removal, or by a session that is gone. Removing one also prunes Git's record of it; its branch stays.</p>
+        <div class="md"><div class="table-wrap"><table><thead><tr><th>Folder</th><th>State</th><th class="num">Size</th><th></th></tr></thead><tbody>
+        ${orphans.map(o => `<tr><td><code>${esc(o.dir)}</code></td><td>${o.kind === 'removed' ? `worktree of ${esc(o.title || o.sessionId)}, already removed` : 'no session'}${o.branch ? ` · <code>${esc(o.branch)}</code>` : ''}${o.dirty ? ` · <span class="err">${o.dirty} uncommitted</span>` : ''}${o.root ? '' : ' · not part of a repository'}</td><td class="num">${fmtSize(o.bytes)}</td>
+          <td class="num"><button class="btn sm danger" data-disk="removeOrphan" data-dir="${esc(o.dir)}"${off}>Remove</button></td></tr>`).join('')}
+        </tbody></table></div></div></section>` : ''}`);
+  }
+  function diskAct(btn) {
+    const d = S.disk.data, act = btn.dataset.disk, r = d?.worktrees.find(x => x.id === btn.dataset.id);
+    if (act === 'scan') return diskStart('scan', {});
+    if (act === 'removeSelected') {
+      const sel = d.worktrees.filter(x => S.disk.sel.has(x.id));
+      if (!sel.length || !confirm(`Remove ${sel.length === 1 ? '1 worktree' : `${sel.length} worktrees`} (${fmtSize(sel.reduce((n, x) => n + x.bytes, 0))}) and ${sel.length === 1 ? 'its omp-web/ branch' : 'their omp-web/ branches'}?\n\n${sel.length === 1 ? 'It has' : 'Each has'} nothing uncommitted and every commit is already in its project's branch. ${sel.length === 1 ? 'The session leaves the panel; its transcript stays' : 'The sessions leave the panel; their transcripts stay'} in OMP history.`)) return;
+      return diskStart('remove', { sessions: sel.map(x => x.id) });
+    }
+    if (act === 'remove' && r) {
+      const loses = r.dirty || r.ahead || !r.base;
+      if (!confirm(`Delete the worktree folder (${fmtSize(r.bytes)}) and branch ${r.branch}?${r.ahead ? `\n\n${r.ahead} ${r.ahead === 1 ? 'commit is' : 'commits are'} not in ${r.base} and will be lost unless pushed.` : ''}${r.base ? '' : '\n\nThe project folder is not on a branch, so whether its commits were merged is unknown; they will be lost unless pushed.'}${r.dirty ? `\n\n${r.dirty} uncommitted ${r.dirty === 1 ? 'change' : 'changes'} will be lost.` : ''}\n\nThe session leaves the panel; its transcript stays in OMP history.`)) return;
+      return diskStart('remove', { sessions: [r.id], confirm: !!loses });
+    }
+    if (act === 'clean' && r) {
+      if (!confirm(`Delete every file .gitignore matches in this worktree (${fmtSize(r.bytes - (r.tracked ?? 0))} of build output and untracked files): dependencies and build output, but also ignored local files such as .env?\n\nTracked files, untracked work, the folder and branch ${r.branch} stay. Rebuilding there reinstalls what it needs.`)) return;
+      return diskStart('clean', { sessions: [r.id] });
+    }
+    if (act === 'removeOrphan') {
+      const o = d.orphans.find(x => x.dir === btn.dataset.dir);
+      if (!o || !confirm(`Delete the folder ${o.dir} (${fmtSize(o.bytes)})?${o.dirty ? `\n\n${o.dirty} uncommitted ${o.dirty === 1 ? 'change' : 'changes'} in it will be lost.` : ''}${o.branch ? `\n\nBranch ${o.branch} stays.` : ''}`)) return;
+      return diskStart('remove', { orphans: [o.dir], confirm: !!o.dirty });
+    }
   }
 
   // ---------- spend ----------
@@ -5022,6 +5113,10 @@
     if (tl) { e.preventDefault(); Object.assign(S.tools, { tool: tl.dataset.tool, action: '', values: {} }); renderTools(); return; }
     const ta = t.closest('[data-toolaction]');
     if (ta) { S.tools.action = ta.dataset.toolaction; S.tools.values = {}; renderTools(); return; }
+    const dk = t.closest('[data-disk]');
+    if (dk) { diskAct(dk); return; }
+    const ds = t.closest('[data-disksel]');
+    if (ds) { S.disk.sel[ds.checked ? 'add' : 'delete'](ds.dataset.disksel); renderDisk(); return; }
     const js = t.closest('[data-jobstop]');
     if (js) { js.disabled = true; api('/cli/stop', { id: js.dataset.jobstop }).then(refreshJobs, err => toast(err.message, 'err')); return; }
     const td = t.closest('[data-todo]');

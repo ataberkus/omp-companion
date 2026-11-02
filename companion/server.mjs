@@ -23,6 +23,7 @@ import { createOriginCheck, tailnetAddress, tailscaleSelf, portBusy } from './ne
 import { updateOmp, installOmp, defaultDataDir, startupUpdate } from './update.mjs';
 import { createCliJobs } from './cli-tools.mjs';
 import { createWorkspaces } from './workspaces.mjs';
+import { createStorage } from './storage.mjs';
 import { openStore } from './store.mjs';
 import { createDrafts } from './drafts.mjs';
 import { createMessages } from './messages.mjs';
@@ -88,6 +89,7 @@ export async function createCompanion(options={}){
  use(createPlugins(ctx));
  use(createEnhance(ctx));
  use(createWorkspaces(ctx));
+ use(createStorage(ctx));
  use(createSync(ctx));
  use(createHistory(ctx));
  use(createSpend(ctx));
@@ -105,7 +107,7 @@ export async function createCompanion(options={}){
  const server=serve();
  // The screen viewer goes first: an open WebSocket would keep server.close() waiting forever. Resolves with the IDs of the
  // visible sessions it paused (pauseSessions): the desktop app's update quit hands them to the new version to resume.
- const close=async()=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));const paused=await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;return paused;};
+ const close=async()=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions();await Promise.all([...servers].filter(s=>s.listening).map(s=>new Promise(r=>{s.close(r);s.closeAllConnections();})));const paused=await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;await ctx.storageRun;return paused;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
  // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
