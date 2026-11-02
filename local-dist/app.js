@@ -254,7 +254,7 @@
   function setToken(t) {
     S.token = t;
     try { t ? sessionStorage.setItem(KEY, t) : sessionStorage.removeItem(KEY); } catch {}
-    if (!t) { S.store = null; S.native = []; S.online = null; S.stateTag = ''; S.tx = null; S.sx = null; leaveScreen(); }
+    if (!t) { S.store = null; S.native = []; S.nativeTag = null; S.online = null; S.stateTag = ''; S.tx = null; S.sx = null; leaveScreen(); }
     route();
   }
   function toast(msg, kind = '', action) {
@@ -4525,9 +4525,15 @@
   // only "ago" labels could change then, and those still render every 10 s. While something works its running timer ticks
   // on every poll, as before. A poll of a hidden page renders nothing at all. Other callers always render: they may have
   // changed the page.
+  // OMP's own session list (the sidebar's history) loads every 20 s, alongside /state instead of after it, and conditionally:
+  // an unchanged list is a 304 that keeps S.native. A refresh that starts while it is in flight (the whole-transcript
+  // refetch below) waits for the same request.
+  let nativeLoad = null;
   async function refresh(poll = false) {
     const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null, online = S.online;
     let fresh = !poll;
+    if (Date.now() - S.nativeAt > 20000) { S.nativeAt = Date.now(); const p = nativeLoad = api('/omp-sessions', undefined, { etag: S.nativeTag ||= { tag: '' } }).catch(() => null).finally(() => { if (nativeLoad === p) nativeLoad = null; }); }
+    const nat = nativeLoad;
     try {
       const st = await api('/state?session=' + encodeURIComponent(view) + (view ? '&since=' + (held ? held.epoch + '.' + held.rev : '') : '') + '&store=' + (S.sx ? S.sx.epoch + '.' + S.sx.rev : ''), undefined, { etag });
       // A reply that is no store at all (a proxy's empty page, say) fails the poll; its ETag must not make the next one a 304.
@@ -4541,10 +4547,8 @@
         else if (st) { S.stateTag = ''; void refresh(); return; }
       }
     } catch (e) { S.online = false; S.fails = (S.fails || 0) + 1; if (e.auth) return; }
-    if (Date.now() - S.nativeAt > 20000) {
-      S.nativeAt = Date.now();
-      try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; fresh = true; } catch {}
-    }
+    const native = nat && await nat;
+    if (native) { S.native = native.sessions; S.nativeReady = true; fresh = true; }
     // Hidden (a background tab, the desktop app in the tray): only the title badge and notifications follow (checkAttention);
     // showing the page refreshes it (visibilitychange), and renderedAt = 0 has the first visible poll render regardless.
     if (poll && document.hidden) { checkAttention(); renderedAt = 0; return; }

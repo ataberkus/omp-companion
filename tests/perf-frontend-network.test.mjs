@@ -168,3 +168,34 @@ test('the first visible poll after hidden ones renders even when it brings nothi
   assert.equal(app.states().at(-1).inm, '"renamed while hidden"', 'a 304: nothing new since the hidden poll');
   assert.match(app.els.get('topbar').innerHTML, /renamed while hidden/, 'rendered what the hidden poll brought');
 });
+
+// ---------- OMP's session list (/api/omp-sessions) ----------
+const nativeList = (n = 1) => ({ dir: '/omp', sessions: Array.from({ length: n }, (_, i) => ({ file: `/omp/h${i}.jsonl`, title: 'History ' + i, cwd: '/project', updatedAt: at(-100 - i), preview: 'p' })) });
+test('the OMP session list loads alongside /state, and conditionally: a 304 keeps the list and renders nothing', async () => {
+  let release, list = nativeList(1), unauthorized = false;
+  const gate = new Promise(r => { release = r; });
+  const app = boot({ hash: '#/new', respond: async (url, call) => {
+    if (url.startsWith('/api/state')) { if (unauthorized) return { status: 401, body: { error: 'Invalid connection token.' } }; await gate; return call.inm === '"s"' ? { status: 304 } : { body: store([session('s1', [])]), headers: { ETag: '"s"' } }; }
+    if (url.startsWith('/api/omp-sessions')) { const tag = `"n${list.sessions.length}"`; return call.inm === tag ? { status: 304 } : { body: list, headers: { ETag: tag } }; }
+  } });
+  await flush();
+  const listings = () => app.calls.filter(c => c.url.startsWith('/api/omp-sessions'));
+  assert.equal(listings().length, 1, 'requested while /state is still on its way');
+  release(); await flush();
+  assert.match(app.list(), /History 0/);
+  await app.advance(15000); await app.poll(); // the 10 s "ago" render
+  await app.advance(6000);
+  const writes = JSON.stringify([...app.writes]);
+  await app.poll();
+  assert.equal(listings().at(-1).inm, '"n1"', 'due again: asked conditionally');
+  assert.match(app.list(), /History 0/, 'the 304 kept the list');
+  assert.equal(JSON.stringify([...app.writes]), writes, 'and, with /state unchanged too, nothing rendered');
+  list = nativeList(2);
+  await app.advance(21000); await app.poll();
+  assert.match(app.list(), /History 1/, 'a changed list is a 200 that renders');
+  // Signed out (the token no longer accepted): the list is dropped, and so is its ETag, or a 304 would keep it empty.
+  unauthorized = true; await app.poll();
+  unauthorized = false; await app.connect('tok');
+  assert.equal(listings().at(-1).inm, undefined);
+  assert.match(app.list(), /History 1/);
+});
