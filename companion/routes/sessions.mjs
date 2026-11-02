@@ -99,7 +99,10 @@ export function sessionRoutes(ctx){
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
    const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','editor_text_applied'];
    // Commands answer with the session; one whose transcript nothing has read yet gets it read for the reply only (deferTranscript).
-   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);const r=await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body)));json(r===s&&unread(s)?{...s,messages:readTranscript(s)}:r);return;}
+   // ?lean=1 (the dashboard, whose polls carry the transcript) leaves out the transcript and /btw answers and reads nothing:
+   // every prompt sent got the whole transcript back (600 messages: ~0.7-0.9 MB gzipped) before the dashboard polled.
+   if(match){const s=store.sessions.find(s=>s.id===match[1]);if(!s)throw error('Session not found.',404);const r=await(unlocked.includes(body.type)?command(s,body):lock(s.id,()=>command(s,body)));
+    json(r!==s?r:url.searchParams.get('lean')==='1'?{...s,messages:undefined,_btw:undefined}:unread(s)?{...s,messages:readTranscript(s)}:r);return;}
    },
  };
 }
