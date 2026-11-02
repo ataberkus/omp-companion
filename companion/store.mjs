@@ -21,18 +21,30 @@ export async function openStore(ctx){
  const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
  for(const f of await fs.readdir(dataDir)){const m=/^workspace\.json\.(?:(\d+)\.)?tmp$/.exec(f);if(m&&!(m[1]&&alive(Number(m[1]))))await fs.rm(path.join(dataDir,f),{force:true}).catch(()=>{});}
  for(const f of await fs.readdir(transcriptDir).catch(()=>[])){const m=/\.json\.(\d+)\.tmp$/.exec(f);if(m&&!alive(Number(m[1])))await fs.rm(path.join(transcriptDir,f),{force:true}).catch(()=>{});}
- let store;
- try{store=JSON.parse(await fs.readFile(stateFile,'utf8'));}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
+ let store,stateText;
+ try{stateText=await fs.readFile(stateFile,'utf8');store=JSON.parse(stateText);}catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read workspace: ${e.message}`);store={projects:[],sessions:[],activity:[]};}
  // Transcripts as last written, by session ID: a digest of each one's JSON, so a save rewrites only those that changed (the
  // JSON itself, kept for that comparison, cost as much memory as the transcripts). A workspace.json from before the split
  // still embeds them; those sessions have no entry here, so the first save moves them out.
  const savedTranscripts=new Map(),textDigest=text=>createHash('sha1').update(text).digest('base64');
+ // Those digests as workspace.json recorded them (persist), for the startup check below; taken out of the store, which
+ // /api/state sends.
+ const recorded=store.transcriptDigests&&typeof store.transcriptDigests==='object'?store.transcriptDigests:{};delete store.transcriptDigests;
  // Every transcript is read and checked at startup (one that does not parse stops the companion), eight at a time, but kept
  // only once something reads it: 400 sessions' transcripts held at once cost more memory than the rest of the companion
  // (~400 MB parsed for 160 MB of files) and slowed every garbage collection. Until then s.messages reads it from disk on
- // first use (deferTranscript).
+ // first use (deferTranscript). Parsing them all took most of a start (0.5-1 s for 100+ MB): a file whose bytes match the
+ // digest recorded when it was written is that valid JSON, so only the others are parsed (a changed, truncated or older file).
+ // Review sessions are always parsed, to note their edit/write tool file records ({path}): markOverlaps checks them on every
+ // poll, and reading s.messages for that read and kept every review transcript. An unread transcript is this file. Only
+ // review sessions: running and queued ones load paused (below), and nothing makes a session active again without reading
+ // its transcript (start, a prompt, a resume). Walked as markOverlaps walks s.messages, so data it would trip over leaves no
+ // entry and markOverlaps reads the transcript then, as before.
+ const editsAtStart=new WeakMap(),noteEdits=(s,list)=>{try{const out=[];for(const m of list||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path)out.push({path:f.path});editsAtStart.set(s,out);}catch{}};
  for(let i=0;i<store.sessions.length;i+=8)await Promise.all(store.sessions.slice(i,i+8).map(async s=>{if(Array.isArray(s.messages))return;s.messages=[];
-  try{const raw=await fs.readFile(transcriptFile(s.id),'utf8');JSON.parse(raw);savedTranscripts.set(s.id,textDigest(raw));deferTranscript(s);}
+  try{const raw=await fs.readFile(transcriptFile(s.id)),sum=textDigest(raw);
+   if(sum!==recorded[s.id]||s.status==='review'){const list=JSON.parse(raw.toString('utf8'));if(s.status==='review')noteEdits(s,list);}
+   savedTranscripts.set(s.id,sum);deferTranscript(s);}
   catch(e){if(e.code!=='ENOENT')throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}));
  // Sidebar keys ('s:<id>' or 'f:<native file>') the user archived; archiving only hides, it never deletes.
  store.archived=Array.isArray(store.archived)?store.archived.filter(k=>typeof k==='string'):[];
@@ -62,8 +74,10 @@ export async function openStore(ctx){
  // then on it is an ordinary array. Not enumerable until then, so a summary or workspace.json never reads it. Its file is
  // what was last saved, so saves skip it (unread).
  function deferTranscript(s){Object.defineProperty(s,'messages',{configurable:true,enumerable:false,get(){const list=readTranscript(s);holdTranscript(s,list);return list;},set(list){holdTranscript(s,list);}});}
- function holdTranscript(s,list){Object.defineProperty(s,'messages',{value:list,writable:true,enumerable:true,configurable:true});}
+ function holdTranscript(s,list){editsAtStart.delete(s);Object.defineProperty(s,'messages',{value:list,writable:true,enumerable:true,configurable:true});}
  function unread(s){return !!Object.getOwnPropertyDescriptor(s,'messages')?.get;}
+ // The file records noted at startup while the transcript is unread; null once read or replaced, or when none were noted.
+ function unreadEdits(s){return unread(s)?editsAtStart.get(s)??null:null;}
  function readTranscript(s){try{return JSON.parse(readFileSync(transcriptFile(s.id),'utf8'));}catch(e){if(e.code==='ENOENT')return [];throw new Error(`Cannot read the transcript of session ${s.id}: ${e.message}`);}}
  // Save scope: the sessions whose transcripts may have changed; undefined = all of them, [] = workspace.json only.
  // Scopes union: true = every session, else a Set of sessions.
@@ -75,14 +89,18 @@ export async function openStore(ctx){
  // and serializes when it starts. Snapshotting per call instead pinned a full copy of the store (~40 MB) per pending save,
  // and a slow disk ran the heap out. Everything is serialized at one instant, so the files on disk match one state.
  // Transcripts are written before workspace.json lists their session, and deleted only once it no longer does.
- // A failed save's scope joins the next one.
- let lastSaved,nextSave,nextScope;
+ // A failed save's scope joins the next one. workspace.json is written only when its JSON changed, starting from the file
+ // as loaded: the startup save of a store that loads unchanged (a clean quit) rewrote and flushed the same bytes.
+ let lastSaved=stateText,nextSave,nextScope;
  const persist=scope=>{nextScope=widen(nextScope,scope);if(nextSave)return nextSave;nextSave=saveChain=saveChain.catch(()=>{}).then(async()=>{
   const scoped=nextScope;nextSave=nextScope=undefined;
   try{
    const sessions=new Set(store.sessions),ids=new Set(store.sessions.map(s=>s.id)),changed=[];
    for(const s of sessions)if(!unread(s)&&(scoped===true||scoped.has(s)||!savedTranscripts.has(s.id))){const text=JSON.stringify(s.messages||[],omit),sum=textDigest(text);if(sum!==savedTranscripts.get(s.id))changed.push([s.id,text,sum]);}
-   const snapshot=JSON.stringify(store,function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
+   // Each transcript's digest as it is on disk once this save is done, for the next startup's check. A write that fails or
+   // races another companion only makes the file differ from it, and that file is parsed.
+   const due=new Map(changed.map(([id,,sum])=>[id,sum])),transcriptDigests={};for(const id of ids){const d=due.get(id)??savedTranscripts.get(id);if(d)transcriptDigests[id]=d;}
+   const snapshot=JSON.stringify({...store,transcriptDigests},function(key,value){return key==='messages'&&sessions.has(this)?undefined:omit(key,value);});
    const gone=[...savedTranscripts.keys()].filter(id=>!ids.has(id));
    if(changed.length)await fs.mkdir(transcriptDir,{recursive:true,mode:0o700});
    // A few at a time: the first save after an upgrade writes every transcript (hundreds of flushed files). All settle
@@ -95,5 +113,5 @@ export async function openStore(ctx){
    for(const id of gone){await fs.rm(transcriptFile(id),{force:true});savedTranscripts.delete(id);}
   }catch(e){nextScope=widen(nextScope,scoped===true?undefined:[...scoped]);throw e;}
  });saveChain.catch(e=>console.error('Workspace save failed:',e.message));return saveChain;};
- return {store,uiKeys,persist,saveNow,scheduleSave,unread,readTranscript,get saveTimer(){return saveTimer;}};
+ return {store,uiKeys,persist,saveNow,scheduleSave,unread,unreadEdits,readTranscript,get saveTimer(){return saveTimer;}};
 }

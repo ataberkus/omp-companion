@@ -24,8 +24,13 @@ export function portBusy(port,host='127.0.0.1',timeoutMs=1000){return new Promis
 export function createOriginCheck(ctx){
  const {options,publicHosts,allowedOrigins}=ctx;
  // This PC's Tailscale name and addresses, looked up at most once a minute; options.tailscale replaces the lookup (tests).
- let tsCache=null,tsAt=0,tsPending;
- const tailscale=()=>Date.now()-tsAt<60000?Promise.resolve(tsCache):tsPending??=(options.tailscale||tailscaleSelf)().catch(()=>null).then(v=>{tsCache=v;tsAt=Date.now();tsPending=undefined;return v;});
+ // A known answer is used at once and refreshed in the background once a minute old: a phone on the MagicDNS name waited
+ // for `tailscale status` once a minute. A refresh that finds nothing (tailscaled reconnecting, a timeout) keeps it until
+ // the last good lookup is 5 minutes old; caching that null refused such phones for a minute. With no answer known
+ // (Tailscale not running), a request waits for the lookup, as before.
+ let tsCache=null,tsAt=0,tsGood=0,tsPending;
+ const lookup=()=>tsPending??=(options.tailscale||tailscaleSelf)().catch(()=>null).then(v=>{const t=Date.now();if(v)tsGood=t;if(v||t-tsGood>=300000)tsCache=v;tsAt=t;tsPending=undefined;return tsCache;});
+ const tailscale=()=>{if(Date.now()-tsAt<60000)return Promise.resolve(tsCache);if(!tsCache)return lookup();void lookup();return Promise.resolve(tsCache);};
  // Host/Origin gate for API requests and the screen WebSocket (CORS doesn't cover WebSockets, so its Origin check matters most),
  // against the address of the listener `srv` that took the request.
  // Bound to all interfaces (OMP_WEB_HOST=0.0.0.0): also accept this machine's adapter addresses, still rejecting DNS-rebinding names.

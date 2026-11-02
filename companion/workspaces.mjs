@@ -11,7 +11,7 @@ import { git, gitRun, currentBranch, addWorktree, removeWorktree } from './git.m
 export const colors=['oklch(.74 .14 50)','oklch(.72 .13 265)','oklch(.74 .12 165)','oklch(.7 .15 310)','oklch(.78 .13 95)','oklch(.7 .14 20)','oklch(.74 .11 215)','oklch(.72 .15 135)','oklch(.7 .14 345)','oklch(.74 .1 240)'];
 export const projectColor=v=>typeof v==='string'&&(/^#[0-9a-f]{6}$/i.test(v)||/^oklch\(\s*[\d.]+%?\s+[\d.]+\s+[\d.]+\s*\)$/.test(v))?v:null;
 export function createWorkspaces(ctx){
- const {command,append,store,dataDir,activity,persist,scheduleSave,runners,enhanceJobs,stopEnhance,dropDraft}=ctx;
+ const {command,append,store,dataDir,activity,persist,scheduleSave,unreadEdits,runners,enhanceJobs,stopEnhance,dropDraft}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
  const listNativeSessions=(...args)=>ctx.listNativeSessions(...args);
  async function ensureProject(dir,name){
@@ -31,11 +31,15 @@ export function createWorkspaces(ctx){
   return changed;
  }
  // At most every 15 s, from dashboard polls; never blocks the poll, and saves only when a branch changed.
- // close() awaits the run in flight: a git child still sitting in a project folder holds it open on Windows.
- let branchesAt=0,branchRun=null;
+ // A project whose last lookup has not settled is skipped: on an unreachable share or mount each round added more hung
+ // fs calls until they filled the thread pool, which also serves saves, static files and the gzip of every reply.
+ // close() awaits every lookup in flight: a git child still sitting in a project folder holds it open on Windows.
+ let branchesAt=0,branchRun=null;const branchLookups=new Map();
  function refreshBranches(){
   if(ctx.closing||Date.now()-branchesAt<15000)return;branchesAt=Date.now();
-  branchRun=Promise.all(store.projects.filter(p=>!p.hidden).map(p=>refreshBranch(p).catch(()=>false))).then(r=>{if(r.some(Boolean)&&!ctx.closing)scheduleSave([],true);});
+  const round=Promise.all(store.projects.filter(p=>!p.hidden&&!branchLookups.has(p.id)).map(p=>{const run=refreshBranch(p).catch(()=>false).finally(()=>branchLookups.delete(p.id));branchLookups.set(p.id,run);return run;}))
+   .then(r=>{if(r.some(Boolean)&&!ctx.closing)scheduleSave([],true);});
+  branchRun=Promise.all([round,...branchLookups.values()]);
  }
  async function createSession(p,{title,prompt='',isolate=false,model,provider,native=false,sessionFile,messages=[],selector,thinking,launch,draft=false}){
   const id=randomUUID();let cwd=p.path;let branch=p.branch;let isolated=isolate;const notes=[];
@@ -123,13 +127,27 @@ export function createWorkspaces(ctx){
   await persist(s);return {action,...await worktreeStatus(s)};
  }
  // Files edited (edit/write tool records) by two active sessions that share a folder rather than separate worktrees.
- // Set as _overlaps on both sessions before each /api/state reply.
+ // Set as _overlaps on both sessions before each /api/state reply. A transcript nothing has read yet contributes the
+ // records store.mjs noted at startup (unreadEdits) instead of being read here. Resolving every record and comparing
+ // every pair on each poll cost 2-15 ms with 50-150 sessions in review: resolved keys are kept per tool.files array
+ // (redone when the session's cwd or the array's length changes) and only pairs sharing a file are compared. So tool.files
+ // arrays and their {path} records are replaced whole, never edited in place (as runner.mjs, transcript.mjs and store.mjs
+ // do), or the kept keys go stale.
+ const resolvedFiles=new WeakMap();
  function markOverlaps(){
   const key=p=>process.platform==='win32'?p.toLowerCase():p;
-  const active=store.sessions.filter(s=>!s.hidden&&!s.isolated&&['running','queued','review'].includes(s.status)).map(s=>{const files=new Map();for(const m of s.messages||[])for(const f of m.tool?.files||[])if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}return {s,files};});
+  const active=store.sessions.filter(s=>!s.hidden&&!s.isolated&&['running','queued','review'].includes(s.status)).map(s=>{const files=new Map(),kept=unreadEdits(s);
+   const add=list=>{if(!Array.isArray(list)){for(const f of list)if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);files.set(key(abs),abs);}return;}
+    let c=resolvedFiles.get(list);if(!c||c.cwd!==s.cwd||c.n!==list.length){c={cwd:s.cwd,n:list.length,keys:[]};for(const f of list)if(typeof f?.path==='string'&&f.path){const abs=path.resolve(s.cwd,f.path);c.keys.push(key(abs),abs);}resolvedFiles.set(list,c);}
+    for(let i=0;i<c.keys.length;i+=2)files.set(c.keys[i],c.keys[i+1]);};
+   if(kept)add(kept);else for(const m of s.messages||[]){const list=m.tool?.files;if(list)add(list);}return {s,files};});
   for(const s of store.sessions)delete s._overlaps;
-  for(let i=0;i<active.length;i++)for(let j=i+1;j<active.length;j++){
-   const a=active[i],b=active[j],shared=[...a.files.keys()].filter(k=>b.files.has(k)).map(k=>a.files.get(k));if(!shared.length)continue;
+  // Each file's holders (ascending indexes into active), then each session's later partners: pairs in the order the
+  // i<j loop over all of them visited them, so every _overlaps list keeps its order.
+  const holders=new Map();active.forEach(({files},i)=>{for(const k of files.keys()){const h=holders.get(k);if(h)h.push(i);else holders.set(k,[i]);}});
+  const partners=active.map(()=>new Set());for(const h of holders.values())if(h.length>1)for(let x=0;x<h.length;x++)for(let y=x+1;y<h.length;y++)partners[h[x]].add(h[y]);
+  for(let i=0;i<active.length;i++)for(const j of [...partners[i]].sort((x,y)=>x-y)){
+   const a=active[i],b=active[j],shared=[...a.files.keys()].filter(k=>b.files.has(k)).map(k=>a.files.get(k));
    (a.s._overlaps??=[]).push({id:b.s.id,title:b.s.title,files:shared.slice(0,20),count:shared.length});(b.s._overlaps??=[]).push({id:a.s.id,title:a.s.title,files:shared.slice(0,20),count:shared.length});
   }
  }
