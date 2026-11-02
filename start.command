@@ -18,7 +18,7 @@ fi
 if [ -n "$OMP_BIN" ]; then
   echo "Using OMP: $OMP_BIN"
 elif ! command -v omp >/dev/null; then
-  echo "Warning: omp was not found on PATH. Updates, usage and the Tools page need the OMP CLI."
+  echo "omp was not found on PATH: the companion installs OMP when it starts (set OMP_WEB_NO_INSTALL=1 to skip)."
 fi
 # Reachable from your network (and your tailnet, if Tailscale runs) with a login. Set OMP_WEB_PASSWORD to choose the password;
 # without it this window prints a random connection token per launch. Set OMP_WEB_HOST=127.0.0.1 to keep it on this Mac only,

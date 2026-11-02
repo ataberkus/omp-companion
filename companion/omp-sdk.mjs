@@ -52,9 +52,9 @@ export function ompSources(entry, dataDir) {
  return [...(dataDir ? newerCopies(dataDir).slice(0, 1) : []), bundledSrc()];
 }
 
-/** Environment for running the OMP CLI: an absolute executable path also puts its folder on PATH. */
-export function cliEnv(entry) {
- const env = { ...process.env };
+/** Environment for running the OMP CLI (a copy of `base`): an absolute executable path also puts its folder on PATH. */
+export function cliEnv(entry, base = process.env) {
+ const env = { ...base };
  if (path.isAbsolute(entry) && !/\.ts$/i.test(entry)) {
   const key = Object.keys(env).find(k => k.toLowerCase() === 'path') || 'PATH';
   env[key] = path.dirname(entry) + path.delimiter + (env[key] || '');
@@ -74,11 +74,11 @@ export function syncOmpSdk(options) {
  return syncing ??= sync(options).finally(() => { syncing = undefined; });
 }
 
-async function sync({ entry, dataDir, prune = () => false, timeout = 20 * 60 * 1000 }) {
+async function sync({ entry, dataDir, prune = () => false, timeout = 20 * 60 * 1000, env = process.env }) {
  const root = store(dataDir);
  try {
   let cli;
-  try { cli = (await exec(entry, ['--version'], { env: cliEnv(entry), timeout: 30000, windowsHide: true })).stdout; }
+  try { cli = (await exec(entry, ['--version'], { env: cliEnv(entry, env), timeout: 30000, windowsHide: true })).stdout; }
   catch (e) { return { status: 'skipped', output: `OMP SDK not updated: could not read the OMP CLI version (${errorTail(e)}).` }; }
   // `omp --version` prints `omp/18.12.5`; anything else (a prerelease, another program) is not an SDK release to install.
   const version = /^omp\/(\d+\.\d+\.\d+)\s*$/m.exec(String(cli))?.[1];

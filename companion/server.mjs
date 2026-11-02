@@ -20,7 +20,7 @@ import { ENHANCE_OVERLAY, ENHANCE_SYSTEM, ENHANCE_GUARD } from './enhance-prompt
 import { createEnhance, enhanceModel, enhanceArgs, enhanceInput, stepLabel, cleanEnhanced } from './enhance.mjs';
 import { createScreen, screenCommands } from './screen.mjs';
 import { createOriginCheck, tailnetAddress, tailscaleSelf, portBusy } from './network.mjs';
-import { updateOmp, defaultDataDir, startupUpdate } from './update.mjs';
+import { updateOmp, installOmp, defaultDataDir, startupUpdate } from './update.mjs';
 import { createCliJobs } from './cli-tools.mjs';
 import { createWorkspaces } from './workspaces.mjs';
 import { openStore } from './store.mjs';
@@ -39,7 +39,7 @@ import { createSpend } from './spend.mjs';
 import { busySessions, createLifecycle } from './lifecycle.mjs';
 import { createStatic } from './routes/static.mjs';
 import { createRouter } from './router.mjs';
-export { addInstallDirs, busySessions, portBusy, startupUpdate, tailnetAddress, tailscaleSelf, updateOmp };
+export { addInstallDirs, busySessions, installOmp, portBusy, startupUpdate, tailnetAddress, tailscaleSelf, updateOmp };
 addInstallDirs();
 // Pure helpers, exported for tests.
 export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,ENHANCE_SYSTEM,ENHANCE_GUARD,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};

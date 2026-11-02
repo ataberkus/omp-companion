@@ -104,7 +104,7 @@ server.close(() => server.listen(port, lan ? '0.0.0.0' : '127.0.0.1'));
 | `createCompanion` / listen error | Error dialog with the message; quit. |
 | LAN bind fails | Revert to 127.0.0.1, uncheck the toggle, error dialog. |
 | No LAN IPv4 for Copy phone link | Disabled "No network address found" submenu item. |
-| OMP missing or outdated | Unchanged: handled by the dashboard and server as today. |
+| OMP missing or outdated | The host's `startupUpdate` runs `omp update`, or, with `OMP_BIN` unset and no `omp` on PATH or in its install folder, installs OMP with OMP's installer (`installOmp`), within the same 45 s budget; an install still running then finishes in the background (logged to stderr) and the companion starts without the CLI. `OMP_WEB_NO_INSTALL=1` / `OMP_WEB_NO_UPDATE=1` skip it. |
 
 ## Testing
 
