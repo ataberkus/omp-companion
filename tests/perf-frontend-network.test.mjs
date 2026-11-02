@@ -86,7 +86,8 @@ function boot({ hash = '#/s/s1', respond, size = { width: 1360, height: 900 } } 
   const go = async h => { location.hash = h; winListeners.hashchange.forEach(fn => fn()); await flush(); };
   const visible = async on => { document.hidden = !on; for (const fn of listeners.visibilitychange || []) fn(); await flush(); };
   const states = () => calls.filter(c => c.url.startsWith('/api/state'));
-  return { els, calls, timers, writes, states, loops, poll, advance, go, visible, document, location, clock, thread: () => els.get('thread').innerHTML, list: () => els.get('list').innerHTML };
+  const connect = async token => { els.get('tokenInput').value = token; listeners.submit[0]({ target: { id: 'connectForm', hasAttribute: () => false, dataset: {} }, preventDefault() {} }); await flush(); };
+  return { els, calls, timers, writes, states, loops, poll, advance, go, visible, connect, document, location, clock, thread: () => els.get('thread').innerHTML, list: () => els.get('list').innerHTML };
 }
 
 // ---------- api(): body failures and the timeout ----------
@@ -135,4 +136,35 @@ test('a body cut off mid-download, or one that is not a store, does not leave th
     assert.equal(app.states()[1].inm, undefined, 'the broken reply’s ETag is not sent back');
     assert.match(app.thread(), /whole store/);
   }
+});
+
+// ---------- hidden pages ----------
+test('a hidden page renders nothing on its polls but keeps the title badge current; showing it renders at once', async () => {
+  let s2 = session('s2', [], { status: 'running' });
+  const app = boot({ respond: url => url.startsWith('/api/state') ? { body: store([session('s1', [reply('m1', 'hello')]), s2]) } : undefined });
+  await flush(); await app.poll();
+  assert.equal(app.document.title, 'OMP Control Room');
+  await app.visible(false);
+  const before = JSON.stringify([...app.writes]);
+  s2 = session('s2', [], { status: 'review', title: 'Chat s2 settled', workFinishedAt: at(5) });
+  await app.poll(); await app.poll();
+  assert.equal(app.document.title, '(1) OMP Control Room', 'the badge counts the session that settled while hidden');
+  assert.equal(JSON.stringify([...app.writes]), before, 'nothing rendered while hidden');
+  assert.doesNotMatch(app.list(), /Chat s2 settled/);
+  await app.visible(true);
+  assert.match(app.list(), /Chat s2 settled/, 'shown again: rendered at once');
+});
+
+test('the first visible poll after hidden ones renders even when it brings nothing new', async () => {
+  let title = 'before';
+  const app = boot({ respond: (url, call) => url.startsWith('/api/state') ? (call.inm === `"${title}"` ? { status: 304 } : { body: store([session('s1', [reply('m1', 'hello')], { title })]), headers: { ETag: `"${title}"` } }) : undefined });
+  await flush(); await app.poll();
+  app.document.hidden = true; // no visibilitychange: this page is seen again only by its next poll
+  title = 'renamed while hidden';
+  await app.poll();
+  assert.doesNotMatch(app.els.get('topbar').innerHTML, /renamed while hidden/);
+  app.document.hidden = false;
+  await app.poll();
+  assert.equal(app.states().at(-1).inm, '"renamed while hidden"', 'a 304: nothing new since the hidden poll');
+  assert.match(app.els.get('topbar').innerHTML, /renamed while hidden/, 'rendered what the hidden poll brought');
 });

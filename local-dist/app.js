@@ -4521,9 +4521,10 @@
   // A reply that changes nothing: no summary, order or other store field, no transcript change and no /btw answers.
   const quiet = st => !!st.sx && !st.sx.changed?.length && !st.sx.top && !st.sx.order && !st.btw && !(st.tx && (st.tx.messages || st.tx.changed?.length || st.tx.order));
   let stateSeq = 0, stateShown = 0, renderedAt = 0;
-  // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works
-  // or nobody sees the page: only "ago" labels could change then, and those still render every 10 s. While something
-  // works its running timer ticks on every poll, as before. Other callers always render: they may have changed the page.
+  // poll: a timer tick (loop). A poll that brings nothing new (304, or an empty delta) renders nothing while nothing works:
+  // only "ago" labels could change then, and those still render every 10 s. While something works its running timer ticks
+  // on every poll, as before. A poll of a hidden page renders nothing at all. Other callers always render: they may have
+  // changed the page.
   async function refresh(poll = false) {
     const seq = ++stateSeq, etag = { tag: S.stateTag }, view = stateSession(), held = S.tx?.session === view ? S.tx : null, online = S.online;
     let fresh = !poll;
@@ -4544,7 +4545,10 @@
       S.nativeAt = Date.now();
       try { S.native = (await api('/omp-sessions')).sessions; S.nativeReady = true; fresh = true; } catch {}
     }
-    if (!fresh && S.online === online && (document.hidden || !busyNow()) && Date.now() - renderedAt < 10000) {
+    // Hidden (a background tab, the desktop app in the tray): only the title badge and notifications follow (checkAttention);
+    // showing the page refreshes it (visibilitychange), and renderedAt = 0 has the first visible poll render regardless.
+    if (poll && document.hidden) { checkAttention(); renderedAt = 0; return; }
+    if (!fresh && S.online === online && !busyNow() && Date.now() - renderedAt < 10000) {
       // A tab looked at again still takes its sessions off the title badge and out of the sidebar marks.
       const unseen = [...attn.unseen.keys()].join();
       checkAttention();
