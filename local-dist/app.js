@@ -321,7 +321,8 @@
     const arch = archivedKeys(), pins = pinnedKeys();
     for (const it of out) { it.archived = arch.has(it.key); it.pinned = pins.has(it.key); }
     const live = it => it.needsReview || it.working || ['review', 'error'].includes(it.status) ? 0 : 1; // running / blue above done
-    return out.sort((a, b) => live(a) - live(b) || new Date(b.at) - new Date(a.at));
+    // Keys computed once per item: the comparator runs ~10 times per item and built two Dates each time.
+    return out.map(it => ({ it, l: live(it), t: new Date(it.at).getTime() })).sort((a, b) => a.l - b.l || b.t - a.t).map(x => x.it);
   }
   const reviewish = it => it.needsReview || it.status === 'review' || it.status === 'error';
   // Waits for you: a question, a failure, finished work to review, or news since you last looked. Archived sessions and
@@ -1432,6 +1433,10 @@
   const groupCtx = group => [S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
 
   function renderThread(messages, status, ownerId, opts = {}) {
+    heldDiffMode = diffMode();
+    try { threadPass(messages, status, ownerId, opts); } finally { heldDiffMode = ''; }
+  }
+  function threadPass(messages, status, ownerId, opts) {
     // Drop hidden advisor messages up front so they don't split activity groups.
     if (S.advHidden) messages = messages.filter(m => m.role !== 'advisor' && m.role !== 'advisor-update');
     const p = S.sending.get(S.view), pending = p && 'text' in p && !p.queued ? p : null;
@@ -1692,7 +1697,10 @@
     return `<div class="diff-scroll"><table class="diff ${mode}${review ? ' commentable' : ''}" aria-label="${mode === 'split' ? 'Side-by-side' : 'Unified'} diff: old line, new line, code${review ? '. Click a line to comment on it' : ''}">${mode === 'split' ? '<colgroup><col class="c-ln"><col><col class="c-ln"><col></colgroup>' : '<colgroup><col class="c-ln"><col class="c-ln"><col></colgroup>'}<tbody>${rows.join('')}</tbody></table></div>`;
   }
   // Split panes need room: decide from the thread's width (the chat column is ~860px, the Changes page is wide), not the window's.
-  const diffMode = () => S.diffMode || (($('#thread')?.clientWidth || innerWidth) > 1000 ? 'split' : 'unified');
+  // A thread render holds its first answer for the whole pass (heldDiffMode): the width can't change while it builds
+  // strings, and it asks per group and tool row (a querySelector and a layout read each).
+  let heldDiffMode = '';
+  const diffMode = () => heldDiffMode || S.diffMode || (($('#thread')?.clientWidth || innerWidth) > 1000 ? 'split' : 'unified');
   const fdCache = new Map();
   const fileDiff = (f, opts = {}) => memo(fdCache, [diffMode(), f.op, f.path, opts.meta || '', opts.edit ?? '', opts.reviewSig || '', f.diff].join('\u0000'), () => fileDiffRaw(f, opts), 400);
   // First changed line of a diff, where Open in editor puts the cursor.

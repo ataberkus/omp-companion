@@ -330,6 +330,20 @@ test('the prompt rail reads each prompt\'s tip once per element, and lists every
   } finally { Element.prototype.querySelector = qs; }
 });
 
+test('a thread render reads the thread width once for its diff layout, not per group and row', async () => {
+  const rows = Array.from({ length: 20 }, (_, i) => edit('e' + i, 10 + i));
+  const srv = txServer([...thread1().slice(0, 6), ...rows, tool('t99', 'bash', 99, { status: 'running', result: 'x' })]);
+  const app = boot({ respond: srv.respond });
+  let reads = 0;
+  Object.defineProperty(app.els.get('thread'), 'clientWidth', { get() { reads++; return 860; } });
+  await flush();
+  streamT8(srv, ''); srv.set(srv.messages.map(m => m.id === 't99' ? { ...m, tool: { ...m.tool, result: 'xy' } } : m));
+  reads = 0;
+  await app.poll();
+  assert.match(app.thread(), /class="diff unified/, 'an 860px thread shows diffs unified');
+  assert.equal(reads, 1, `${reads} width reads for one render`);
+});
+
 test('omp-debug-parts catches a part whose input is missing from its ctx (here: a message edited in place)', async () => {
   for (const debug of [false, true]) {
     const srv = txServer(thread1()), c = counting('text');
