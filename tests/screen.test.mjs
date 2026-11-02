@@ -96,8 +96,8 @@ test('the WebSocket needs a fresh ticket from the same address and passes the sa
   assert.equal((await upgrade(port, 'ab'.repeat(32))).status, 401);
   assert.equal((await upgrade(port, await ticketFor(port), { Host: `evil.example:${port}` })).status, 403);
   assert.equal((await upgrade(port, await ticketFor(port), { Origin: 'http://evil.example' })).status, 403);
-  // Another device can't use a ticket it saw: it is bound to the address that asked for it.
-  assert.equal((await upgrade(port, await ticketFor(port), {}, '127.0.0.2')).status, 401);
+  // Another device can't use a ticket it saw: it is bound to the address that asked for it. (macOS has no 127.0.0.2.)
+  if (process.platform !== 'darwin') assert.equal((await upgrade(port, await ticketFor(port), {}, '127.0.0.2')).status, 401);
   const ticket = await ticketFor(port);
   assert.equal((await upgrade(port, ticket, { Origin: `http://127.0.0.1:${port}` })).status, 101);
   assert.equal((await upgrade(port, ticket)).status, 401);

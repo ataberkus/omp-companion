@@ -1,0 +1,125 @@
+# Builds the macOS app for Apple silicon and Intel when the app's code changes (or from the Actions tab), runs the test
+# suite on macOS, smoke-tests each build (scripts/smoke-app.mjs) and keeps its .dmg as a run artifact. Those are ad-hoc
+# signed test builds; release.yml publishes the releases installed apps update from.
+name: macOS app
+
+on:
+  push:
+    paths:
+      - 'src-tauri/**'
+      - 'desktop/**'
+      - 'scripts/check-build.mjs'
+      - 'scripts/smoke-app.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'desktop/**'
+      - 'scripts/check-build.mjs'
+      - 'scripts/smoke-app.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: npm ci
+      # One test file at a time: tests/frontend-render.test.mjs times markdown rendering against a 50 ms budget, which
+      # parallel test files competing for the runner's few cores can exceed.
+      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-latest, arch: aarch64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      APP: src-tauri/target/release/bundle/macos/OMP Control Room.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # build.rs copies this Bun into the app, and npm ci installs OMP's native modules for this runner's CPU: each
+      # architecture is built on its own kind of Mac.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Saved after failed runs too: a later step failing must not cost the next run a cold Rust build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.arch }}
+          cache-on-failure: true
+
+      - run: npm ci
+
+      # The app first, ad-hoc signed (bundle.macOS.signingIdentity "-") with the hardened runtime and
+      # src-tauri/Entitlements.plist: the checks below need nothing more, and a disk image problem must not hide them.
+      - run: npm run build -- --bundles app
+
+      - name: Inspect the app
+        run: |
+          codesign --verify --strict --verbose=2 "$APP"
+          codesign --display --entitlements - "$APP/Contents/MacOS/bun"
+          main="$APP/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")"
+          for bin in "$main" "$APP/Contents/MacOS/bun"; do echo "$(basename "$bin"): $(lipo -archs "$bin")"; done
+          plutil -p "$APP/Contents/Info.plist"
+          du -sh "$APP"
+
+      - name: Smoke test
+        run: node scripts/smoke-app.mjs "$APP"
+
+      # Spotlight indexes every disk image the DMG step mounts; on the slower Intel runner that kept the image busy past
+      # hdiutil's detach timeout ("timeout for DiskArbitration expired").
+      - name: Keep Spotlight off disk images
+        run: sudo mdutil -a -i off || echo "mdutil could not turn indexing off on every volume; continuing"
+
+      # Then the disk image from the built binary. Verbose, because hdiutil's own errors only show in the debug log.
+      - name: Disk image
+        timeout-minutes: 20
+        run: |
+          npx tauri bundle --bundles dmg --verbose
+          du -sh src-tauri/target/release/bundle/dmg/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omp-control-room-macos-${{ matrix.arch }}
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/omp-app.png
+          if-no-files-found: ignore

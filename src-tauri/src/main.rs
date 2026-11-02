@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+#[cfg(not(target_os = "macos"))]
+use tauri::tray::{MouseButton, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
 use tauri::webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent};
 use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -35,6 +37,11 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
 const PING_MISSES: u32 = 3;
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
+// Where the app stays while its window is closed: the notification area on Windows, the menu bar (and Dock) on macOS.
+#[cfg(target_os = "macos")]
+const TRAY: &str = "the menu bar";
+#[cfg(not(target_os = "macos"))]
+const TRAY: &str = "the tray";
 
 struct Shell {
     // Replaced when the companion is restarted after a crash.
@@ -90,8 +97,8 @@ fn paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     } else {
         app.path().resource_dir().map_err(|e| e.to_string())?.join("desktop/host.mjs")
     };
-    // tauri-build copies externalBin next to the executable without the target-triple suffix.
-    let bun = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name("bun.exe");
+    // tauri-build copies externalBin next to the executable without the target-triple suffix (Contents/MacOS/bun in a macOS app).
+    let bun = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name(format!("bun{}", std::env::consts::EXE_SUFFIX));
     Ok((dunce::simplified(&bun).to_path_buf(), dunce::simplified(&script).to_path_buf()))
 }
 
@@ -192,8 +199,11 @@ fn boot(app: AppHandle) {
     });
     let handle = app.clone();
     thread::spawn(move || watchdog(handle));
-    let handle = app.clone();
-    thread::spawn(move || quit_on_installer_request(handle));
+    #[cfg(windows)]
+    {
+        let handle = app.clone();
+        thread::spawn(move || quit_on_installer_request(handle));
+    }
     // Development builds run the repo's files; only installed releases update themselves.
     if !cfg!(debug_assertions) {
         thread::spawn(move || update_loop(app));
@@ -358,7 +368,7 @@ fn offer_update(app: &AppHandle, update: Update, notify: bool) {
     let known = shell.update.lock().replace(update).is_some_and(|old| old.version == version);
     refresh_menu(app);
     if notify && !known {
-        let body = format!("OMP Control Room {version} is available. Choose Install update in the tray menu.");
+        let body = format!("OMP Control Room {version} is available. Choose Install update in {TRAY} menu.");
         let _ = app.notification().builder().title(TITLE).body(body).show();
     }
 }
@@ -445,10 +455,14 @@ fn install_update(app: &AppHandle) {
         return;
     }
     stop_companion(app, true);
-    // On success the installer takes over and this process exits.
-    if let Err(e) = update.install(bytes) {
-        error_dialog(app, format!("Could not install the update. Sessions were paused and saved; start OMP Control Room again to keep using this version.\n\n{e}"));
-        app.exit(1);
+    // Windows: on success the installer takes over and install() exits this process. macOS: install() swaps the app
+    // bundle in place and returns, so start the new version (the old companion is already stopped).
+    match update.install(bytes) {
+        Ok(()) => app.restart(),
+        Err(e) => {
+            error_dialog(app, format!("Could not install the update. Sessions were paused and saved; start OMP Control Room again to keep using this version.\n\n{e}"));
+            app.exit(1);
+        }
     }
 }
 
@@ -499,6 +513,12 @@ fn new_window_handler(app: AppHandle, port: u16) -> impl Fn(Url, NewWindowFeatur
     }
 }
 
+// The count in the dashboard's "(N) OMP Control Room" title; None (no badge) without one.
+fn attention_count(title: &str) -> Option<i64> {
+    let (count, _) = title.strip_prefix('(')?.split_once(") ")?;
+    count.parse().ok().filter(|n| *n > 0)
+}
+
 fn create_main(app: &AppHandle) {
     let shell = app.state::<Shell>();
     let url = main_url(&shell);
@@ -511,9 +531,13 @@ fn create_main(app: &AppHandle) {
         .visible(false)
         .on_navigation(nav_guard(app.clone(), shell.port))
         .on_new_window(new_window_handler(app.clone(), shell.port))
-        // The dashboard badges document.title with sessions that need attention; the taskbar shows it.
+        // The dashboard badges document.title with sessions that need attention ("(2) OMP Control Room"); the taskbar
+        // shows the title, and on macOS the Dock icon carries the count as its badge.
         .on_document_title_changed(|window, title| {
             let _ = window.set_title(&title);
+            if cfg!(target_os = "macos") {
+                let _ = window.set_badge_count(attention_count(&title));
+            }
         })
         .on_page_load(move |window, payload| {
             if payload.event() == PageLoadEvent::Finished && !shown.swap(true, Ordering::SeqCst) {
@@ -585,7 +609,12 @@ fn build_menu(app: &AppHandle, lan: bool, screen: bool, viewer: Option<&str>, li
         UpdateItem::Installing => Some(MenuItem::new(app, "Installing update…", false, None::<&str>)?),
     };
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&open, &lan_item, &copy, &screen_item, &separator];
+    let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&open, &lan_item, &copy];
+    // The Screen page captures and drives the desktop through a Windows-only helper; elsewhere the companion refuses to turn it on.
+    if cfg!(windows) {
+        items.push(&screen_item);
+    }
+    items.push(&separator);
     if let Some(item) = &update_item {
         items.push(item);
     }
@@ -679,23 +708,103 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
 fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let shell = app.state::<Shell>();
     let menu = build_menu(app, *shell.lan.lock(), *shell.screen.lock(), shell.viewer.lock().as_deref(), &shell.links.lock(), &update_item(&shell))?;
-    TrayIconBuilder::with_id("main")
+    let tray = TrayIconBuilder::with_id("main").tooltip(TITLE).menu(&menu).on_menu_event(on_menu_event);
+    // macOS: a monochrome template image that the menu bar tints for its light or dark look, and the menu on click like
+    // every other menu bar item (Open is its first entry; the Dock icon opens the window too).
+    #[cfg(target_os = "macos")]
+    let tray = tray.icon(menu_bar_icon()).icon_as_template(true).show_menu_on_left_click(true);
+    // Windows: the app icon; double-click opens the window, right-click the menu.
+    #[cfg(not(target_os = "macos"))]
+    let tray = tray
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip(TITLE)
-        .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(on_menu_event)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
                 show_main(tray.app_handle());
             }
-        })
-        .build(app)?;
+        });
+    tray.build(app)?;
     Ok(())
 }
 
+// 36×36 px black-on-transparent mark (18 pt on Retina menu bars); decoded at compile time on every platform, so a broken
+// file fails every build rather than only the macOS one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn menu_bar_icon() -> tauri::image::Image<'static> {
+    tauri::include_image!("icons/tray-template.png")
+}
+
+// macOS gives every app a menu bar menu. Edit is what makes Cmd+C, Cmd+V, Cmd+X, Cmd+A and Cmd+Z work in the page.
+// AppKit's own Quit item (terminate:) would end the app on the spot, without the question Quit asks while sessions are
+// working, so Cmd+Q is a plain item handled by on_app_menu_event. Built on every platform, used on macOS only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+    use tauri::menu::{AboutMetadata, WINDOW_SUBMENU_ID};
+    let about = AboutMetadata { name: Some(TITLE.into()), version: Some(app.package_info().version.to_string()), ..Default::default() };
+    let app_items = Submenu::with_items(
+        app,
+        TITLE,
+        true,
+        &[
+            &PredefinedMenuItem::about(app, None, Some(about))?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::hide(app, None)?,
+            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::show_all(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "app_quit", format!("Quit {TITLE}"), true, Some("CmdOrCtrl+Q"))?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+    let view = Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?;
+    // This id makes AppKit list the open windows in it.
+    let window = Submenu::with_id_and_items(
+        app,
+        WINDOW_SUBMENU_ID,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+    Menu::with_items(app, &[&app_items, &edit, &view, &window])
+}
+
+// Every menu event reaches this handler, the tray menu's included; it acts on the app menu's Quit only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn on_app_menu_event(app: &AppHandle, event: MenuEvent) {
+    if event.id().as_ref() != "app_quit" {
+        return;
+    }
+    // Still starting: no session to save yet, and a Bun that is starting stops when the app's pipe to it closes.
+    if app.try_state::<Shell>().is_none() {
+        return app.exit(0);
+    }
+    // Off the event loop: quit() asks and waits for the companion.
+    let app = app.clone();
+    thread::spawn(move || quit(&app, false));
+}
+
 // for_update: a newer installer asked (quit_on_installer_request), so there is no prompt and the new version resumes the
-// sessions that were working. The tray's Quit asks first and leaves them paused.
+// sessions that were working. The tray's and the app menu's Quit ask first and leave them paused.
 fn quit(app: &AppHandle, for_update: bool) {
     let shell = app.state::<Shell>();
     if shell.quitting.swap(true, Ordering::SeqCst) {
@@ -743,7 +852,9 @@ fn stop_companion(app: &AppHandle, resume: bool) {
 // OMP_STOP_APP): quit without asking, so sessions are paused and saved and Bun's files come free, and leave the update
 // note so the version it installs resumes the sessions that were working. The uninstaller sets it too; its note goes
 // stale unread unless the app is installed and started again within minutes.
-// The installer waits for this process to end and closes it by force only after that times out.
+// The installer waits for this process to end and closes it by force only after that times out. Windows only: the macOS
+// updater replaces the app bundle from inside the app.
+#[cfg(windows)]
 fn quit_on_installer_request(app: AppHandle) {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
@@ -770,16 +881,16 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
     if shell.quitting.load(Ordering::SeqCst) {
         return;
     }
-    // Closing hides to the tray so running agents keep working; Quit lives in the tray menu.
+    // Closing hides to the tray (macOS: the menu bar and Dock) so running agents keep working; Quit lives in its menu.
     api.prevent_close();
     let _ = window.hide();
     if !shell.told_about_tray.swap(true, Ordering::SeqCst) {
-        let _ = window.app_handle().notification().builder().title(TITLE).body("Still running in the tray.").show();
+        let _ = window.app_handle().notification().builder().title(TITLE).body(format!("Still running in {TRAY}.")).show();
     }
 }
 
 fn main() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // First: a second instance focuses the first and never reaches setup or the Bun spawn.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         // VISIBLE excluded: quitting while hidden in the tray must not start the next launch invisible.
@@ -799,13 +910,18 @@ fn main() {
             thread::spawn(move || boot(handle));
             Ok(())
         })
-        .on_window_event(on_window_event)
-        .build(tauri::generate_context!())
-        .expect("failed to build the app");
+        .on_window_event(on_window_event);
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(app_menu).on_menu_event(on_app_menu_event);
+    let app = builder.build(tauri::generate_context!()).expect("failed to build the app");
     app.run(|app, event| match event {
         // Hidden or extra windows closing must never end the app; only app.exit() does.
         RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
-        // Also reached on Windows logoff/shutdown: save sessions and stop OMP without asking.
+        // Clicking the Dock icon, or opening the app again from Finder, brings back the window hidden in the menu bar.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main(app),
+        // Also reached on Windows logoff/shutdown, and on macOS on logout, shutdown or Quit from the Dock icon's menu
+        // (AppKit ends the app without asking): save sessions and stop OMP without asking.
         RunEvent::Exit => {
             if let Some(shell) = app.try_state::<Shell>() {
                 if !shell.host_closed.load(Ordering::SeqCst) {
@@ -818,4 +934,19 @@ fn main() {
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attention_count;
+
+    #[test]
+    fn dock_badge_follows_the_dashboard_title() {
+        assert_eq!(attention_count("(2) OMP Control Room"), Some(2));
+        assert_eq!(attention_count("(12) OMP Control Room"), Some(12));
+        assert_eq!(attention_count("OMP Control Room"), None);
+        assert_eq!(attention_count("(0) OMP Control Room"), None);
+        assert_eq!(attention_count("(x) OMP Control Room"), None);
+        assert_eq!(attention_count("(3)OMP Control Room"), None);
+    }
 }
