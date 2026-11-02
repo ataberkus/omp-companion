@@ -133,6 +133,7 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .item-row:hover .row-acts button,.item-row:focus-within .row-acts button{opacity:1;pointer-events:auto}
 .item-row .row-acts button:hover{color:var(--fg);background:var(--active)}
 .item-row .pin.on{color:var(--accent)}
+.item-row .row-acts .del:hover{color:var(--red)}
 .item-row .row-acts .row-more{display:none}
 @media (hover:none){.item-row .row-acts button{opacity:1;pointer-events:auto}}
 /* Touch sidebar: the session list is the drawer's main part. The controls around it are drawn 30–36px tall and an
@@ -165,7 +166,7 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 }
 /* Touch: a row shows one ⋯ (a pin when pinned) that lists pin and archive, so the title keeps the row's width. */
 @media (hover:none){
-  .item-row .row-acts :is(.pin,.arch){display:none}
+  .item-row .row-acts :is(.pin,.arch,.del){display:none}
   .item-row .row-acts .row-more{display:grid;position:relative;width:30px;height:30px}
   .item-row .row-acts .row-more::after{content:'';position:absolute;inset:-7px}
   .item-row .row-acts .row-more.on{color:var(--accent)}
