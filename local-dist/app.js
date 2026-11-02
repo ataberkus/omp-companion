@@ -201,14 +201,12 @@
   const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
   if (hashToken) { S.token = hashToken; try { sessionStorage.setItem(KEY, hashToken); } catch {} history.replaceState(null, '', location.pathname); }
 
-  // A reply's JSON body, calling `progress` as its chunks arrive (res.json() where the reply has no stream to read).
+  // A reply's JSON body, calling `progress` as its chunks arrive. They are counted off a clone: Chromium reports a fetch
+  // whose body a stream reader read to the end as canceled (ERR_ABORTED) about half the time, never one read by res.json().
   async function readJson(res, progress) {
-    const reader = res.body?.getReader?.();
-    if (!reader) return res.json();
-    const dec = new TextDecoder();
-    let text = '';
-    for (let r; !(r = await reader.read()).done;) { progress(); text += dec.decode(r.value, { stream: true }); }
-    return JSON.parse(text + dec.decode());
+    const reader = res.body && res.clone?.().body?.getReader?.();
+    if (reader) (async () => { while (!(await reader.read()).done) progress(); })().catch(() => {});
+    return res.json();
   }
   // `token` probes a pasted token without adopting it; `etag` ({ tag }) makes the GET conditional and resolves null on 304.
   // `keepalive` lets the request outlive the page (a closing tab); browsers cap such bodies at 64 KB, so larger ones go as usual.
