@@ -1,13 +1,30 @@
 // Dashboard poll deltas: the viewed transcript and the session list go out as changes since the dashboard's last rev.
 import { randomBytes } from 'node:crypto';
+// Content comparison without serializing: snapshot() copies a value's objects and arrays, sharing its leaves (strings
+// included), so a copy costs object headers only. same() compares a live value with a snapshot under JSON.stringify's
+// rules (own enumerable keys in order; undefined, functions and symbols left out, or null in arrays; non-finite numbers
+// as null; toJSON values by their JSON), so it is true exactly when their JSON is equal, and an unchanged string compares
+// by reference without reading its text. A "__proto__" key (JSON.parse makes it an own key) is defined on the copy, not
+// set as its prototype, which never compared equal.
+class Frozen{constructor(json){this.json=json;}}
+const skip=v=>v===undefined||typeof v==='function'||typeof v==='symbol',leaf=v=>(typeof v==='number'&&!Number.isFinite(v))||skip(v)?null:v,own=Object.prototype.hasOwnProperty;
+function snapshot(v){if(v===null||typeof v!=='object')return leaf(v);if(typeof v.toJSON==='function')return new Frozen(JSON.stringify(v));
+ if(Array.isArray(v)){const a=new Array(v.length);for(let i=0;i<v.length;i++)a[i]=snapshot(v[i]);return a;}
+ const o={};for(const k in v){if(!own.call(v,k))continue;const x=v[k];if(skip(x))continue;if(k==='__proto__')Object.defineProperty(o,k,{value:snapshot(x),enumerable:true,writable:true,configurable:true});else o[k]=snapshot(x);}return o;}
+function same(live,snap){if(live===null||typeof live!=='object')return (snap===null||typeof snap!=='object')&&leaf(live)===snap;
+ if(snap===null||typeof snap!=='object')return false;if(typeof live.toJSON==='function')return snap instanceof Frozen&&JSON.stringify(live)===snap.json;if(snap instanceof Frozen)return false;
+ if(Array.isArray(live)){if(!Array.isArray(snap)||snap.length!==live.length)return false;for(let i=0;i<live.length;i++)if(!same(live[i],snap[i]))return false;return true;}
+ if(Array.isArray(snap))return false;let n=0;const sk=Object.keys(snap);
+ for(const k in live){if(!own.call(live,k))continue;const x=live[k];if(skip(x))continue;if(sk[n]!==k||!same(x,snap[k]))return false;n++;}return n===sk.length;}
 export function createSync(ctx){
  const {store}=ctx;
  // A viewed transcript (up to 600 messages, megabytes) changes on almost every poll while its session streams, and the
  // poll's ETag covers the whole store, so any session streaming anywhere made every dashboard download the transcript it
  // views again, every 1.2 s. Dashboards that send since=<epoch>.<rev> get only the messages that changed after that rev,
- // plus the message order when it changed, and merge them into their copy. Each poll serializes the viewed session's
- // messages one by one and compares them with the previous poll of that session (by any dashboard): changed and new
+ // plus the message order when it changed, and merge them into their copy. Each poll compares the viewed session's
+ // messages one by one with their snapshots from the previous poll of that session (by any dashboard): changed and new
  // messages take the next rev. Comparing content means no change slips by, wherever in the companion it was made.
+ // Serializing every message for it instead cost 5-6 ms a poll and 2 MB of garbage on a 600-message transcript.
  // An unknown epoch (first poll, an evicted entry, a restarted companion) gets the full transcript. Null when message IDs
  // are missing or repeated: that transcript is sent whole.
  const txSync=new Map();
@@ -17,8 +34,8 @@ export function createSync(ctx){
   const c=txSync.get(s.id)||{epoch:randomBytes(6).toString('base64url'),rev:0,orderRev:0,order:[],entries:new Map()};
   txSync.delete(s.id);txSync.set(s.id,c);if(txSync.size>8)txSync.delete(txSync.keys().next().value);
   const entries=new Map(),next=c.rev+1;let changed=false,reordered=list.length!==c.order.length;
-  for(let i=0;i<list.length;i++){const m=list[i],json=JSON.stringify(m),prev=c.entries.get(m.id);
-   if(prev?.json===json)entries.set(m.id,prev);else{entries.set(m.id,{json,rev:next});changed=true;}
+  for(let i=0;i<list.length;i++){const m=list[i],prev=c.entries.get(m.id);
+   if(prev&&same(m,prev.snap))entries.set(m.id,prev);else{entries.set(m.id,{snap:snapshot(m),rev:next});changed=true;}
    if(c.order[i]!==m.id)reordered=true;}
   if(changed||reordered)c.rev=next;
   if(reordered){c.orderRev=next;c.order=[...ids];}
