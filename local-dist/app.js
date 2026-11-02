@@ -1562,6 +1562,9 @@
     const rail = $('#promptRail'), sc = $('#scroller');
     if (!rail || !sc) return;
     const base = sc.getBoundingClientRect().top - sc.scrollTop, h = sc.scrollHeight;
+    // The current prompt's line, read with the rest before the buttons move: read after, it laid the page out again (the
+    // rail is a fixed-width sibling of the scroller, so moving its buttons can't change what is read here).
+    const at = sc.scrollTop + sc.clientHeight * 0.3;
     // Prompts are top-level parts of the thread: its children are a few hundred, its nodes tens of thousands.
     const users = h > sc.clientHeight ? [...$('#thread').children].filter(n => n.matches('.msg.user[data-key]')) : [];
     const ticks = users.map(u => ({ key: u.dataset.key, y: Math.round(u.getBoundingClientRect().top - base), tip: promptTip(u) }));
@@ -1572,12 +1575,12 @@
       rail.innerHTML = ticks.map((t, i) => `<button type="button" tabindex="-1" data-prompt="${esc(t.key)}" data-tip="${esc(t.tip)}" aria-label="Prompt ${i + 1}: ${esc(t.tip)}"></button>`).join('');
     }
     ticks.forEach((t, i) => { const b = rail.children[i]; b.dataset.y = t.y; b.style.top = (t.y / h * 100).toFixed(2) + '%'; });
-    markPromptRail();
+    markPromptRail(at);
   }
-  function markPromptRail() {
+  function markPromptRail(at) {
     const sc = $('#scroller'), ticks = $('#promptRail')?.children;
     if (!sc || !ticks?.length) return;
-    const at = sc.scrollTop + sc.clientHeight * 0.3;
+    at ??= sc.scrollTop + sc.clientHeight * 0.3;
     let cur = null;
     for (const b of ticks) if (+b.dataset.y <= at) cur = b;
     for (const b of ticks) b.classList.toggle('on', b === cur);
