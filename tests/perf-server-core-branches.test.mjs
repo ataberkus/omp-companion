@@ -58,3 +58,32 @@ test('a project whose branch lookup hangs is not asked again until it settles; t
   for (let i = 0; i < 100 && st.projects[0].branch !== 'other'; i++) { await sleep(20); st = await state(); }
   assert.equal(st.projects[0].branch, 'other');
 });
+
+// Hiding (or removing) the workspace whose share hangs used to let close() finish once the next round ran without it.
+// Tracking each project's lookup across rounds kept close() waiting for that hung lookup until the share answered.
+test('close() does not wait for a hung branch lookup of a workspace hidden or removed before the last round', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
+  for (const how of ['hide', 'remove']) {
+    const dir = await mkdtemp(join(tmpdir(), 'omp-branches-'));
+    const head = join(dir, 'stuck', '.git', 'HEAD');
+    const realNow = Date.now; let skew = 0, closed;
+    t.after(async () => {
+      Date.now = realNow;
+      await new Promise(r => execFile('sh', ['-c', 'printf "ref: refs/heads/main\\n" > "$1"', 'sh', head], { timeout: 2000 }, r));
+      await closed; await rm(dir, { recursive: true, force: true });
+    });
+    for (const p of ['stuck', 'fine']) await mkdir(join(dir, p, '.git'), { recursive: true });
+    execFileSync('mkfifo', [head]);
+    await writeFile(join(dir, 'fine', '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [{ id: 'stuck', path: join(dir, 'stuck'), name: 'stuck' }, { id: 'fine', path: join(dir, 'fine'), name: 'fine' }], sessions: [], activity: [] }));
+    const app = await createCompanion({ dataDir: dir, omp: fakeOmp() });
+    app.server.listen(0, '127.0.0.1');
+    await once(app.server, 'listening');
+    const api = (p, body) => fetch(`http://127.0.0.1:${app.server.address().port}/api${p}`, { method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + app.token, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) }).then(r => r.json());
+    Date.now = () => realNow() + skew;
+    skew += 16000; await api('/state'); await sleep(100); // its lookup starts and hangs
+    if (how === 'hide') await api('/projects/update', { id: 'stuck', hidden: true }); else app.store.projects.splice(0, 1);
+    skew += 16000; await api('/state'); await sleep(100); // the next round runs without it
+    closed = app.close();
+    await within(closed, 4000, `close() after ${how}`);
+  }
+});
