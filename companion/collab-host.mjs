@@ -243,7 +243,10 @@ class Collab {
  #replaced(note) { if (!this.#inRun && !this.#disposing) this.#io.emit({ type: 'session_replaced', ...(note ? { note } : {}) }); }
  #mirror(event) {
   if (event.type === 'agent_start') this.#hostRunning = true;
-  this.#io.emit({ ...this.#io.plain(event), mirrored: true });
+  // A message_update carries the whole partial message, twice (message and assistantMessageEvent.partial): copied per
+  // delta, a long reply cost quadratic time. runner.event reads only the delta's type and text from it.
+  const copy = event.type === 'message_update' ? { type: event.type, assistantMessageEvent: { type: event.assistantMessageEvent?.type, delta: event.assistantMessageEvent?.delta } } : event;
+  this.#io.emit({ ...this.#io.plain(copy), mirrored: true });
   // The host's run ended (the TUI stops its loader here); a later agent_start or busy host state starts it again.
   if (event.type === 'agent_end') this.#hostIdle();
  }

@@ -18,6 +18,8 @@ export function tanMessage(m,id,at){
 // A collab guest's prompt as OMP stores it on the host (a `collab-prompt` custom message): a user message with its author.
 export const collabPrompt=(m,id,at)=>{if(m?.customType!=='collab-prompt')return null;const text=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');return text||hasImage?{id,role:'user',text:text.slice(-100000)||'Image attached',hasImage,at,from:String(m.details?.from||'Guest').slice(0,80)}:null;};
 // Background jobs (async bash, task subagents) as recorded in a session transcript. Scans append-only files incrementally.
+// The 32 files scanned last are kept (each holds its jobs' task text and output, ~1-3 MB for a task-heavy session); an
+// evicted one is scanned again from the start, which gives the same jobs in the same order.
 const jobScans=new Map();
 export async function scanJobs(file){
  let st;try{st=await fs.stat(file);}catch{return [];}
@@ -25,7 +27,8 @@ export async function scanJobs(file){
  if(st.size>c.offset){const fh=await fs.open(file,'r');try{
   const n=st.size-c.offset;const buf=Buffer.alloc(n);await fh.read(buf,0,n,c.offset);const end=buf.lastIndexOf(10);
   if(end>=0){for(const line of buf.subarray(0,end).toString('utf8').split('\n'))scanJobLine(c,line);c.offset+=end+1;}
- }finally{await fh.close();}jobScans.set(file,c);}
+ }finally{await fh.close();}}
+ jobScans.delete(file);jobScans.set(file,c);if(jobScans.size>32)jobScans.delete(jobScans.keys().next().value);
  return [...c.jobs.values()].sort((a,b)=>a.order-b.order);
 }
 const jobStatus=v=>{v=String(v||'').toLowerCase();return /fail|error|abort/.test(v)?'error':/cancel|kill/.test(v)?'cancelled':/run|pend|queue|start/.test(v)?'running':'done';};
@@ -38,7 +41,9 @@ function scanJobLine(c,line){
  let f;try{f=JSON.parse(line);}catch{return;}const at=f.timestamp||now();const m=f.message||{};
  if(call&&m.role==='assistant')for(const p of Array.isArray(m.content)?m.content:[]){if(p?.type!=='toolCall')continue;const a=p.arguments||{};
   if(p.name==='task'||a.async===true)c.calls.set(p.id,{name:p.name,intent:String(p.intent||a.i||''),command:typeof a.command==='string'?a.command.slice(0,2000):'',tasks:Array.isArray(a.tasks)?a.tasks:[],at});}
- if(result&&m.role==='toolResult'){const d=m.details||{};const info=c.calls.get(m.toolCallId)||{};const put=(id,job)=>{const prev=c.jobs.get(id);c.jobs.set(id,{...prev,...job,id,order:prev?.order??++c.order});};
+ // A call is needed until its result: OMP writes one per call (agent-loop's resultEmitted), and the other results that
+ // reuse an id (an ask re-answered, a pending call's synthetic result on a new branch) carry no job progress to name.
+ if(result&&m.role==='toolResult'){const d=m.details||{};const info=c.calls.get(m.toolCallId)||{};c.calls.delete(m.toolCallId);const put=(id,job)=>{const prev=c.jobs.get(id);c.jobs.set(id,{...prev,...job,id,order:prev?.order??++c.order});};
   if(m.toolName==='task'||d.async?.type==='task'){const prog=Array.isArray(d.progress)?d.progress:[];const results=Array.isArray(d.results)?d.results:[];
    for(const [i,p] of prog.entries()){const id=String(p.id||info.tasks?.[i]?.name||`task-${i}`);const r=results.find(r=>r?.id===p.id||r?.index===p.index);const spec=info.tasks?.find(t=>t?.name===p.id)||{};
     put(id,{type:'task',agent:String(p.agent||'task'),title:String(p.description||spec.description||spec.name||id).slice(0,300),task:String(p.task||spec.task||'').slice(0,6000),intent:info.intent,toolCallId:m.toolCallId,startedAt:info.at||at,status:d.async?'running':(m.isError||r?.exitCode>0||/fail|error|abort/i.test(String(r?.status||p.status||'')))?'error':'done',finishedAt:d.async?undefined:at,durationMs:d.async?undefined:(r?.durationMs??d.totalDurationMs),output:d.async?'':clip(r?.output??r?.result??'',8000)});}}
@@ -87,9 +92,23 @@ export async function lastContext(file){
  for(let i=lines.length-1;i>=0;i--){if(!lines[i].includes('"usage"'))continue;let f;try{f=JSON.parse(lines[i]);}catch{continue;}const m=f.message||{};if(f.type==='message'&&m.role==='assistant'&&usageTokens(m.usage))return usageTokens(m.usage);if(f.type==='compaction')return undefined;}
  return undefined;
 }
+// The last `limit` messages of a session file, from its last 12 MB (readTail's lines). Read and parsed in two steps: the
+// last limit × 8 KB first, which usually holds them (reading and parsing all 12 MB to keep 150 blocked the event loop for
+// 60-110 ms on a large file), and the rest only when those lines yield fewer and hold no context reset. Exact: a message
+// of the shorter tail is built from its own lines (a tool's result follows its call), and what they cannot see (calls,
+// results and context resets further up) touches only messages that are cut anyway, or cleared by a reset they hold.
 export async function importMessages(file,limit=400,stash){
- const frames=[];for(const line of (await readTail(file,12*1024*1024)).split('\n')){try{frames.push(JSON.parse(line));}catch{}}
- return entryMessages(frames,limit,stash);
+ const parse=(buf,cut)=>{const frames=[];if(cut)buf=buf.subarray(buf.indexOf(10)+1);for(const line of buf.toString('utf8').split('\n')){try{frames.push(JSON.parse(line));}catch{}}return frames;};
+ const fh=await fs.open(file,'r');try{
+  const {size}=await fh.stat(),start=Math.max(0,size-12*1024*1024),at=limit>0?Math.max(start,size-limit*8192):start;
+  const tail=Buffer.alloc(size-at);await fh.read(tail,0,tail.length,at);
+  if(at===start)return entryMessages(parse(tail,at>0),limit,stash);
+  // The shorter tail starts after its first newline; the rest of the 12 MB ends there.
+  const nl=tail.indexOf(10),end=nl<0?size:at+nl+1,frames=parse(tail.subarray(end-at),false);
+  const kept=entryMessages(frames,limit);if(kept.length>=limit||frames.some(f=>f?.type==='reset_boundary'))return stash?entryMessages(frames,limit,stash):kept;
+  const head=Buffer.alloc(end-start);await fh.read(head,0,head.length,start);
+  return entryMessages([...parse(head,start>0),...frames],limit,stash);
+ }finally{await fh.close();}
 }
 // OMP session entries (file lines or get_entries) as thread messages; user prompts keep their entry ID for branching.
 // stash stores tool-result images ([{mimeType,bytes}] → [{mimeType,id}]); without it they are left out.

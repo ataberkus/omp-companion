@@ -1,5 +1,6 @@
-// Dashboard files from local-dist/ (or options.staticDir): cache-busted asset URLs, ETags and the page CSP.
+// Dashboard files from local-dist/ (or options.staticDir): cache-busted asset URLs, ETags, gzip and the page CSP.
 import { createHash } from 'node:crypto';
+import { gzip } from 'node:zlib';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,11 @@ export function createStatic(ctx){
  // The page's own host as a ws: source too: older Safari doesn't count ws: under 'self' (the Screen page's WebSocket).
  const staticFiles=new Map();const csp=host=>`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self' ws://${host}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
  const digest=data=>createHash('sha1').update(data).digest('base64url').slice(0,12);
+ // Scripts, styles and icons gzipped (level 9) once per content hash, off the event loop. Phones reach the companion over
+ // plain HTTP, where browsers offer only gzip and deflate, and loaded app.js and app.css raw (556 KB, 160 KB gzipped) on
+ // every first visit and after every update. The page stays raw: it is small and carries the per-client token. A failed
+ // gzip sends the file raw.
+ const gz=new Map();const gzOf=(hash,data)=>{let p=gz.get(hash);if(!p){p=new Promise(r=>gzip(data,{level:9},(e,z)=>r(e?null:z)));gz.set(hash,p);if(gz.size>32)gz.delete(gz.keys().next().value);}return p;};
  const staticFile=async file=>{const st=await fs.stat(file);let c=staticFiles.get(file);if(c?.mtime!==st.mtimeMs||c.size!==st.size){const data=await fs.readFile(file);c={mtime:st.mtimeMs,size:st.size,data,hash:digest(data)};staticFiles.set(file,c);}return c;};
  const serveStatic=async({req,res,url,host})=>{
     if(req.method!=='GET')throw error('Method not allowed.',405);
@@ -23,8 +29,10 @@ export function createStatic(ctx){
      data=Buffer.from(html);hash=digest(data);}
     const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.woff2':'font/woff2','.zip':'application/zip'};
     const headers={'Content-Type':mime[ext]||'application/octet-stream','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':csp(host),'Cache-Control':ext!=='.html'&&url.searchParams.get('v')===hash?'public, max-age=31536000, immutable':'no-cache',ETag:`"${hash}"`};
+    // Each encoding has its own validator, so If-None-Match is compared once the encoding is chosen. Vary keeps CORS's Origin.
+    let body=data;if(['.js','.css','.svg'].includes(ext)&&data.length>=1024){headers.Vary=[res.getHeader('Vary'),'Accept-Encoding'].filter(Boolean).join(', ');if(/\bgzip\b/.test(req.headers['accept-encoding']||'')){const z=await gzOf(hash,data);if(z&&z.length<data.length){body=z;headers['Content-Encoding']='gzip';headers.ETag=`"${hash}-gz"`;}}}
     if(req.headers['if-none-match']===headers.ETag){res.writeHead(304,headers);res.end();return;}
-    res.writeHead(200,headers);res.end(data);return;
+    res.writeHead(200,headers);res.end(body);return;
    };
  return {digest,serveStatic};
 }

@@ -9,22 +9,29 @@ export async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}
 // `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
 // so the dashboard renders it with the same diff view as edit-tool records. Paths are as git prints them (b/ side).
 const unquoteGitPath=p=>/^".*"$/.test(p)?p.slice(1,-1).replace(/\\(["\\])/g,'$1').replace(/\\t/g,'\t').replace(/\\n/g,'\n'):p;
+// A file's lines stop being formatted once its text is past perFile (only the first perFile characters are kept), and a
+// file past the budget is read only up to its first hunk (path and op come before it): a regenerated lockfile or bundle
+// formatted megabytes of lines it then dropped, on every Working tree reload.
 export function gitDiffFiles(out,{budget=2*1024*1024,perFile=200*1024}={}){
  const files=[];
  for(const chunk of String(out||'').split(/^diff --git /m).slice(1)){
-  const lines=chunk.split('\n');let from='',to='',op='modify';const body=[];let o=0,n=0,inHunk=false,binary=false;
-  for(const l of lines.slice(1)){
+  // len: the length of body.join('\n').
+  const lines=chunk.split('\n');let from='',to='',op='modify';const body=[];let len=-1,o=0,n=0,inHunk=false,binary=false;const omitted=budget<=0;
+  for(let i=1;i<lines.length;i++){const l=lines[i];
    if(!inHunk){
     if(l.startsWith('new file mode'))op='create';else if(l.startsWith('deleted file mode'))op='delete';
     else if(l.startsWith('--- '))from=l.slice(4);else if(l.startsWith('+++ '))to=l.slice(4);
     else if(l.startsWith('Binary files '))binary=true;
    }
-   const h=l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-   if(h){if(body.length)body.push('');o=+h[1];n=+h[2];inHunk=true;continue;}
-   if(!inHunk)continue;
-   if(l.startsWith(' ')){body.push(` ${o}|${l.slice(1)}`);o++;n++;}
-   else if(l.startsWith('-')){body.push(`-${o}|${l.slice(1)}`);o++;}
-   else if(l.startsWith('+')){body.push(`+${n}|${l.slice(1)}`);n++;}
+   const h=l.charCodeAt(0)===64&&l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+   if(h){if(omitted)break;if(body.length){body.push('');len++;}o=+h[1];n=+h[2];inHunk=true;continue;}
+   if(!inHunk||len>perFile)continue;
+   const c=l.charCodeAt(0);let t;
+   if(c===32){t=` ${o}|${l.slice(1)}`;o++;n++;}
+   else if(c===45){t=`-${o}|${l.slice(1)}`;o++;}
+   else if(c===43){t=`+${n}|${l.slice(1)}`;n++;}
+   else continue;
+   body.push(t);len+=t.length+1;
   }
   // Git ends ---/+++ paths that contain spaces with a tab.
   const side=to&&to!=='/dev/null'?to:from;let p=unquoteGitPath(side.replace(/\t$/,'')).replace(/^[ab]\//,'');
@@ -115,13 +122,23 @@ async function gitTop(cwd){let prefix;try{prefix=(await gitRun(cwd,['rev-parse',
 export async function gitLog(s,limit=50){
  const cwd=s.cwd,lines=o=>o.split('\n').filter(Boolean),opt={timeout:15000};
  const top=await gitTop(cwd);
- const head=await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(o=>o.trim(),()=>'');
- const [branch,upstream,dirty]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'',gitRun(cwd,['status','--porcelain'],opt).then(o=>lines(o).length,()=>null)]);
- let ahead=0,behind=0,commits=[];
+ // One `status --porcelain=v2 --branch` instead of five git runs in three rounds: HEAD (branch.oid; '(initial)' while
+ // unborn), the branch (branch.head; '(detached)'), the upstream with ahead/behind (branch.ab, printed only while the
+ // upstream ref exists, as when @{u} resolves) and one line per changed path, as --porcelain prints. Should it fail (a
+ // huge repository's timeout, a broken index), the separate reads still show the branch and commits, with dirty unknown.
+ const st=await gitRun(cwd,['status','--porcelain=v2','--branch'],opt).then(o=>{const h={};let n=0;for(const l of lines(o)){if(l.startsWith('# ')){const i=l.indexOf(' ',2);h[l.slice(2,i)]=l.slice(i+1);}else n++;}return {h,n};},()=>null);
+ let head,branch,upstream,dirty=null,ahead=0,behind=0,commits=[];
+ if(st){const {h}=st,ab=/^\+(\d+) -(\d+)$/.exec(h['branch.ab']||'');
+  head=/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(h['branch.oid']||'')?h['branch.oid']:'';branch=h['branch.head']==='(detached)'?'':h['branch.head']||'';
+  upstream=head&&ab?h['branch.upstream']||'':'';if(upstream){ahead=+ab[1];behind=+ab[2];}dirty=st.n;}
+ else{
+  head=await gitRun(cwd,['rev-parse','--verify','HEAD'],{timeout:10000}).then(o=>o.trim(),()=>'');
+  [branch,upstream]=await Promise.all([gitRun(cwd,['branch','--show-current'],opt).then(o=>o.trim(),()=>''),head?gitRun(cwd,['rev-parse','--abbrev-ref','--symbolic-full-name','@{u}'],opt).then(o=>o.trim(),()=>''):'']);
+  if(head&&upstream)[behind,ahead]=(await gitRun(cwd,['rev-list','--left-right','--count',`${upstream}...HEAD`],opt)).trim().split(/\s+/).map(Number);
+ }
  if(head){
-  if(upstream)[behind,ahead]=(await gitRun(cwd,['rev-list','--left-right','--count',`${upstream}...HEAD`],opt)).trim().split(/\s+/).map(Number);
-  const mine=new Set(s.baseSha?await gitRun(cwd,['rev-list',`${s.baseSha}..HEAD`],opt).then(lines,()=>[]):[]);
-  commits=lines(await gitRun(cwd,['log','--no-color',`--format=%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%s`,'-n',String(limit),'HEAD'],opt)).map(l=>{const [sha,short,author,date,parents,subject]=l.split('\x1f');return {sha,short,author,date,merge:parents.split(' ').length>1,subject,session:mine.has(sha)};});
+  const [mine,log]=await Promise.all([s.baseSha?gitRun(cwd,['rev-list',`${s.baseSha}..HEAD`],opt).then(o=>new Set(lines(o)),()=>new Set()):new Set(),gitRun(cwd,['log','--no-color',`--format=%H%x1f%h%x1f%an%x1f%aI%x1f%P%x1f%s`,'-n',String(limit),'HEAD'],opt)]);
+  commits=lines(log).map(l=>{const [sha,short,author,date,parents,subject]=l.split('\x1f');return {sha,short,author,date,merge:parents.split(' ').length>1,subject,session:mine.has(sha)};});
  }
  return {cwd,top,branch,head:head.slice(0,12),upstream,ahead,behind,dirty,commits,limit};
 }

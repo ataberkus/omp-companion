@@ -98,6 +98,9 @@ export function createCliJobs(ctx){
  const {dataDir,ompExecutable,ompPrefix,sessionFileParam}=ctx;
  // Tools page: each run is a background job the dashboard polls; stdin is closed so a prompt fails instead of hanging.
  const cliJobs=[];const cliProcs=new Map();
+ // Each job's revision, bumped with every change to it: a poll naming the revision it holds gets that job back as
+ // unchanged instead of its output (up to 200 KB) again. Kept beside the job, so replies without revs=1 stay as they were.
+ const cliRevs=new WeakMap(),bumpCliRev=job=>{cliRevs.set(job,(cliRevs.get(job)||0)+1);},cliRev=job=>cliRevs.get(job)||0;
  async function cliArgs(body){
   const tool=CLI_TOOLS[body.tool],spec=tool&&Object.hasOwn(tool.actions,body.action)?tool.actions[body.action]:null;
   if(!spec||!Object.hasOwn(CLI_TOOLS,body.tool))throw error('Unknown OMP command.');
@@ -127,15 +130,15 @@ export function createCliJobs(ctx){
   const {spec,args,cwd}=await cliArgs(body);
   if(cliJobs.filter(j=>j.status==='running').length>=4)throw error('Four OMP commands are already running. Wait for one to finish.',409);
   const job={id:randomUUID(),tool:body.tool,action:body.action,command:'omp '+args.join(' '),cwd,status:'running',output:'',startedAt:now()};
-  cliJobs.unshift(job);cliJobs.splice(30);
+  cliJobs.unshift(job);cliJobs.splice(30);bumpCliRev(job);
   const child=spawn(ompExecutable,[...ompPrefix,...args],{cwd,stdio:['ignore','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});
   cliProcs.set(job.id,child);
-  const add=b=>{job.output=(job.output+b.toString()).slice(-200000);};
+  const add=b=>{job.output=(job.output+b.toString()).slice(-200000);bumpCliRev(job);};
   child.stdout.on('data',add);child.stderr.on('data',add);
-  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},spec.long?30*60000:3*60000);
-  const finish=(code,err)=>{if(job.status!=='running')return;clearTimeout(timer);cliProcs.delete(job.id);job.output=[job.output,err?.message,job.timedOut?'Timed out.':job.stopped?'Stopped.':''].filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-200000)||'(no output)';job.exitCode=code;job.status=code===0&&!err?'done':'error';job.finishedAt=now();};
+  const timer=setTimeout(()=>{job.timedOut=true;bumpCliRev(job);child.kill();},spec.long?30*60000:3*60000);
+  const finish=(code,err)=>{if(job.status!=='running')return;clearTimeout(timer);cliProcs.delete(job.id);job.output=[job.output,err?.message,job.timedOut?'Timed out.':job.stopped?'Stopped.':''].filter(Boolean).join('\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').trim().slice(-200000)||'(no output)';job.exitCode=code;job.status=code===0&&!err?'done':'error';job.finishedAt=now();bumpCliRev(job);};
   child.on('error',e=>finish(null,e));child.on('close',code=>finish(code));
   return job;
  }
- return {cliJobs,cliProcs,runCli};
+ return {cliJobs,cliProcs,runCli,cliRev,bumpCliRev};
 }
