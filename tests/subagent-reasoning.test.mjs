@@ -116,6 +116,14 @@ test('background reports the reasoning level each subagent last ran with, and no
   const res = await fetch(`http://127.0.0.1:${app.server.address().port}/api/background?file=${encodeURIComponent(parent)}`, { headers: { Authorization: 'Bearer ' + app.token } });
   const levels = Object.fromEntries((await res.json()).subagents.map(x => [x.name, x.thinking]));
   assert.deepEqual(levels, { Auto: 'high', Suffix: 'medium', Changed: 'xhigh', Unknown: '' });
+  // The subagent page's header reads the same level from the transcript itself.
+  const shown = {};
+  for (const name of Object.keys(levels)) {
+    const tx = await fetch(`http://127.0.0.1:${app.server.address().port}/api/transcript?file=${encodeURIComponent(join(sub, name + '.jsonl'))}`, { headers: { Authorization: 'Bearer ' + app.token } });
+    assert.equal(tx.status, 200);
+    shown[name] = (await tx.json()).thinking;
+  }
+  assert.deepEqual(shown, levels);
 });
 
 test('background gives running and task-linked subagents the model, level and start time from their own transcripts', async t => {

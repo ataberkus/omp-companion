@@ -36,7 +36,8 @@ export function historyRoutes(ctx){
     const thought=[...subagentThoughts.values()].find(t=>t.file&&samePath(t.file,file));
     const active=thought?runners.has(thought.parentId)&&thought.active:undefined;
     if(active&&thought.streaming&&thought.text&&!messages.some(m=>m.role==='thinking'&&m.sourceTimestamp!==undefined&&m.sourceTimestamp===thought.sourceTimestamp))messages.push({id:thought.id,role:'thinking',text:thought.text,at:thought.at,sourceTimestamp:thought.sourceTimestamp});
-    tagged(r,{...head,file,result,active,updatedAt:new Date(Math.max(st.mtimeMs,active?new Date(thought.at).getTime():0)).toISOString(),messages});return;
+    // `thinking` is the level it ran with, like the Activity panel's: the spawn suffix and request effort count, not only a level change.
+    tagged(r,{...head,thinking:head.reasoning||head.thinking,file,result,active,updatedAt:new Date(Math.max(st.mtimeMs,active?new Date(thought.at).getTime():0)).toISOString(),messages});return;
    },
    'GET /api/log':async({url,json})=>{const file=insideSessions(url.searchParams.get('file'),['.log']);const fh=await fs.open(file,'r').catch(()=>{throw error('Log not found.',404);});try{const {size}=await fh.stat();const n=Math.min(size,128*1024);const buf=Buffer.alloc(n);await fh.read(buf,0,n,size-n);json({file,size,text:buf.toString('utf8')});}finally{await fh.close();}return;},
  };
