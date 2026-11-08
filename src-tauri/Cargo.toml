@@ -20,9 +20,14 @@ dunce = "1"
 parking_lot = "0.12"
 tauri-plugin-updater = "2"
 
-# The installer's quit-for-update event (quit_on_installer_request in src/main.rs).
+# The installer's quit-for-update event (quit_on_installer_request in src/main.rs); the job object that holds Bun and
+# everything it starts (src/host.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# Ends Bun's process group (src/host.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1

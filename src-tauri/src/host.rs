@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +25,74 @@ pub struct Host {
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     next_id: AtomicU64,
+    tree: Tree,
+}
+
+// Bun and every process it starts, however deep. Killing Bun alone (or Bun exiting after quit) left the rest running:
+// processes that OMP's tools and MCP servers start through cmd or .cmd shims, terminals opened with `start`. libuv ends
+// Bun's direct children with it, but lets their own children leave its job. On Windows those inherit Bun's listening socket,
+// so the next launch found port 4545 taken by a process whose owner had exited and refused to start ("already running").
+// Windows: a job object that allows no breakaway, so those grandchildren stay in it. Its last handle closing (the app
+// exiting, even by a crash) ends every process in it. Bun is assigned right after it starts, before it has loaded anything.
+#[cfg(windows)]
+struct Tree(windows_sys::Win32::Foundation::HANDLE);
+// Unix: Bun leads its own process group, which its children join unless they start their own session.
+#[cfg(unix)]
+struct Tree(i32);
+
+// The job handle is only passed to job APIs, which may be called from any thread.
+#[cfg(windows)]
+unsafe impl Send for Tree {}
+#[cfg(windows)]
+unsafe impl Sync for Tree {}
+
+#[cfg(windows)]
+impl Tree {
+    fn new(child: &Child) -> Result<Tree, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(format!("Could not create a job object for the companion: {}", std::io::Error::last_os_error()));
+        }
+        let tree = Tree(job);
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        let ok = unsafe {
+            SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits as *const _ as *const _, size) != 0
+                && AssignProcessToJobObject(job, child.as_raw_handle()) != 0
+        };
+        if !ok {
+            return Err(format!("Could not put the companion in a job object: {}", std::io::Error::last_os_error()));
+        }
+        Ok(tree)
+    }
+
+    fn end(&self) {
+        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Tree {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(unix)]
+impl Tree {
+    fn new(child: &Child) -> Result<Tree, String> {
+        Ok(Tree(child.id() as i32))
+    }
+
+    fn end(&self) {
+        unsafe { libc::kill(-self.0, libc::SIGKILL) };
+    }
 }
 
 pub struct Ready {
@@ -54,7 +124,17 @@ pub fn spawn(
     // A GUI app has no console; without this flag Windows opens one for Bun.
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(unix)]
+    cmd.process_group(0);
     let mut child = cmd.spawn().map_err(|e| format!("Could not start the bundled Bun: {e}"))?;
+    let tree = match Tree::new(&child) {
+        Ok(tree) => tree,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -134,7 +214,7 @@ pub fn spawn(
         });
     }
 
-    let host = Host { child: Mutex::new(child), stdin: Mutex::new(stdin), pending, next_id: AtomicU64::new(1) };
+    let host = Host { child: Mutex::new(child), stdin: Mutex::new(stdin), pending, next_id: AtomicU64::new(1), tree };
     match ready_rx.recv_timeout(Duration::from_secs(60)) {
         Ok(Ok(ready)) => Ok((host, ready)),
         Ok(Err(e)) => {
@@ -188,18 +268,21 @@ impl Host {
         matches!(self.child.lock().try_wait(), Ok(None))
     }
 
-    /// Waits for the process to exit; kills it once `timeout` passes.
+    /// Waits for the process to exit; kills it once `timeout` passes. Either way, then ends every process it started.
     pub fn wait_exit(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         let mut child = self.child.lock();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) if Instant::now() >= deadline => break,
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(100)),
             }
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        self.tree.end();
     }
 }

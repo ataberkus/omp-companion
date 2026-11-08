@@ -223,6 +223,8 @@ fn recover(app: &AppHandle, mut reason: String) {
     } else if hung {
         reason = format!("{headline}\n\n{reason}");
     }
+    // What the crashed Bun started is still running and, on Windows, holds its port: the restart would find it taken.
+    shell.host().wait_exit(Duration::ZERO);
     loop {
         let log = log_crash(app, &reason);
         let crashes = {
@@ -966,6 +968,8 @@ fn quit(app: &AppHandle, for_update: bool) {
 // Quit and updates: the tray goes first so nothing starts new work, then close() pauses running sessions, saves
 // workspace.json and stops every OMP session. For an update (resume) the host also writes the IDs of the sessions it
 // paused to its update note before replying, and the next launch resumes them; Quit, sign-out and crash recovery don't.
+// wait_exit then ends whatever Bun leaves running (or Bun itself, should close() hang), so nothing holds the port or OMP's
+// files once the app exits.
 fn stop_companion(app: &AppHandle, resume: bool) {
     let shell = app.state::<Shell>();
     let _ = app.remove_tray_by_id("main");
