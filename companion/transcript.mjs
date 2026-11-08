@@ -15,6 +15,12 @@ export function tanMessage(m,id,at){
  const work=String(m.details?.work||'').replace(/\s+/g,' ').trim();
  return {id,role:'system',text:`Tangent dispatched [task] ${String(m.details?.jobId||'unknown')}${work?` — ${work.length>56?work.slice(0,55)+'…':work}`:''}`,at};
 }
+// billion-context's /acp, /acp-cache and /acp-rule reports (pi.sendMessage with customType bili-*): shown as a system note.
+export function biliMessage(m,id,at){
+ if(typeof m?.customType!=='string'||!m.customType.startsWith('bili-')||m.display!==true)return null;
+ const text=contentText(m.content).trim();
+ return text?{id,role:'system',text:text.slice(-100000),at}:null;
+}
 // A collab guest's prompt as OMP stores it on the host (a `collab-prompt` custom message): a user message with its author.
 export const collabPrompt=(m,id,at)=>{if(m?.customType!=='collab-prompt')return null;const text=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');return text||hasImage?{id,role:'user',text:text.slice(-100000)||'Image attached',hasImage,at,from:String(m.details?.from||'Guest').slice(0,80)}:null;};
 // Transcripts keep only their newest messages; a long autonomous run can push the user's prompt out of that window.
@@ -144,7 +150,7 @@ export function entryMessages(frames,limit=400,stash,info={}){
    const v=contentText(m.content).trim();if(v)out.push({id:f.id||randomUUID(),role:'assistant',text:v.slice(-100000),at,model:m.provider&&m.model?`${m.provider}/${m.model}`:undefined});
    for(const c of Array.isArray(m.content)?m.content:[])if(c?.type==='toolCall'){const tool=toolRecord(c.name,c.arguments,c.intent);tool.status='done';const msg={id:'tool-'+c.id,role:'tool',tool,text:toolSummary(tool),at};tools.set(c.id,msg);out.push(msg);}
   }
-  else if(f.type==='custom_message'||m.role==='custom'){const card=collabPrompt(m,f.id||randomUUID(),at)||advisorMessage(m,f.id||randomUUID(),at)||tanMessage(m,f.id||randomUUID(),at);if(card)out.push(card);}
+  else if(f.type==='custom_message'||m.role==='custom'){const card=collabPrompt(m,f.id||randomUUID(),at)||advisorMessage(m,f.id||randomUUID(),at)||tanMessage(m,f.id||randomUUID(),at)||biliMessage(m,f.id||randomUUID(),at);if(card)out.push(card);}
   else if(m.role==='toolResult'){const msg=tools.get(m.toolCallId);if(msg){msg.tool.result=clip(contentText(m.content),8000);msg.tool.status=m.isError?'error':'done';const files=editFiles(m.details);if(files)msg.tool.files=files;msg.text=toolSummary(msg.tool);if(stash)shots.set(msg,m.content);}}
   else if(m.role==='bashExecution'){const tool=shellRecord(m.command,m);out.push({id:'tool-'+(f.id||randomUUID()),role:'tool',tool,text:toolSummary(tool),at});}
  }

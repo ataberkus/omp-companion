@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { now, error, contentText, samePath, clip } from './util.mjs';
 import { toolImages } from './images.mjs';
 import { startWork, finishWork, askQuestion, parseAdvisorStatus, btwView, subagentView, goalView, loopView } from './session-views.mjs';
-import { advisorMessage, tanMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt } from './transcript.mjs';
+import { advisorMessage, tanMessage, biliMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt } from './transcript.mjs';
 import { launchArgs } from './launch.mjs';
 // What a session resumed after a restart is told: its interrupted turn is in OMP's session file, so it carries on from there.
 const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
@@ -101,7 +101,7 @@ export function createRunner(ctx){
    if(prompt){const own=f.mirrored&&[...s.messages].reverse().find(x=>x.role==='user'&&!x.from&&!x.entryId&&!x.ompAt&&x.text.trim()===prompt.text.trim());
     if(own){own.from=prompt.from;if(own.steer){s.messages.splice(s.messages.indexOf(own),1);delete own.steer;own.at=now();place(s,own);}}
     else{const msg=append(s,'user',prompt.text,prompt.id);if(msg){msg.from=prompt.from;if(prompt.hasImage)msg.hasImage=true;}}}
-   else if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}const tan=tanMessage(m,randomUUID(),now());if(tan)append(s,'system',tan.text,tan.id);}
+   else if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}const tan=tanMessage(m,randomUUID(),now());if(tan)append(s,'system',tan.text,tan.id);const bili=biliMessage(m,randomUUID(),now());if(bili)append(s,'system',bili.text,bili.id);}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}
   if(f.type==='tool_execution_end'){let msg=s.messages.find(m=>m.id==='tool-'+f.toolCallId);if(!msg){msg=append(s,'tool','tool','tool-'+(f.toolCallId||randomUUID()));msg.tool=toolRecord(f.toolName,{},'');}
