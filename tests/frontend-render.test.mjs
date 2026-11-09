@@ -367,12 +367,17 @@ test('crafted markdown renders fast and deep nesting does not overflow the stack
     '>'.repeat(4000) + ' x',
   ];
   await renderReply('warm up **the** [jit](https://x.dev)');
+  // Best of 3: a shared CI runner can stall one render for hundreds of ms; a real
+  // superlinear path is slow on every run, so the minimum still catches it.
   for (const text of inputs) {
-    const t0 = performance.now();
-    const html = await renderReply(text);
-    const ms = performance.now() - t0;
+    let ms = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      const html = await renderReply(text);
+      ms = Math.min(ms, performance.now() - t0);
+      assert.match(html, /data-key="msg:m1"/);
+    }
     assert.ok(ms < 50, `${JSON.stringify(text.slice(0, 12))}… took ${ms.toFixed(1)} ms`);
-    assert.match(html, /data-key="msg:m1"/);
   }
 });
 
