@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { exists, now, error, text, contentText, resolveDir } from './util.mjs';
 import { IMAGE_EXT, chatImages } from './images.mjs';
+import { ENHANCE_MODES, ENHANCE_LOOKUP_ENV } from './enhance-prompts.mjs';
 // Enhance prompt: a one-shot read-only `omp -p` that rewrites a composer draft.
 // An `enhance` role (model[:thinking] in OMP's config.yml modelRoles) wins unless the cached model list shows its model is not
 // available (OMP would fail the run with `Model "@enhance" not found`); otherwise the enhancer runs on the composer's model at
@@ -65,13 +66,16 @@ export async function modelRoles(){
  return {roles,defaultThinking};
 }
 export function createEnhance(ctx){
- const {options,store,dataDir,ompExecutable,ompPrefix,enhanceOverlay,enhanceSystem,enhanceGuard,modelChoice}=ctx;
+ const {options,store,dataDir,ompExecutable,ompPrefix,enhanceOverlay,enhanceSystems,enhanceGuard,modelChoice}=ctx;
  // Enhance jobs: one read-only `omp -p` per click; the dashboard polls GET /api/enhance until it settles.
  const enhanceJobs=new Map();
  async function startEnhance(body){
  // A draft may be only images (as a prompt may): no text, at least one image; chatImages validates them below.
  const imageOnly=typeof body.text==='string'&&!body.text.trim()&&Array.isArray(body.images)&&body.images.length>0;
  const draft=imageOnly?'':text(body.text,'Draft',200000);
+  // mode: full | notest | fast (ENHANCE_MODES); without one, the mode picked in Settings › Enhance.
+  const mode=body.mode??store.enhanceMode;
+  if(!Object.hasOwn(ENHANCE_MODES,mode))throw error('Unknown enhance mode.');
   if(!!body.session===!!body.path)throw error('Choose a session or a folder to enhance in.');
   const s=body.session?store.sessions.find(x=>x.id===body.session):null;
   if(body.session&&!s)throw error('Session not found.',404);
@@ -86,8 +90,8 @@ export function createEnhance(ctx){
   const id=randomUUID(),dir=path.join(dataDir,'enhance',id);
   const files=[];
   if(images.length){await fs.mkdir(dir,{recursive:true,mode:0o700});for(const [i,img] of images.entries()){const f=path.join(dir,`image-${i+1}.${IMAGE_EXT[img.mimeType]||'png'}`);await fs.writeFile(f,Buffer.from(img.data,'base64'),{mode:0o600});files.push(f);}}
-  const job={id,sessionId:s?.id||null,status:'running',step:'',model:pick.label,text:'',error:'',dir};
-  const child=spawn(ompExecutable,[...ompPrefix,...(options.enhancePrefix||[]),...enhanceArgs({model:pick.model,thinking:pick.thinking,overlay:enhanceOverlay,system:enhanceSystem,guard:enhanceGuard,images:files})],{cwd,stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0'}});
+  const job={id,sessionId:s?.id||null,status:'running',step:'',model:pick.label,mode,text:'',error:'',dir};
+  const child=spawn(ompExecutable,[...ompPrefix,...(options.enhancePrefix||[]),...enhanceArgs({model:pick.model,thinking:pick.thinking,overlay:enhanceOverlay,system:enhanceSystems[mode],guard:enhanceGuard,images:files})],{cwd,stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0',[ENHANCE_LOOKUP_ENV]:String(ENHANCE_MODES[mode].lookups)}});
   job.child=child;enhanceJobs.set(id,job);
   let stderr='',answer='';
   child.stdin.on('error',()=>{});child.stdin.end(enhanceInput(draft,s?.messages??[]),'utf8');
@@ -109,7 +113,7 @@ export function createEnhance(ctx){
    setTimeout(()=>{if(enhanceJobs.get(id)===job)enhanceJobs.delete(id);},5*60000).unref();
    resolve();};
    child.on('error',e=>finish(null,e));child.on('close',code=>finish(code));});
-  return {id,model:job.model};
+  return {id,model:job.model,mode};
  }
  // Resolves once the enhancer process has exited and its image folder is gone.
  async function stopEnhance(job){if(job.child){job.stopped=true;job.child.kill();}await job.closed;}

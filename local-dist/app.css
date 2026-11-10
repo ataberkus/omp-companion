@@ -413,6 +413,8 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .composer-bar .btn.ghost:hover:not(:disabled){background:transparent;border-color:var(--accent);color:var(--fg)}
 .composer-bar .btn.ghost.on{border-color:var(--input);color:var(--fg)}
 .composer-bar :is(.enhance-btn,[data-act=abort]){width:30px;padding:0}
+.composer-bar .enhance-mode,#homeEnhance .enhance-mode{height:30px;border-radius:8px;padding:0 6px;font-size:12.5px;margin-left:6px}
+@media (max-width:820px),(pointer:coarse){.composer-bar .enhance-mode,#homeEnhance .enhance-mode{height:44px}}
 .composer-bar .model-chip>span[aria-hidden]{color:var(--faint);font-size:11px}
 /* Touch: the toolbar keeps one height, now the 44px of its buttons. */
 @media (max-width:820px),(pointer:coarse){.composer-bar .model-chip{height:44px}}

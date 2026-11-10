@@ -841,23 +841,33 @@
   // ---------- enhance prompt: a read-only OMP run rewrites the draft with project context ----------
   // Enhanceable: text that is not a slash or shell command, or no text with images attached (as Send accepts).
   const enhanceBlocked = (v, images) => v.trim() ? /^[/!]/.test(v.trim()) : !images;
+  // Enhance modes (companion/enhance-prompts.mjs ENHANCE_MODES); the one picked in Settings › Enhance is S.store.enhanceMode.
+  const ENHANCE_MODES = [
+    ['full', 'Full spec', 'Complete architect spec: inferred requirements, assumptions, and a Done when that adds tests for the new behaviour. Up to 12 lookups.'],
+    ['notest', 'No new tests', 'The same complete spec, but the agent only runs the repo\'s existing typecheck, lint, tests or build: no new tests, no browser or dev-server smoke runs. Up to 12 lookups.'],
+    ['fast', 'Fast', 'Lean prompt: the request, at most 5 must-have notes, assumptions, and the same light checks. Up to 6 lookups.'],
+  ];
+  const enhanceModeLabel = mode => (ENHANCE_MODES.find(m => m[0] === mode) || ENHANCE_MODES[0])[1];
+  // ✨ plus its mode picker; the picker saves the mode for every composer (same as Settings › Enhance › Mode) and hides while one runs.
   function enhanceButton(view, draft) {
     if (S.enhance.has(view)) return `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`;
     const images = S.attachments.some(a => a.view === view);
     const why = S.sending.has(view) ? 'Wait until the message is sent'
       : !enhanceBlocked(draft, images) ? '' : draft.trim() ? 'Slash and shell commands are not enhanced' : 'Type a draft or attach an image to enhance';
-    return `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="${why || 'Rewrite this draft with project context (Ctrl+Shift+E)'}" ${why ? 'disabled' : ''}>✨</button>`;
+    const mode = S.store?.enhanceMode || 'full';
+    return `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="${why || `Rewrite this draft with project context: ${esc(enhanceModeLabel(mode))} (Ctrl+Shift+E)`}" ${why ? 'disabled' : ''}>✨</button>`
+      + `<select class="enhance-mode" data-enhmode aria-label="Enhance mode" title="Enhance mode">${ENHANCE_MODES.map(([v, t, d]) => `<option value="${v}" title="${esc(d)}" ${v === mode ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
   // An enhance counts as running from here (✕, read-only composer, no draft pull or discard), before its request goes out.
   function enhanceJob(view, original) {
-    const job = { id: null, original, model: '', step: '' };
+    const job = { id: null, original, model: '', mode: S.store?.enhanceMode, step: '' };
     S.enhance.set(view, job); refreshComposer();
     return job;
   }
   async function startEnhance(view, body, original, job = enhanceJob(view, original)) {
     let r;
-    try { r = await api('/enhance', body, { timeout: 60000 }); }
+    try { r = await api('/enhance', { ...body, mode: job.mode || 'full' }, { timeout: 60000 }); }
     catch (e) {
       if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); }
       // The draft session New-session Enhance made is gone (another dashboard left it): its draft goes back to New session.
@@ -866,7 +876,7 @@
     }
     // Cancelled while the request was in flight: stop the job it just created.
     if (S.enhance.get(view) !== job) { api('/enhance/stop', { id: r.id }).catch(() => {}); return; }
-    Object.assign(job, { id: r.id, model: r.model }); refreshComposer();
+    Object.assign(job, { id: r.id, model: r.model, mode: r.mode }); refreshComposer();
     pollEnhance(view);
   }
   async function pollEnhance(view) {
@@ -2765,7 +2775,7 @@
       status = `<span class="grow">Plan ready for review. Approval is required before implementation.</span><button class="btn sm primary" data-plan-review="${esc(s.id)}" ${S.planBusy.has(s.id) ? 'disabled' : ''}>Review plan</button>`;
       placeholder = 'Type feedback to keep planning without approving…';
     }
-    if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…${s?.draft ? ' · Draft kept if you leave' : ''}</span>`; }
+    if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing (${esc(enhanceModeLabel(enhancing.mode))}) with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…${s?.draft ? ' · Draft kept if you leave' : ''}</span>`; }
     else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft. Not before this
@@ -4374,15 +4384,18 @@
   // without one it follows the composer's model and reasoning level.
   function enhanceSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (q.length && !q.every(w => 'enhance prompt enhancer model reasoning thinking level'.includes(w))) return '';
+    if (q.length && !q.every(w => 'enhance prompt enhancer model reasoning thinking level mode full spec tests notest fast'.includes(w))) return '';
     const roles = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = roles?.value?.enhance || '';
-    if (S.set.changed && !role) return '';
+    const mode = S.store?.enhanceMode || 'full';
+    if (S.set.changed && !role && mode === 'full') return '';
     const r = splitSel(role), label = role ? modelLabel(r.sel, r.thinking) || role : "Composer's model";
     const levels = S.models?.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
     // With a role, the row edits the role's `:level` suffix; no suffix means OMP's default level (shown, not offered).
     const lv = r.thinking;
     const opts = !lv ? [['', 'OMP default'], ...levels.map(l => [l, l])] : (levels.includes(lv) ? levels : [lv, ...levels]).map(l => [l, l]);
     return `<section class="set-group" id="sg-enhance"><h2>✨ Enhance <small>prompt enhancer</small></h2>
+      <div class="set-row ${mode !== 'full' ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-mode-name">Mode${mode !== 'full' ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${esc(ENHANCE_MODES.find(m => m[0] === mode)?.[2] || '')} Used by ✨ and Ctrl+Shift+E, saved by the companion.</div>${mode !== 'full' ? '<div class="set-def">Default: <code>Full spec</code></div>' : ''}</div>
+        <div class="set-ctl"><select data-enhmode aria-labelledby="enh-mode-name">${ENHANCE_MODES.map(([v, t]) => `<option value="${v}" ${v === mode ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div>
       <div class="set-row ${role ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-model-name">Model${role ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Composer's model: the model of the session (or New session) you enhance in. A picked model is saved as OMP's <code>enhance</code> model role, together with its reasoning level.</div></div>
         <div class="set-ctl">${roles ? `<button class="model-chip" data-mmkey="modelRoles" data-mmname="enhance" title="${esc(role || "Composer's model")}" aria-label="Enhance model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>${role ? `<button class="btn sm ghost" data-mmdel="modelRoles" data-mmname="enhance">Use composer's model</button>` : ''}` : '<span class="muted">Needs OMP settings</span>'}</div></div>
       <div class="set-row"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level</div><div class="set-desc">${role ? `Saved with the <code>enhance</code> model role${lv ? '' : '. None set: OMP\'s default level applies, which may be slow. Pick one'}.` : "The composer's reasoning level: the level picked for the session (or New session) you enhance in."}</div></div>
@@ -4411,6 +4424,15 @@
   function saveEnhanceThinking(thinking) {
     const x = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = x?.value?.enhance;
     if (role && thinking) saveSetting('modelRoles', { ...x.value, enhance: splitSel(role).sel + ':' + thinking });
+  }
+  // Applied at once (✨ title, every composer's picker), then saved; a failed save puts the previous mode back.
+  async function saveEnhanceMode(mode) {
+    const prev = S.store?.enhanceMode || 'full';
+    const redraw = () => { if (current().kind === 'settings') renderSettings(); else refreshComposer(); };
+    if (S.store) S.store.enhanceMode = mode;
+    redraw();
+    try { await api('/enhance-mode', { mode }); }
+    catch (e) { if (S.store) S.store.enhanceMode = prev; toast(e.message, 'err'); redraw(); }
   }
   function settingRow(x) {
     const id = setId(x.key), long = x.description?.length > 220, open = S.set.descOpen.has(x.key);
@@ -5519,6 +5541,7 @@
     else if (e.target.dataset?.mcpToggle) saveMcp(e.target.dataset.mcpToggle, e.target.checked);
     else if (e.target.dataset?.set) settingInput(e.target);
     else if (e.target.matches?.('[data-enhthinking]')) saveEnhanceThinking(e.target.value);
+    else if (e.target.matches?.('[data-enhmode]')) saveEnhanceMode(e.target.value);
     else if (e.target.matches?.('[data-editor]')) saveEditor(e.target.value);
     else if (e.target.matches?.('[data-viewed]')) { const sec = e.target.closest('[data-cpath]'); if (sec) setViewed(current().parent, sec.dataset.cpath, e.target.dataset.viewed, e.target.checked); }
     else if (e.target.matches?.('[data-wtbase]')) { const id = current().parent.slice(2), w = S.wt.get(id) || {}; w.base = e.target.value === 'head' ? 'head' : 'start'; w.data = null; w.error = ''; S.wt.set(id, w); S.lastSig = ''; loadWorktree(id, true); }

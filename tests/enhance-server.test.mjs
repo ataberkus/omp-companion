@@ -25,6 +25,7 @@ import { join } from 'node:path';
 const out = ${JSON.stringify(dir)};
 writeFileSync(join(out, 'pid-' + process.pid), '');
 writeFileSync(join(out, 'argv.json'), JSON.stringify(process.argv.slice(2)));
+writeFileSync(join(out, 'lookups.txt'), process.env.OMP_ENHANCE_LOOKUP_LIMIT || '');
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', d => { input += d; });
@@ -181,6 +182,38 @@ test('lookup guard keeps the enhancer inside the repository and within 12 lookup
   let handler; guard({ on: (_, h) => { handler = h; } });
   const run = []; for (let i = 0; i < 14; i++) run.push(await decide('read', { path: 'src/a.ts' }, handler));
   assert.deepEqual(run, [...Array(12).fill('allow'), 'block', 'block']);
+});
+
+test('the guard takes its lookup budget from OMP_ENHANCE_LOOKUP_LIMIT', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'enh-guard-env-'));
+  t.after(() => { delete process.env.OMP_ENHANCE_LOOKUP_LIMIT; return rm(root, { recursive: true, force: true }); });
+  await writeFile(join(root, 'guard.mjs'), internals.ENHANCE_GUARD);
+  process.env.OMP_ENHANCE_LOOKUP_LIMIT = '6';
+  const { default: guard } = await import(pathToFileURL(join(root, 'guard.mjs')).href);
+  let handler; guard({ on: (_, h) => { handler = h; } });
+  const run = []; for (let i = 0; i < 7; i++) run.push((await handler({ toolName: 'grep', input: { pattern: 'x' } }, { cwd: root }))?.block ? 'block' : 'allow');
+  assert.deepEqual(run, [...Array(6).fill('allow'), 'block']);
+});
+
+test('each mode runs its own system prompt and lookup budget; the saved mode is the default', async t => {
+  const { dir, call, settle } = await boot(t);
+  const run = async body => {
+    const start = await call('/enhance', { session: 'session', text: 'x', ...body });
+    assert.equal(start.status, 202);
+    assert.equal((await settle(start.body.id)).status, 'done');
+    const argv = JSON.parse(await readFile(join(dir, 'argv.json'), 'utf8'));
+    const system = argv.find(a => a.startsWith('--system-prompt=')).slice('--system-prompt='.length);
+    return { mode: start.body.mode, prompt: await readFile(system, 'utf8'), lookups: await readFile(join(dir, 'lookups.txt'), 'utf8') };
+  };
+  for (const mode of ['full', 'notest', 'fast']) {
+    const r = await run({ mode });
+    assert.deepEqual(r, { mode, prompt: internals.ENHANCE_MODES[mode].system, lookups: String(internals.ENHANCE_MODES[mode].lookups) });
+  }
+  assert.equal((await run({})).mode, 'full');
+  assert.equal((await call('/enhance-mode', { mode: 'fast' })).status, 200);
+  assert.equal((await run({})).mode, 'fast');
+  assert.equal((await call('/enhance-mode', { mode: 'nope' })).status, 400);
+  assert.equal((await call('/enhance', { session: 'session', text: 'x', mode: 'nope' })).status, 400);
 });
 
 test('stdin round trip: draft and images reach the enhancer, never argv', async t => {

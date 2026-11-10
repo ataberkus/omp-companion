@@ -84,10 +84,10 @@ test('Enhance replaces the draft, Undo restores it, Send is blocked meanwhile', 
   const d = await boot({ sessions: [idle('a')], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m' } : polls() } });
   await d.type('fix it');
   await d.fire('click', { target: d.act('enhance') });
-  assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it' }]);
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it', mode: 'full' }]);
   assert.ok(d.calls.some(c => c.url === '/api/commands?session=a'), 'OMP is started alongside');
   assert.equal(d.input.readOnly, true);
-  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing with m · reading src\/a\.js…/);
+  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing \(Full spec\) with m · reading src\/a\.js…/);
   assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Cancel enhance"[^>]*>✕</);
   await d.key('Enter');
   assert.ok(!d.calls.some(c => c.body?.type === 'prompt'), 'Enter does not send while enhancing');
@@ -97,6 +97,25 @@ test('Enhance replaces the draft, Undo restores it, Send is blocked meanwhile', 
   assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Enhance prompt"[^>]*>✨</);
   d.toastAction('Undo');
   assert.equal(d.input.value, 'fix it');
+});
+
+test('the composer mode picker switches the mode at once; a failed save puts the previous mode back', async () => {
+  let refuse = false;
+  const d = await boot({ sessions: [idle('a')], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m', mode: body.mode } : { status: 'running', step: '' }, '/enhance-mode': () => refuse ? { httpStatus: 500, error: 'disk full' } : { mode: 'fast' } } });
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /data-enhmode[^>]*>.*<option value="full" [^>]*selected/);
+  await d.type('fix it');
+  const pick = mode => d.fire('change', { target: d.node('', { tagName: 'SELECT', value: mode, matches: s => s === '[data-enhmode]' }) });
+  await pick('fast');
+  assert.deepEqual(d.posts('/enhance-mode'), [{ mode: 'fast' }]);
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /title="Rewrite this draft with project context: Fast/);
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /<option value="fast" [^>]*selected/);
+  refuse = true;
+  await pick('notest');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /<option value="fast" [^>]*selected/, 'back to the saved mode');
+  await d.fire('click', { target: d.act('enhance') });
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it', mode: 'fast' }]);
+  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing \(Fast\)/);
+  assert.doesNotMatch(d.elements.get('enhanceSlot').innerHTML, /data-enhmode/, 'no picker while it runs');
 });
 
 test('an edited draft is not overwritten; the offer toast applies it', async () => {
@@ -136,7 +155,7 @@ for (const status of ['review', 'done']) {
     await d.type('fix it');
     assert.doesNotMatch(enhanceSlot(d), /disabled/);
     await d.fire('click', { target: d.act('enhance') });
-    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it' }]);
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it', mode: 'full' }]);
   });
   test(`${status}: an image with no text is enhanced, slash and shell drafts say why they are not`, async () => {
     const d = await boot({ sessions: [idle('a', { status })], routes: enhanceRoutes() });
@@ -147,7 +166,7 @@ for (const status of ['review', 'done']) {
     assert.match(enhanceSlot(d), /title="Slash and shell commands are not enhanced" disabled>✨/);
     await d.type('');
     await d.fire('click', { target: d.act('enhance') });
-    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: '', images: shot, preview: shotPreview }]);
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: '', images: shot, preview: shotPreview, mode: 'full' }]);
   });
   test(`${status}: a draft restored on switching back enables ✨ without typing`, async () => {
     const d = await boot({ sessions: [idle('a', { status }), idle('b', { status })], routes: enhanceRoutes() });
@@ -169,7 +188,7 @@ for (const status of ['review', 'done']) {
     await d.type('again');
     assert.doesNotMatch(enhanceSlot(d), /disabled/);
     await d.fire('click', { target: d.act('enhance') });
-    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'again' }]);
+    assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'again', mode: 'full' }]);
   });
 }
 
@@ -189,7 +208,7 @@ test('history view enhances in its folder with the chosen model', async () => {
   const d = await boot({ hash: '#/f/' + encodeURIComponent(file), routes: { '/omp-sessions': () => ({ sessions: [{ file, cwd: 'C:/proj', title: 'x', model: 'p/a', updatedAt: new Date().toISOString() }] }), '/omp-sessions/preview': () => ({ file, cwd: 'C:/proj', messages: [] }), '/enhance': body => body ? { id: 'j', model: 'p/a' } : { status: 'running', step: '' } } });
   await d.type('fix it');
   await d.fire('click', { target: d.act('enhance') });
-  assert.deepEqual(d.posts('/enhance'), [{ path: 'C:/proj', model: 'p/a', text: 'fix it' }]);
+  assert.deepEqual(d.posts('/enhance'), [{ path: 'C:/proj', model: 'p/a', text: 'fix it', mode: 'full' }]);
 });
 
 test('New-session Enhance creates a draft session, moves the draft there and enhances in it', async () => {
@@ -209,7 +228,7 @@ test('New-session Enhance creates a draft session, moves the draft there and enh
   assert.ok(!('prompt' in qs) && !('images' in qs), 'the draft session starts empty');
   assert.ok(d.calls.some(c => c.url === '/api/commands?session=n'), 'OMP is started in the picked folder');
   assert.equal(d.location.hash, '#/s/n');
-  assert.deepEqual(d.posts('/enhance'), [{ session: 'n', text: 'fix it' }]);
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'n', text: 'fix it', mode: 'full' }]);
   assert.equal(d.input.value, 'fix it');
   assert.equal(d.input.readOnly, true);
 });
@@ -271,7 +290,7 @@ test('New-session Enhance: the draft session opened and left before its enhance 
   assert.deepEqual(discardUrls(d), [], 'not discarded under the starting enhance');
   assert.deepEqual(errToasts(d), []);
   assert.equal(d.location.hash, '#/s/n');
-  assert.deepEqual(d.posts('/enhance'), [{ session: 'n', text: 'fix it', images: shot, preview: shotPreview }]);
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'n', text: 'fix it', images: shot, preview: shotPreview, mode: 'full' }]);
   assert.equal(d.input.value, 'fix it');
   assert.equal(d.input.readOnly, true);
 });
@@ -418,7 +437,7 @@ for (const outcome of ['done', 'error']) test(`a draft left while its enhance ru
   await d.paste({ type: 'image/png', size: 3, name: 'shot.png' });
   await d.type('fix it');
   await d.fire('click', { target: d.act('enhance') });
-  assert.deepEqual(d.posts('/enhance'), [{ session: 'd', text: 'fix it', images: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }], preview: ['data:image/jpeg;base64,UFJF'] }]);
+  assert.deepEqual(d.posts('/enhance'), [{ session: 'd', text: 'fix it', images: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }], preview: ['data:image/jpeg;base64,UFJF'], mode: 'full' }]);
   await d.runPolls();
   await d.go('#/new');
   await d.runPolls();
@@ -427,7 +446,7 @@ for (const outcome of ['done', 'error']) test(`a draft left while its enhance ru
   await d.go('#/s/d');
   assert.equal(d.input.value, 'fix it');
   assert.equal(d.input.readOnly, true, 'still enhancing on return');
-  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing with m · reading src\/a\.js… · Draft kept if you leave/);
+  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing \(Full spec\) with m · reading src\/a\.js… · Draft kept if you leave/);
   assert.match(d.elements.get('imagePreview').innerHTML, /src="data:image\/jpeg;base64,UFJF"/);
   await d.go('#/s/b');
   status = outcome === 'done' ? { status: 'done', text: 'Better' } : { status: 'error', error: 'model down' };

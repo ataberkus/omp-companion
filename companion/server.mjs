@@ -16,7 +16,7 @@ import { treeView } from './transcript.mjs';
 import { addInstallDirs, shutdownCommand, restartHandoff, editorUrl } from './system.mjs';
 import { gitDiffFiles } from './git.mjs';
 import { launchOptions, launchArgs } from './launch.mjs';
-import { ENHANCE_OVERLAY, ENHANCE_SYSTEM, ENHANCE_GUARD } from './enhance-prompts.mjs';
+import { ENHANCE_OVERLAY, ENHANCE_SYSTEM, ENHANCE_GUARD, ENHANCE_MODES } from './enhance-prompts.mjs';
 import { createEnhance, enhanceModel, enhanceArgs, enhanceInput, stepLabel, cleanEnhanced } from './enhance.mjs';
 import { createScreen, screenCommands } from './screen.mjs';
 import { createOriginCheck, tailnetAddress, tailscaleKeeper, tailscaleSelf, portBusy } from './network.mjs';
@@ -43,7 +43,7 @@ import { createRouter } from './router.mjs';
 export { addInstallDirs, busySessions, installOmp, portBusy, startupUpdate, tailnetAddress, tailscaleKeeper, tailscaleSelf, updateOmp };
 addInstallDirs();
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,ENHANCE_SYSTEM,ENHANCE_GUARD,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,ENHANCE_SYSTEM,ENHANCE_GUARD,ENHANCE_MODES,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};
 export async function createCompanion(options={}){
  // OMP_WEB_PASSWORD: a password you choose becomes the connection token, so the same Bearer check enforces it. It is never served in the page.
  const password=options.password??process.env.OMP_WEB_PASSWORD??'';
@@ -63,11 +63,14 @@ export async function createCompanion(options={}){
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
  const omp=options.omp||ompHost(ompEntry,{dataDir});omp.warm?.();
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
- const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceSystem=path.join(dataDir,'enhance-system.md'),enhanceGuard=path.join(dataDir,'enhance-guard.mjs');
- await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceSystem,ENHANCE_SYSTEM);await syncFile(enhanceGuard,ENHANCE_GUARD);
+ // One system prompt file per Enhance mode (enhance-system.md is `full`).
+ const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceGuard=path.join(dataDir,'enhance-guard.mjs');
+ const enhanceSystems=Object.fromEntries(Object.keys(ENHANCE_MODES).map(m=>[m,path.join(dataDir,m==='full'?'enhance-system.md':`enhance-system-${m}.md`)]));
+ await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceGuard,ENHANCE_GUARD);
+ for(const [m,file] of Object.entries(enhanceSystems))await syncFile(file,ENHANCE_MODES[m].system);
  // Shared state of this companion. Each module below adds its functions (and getters for state it owns); a module
  // calls one created after it through ctx. Kept per companion: tests run several in one process.
- const ctx={options,password,token,exposeToken,publicHosts,dataDir,ompEntry,ompSource,ompExecutable,ompPrefix,execOmp,omp,enhanceOverlay,enhanceSystem,enhanceGuard};
+ const ctx={options,password,token,exposeToken,publicHosts,dataDir,ompEntry,ompSource,ompExecutable,ompPrefix,execOmp,omp,enhanceOverlay,enhanceSystems,enhanceGuard};
  const use=api=>Object.defineProperties(ctx,Object.getOwnPropertyDescriptors(api));
  use(await openStore(ctx));
  use(await createDrafts(ctx));

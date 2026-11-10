@@ -41,15 +41,27 @@ Follows the existing CLI-job pattern (`runCli`, `cliJobs`, `cliProcs`).
 
 ### Routes
 
-- `POST /api/enhance` with `{ text, session? | path?, model?, thinking?, images?, preview? }` → `202 { id, model }`.
+- `POST /api/enhance` with `{ text, session? | path?, model?, thinking?, images?, preview?, mode? }` → `202 { id, model, mode }`.
+  - `mode`: `full` | `notest` | `fast` (`ENHANCE_MODES` in `companion/enhance-prompts.mjs`); omitted, the mode saved with `POST /api/enhance-mode` (`store.enhanceMode`, default `full`). Anything else is a 400.
   - `text`: required, 1–20 000 characters.
   - `session`: a panel session id. The folder is the session's `cwd` (which may be an isolated worktree); the model is the session's current choice; the conversation tail comes from its messages.
   - `path`: a folder from the OMP-history view, validated with `resolveDir`. Used together with `model`/`thinking` from the client. No conversation tail.
   - Exactly one of `session` / `path` is required.
   - `images`: validated with the existing `chatImages()` (same limits as prompts). The body cap is 48 MB, as for `/api/quick-start`.
-- `GET /api/enhance?id=` → `{ id, status: 'running'|'done'|'error'|'cancelled', step, model, text?, error? }`.
+- `GET /api/enhance?id=` → `{ id, status: 'running'|'done'|'error'|'cancelled', step, model, mode, text?, error? }`.
 - `POST /api/enhance/stop` with `{ id }` → `{ status }`. Kills the process.
 - Jobs are kept in memory only. At most **3** can run at once (409 beyond that). A finished job is dropped 5 minutes after it finishes. Companion shutdown kills running enhance processes.
+- `POST /api/enhance-mode` with `{ mode }` → `{ mode }`. Saves the mode *Settings › Enhance › Mode* picked in `workspace.json`.
+
+### Modes
+
+Ported from [ataberkus/prompt-enhancer](https://github.com/ataberkus/prompt-enhancer). Each mode is its own system prompt file in `dataDir` (`enhance-system.md`, `enhance-system-notest.md`, `enhance-system-fast.md`) and its own lookup budget, passed to the guard as `OMP_ENHANCE_LOOKUP_LIMIT`:
+
+| mode | prompt | lookups |
+|---|---|---|
+| `full` (Full spec) | the system prompt below | 12 |
+| `notest` (No new tests) | the same, with the test and runnable-check lines of *Done when* swapped for light checks: only the repo's existing typecheck, lint, tests or build; no new tests, no browser or dev-server runs | 12 |
+| `fast` (Fast) | a lean prompt: the request, at most 5 must-have notes, assumptions and the same light checks | 6 |
 
 ### Model resolution
 
@@ -120,7 +132,7 @@ cwd: session cwd / path
   - any tool other than read/grep/glob;
   - `scheme:` paths (`https://`, `skill://`, `issue://`, `pr://`, `mcp://`, `ssh://`; OMP's read resolves all of them), `~`, any `..` segment, and paths whose real path (the longest existing ancestor, so junctions and symlinks count) is outside the cwd. Read selectors (`:50-80`, `:raw`) are stripped and grep/glob paths are cut at the first glob character; `;`-lists and `paths` arrays are checked entry by entry;
   - `.env` / `.env.*` files (`.env.example`, `.sample`, `.template`, `.dist` stay readable) and grep with `gitignore: false` (glob may still list ignored names);
-  - the 13th and later calls, blocked attempts included, so the twelve-lookup budget is a hard limit.
+  - calls past the mode's budget (`OMP_ENHANCE_LOOKUP_LIMIT`, 12 when unset), blocked attempts included, so the lookup budget is a hard limit.
   A handler that throws or times out blocks the call (OMP fails closed). Without the guard, read/grep/glob read `~/.omp/agent/config.yml`, `../<sibling repo>/…` and fetched `https://…` pages (verified); in the comparison below the unguarded prompt again read a sibling repo and tried `skill://` on the probe drafts.
 - `--no-session` writes no session file.
 
