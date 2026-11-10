@@ -39,7 +39,7 @@ export function createLifecycle(ctx){
   autoShutdown.firing=true;
   void shutdownPc().catch(e=>{autoShutdown.error={message:e.message,at:now()};console.error('Automatic shutdown failed:',e.message);}).finally(()=>Object.assign(autoShutdown,{on:false,since:null,firing:false}));
  }
- // A newly installed OMP SDK loads only in a new process: restart (start.bat's loop) once no work is running, so nothing is cut off.
+ // A newly installed OMP SDK loads only in a new process: restart (start.bat's loop, the desktop app) once no work is running, so nothing is cut off.
  let restartPending=false;
  function restartWhenIdle(){if(canRestart){restartPending=true;checkAutoRestart();}}
  function checkAutoRestart(){

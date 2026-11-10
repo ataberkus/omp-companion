@@ -280,7 +280,7 @@
     $('#toasts').appendChild(el);
     setTimeout(() => el.remove(), kind === 'err' ? 6000 : 3500);
   }
-  // start.bat starts the companion again on the same port and token; wait until a new process (new instance id) answers.
+  // start.bat or the desktop app starts the companion again on the same port and token; wait until a new process (new instance id) answers.
   // Then reload: this page still runs the app.js it loaded, so dashboard changes (and new companion APIs) take effect
   // only with a fresh page. Pending composer drafts are saved first, so the reload brings them back.
   async function restartCompanion() {
@@ -294,7 +294,7 @@
       try { st = await api('/state?session=', undefined, { timeout: 3000 }); } catch (e) { if (e.auth) return; continue; }
       if (st?.instance && st.instance !== before) { try { sessionStorage.setItem(RESTARTED, '1'); } catch {} location.reload(); return; }
     }
-    toast('The companion did not come back within 2 minutes. Check the start.bat window on that computer.', 'err');
+    toast('The companion did not come back within 2 minutes. Check the start.bat window or the OMP Control Room app on that computer.', 'err');
   }
   // Set just before the reload that follows Restart companion; the reloaded page says the restart worked.
   const RESTARTED = 'omp-restarted';

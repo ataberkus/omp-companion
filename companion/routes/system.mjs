@@ -22,11 +22,11 @@ export function systemRoutes(ctx){
     if(body.on&&!autoShutdown.on)Object.assign(autoShutdown,{on:true,since:now(),error:null});else if(!body.on)Object.assign(autoShutdown,{on:false,since:null});
     checkAutoShutdown();json(autoShutdownView());return;
    },
-   // options.restart (start.bat's loop, see the entry point below) prepares the relaunch and returns the step that stops
+   // options.restart (start.bat's loop, see the entry point below, or the desktop app's host) prepares the relaunch and returns the step that stops
    // this process; it runs once the reply is sent. Sessions are paused and saved first, as on quit; the IDs of those that
    // were working go to options.restart, so the next companion resumes them.
    'POST /api/restart':async({res,json})=>{
-    if(!options.restart)throw error('Restart works when the companion runs from start.bat, which starts it again. Stop it and start it yourself.',409);
+    if(!options.restart)throw error('Restart works when the companion runs from start.bat or the desktop app, which start it again. Stop it and start it yourself.',409);
     const resume=await pauseSessions();const relaunch=await options.restart(resume);json({ok:true});if(relaunch)res.once('finish',()=>void relaunch());return;
    },
  };

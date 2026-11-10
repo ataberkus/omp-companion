@@ -44,7 +44,7 @@ const TRAY: &str = "the menu bar";
 const TRAY: &str = "the tray";
 
 struct Shell {
-    // Replaced when the companion is restarted after a crash.
+    // Replaced when the companion is restarted (Restart companion, or after a crash).
     host: Mutex<Arc<Host>>,
     port: u16,
     token: String,
@@ -60,6 +60,8 @@ struct Shell {
     crashes: Mutex<Vec<Instant>>,
     // Set by the watchdog before it kills a companion that stopped answering.
     hung: AtomicBool,
+    // Set when the companion said it is restarting itself (Restart companion): its exit is meant, not a crash.
+    restarting: AtomicBool,
     // A newer signed release found by the update check; the tray offers to install it.
     update: Mutex<Option<Update>>,
     updating: AtomicBool,
@@ -136,11 +138,17 @@ fn on_event(app: AppHandle) -> impl Fn(Value) + Send + 'static {
             }
             refresh_menu(&app);
         }
+        Some("restart") => {
+            if let Some(shell) = app.try_state::<Shell>() {
+                shell.restarting.store(true, Ordering::SeqCst);
+            }
+        }
         _ => {}
     }
 }
 
-// The companion ended without being asked to (a crash, OMP taking the process down, the watchdog): restart it.
+// The companion ended: restart it. After a "restart" event the exit is meant (Restart companion); otherwise it is a crash,
+// OMP taking the process down, or the watchdog.
 fn on_exit(app: AppHandle) -> impl FnOnce(String) + Send + 'static {
     move |tail: String| {
         let Some(shell) = app.try_state::<Shell>() else {
@@ -153,7 +161,11 @@ fn on_exit(app: AppHandle) -> impl FnOnce(String) + Send + 'static {
             return;
         }
         let app = app.clone();
-        thread::spawn(move || recover(&app, tail));
+        if shell.restarting.swap(false, Ordering::SeqCst) {
+            thread::spawn(move || restart(&app));
+        } else {
+            thread::spawn(move || recover(&app, tail));
+        }
     }
 }
 
@@ -189,6 +201,7 @@ fn boot(app: AppHandle) {
         told_about_tray: AtomicBool::new(false),
         crashes: Mutex::new(Vec::new()),
         hung: AtomicBool::new(false),
+        restarting: AtomicBool::new(false),
         update: Mutex::new(None),
         updating: AtomicBool::new(false),
     });
@@ -209,6 +222,28 @@ fn boot(app: AppHandle) {
     // Development builds run the repo's files; only installed releases update themselves.
     if !cfg!(debug_assertions) {
         thread::spawn(move || update_loop(app));
+    }
+}
+
+// Restart companion (the dashboard's ⋯ menu, or the restart after an OMP SDK update): the host paused and saved the
+// sessions, wrote the working ones to its resume note and exited. The new host runs on the same port and token, resumes
+// them and skips the `omp update` check; the window reloads. Not a crash: no log, no limit. One that fails to come back
+// is handled as a crash by recover().
+fn restart(app: &AppHandle) {
+    let shell = app.state::<Shell>();
+    // Whatever the old Bun left running would hold the port.
+    shell.host().wait_exit(Duration::ZERO);
+    if shell.quitting.load(Ordering::SeqCst) {
+        return;
+    }
+    match spawn_host(app, Some(&shell.token)) {
+        Ok((host, ready)) if ready.port == shell.port => adopt(app, host, None),
+        Ok((host, ready)) => {
+            host.send_quit();
+            host.wait_exit(Duration::from_secs(10));
+            recover(app, format!("The restarted companion listened on port {} instead of {}.", ready.port, shell.port));
+        }
+        Err(e) => recover(app, e),
     }
 }
 
@@ -248,7 +283,11 @@ fn recover(app: &AppHandle, mut reason: String) {
             return;
         }
         match spawn_host(app, Some(&shell.token)) {
-            Ok((host, ready)) if ready.port == shell.port => return adopt(app, host, log),
+            Ok((host, ready)) if ready.port == shell.port => {
+                let log = log.map(|p| format!(" Details: {}", p.display())).unwrap_or_default();
+                let notice = format!("The companion stopped unexpectedly and was restarted. Sessions that were running are paused; send them a message to continue.{log}");
+                return adopt(app, host, Some(notice));
+            }
             Ok((host, ready)) => {
                 host.send_quit();
                 host.wait_exit(Duration::from_secs(10));
@@ -259,7 +298,10 @@ fn recover(app: &AppHandle, mut reason: String) {
     }
 }
 
-fn adopt(app: &AppHandle, host: Host, log: Option<PathBuf>) {
+// `crash_notice`: after a crash, the window is reloaded and a notification says what happened. A requested restart does
+// neither: the dashboard that asked reloads itself once the new companion answers and says it worked, other panels keep
+// their page (the token is the same) as under start.bat.
+fn adopt(app: &AppHandle, host: Host, crash_notice: Option<String>) {
     let shell = app.state::<Shell>();
     let host = Arc::new(host);
     let old = std::mem::replace(&mut *shell.host.lock(), host.clone());
@@ -279,6 +321,7 @@ fn adopt(app: &AppHandle, host: Host, log: Option<PathBuf>) {
     *shell.viewer.lock() = None;
     *shell.links.lock() = fetch_links(&host);
     refresh_menu(app);
+    let Some(body) = crash_notice else { return };
     let url = main_url(&shell);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -286,8 +329,6 @@ fn adopt(app: &AppHandle, host: Host, log: Option<PathBuf>) {
             let _ = webview.navigate(url);
         }
     });
-    let log = log.map(|p| format!(" Details: {}", p.display())).unwrap_or_default();
-    let body = format!("The companion stopped unexpectedly and was restarted. Sessions that were running are paused; send them a message to continue.{log}");
     let _ = app.notification().builder().title(TITLE).body(body).show();
 }
 

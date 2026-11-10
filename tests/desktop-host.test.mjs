@@ -174,6 +174,22 @@ test('a plain quit (tray Quit, sign-out) leaves no update note, so its sessions 
   assert.equal(JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions.find(s => s.id === 'run').status, 'paused');
 });
 
+// Restart companion in the app: the host offers it, writes the working sessions to the resume note, tells the shell the exit
+// is meant (so it restarts instead of logging a crash) and exits; the next host resumes them.
+test('Restart companion leaves the working sessions in the resume note, says restart and exits cleanly', async t => {
+  const { dir, port, exited, next } = await startHost(t, seedSessions({ at: Date.now(), resume: ['run'] }), {}, fakeOmpHost);
+  const { token } = await next();
+  const auth = { Authorization: `Bearer ${token}` };
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/api/state?session=`, { headers: auth })).json()).canRestart, true);
+  assert.ok(await waitFor(async () => (await statuses(port, token)).run === 'running'));
+  const res = await fetch(`http://127.0.0.1:${port}/api/restart`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: '{}' });
+  assert.deepEqual([res.status, await res.json()], [200, { ok: true }]);
+  assert.deepEqual(await next(), { event: 'restart' });
+  assert.equal(await exited, 0);
+  assert.deepEqual((await noteOf(dir)).resume, ['run']);
+  assert.equal(JSON.parse(await readFile(join(dir, 'workspace.json'), 'utf8')).sessions.find(s => s.id === 'run').status, 'paused');
+});
+
 // An install that failed tells the user to start the app again; that much later the sessions stay paused.
 test('a stale update note is ignored and deleted', async t => {
   const { dir, port, next } = await startHost(t, seedSessions({ at: Date.now() - 11 * 60 * 1000, resume: ['run'] }), {}, fakeOmpHost);

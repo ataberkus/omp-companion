@@ -1,8 +1,9 @@
 // Companion host for the Tauri shell: runs the companion and talks line-delimited JSON over stdin/stdout.
 // Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something)
-//   | {"event":"screen","address"} (a device started viewing and controlling this PC; address null when it stopped).
+//   | {"event":"screen","address"} (a device started viewing and controlling this PC; address null when it stopped)
+//   | {"event":"restart"} (Restart companion, or the restart after an OMP SDK update: the host exits next, and the shell starts a new one).
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
-//   {"cmd":"quit","resume":true} (an app update) also leaves the update note below before replying, so the new version
+//   {"cmd":"quit","resume":true} (an app update) also leaves the resume note below before replying, so the new version
 //   resumes the sessions that were working; a plain quit does not.
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -163,10 +164,11 @@ function closeTailnet() {
 // companion.close() closes every listener, the tailnet one included, and resolves with the IDs of the sessions it paused.
 const shutdown = () => { clearTimeout(tailnetRetry); return (closing ??= companion ? companion.close() : Promise.resolve()); };
 
-// The update note: an app update (the tray's Install update, or a newer installer asking the app to quit) writes
-// {at, resume} here, and the next host resumes those sessions. Tray Quit, sign-out and crash recovery send a plain quit and
-// leave none, so their sessions come back paused. Its own file: restart.json belongs to start.bat's companion, which may
-// share the data dir, and the two never read each other's note. No token: the app's token changes at every launch.
+// The resume note: an app update (the tray's Install update, or a newer installer asking the app to quit) or a restart
+// (Restart companion) writes {at, resume} here, and the next host resumes those sessions. Tray Quit, sign-out and crash
+// recovery send a plain quit and leave none, so their sessions come back paused. Its own file: restart.json belongs to
+// start.bat's companion, which may share the data dir, and the two never read each other's note. No token: an update gets
+// a new one at launch, and a restart keeps the window's through the shell (OMP_WEB_DESKTOP_TOKEN).
 const updateNote = path.join(defaultDataDir(), 'update-resume.json');
 // Long enough for an installer that replaces node_modules; a note left by an install that failed goes stale after it.
 const UPDATE_NOTE_MAX_AGE = 10 * 60 * 1000;
@@ -231,7 +233,8 @@ async function main() {
   // The shell gives up on a host that is not ready within 60 s, reading the login shell included; an update cut short
   // starts with the installed OMP, and an OMP install (no omp found) cut short finishes in the background while the
   // companion starts without the CLI. stdout carries the protocol, so update and install progress go to stderr.
-  await startupUpdate({ timeout: 45000 - (shellEnv.ms || 0), log: m => console.error(m) });
+  // A restart skips it (the shell sets OMP_WEB_NO_UPDATE).
+  const update = await startupUpdate({ timeout: 45000 - (shellEnv.ms || 0), log: m => console.error(m) });
   // OMP_WEB_NO_TOKEN=1 (read by createCompanion) embeds the token in the page: phones need no token, anyone on the LAN gets control.
   // Attention events become native notifications in the shell; it skips them while the main window has focus.
   const verbs = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
@@ -242,8 +245,19 @@ async function main() {
   // environment at once, so OMP's tools and CLI runs never inherit it.
   const token = process.env.OMP_WEB_DESKTOP_TOKEN;
   delete process.env.OMP_WEB_DESKTOP_TOKEN;
-  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}), ...(resume.length ? { resume } : {}) }); }
+  // Restart companion: the sessions are paused and saved already; the working ones go to the resume note, the shell is told
+  // this exit is meant, and once the companion closed the host exits. The shell starts a new host on the same port and token.
+  const restart = async resume => {
+    await writeUpdateNote(resume).catch(e => console.error(`Could not save the sessions to resume after the restart: ${e.message}`));
+    return async () => {
+      send({ event: 'restart' });
+      try { await shutdown(); } finally { process.exit(0); }
+    };
+  };
+  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, restart, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}), ...(resume.length ? { resume } : {}) }); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
+  // An OMP SDK whose install outlived the startup limit loads only in a new process: restart once no session is working.
+  update?.sdkLate?.then(r => r?.status === 'installed' && companion.restartWhenIdle()).catch(() => {});
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);
   server.once('error', onStartError);
