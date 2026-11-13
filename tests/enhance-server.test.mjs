@@ -205,7 +205,7 @@ test('each mode runs its own system prompt and lookup budget; the saved mode is 
     const system = argv.find(a => a.startsWith('--system-prompt=')).slice('--system-prompt='.length);
     return { mode: start.body.mode, prompt: await readFile(system, 'utf8'), lookups: await readFile(join(dir, 'lookups.txt'), 'utf8') };
   };
-  for (const mode of ['full', 'notest', 'fast']) {
+  for (const mode of ['full', 'notest', 'fast', 'max']) {
     const r = await run({ mode });
     assert.deepEqual(r, { mode, prompt: internals.ENHANCE_MODES[mode].system, lookups: String(internals.ENHANCE_MODES[mode].lookups) });
   }

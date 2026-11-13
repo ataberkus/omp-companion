@@ -843,9 +843,10 @@
   const enhanceBlocked = (v, images) => v.trim() ? /^[/!]/.test(v.trim()) : !images;
   // Enhance modes (companion/enhance-prompts.mjs ENHANCE_MODES); the one picked in Settings › Enhance is S.store.enhanceMode.
   const ENHANCE_MODES = [
-    ['full', 'Full spec', 'Complete architect spec: inferred requirements, assumptions, and a Done when that adds tests for the new behaviour. Up to 12 lookups.'],
-    ['notest', 'No new tests', 'The same complete spec, but the agent only runs the repo\'s existing typecheck, lint, tests or build: no new tests, no browser or dev-server smoke runs. Up to 12 lookups.'],
+    ['full', 'Full spec', 'Complete architect spec: inferred requirements, added features the best products of the kind have, assumptions, and a Done when that adds tests for the new behaviour. Up to 12 lookups.'],
+    ['notest', 'No new tests', 'The same complete spec and added features, but the agent only runs the repo\'s existing typecheck, lint, tests or build: no new tests, no browser or dev-server smoke runs. Up to 12 lookups.'],
     ['fast', 'Fast', 'Lean prompt: the request, at most 5 must-have notes, assumptions, and the same light checks. Up to 6 lookups.'],
+    ['max', 'Best-in-class', 'Reads the draft as a product brief: the full feature set the best products of its kind have, including the ones you didn\'t name, built with the repo\'s stack; the repo\'s existing checks, testing left to the agent. Up to 12 lookups.'],
   ];
   const enhanceModeLabel = mode => (ENHANCE_MODES.find(m => m[0] === mode) || ENHANCE_MODES[0])[1];
   // ✨ plus its mode picker; the picker saves the mode for every composer (same as Settings › Enhance › Mode) and hides while one runs.
