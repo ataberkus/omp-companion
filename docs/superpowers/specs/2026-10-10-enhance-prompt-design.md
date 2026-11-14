@@ -76,7 +76,7 @@ The response and `GET` report the model actually used, for the status line.
 
 ```
 omp -p --mode json --no-session --no-title --no-skills --no-extensions --no-rules --no-lsp
-    --tools=read,grep,glob --approval-mode=always-ask --max-time=240
+    --tools=read,grep,glob --approval-mode=always-ask --max-time=630
     --config=<overlay.yml>          # lockdown overlay, see below
     -e <enhance-guard.mjs>          # lookup guard, see below
     --model=… [--thinking=…]
@@ -145,7 +145,7 @@ Stdout is read line by line as JSON:
 - `message_end` where role is `assistant` → remember its text content (the last one wins).
 - Exit code 0 with non-empty text → `done`, and `text` is that text trimmed; a code fence around the whole prompt is removed, a prompt that merely starts with a code block keeps it.
 - Nonzero exit or no text → `error`. The reason is the last stderr line (ANSI stripped). `Model "@enhance" not found`-style output passes through unchanged.
-- The server kills the process at 150 s → `error: 'Enhance timed out.'`.
+- The server's watchdog kills the process at 600 s (`ENHANCE_TIMEOUT_MS`) → `error: 'Enhance timed out.'`. OMP's own `--max-time` (630 s) sits above it and only stops a run whose companion never runs the timer; that path exits 1 with empty stderr, so it reads as `OMP exited (1)`.
 
 ## 3. Enhancer request
 
@@ -324,7 +324,7 @@ A session created by Enhance is a **draft session** until its first message goes
 | Empty draft, `/…` or `!…` | Button disabled |
 | `@enhance` role set to an unknown model | Error toast with OMP's message; draft unchanged |
 | No provider auth, network error | Error toast (last stderr line) |
-| Over 240 s / 270 s | Error toast `Enhance timed out.` |
+| Over 600 s (OMP's own cap at 630 s) | Error toast `Enhance timed out.` |
 | A fourth job while three are running | 409 toast `Wait for the running enhance to finish.` |
 | Draft edited while running | Not applied; info toast with `Use enhanced prompt` action |
 | Companion shutdown | Processes killed; images directory removed |

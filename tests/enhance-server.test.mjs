@@ -109,11 +109,13 @@ test('enhance model resolution order', () => {
 
 test('enhancer argv is fixed, read-only, and never carries the draft', () => {
   const a = internals.enhanceArgs({ model: '@enhance', thinking: null, overlay: 'O.yml', system: 'S.md', guard: 'G.mjs', images: ['C:\\d i r\\image-1.png'] });
-  assert.deepEqual(a.slice(0, 12), ['-p', '--mode', 'json', '--no-session', '--no-title', '--no-skills', '--no-extensions', '--no-rules', '--no-lsp', '--tools=read,grep,glob', '--approval-mode=always-ask', '--max-time=240']);
+  assert.deepEqual(a.slice(0, 12), ['-p', '--mode', 'json', '--no-session', '--no-title', '--no-skills', '--no-extensions', '--no-rules', '--no-lsp', '--tools=read,grep,glob', '--approval-mode=always-ask', '--max-time=630']);
   assert.ok(a.includes('--config=O.yml') && a.includes('--model=@enhance') && a.includes('--system-prompt=S.md'));
   assert.equal(a[a.indexOf('-e') + 1], 'G.mjs', 'the lookup guard loads even with --no-extensions');
   assert.ok(!a.some(x => x.startsWith('--append-system-prompt')), 'OMP\'s coding-agent prompt is replaced, not extended');
   assert.ok(!a.some(x => x.startsWith('--thinking')));
+  // A slow model must end with the server's own timeout, not OMP's: the watchdog fires first and names it.
+  assert.ok(Number(a.find(x => x.startsWith('--max-time=')).split('=')[1]) * 1000 > internals.ENHANCE_TIMEOUT_MS);
   assert.equal(a.at(-1), '@C:\\d i r\\image-1.png');
   const b = internals.enhanceArgs({ model: null, thinking: null, overlay: 'O.yml', system: 'S.md', guard: 'G.mjs', images: [] });
   assert.ok(!b.some(x => x.startsWith('--model')));
