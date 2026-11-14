@@ -143,9 +143,11 @@ Stdout is read line by line as JSON:
 
 - `tool_execution_start` → `step` = short label: `reading <path>`, `searching "<pattern>"`, `listing <glob>`. Paths are shown relative to the cwd and truncated to 80 characters.
 - `message_end` where role is `assistant` → remember its text content (the last one wins).
+- `turn_end` / `auto_retry_start` / `agent_end` → the failure OMP reports in the frame itself (`message.errorMessage`, `errorMessage`, or the last `agent_end` message's), kept as the latest reason. A provider that never answers fails this way with an empty stderr.
 - Exit code 0 with non-empty text → `done`, and `text` is that text trimmed; a code fence around the whole prompt is removed, a prompt that merely starts with a code block keeps it.
-- Nonzero exit or no text → `error`. The reason is the last stderr line (ANSI stripped). `Model "@enhance" not found`-style output passes through unchanged.
-- The server's watchdog kills the process at 600 s (`ENHANCE_TIMEOUT_MS`) → `error: 'Enhance timed out.'`. OMP's own `--max-time` (630 s) sits above it and only stops a run whose companion never runs the timer; that path exits 1 with empty stderr, so it reads as `OMP exited (1)`.
+- Nonzero exit or no text → `error`. The reason is the first stderr line that is not a warning (ANSI stripped), else the reason from the frames, else `OMP exited (<code>).`. `Model "@enhance" not found`-style output passes through unchanged.
+- The server's watchdog kills the process at 600 s (`ENHANCE_TIMEOUT_MS`) → `error: 'Enhance timed out.'`. OMP's own `--max-time` (630 s) sits above it and only stops a run whose companion never runs the timer; that path exits 1 with empty stderr and reports the frame's reason (`Deadline exceeded`).
+- The dashboard shows an error as a toast and, on a draft session, on its status line (`⚠ Enhance failed: <reason> · Draft kept if you leave`) until the draft is sent, discarded, or enhanced again; the draft itself is never touched.
 
 ## 3. Enhancer request
 

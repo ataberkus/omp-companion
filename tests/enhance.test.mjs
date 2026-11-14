@@ -455,10 +455,29 @@ for (const outcome of ['done', 'error']) test(`a draft left while its enhance ru
   await d.go('#/s/d');
   assert.equal(d.input.value, outcome === 'done' ? 'Better' : 'fix it');
   assert.equal(d.input.readOnly, false);
-  assert.match(d.elements.get('statusLine').innerHTML, /Draft · discarded if you leave without sending/);
+  // A failure names its reason on the draft (the toast goes, the status line stays); a result leaves the plain draft notice.
+  if (outcome === 'done') assert.match(d.elements.get('statusLine').innerHTML, /Draft · discarded if you leave without sending/);
+  else assert.match(d.elements.get('statusLine').innerHTML, /⚠ Enhance failed: model down · Draft kept if you leave/);
   assert.match(d.elements.get('imagePreview').innerHTML, /src="data:image\/jpeg;base64,UFJF"/);
   await d.go('#/new');
   assert.equal(discards(), 1, 'an unsent draft with nothing running is discarded as before');
+});
+
+test('a failed enhance keeps the draft and its reason; a new enhance replaces it', async () => {
+  let status = { status: 'error', error: 'provider unreachable' };
+  const d = await boot({ hash: '#/s/d', sessions: [idle('d', { draft: true })], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m' } : status } });
+  await d.type('fix it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.runPolls();
+  assert.equal(d.input.value, 'fix it', 'the draft is untouched');
+  assert.equal(d.input.readOnly, false, 'and editable again');
+  assert.match(d.elements.get('statusLine').innerHTML, /⚠ Enhance failed: provider unreachable · Draft kept if you leave/);
+  assert.match(d.elements.get('statusLine').className, /\berr\b/);
+  assert.ok(errToasts(d).some(t => /provider unreachable/.test(t)), 'the toast carries the same reason');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Enhance prompt"[^>]*>✨/);
+  status = { status: 'running', step: 'reading src/a.js' };
+  await d.fire('click', { target: d.act('enhance') });
+  assert.match(d.elements.get('statusLine').innerHTML, /Enhancing \(Full spec\) with m · reading src\/a\.js… · Draft kept if you leave/);
 });
 
 test('cancelling the enhance with ✕ makes the draft discardable again', async () => {

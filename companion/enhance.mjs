@@ -98,10 +98,14 @@ export function createEnhance(ctx){
   const job={id,sessionId:s?.id||null,status:'running',step:'',model:pick.label,mode,text:'',error:'',dir};
   const child=spawn(ompExecutable,[...ompPrefix,...(options.enhancePrefix||[]),...enhanceArgs({model:pick.model,thinking:pick.thinking,overlay:enhanceOverlay,system:enhanceSystems[mode],guard:enhanceGuard,images:files})],{cwd,stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0',[ENHANCE_LOOKUP_ENV]:String(ENHANCE_MODES[mode].lookups)}});
   job.child=child;enhanceJobs.set(id,job);
-  let stderr='',answer='';
+  let stderr='',answer='',failure='';
   child.stdin.on('error',()=>{});child.stdin.end(enhanceInput(draft,s?.messages??[]),'utf8');
   child.stderr.on('data',b=>{stderr=(stderr+b).slice(-8000);});
   createInterface({input:child.stdout,crlfDelay:Infinity}).on('line',line=>{let f;try{f=JSON.parse(line);}catch{return;}
+   // A failed turn's reason lives only in the frames (`turn_end` with stopReason error, the auto-retries before it, and
+   // `agent_end` after it); OMP writes nothing to stderr then, so keep the latest one for finish.
+   const why=String(f.message?.errorMessage||f.errorMessage||(f.type==='agent_end'?f.messages?.at(-1)?.errorMessage:'')||'').trim();
+   if(why)failure=why;
    if(f.type==='tool_execution_start')job.step=stepLabel(f.toolName,f.args,cwd);
    else if(f.type==='message_end'&&f.message?.role==='assistant')answer=contentText(f.message.content);});
   const timer=setTimeout(()=>{job.timedOut=true;child.kill();},ENHANCE_TIMEOUT_MS);timer.unref();
@@ -110,9 +114,10 @@ export function createEnhance(ctx){
    if(job.timedOut)Object.assign(job,{status:'error',error:'Enhance timed out.'});
    else if(job.stopped)job.status='cancelled';
    else if(code===0&&!err&&out)Object.assign(job,{status:'done',text:out});
-   else if(code===0&&!err)Object.assign(job,{status:'error',error:'The enhancer returned no text.'});
-   // OMP prints the error first and a "Run `omp …`" hint after it; skip warnings (e.g. MCP connect failures).
-   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||`OMP exited (${code}).`});
+   else if(code===0&&!err)Object.assign(job,{status:'error',error:failure||'The enhancer returned no text.'});
+   // OMP prints the error first and a "Run `omp …`" hint after it; skip warnings (e.g. MCP connect failures). A run that
+   // died with nothing on stderr (a provider that never answered) reports the reason its frames carried, not the code.
+   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||failure||`OMP exited (${code}).`});
    delete job.child;job.finishedAt=now();
    await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});
    setTimeout(()=>{if(enhanceJobs.get(id)===job)enhanceJobs.delete(id);},5*60000).unref();
