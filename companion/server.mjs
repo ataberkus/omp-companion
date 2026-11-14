@@ -17,7 +17,7 @@ import { addInstallDirs, shutdownCommand, restartHandoff, editorUrl } from './sy
 import { gitDiffFiles } from './git.mjs';
 import { launchOptions, launchArgs } from './launch.mjs';
 import { ENHANCE_OVERLAY, ENHANCE_SYSTEM, ENHANCE_GUARD, ENHANCE_MODES } from './enhance-prompts.mjs';
-import { createEnhance, enhanceModel, enhanceArgs, enhanceInput, stepLabel, cleanEnhanced } from './enhance.mjs';
+import { createEnhance, enhanceModel, enhanceArgs, enhanceInput, stepLabel, cleanEnhanced, ENHANCE_TIMEOUT_MS } from './enhance.mjs';
 import { createScreen, screenCommands } from './screen.mjs';
 import { createOriginCheck, tailnetAddress, tailscaleKeeper, tailscaleSelf, portBusy } from './network.mjs';
 import { updateOmp, installOmp, defaultDataDir, startupUpdate } from './update.mjs';
@@ -43,7 +43,7 @@ import { createRouter } from './router.mjs';
 export { addInstallDirs, busySessions, installOmp, portBusy, startupUpdate, tailnetAddress, tailscaleKeeper, tailscaleSelf, updateOmp };
 addInstallDirs();
 // Pure helpers, exported for tests.
-export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_OVERLAY,ENHANCE_SYSTEM,ENHANCE_GUARD,ENHANCE_MODES,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};
+export const internals={launchOptions,launchArgs,treeView,todoPhases,enhanceModel,enhanceArgs,enhanceInput,stepLabel,cleanEnhanced,ENHANCE_TIMEOUT_MS,ENHANCE_OVERLAY,ENHANCE_SYSTEM,ENHANCE_GUARD,ENHANCE_MODES,gitDiffFiles,editorUrl,shutdownCommand,restartHandoff,screenCommands};
 export async function createCompanion(options={}){
  // OMP_WEB_PASSWORD: a password you choose becomes the connection token, so the same Bearer check enforces it. It is never served in the page.
  const password=options.password??process.env.OMP_WEB_PASSWORD??'';

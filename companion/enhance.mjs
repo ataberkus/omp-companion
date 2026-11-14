@@ -9,6 +9,11 @@ import { createInterface } from 'node:readline';
 import { exists, now, error, text, contentText, resolveDir } from './util.mjs';
 import { IMAGE_EXT, chatImages } from './images.mjs';
 import { ENHANCE_MODES, ENHANCE_LOOKUP_ENV } from './enhance-prompts.mjs';
+// One deadline for an enhance run, owned by the server's watchdog (it names the timeout). A slow model at a high
+// reasoning level plus a dozen lookups spends minutes, so OMP's own --max-time sits above the watchdog and only covers a
+// companion whose event loop never runs the timer: that path ends with exit 1 and empty stderr, `OMP exited (1)`.
+export const ENHANCE_TIMEOUT_MS=600000;
+const ENHANCE_MAX_TIME_S=Math.ceil(ENHANCE_TIMEOUT_MS/1000)+30;
 // Enhance prompt: a one-shot read-only `omp -p` that rewrites a composer draft.
 // An `enhance` role (model[:thinking] in OMP's config.yml modelRoles) wins unless the cached model list shows its model is not
 // available (OMP would fail the run with `Model "@enhance" not found`); otherwise the enhancer runs on the composer's model at
@@ -25,7 +30,7 @@ export function enhanceModel(roles,selector,thinking='',available){
 // --system-prompt replaces OMP's coding-agent prompt; the guard extension (-e loads even under --no-extensions) confines
 // lookups to the repository and the lookup budget.
 export function enhanceArgs({model,thinking,overlay,system,guard,images}){
- return ['-p','--mode','json','--no-session','--no-title','--no-skills','--no-extensions','--no-rules','--no-lsp','--tools=read,grep,glob','--approval-mode=always-ask','--max-time=240',
+ return ['-p','--mode','json','--no-session','--no-title','--no-skills','--no-extensions','--no-rules','--no-lsp','--tools=read,grep,glob','--approval-mode=always-ask',`--max-time=${ENHANCE_MAX_TIME_S}`,
   `--config=${overlay}`,`-e`,guard,...(model?[`--model=${model}`]:[]),...(thinking?[`--thinking=${thinking}`]:[]),`--system-prompt=${system}`,...images.map(f=>'@'+f)];
 }
 // The last 6 turns, each run of assistant messages reduced to its last (the reply the user saw). Clips keep both ends: the
@@ -99,7 +104,7 @@ export function createEnhance(ctx){
   createInterface({input:child.stdout,crlfDelay:Infinity}).on('line',line=>{let f;try{f=JSON.parse(line);}catch{return;}
    if(f.type==='tool_execution_start')job.step=stepLabel(f.toolName,f.args,cwd);
    else if(f.type==='message_end'&&f.message?.role==='assistant')answer=contentText(f.message.content);});
-  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},270000);timer.unref();
+  const timer=setTimeout(()=>{job.timedOut=true;child.kill();},ENHANCE_TIMEOUT_MS);timer.unref();
   job.closed=new Promise(resolve=>{let done=false;const finish=async(code,err)=>{if(done)return;done=true;clearTimeout(timer);
    const out=cleanEnhanced(answer);
    if(job.timedOut)Object.assign(job,{status:'error',error:'Enhance timed out.'});
