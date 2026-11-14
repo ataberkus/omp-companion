@@ -196,6 +196,7 @@
     noticeSeen: new Map(), cmds: new Map(), cmdsLoading: new Set(), slash: null,
     planBusy: new Set(), planSubmitted: new Set(),
     enhance: new Map(), // view → { id, original, model, step } while an enhance runs
+    enhanceFail: new Map(), // view → why its last enhance failed, on its draft until the draft is sent or enhanced again
     // view → its in-flight send: { text, imagePreview, queued, at } for a composer message, {} for other prompts. Keyed by
     // view, so a send still going out to one session never blocks another session's composer.
     sending: new Map(),
@@ -863,7 +864,7 @@
   // An enhance counts as running from here (✕, read-only composer, no draft pull or discard), before its request goes out.
   function enhanceJob(view, original) {
     const job = { id: null, original, model: '', mode: S.store?.enhanceMode, step: '' };
-    S.enhance.set(view, job); refreshComposer();
+    S.enhanceFail.delete(view); S.enhance.set(view, job); refreshComposer();
     return job;
   }
   async function startEnhance(view, body, original, job = enhanceJob(view, original)) {
@@ -888,11 +889,15 @@
     catch (e) { if (S.enhance.get(view) === job) { S.enhance.delete(view); refreshComposer(); toast(e.message, 'err'); } return; }
     if (S.enhance.get(view) !== job) return;
     if (r.status === 'running') { job.step = r.step || ''; if (r.model) job.model = r.model; refreshComposer(); setTimeout(() => pollEnhance(view), 500); return; }
-    S.enhance.delete(view); refreshComposer();
+    S.enhance.delete(view);
+    // A failed enhance leaves the draft exactly as it was: say why on it (the status line outlives the toast).
+    if (r.status === 'error') S.enhanceFail.set(view, r.error || 'Enhance failed.');
+    refreshComposer();
     if (r.status === 'done') applyEnhanced(view, job.original, r.text);
-    else if (r.status === 'error') toast(r.error || 'Enhance failed.', 'err');
+    else if (r.status === 'error') toast(S.enhanceFail.get(view), 'err');
   }
   function applyEnhanced(view, original, text) {
+    S.enhanceFail.delete(view);
     const input = S.view === view ? $('#input') : null;
     if (!input) { if ((drafts.get(view) ?? '') === original) drafts.set(view, text); return; }
     // The user (or an extension) changed the draft meanwhile: offer the result instead of overwriting.
@@ -957,7 +962,7 @@
     discardView(prev);
   }
   function discardView(view) {
-    S.enhance.delete(view); S.ownDrafts.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
+    S.enhance.delete(view); S.enhanceFail.delete(view); S.ownDrafts.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
     api(`/sessions/${encodeURIComponent(view.slice('session:'.length))}/command`, { type: 'discard' }).then(() => refresh()).catch(() => {});
   }
   // After a send settles: if the user left its draft session meanwhile, let the server decide (no-op once sent).
@@ -969,7 +974,7 @@
   // cleaned it up): its text and images go back to New session instead of staying in a view that no longer exists.
   function rescueDraft(view) {
     const { home } = S.ownDrafts.get(view);
-    S.ownDrafts.delete(view); S.enhance.delete(view); S.discardAfterSend.delete(view);
+    S.ownDrafts.delete(view); S.enhance.delete(view); S.enhanceFail.delete(view); S.discardAfterSend.delete(view);
     clearTimeout(draftTimers.get(view)); draftTimers.delete(view);
     const text = Map.prototype.get.call(drafts, view) || '';
     Map.prototype.delete.call(drafts, view); // not saved: the companion keeps no draft for a removed session
@@ -2777,6 +2782,7 @@
       placeholder = 'Type feedback to keep planning without approving…';
     }
     if (enhancing) { const m = splitSel(enhancing.model); status = `<span class="grow">Enhancing (${esc(enhanceModeLabel(enhancing.mode))}) with ${esc(modelName(m.sel) || 'OMP')} · ${esc(enhancing.step || 'starting')}…${s?.draft ? ' · Draft kept if you leave' : ''}</span>`; }
+    else if (s?.draft && S.enhanceFail.get(S.view)) status = `<span class="grow">⚠ Enhance failed: ${esc(S.enhanceFail.get(S.view))} · Draft kept if you leave</span>`;
     else if (s?.draft) status = `<span class="grow">Draft · discarded if you leave without sending</span>`;
     if (s?._bash) btns = `<button class="btn danger" data-act="abortBash" title="Stop the shell command">■ Stop command</button>` + btns;
     // Extensions can pre-fill the composer (set_editor_text); apply each request once, after any unsent draft. Not before this
@@ -2793,7 +2799,7 @@
     const commitSlot = $('#commitSlot'); if (commitSlot) setIfChanged(commitSlot, s ? `<button class="btn sm ghost" data-act="commitRelated" type="button" title="Ask OMP to commit only the changes from its work in this session${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${sending ? 'disabled' : ''}>Commit related changes</button>${pushButton(s)}` : '');
     hint.textContent = hintText;
     setIfChanged(buttons, btns);
-    line.className = 'status-line' + (s?.status === 'error' ? ' err' : '');
+    line.className = 'status-line' + (s?.status === 'error' || (s?.draft && S.enhanceFail.has(S.view)) ? ' err' : '');
     setIfChanged(line, status);
     renderGhost();
   }
@@ -3285,6 +3291,7 @@
     if ((!text && !attachment.length) || S.sending.has(S.view) || S.enhance.has(S.view)) return;
     keepSpaceAccept();
     const sendView = S.view;
+    S.enhanceFail.delete(sendView);
     // "/btw question" opens the side-question panel instead of joining the conversation.
     if (!retry && /^\/btw(\s|$)/i.test(text)) {
       if (c.kind !== 'session') return toast('Continue this session first, then ask a side question.', 'err');

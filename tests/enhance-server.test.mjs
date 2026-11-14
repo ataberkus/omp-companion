@@ -35,6 +35,8 @@ process.stdin.on('end', () => {
   if (input.includes('HANG')) { setInterval(() => {}, 1e9); return; }
   // Shaped like OMP's real failure: a warning, the error, a blank line, then a hint.
   if (input.includes('FAIL')) { process.stderr.write('Warning: MCP server "x" failed to connect\\nModel "@enhance" not found\\n\\nRun \`omp models find <pattern>\` to search, or \`omp models\` to list all.\\n'); process.exit(1); }
+  // A provider that never answered: the reason is in OMP's frames only, stderr stays empty.
+  if (input.includes('FRAMEERR')) { emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 10, errorMessage: 'openrouter: 402 Insufficient credits.' }); emit({ type: 'turn_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'openrouter: 402 Insufficient credits.' } }); process.exitCode = 1; return; }
   emit({ type: 'session', cwd: process.cwd() });
   if (input.includes('EMPTY')) return;
   emit({ type: 'tool_execution_start', toolName: 'read', args: { path: join(process.cwd(), 'src', 'a.js') } });
@@ -257,6 +259,14 @@ test('a failed run reports OMP\'s error line, not its trailing hint', async t =>
   const job = await settle(body.id);
   assert.equal(job.status, 'error');
   assert.equal(job.error, 'Model "@enhance" not found');
+});
+
+test('a run that dies with an empty stderr reports the reason from OMP\'s frames, not its exit code', async t => {
+  const { call, settle } = await boot(t);
+  const { body } = await call('/enhance', { session: 'session', text: 'FRAMEERR' });
+  const job = await settle(body.id);
+  assert.equal(job.status, 'error');
+  assert.equal(job.error, 'openrouter: 402 Insufficient credits.');
 });
 
 test('empty result is an error, not a blank draft', async t => {
