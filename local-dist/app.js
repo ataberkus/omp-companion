@@ -2080,11 +2080,14 @@
     try { await api(`/sessions/${c.id}/command?lean=1`, { type: 'advisor', action, model }); if (action === 'model') S.advCfg = null; await refresh(); }
     catch (err) { toast(err.message, 'err'); }
   }
+  // The viewed live session (null on native/history pages): its subagentList comes with every poll.
+  const bgSession = () => { const c = current(); return c.kind === 'session' ? S.store?.sessions.find(x => x.id === c.id) || null : null; };
   async function loadBg(file, force) {
     if (!file) return;
     const e = S.bg.get(file) || {};
-    const running = e.data && bgJobs(e.data).some(j => j.status === 'running');
-    const live = current().kind === 'session' && ['running', 'queued'].includes(S.store?.sessions.find(x => x.id === current().id)?.status);
+    const s = bgSession();
+    const running = bgJobs(e.data, s).some(j => j.status === 'running');
+    const live = ['running', 'queued'].includes(s?.status);
     const wait = live || running ? 3000 : 20000;
     // Conditional (e.etag): an unchanged reply is a 304 that keeps e.data. A hidden page waits until it is shown.
     if (e.loading || (!force && (document.hidden || e.at && Date.now() - e.at < wait))) return;
@@ -2096,18 +2099,25 @@
   // A running subagent's timer counts from its transcript's start; one not yet written counts from when we first saw it.
   const seenAt = new Map();
   const firstSeen = id => { if (!seenAt.has(id)) { seenAt.set(id, new Date().toISOString()); trim(seenAt, 500); } return seenAt.get(id); };
-  function bgJobs(data) {
-    if (!data) return [];
-    const jobs = (data.tasks || []).map(j => ({ ...j }));
+  // data: the /background reply for the session's file (null before the first one, after a failed one, or while the
+  // session has no file yet). s: the live session, whose subagentList (polled with the store) is the registry the
+  // reply's agents came from, and fresher: its entries fill in agents the reply lacks and update the status of those it
+  // has. Without a reply, a registry entry counts as running unless the session's OMP has stopped (paused, done).
+  function bgJobs(data, s) {
+    const live = data ? data.live : !!s && !['paused', 'done'].includes(s.status);
+    const agents = (data?.agents || []).map(a => ({ ...a }));
+    for (const r of s?.subagentList || []) { if (!r.id) continue; const a = agents.find(x => x.id === r.id); if (a) Object.assign(a, r); else agents.push({ ...r }); }
+    const jobs = (data?.tasks || []).map(j => ({ ...j }));
     // Live registry entries carry progress for subagents that are still working.
-    for (const a of data.agents || []) {
+    for (const a of agents) {
       const j = jobs.find(x => x.id === a.id);
       const status = /run|pend|start|queue/i.test(a.status) ? 'running' : /fail|error|abort/i.test(a.status) ? 'error' : a.status ? 'done' : '';
       // A task's transcript not on this machine (a collab guest's: the host's) is the one its roster entry names.
-      if (j) { if (status === 'running' && data.live) j.status = 'running'; j.live = a; if (!j.transcript && a.remote && a.sessionFile) j.transcript = a.sessionFile; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
-      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: data.live ? status || 'running' : 'stale', startedAt: a.startedAt || firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
+      if (j) { if (status === 'running' && live) j.status = 'running'; j.live = a; if (!j.transcript && a.remote && a.sessionFile) j.transcript = a.sessionFile; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
+      else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: live ? status || 'running' : 'stale', startedAt: a.startedAt || firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
     }
-    for (const x of data.subagents || []) if (!x.advisor) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, thinking: x.thinking, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
+    // A registry entry newer than the reply may already have its transcript listed there: one card per subagent.
+    for (const x of data?.subagents || []) if (!x.advisor && !jobs.some(j => j.id === x.name)) jobs.push({ id: x.name, type: 'task', agent: 'subagent', title: x.name, status: 'done', transcript: x.file, model: x.model, thinking: x.thinking, cost: x.cost, summary: x.result, startedAt: x.updatedAt, finishedAt: x.updatedAt });
     return jobs;
   }
   const since = iso => { const ms = Date.now() - new Date(iso).getTime(); return isFinite(ms) ? fmtMs(Math.max(0, Math.round(ms / 1000) * 1000)) : ''; };
@@ -2136,18 +2146,21 @@
     if (!el) return;
     const file = bgFile();
     const e = file ? S.bg.get(file) : null;
-    const jobs = bgJobs(e?.data);
+    const jobs = bgJobs(e?.data, s);
     const advisors = (e?.data?.subagents || []).filter(x => x.advisor);
     const running = jobs.filter(j => j.status === 'running');
     const finished = jobs.filter(j => j.status !== 'running').sort((a, b) => String(b.finishedAt || b.startedAt).localeCompare(String(a.finishedAt || a.startedAt)));
     const { total, done } = countTasks(s);
-    S.sideCounts = { running: running.length, jobs: jobs.length, advisors: advisors.length, total };
-    el.hidden = !(S.sideOpen && (total || jobs.length || advisors.length));
+    // One source for the panel and its top-bar button (sideButton reads it right after): activity is anything the
+    // Activity tab lists. A failed /background read keeps the last reply's jobs and the live registry's.
+    const activity = !!(jobs.length || advisors.length);
+    S.sideCounts = { running: running.length, jobs: jobs.length, advisors: advisors.length, total, activity };
+    el.hidden = !(S.sideOpen && (total || activity));
     const tab = total && S.sideTab === 'plan' ? 'plan' : 'activity';
     const shown = finished.slice(0, 60);
     setIfChanged(el, `<div class="side-head"><div class="side-tabs" role="group" aria-label="Session panel"><button type="button" class="${tab === 'plan' ? 'on' : ''}" aria-pressed="${tab === 'plan'}" data-act="sideTab" data-tab="plan" ${total ? '' : 'disabled'}>Plan${total ? ` <small>${done}/${total}</small>` : ''}</button><button type="button" class="${tab === 'activity' ? 'on' : ''}" aria-pressed="${tab === 'activity'}" data-act="sideTab" data-tab="activity">Activity${running.length ? ` <small>${running.length}</small>` : ''}</button></div><button class="btn sm ghost" data-act="closeSide" aria-label="Close panel">✕</button></div>
       ${tab === 'plan' ? `<div class="side-plan"><div class="side-plan-progress"><span>${done} of ${total} complete</span><progress value="${done}" max="${total}"></progress></div>${planPhases(s, current().kind === 'session')}${current().kind === 'session' ? '<button class="btn sm ghost todo-clear" data-act="clearTodos">Clear task plan</button>' : ''}</div>` :
-        `${jobs.length ? `<div class="side-sec"><div class="side-label">Running <span>${running.length}</span></div>${running.map(jobCard).join('') || '<div class="side-empty">Nothing running right now.</div>'}</div>
+        `${jobs.length ? `${e?.error ? `<div class="side-sec"><div class="side-empty">Could not read background work: ${esc(e.error)}</div></div>` : ''}<div class="side-sec"><div class="side-label">Running <span>${running.length}</span></div>${running.map(jobCard).join('') || '<div class="side-empty">Nothing running right now.</div>'}</div>
       ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
       ${advisors.length ? `<div class="side-sec"><div class="side-label">Advisors <span>${advisors.length}</span></div>${advisors.map(x => `<div class="job"><div class="job-top"><b>${esc(x.name === '__advisor' ? 'Default' : x.name.slice('__advisor.'.length))}</b><span class="dur">${esc(ago(x.updatedAt))}</span></div>${x.model ? `<div class="job-sub">${esc(modelName(x.model))}</div>` : ''}<button class="btn sm ghost job-open" data-sub="${esc(x.file)}">Open transcript →</button></div>`).join('')}</div>` : ''}`}`);
     // A live Reasoning box follows new text until the user scrolls it (swapHtml keeps it pinned while it sits at the bottom).
@@ -2161,7 +2174,7 @@
   }
   function sideButton() {
     const c = S.sideCounts || {};
-    if (!c.jobs && !c.advisors) return '';
+    if (!c.activity) return '';
     const bits = [c.running ? `<span class="badge live">${c.running} running</span>` : c.jobs ? `${c.jobs} background` : '', c.advisors ? `${c.advisors} advisor${c.advisors === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
     return `<button class="btn sm ghost ${S.sideOpen && (S.sideTab === 'activity' || !c.total) ? 'on' : ''}" data-act="side" title="Background tasks and advisors" aria-label="Background tasks and advisors${bits ? ': ' + bits.replace(/<[^>]+>/g, '') : ''}">⧉ <span class="lbl">${bits}</span></button>`;
   }
@@ -5135,7 +5148,7 @@
     const subName = t.closest('[data-subname]');
     if (subName) {
       const e2 = S.bg.get(bgFile());
-      const j = bgJobs(e2?.data).find(x => x.id === subName.dataset.subname && x.transcript);
+      const j = bgJobs(e2?.data, bgSession()).find(x => x.id === subName.dataset.subname && x.transcript);
       if (j) openSub(j.transcript); else { toast('That subagent transcript is not available yet.'); loadBg(bgFile(), true); }
       return;
     }

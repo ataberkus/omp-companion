@@ -586,7 +586,9 @@ class OmpSession {
     model: s.model, thinkingLevel: s.thinkingLevel, isStreaming: s.isStreaming, isCompacting: s.isCompacting,
     steeringMode: s.steeringMode, followUpMode: s.followUpMode, interruptMode: s.interruptMode,
     sessionFile: s.sessionFile, sessionId: s.sessionId, sessionName: s.sessionName, autoCompactionEnabled: s.autoCompactionEnabled,
-    queuedMessageCount: s.queuedMessageCount, hasPendingAsyncWork: s.hasPendingAsyncWork(),
+    // OMP 18.22 dropped hasPendingAsyncWork() (its own get_state reads wakeSources). Calling it threw, failing every
+    // get_state, so refresh() never learned a new session's file, todos or subagents.
+    queuedMessageCount: s.queuedMessageCount, hasPendingAsyncWork: typeof s.hasPendingAsyncWork === 'function' ? s.hasPendingAsyncWork() : s.wakeSources !== undefined,
     isSettled: this.#rt.isSettled(s, this.#scheduled),
     queuedMessages: { steering: [...q.steering], followUp: [...q.followUp], liveSteered: q.liveSteered },
     todoPhases: s.getTodoPhases(), fastModeEnabled: s.isFastModeEnabled(), fastModeActive: s.isFastModeActive(),
