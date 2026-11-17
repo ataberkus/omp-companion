@@ -203,7 +203,8 @@ export function createSessionCommand(ctx){
     await refresh(s,runner);await persist(s);return body.type==='plan_review'?{proposal:s._planReview}:s;
    }catch(e){throw error(e.message,e.code==='stale_proposal'?409:400);}
   }
-  if(body.type==='rename'){const name=text(body.name,'Session name',120);const runner=runners.get(s.id);if(runner?.alive)await runner.setSessionName(name);s.title=name;delete s.autoTitle;await persist(s);return s;}
+  // renamed: the user named it here, so a title the session file holds (OMP's, or one set in a terminal) does not replace it.
+  if(body.type==='rename'){const name=text(body.name,'Session name',120);const runner=runners.get(s.id);if(runner?.alive)await runner.setSessionName(name);s.title=name;s.renamed=true;delete s.autoTitle;await persist(s);return s;}
   if(body.type==='pref'){
    if(!Object.hasOwn(PREF_VALUES,body.key)||!PREF_VALUES[body.key].includes(body.value))throw error('Invalid session setting.');
    const runner=await start(s);try{await runner.setPref(body.key,body.value);}catch(e){throw error(e.message);}
@@ -253,7 +254,7 @@ export function createSessionCommand(ctx){
    const r=body.type==='new_session'?await runner.newSession():await runner.switchSession(file);
    if(r?.cancelled)throw error('An extension cancelled the session change.');
    s.messages=[];delete s.promptTrimmed;s.todos=[];s.subagentList=[];delete s.contextTokens;delete s.contextPercent;await reload(s,runner);
-   if(body.type==='switch_session'){const head=await readSessionHead(file).catch(()=>null);if(head?.title)s.title=head.title.slice(0,120);}
+   if(body.type==='switch_session'){const head=await readSessionHead(file).catch(()=>null);if(head?.title){s.title=head.title.slice(0,120);delete s.renamed;}}
    append(s,'system',body.type==='new_session'?'Started a fresh OMP session. The previous conversation stays in its own session file.':'Switched to another saved OMP session.');
    s.status='paused';await persist(s);return s;
   }

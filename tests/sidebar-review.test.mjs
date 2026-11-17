@@ -57,3 +57,37 @@ test('pending questions take review priority until the last question clears', as
   await refresh();
   assert.equal(groups().size, 0);
 });
+
+// A panel session continued in a terminal: its history row merges into the panel row (no second row), the file's title
+// and later time win unless the session was renamed here, and forks carry their badge.
+test('a panel session\'s OMP history row merges into it: newer time and title, one row, fork badge', async () => {
+  const old = new Date(Date.now() - 3 * 86400000).toISOString(), fresh = new Date().toISOString();
+  const store = { projects: [], archived: [], sessions: [
+    { id: 'a', title: 'Panel title', cwd: '/p', status: 'done', updatedAt: old, sessionFile: 'C:/s/a.jsonl' },
+    { id: 'b', title: 'Mine', renamed: true, cwd: '/p', status: 'done', updatedAt: old, sessionFile: 'C:/s/b.jsonl' },
+  ] };
+  const native = { sessions: [
+    { file: 'C:/s/a.jsonl', title: '🔁 REVRS: Terminal title', named: true, cwd: '/p', preview: '', updatedAt: fresh, managedId: 'a', parent: 'C:/s/p.jsonl', parentTitle: 'Parent' },
+    { file: 'C:/s/b.jsonl', title: 'Terminal rename', named: true, cwd: '/p', preview: '', updatedAt: fresh, managedId: 'b' },
+    { file: 'C:/s/p.jsonl', title: 'Parent', named: true, cwd: '/p', preview: '', updatedAt: old },
+  ] };
+  const node = () => ({ innerHTML: '', value: '', style: {}, scrollHeight: 20, classList: { remove() {}, toggle() {} }, addEventListener() {}, setAttribute() {}, querySelector: () => null, focus() {} });
+  const elements = new Map(['app', 'main', 'list', 'conn', 'input', 'thread', 'topbar', 'newBtn', 'scrim', 'groupBy', 'disconnect'].map(id => [id, node()]));
+  runInNewContext(await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8'), {
+    document: { hidden: false, getElementById: id => elements.get(id), querySelector: s => elements.get(s.slice(1)) || null, querySelectorAll: () => [], addEventListener() {} },
+    window: { addEventListener() {} }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
+    location: { hash: '#/s/unopened', pathname: '/' }, URLSearchParams, AbortSignal,
+    localStorage: { getItem: () => null }, sessionStorage: { getItem: () => 'test-token' },
+    setTimeout() {}, ResizeObserver: class { observe() {} disconnect() {} },
+    fetch: async url => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => structuredClone(url.startsWith('/api/state') ? store : url === '/api/models' ? { models: [], roles: {} } : url.startsWith('/api/omp-sessions') ? native : {}) }),
+  });
+  for (let i = 0; i < 8; i++) await new Promise(setImmediate);
+  const html = elements.get('list').innerHTML;
+  const today = html.slice(html.indexOf('data-group="Today"'), html.indexOf('data-group="Previous 7 days"'));
+  assert.deepEqual([...today.matchAll(/data-key="([^"]+)"/g)].map(m => m[1]), ['s:a', 's:b'], 'the terminal turn moves both to Today, one row each');
+  assert.deepEqual([...html.matchAll(/data-key="([^"]+)"/g)].map(m => m[1]).filter(k => k.startsWith('f:')), ['f:C:/s/p.jsonl'], 'only the unmanaged file is a history row');
+  assert.match(today, /🔁 REVRS: Terminal title/);
+  assert.match(today, /Mine/, 'a rename in the panel stays');
+  assert.doesNotMatch(html, /Terminal rename/);
+  assert.match(today, /class="fork" title="Forked from Parent">fork</);
+});

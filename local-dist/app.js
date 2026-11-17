@@ -341,16 +341,25 @@
   function items() { return heldItems || listItems(); }
   function listItems() {
     const panel = panelSessions(), sel = selKey();
+    // OMP's history row of each panel session's file: the same session, continued maybe in a terminal since.
+    const ids = new Set(panel.map(s => s.id)), nativeOf = new Map();
+    for (const n of S.native) if (n.managedId && ids.has(n.managedId)) nativeOf.set(n.managedId, n);
+    const forkTip = n => n?.parent ? 'Forked from ' + (n.parentTitle || base(n.parent)) : '';
     const out = panel.map(s => {
-      const p = projectOf(s);
-      const model = sessionModel(s), cwd = p?.path || s.cwd;
-      return { key: 's:' + s.id, id: s.id, title: s.title, folder: p?.name || base(s.cwd), cwd, color: p?.color || pathColor(cwd), hiddenWs: !!p?.hidden, unseen: ('s:' + s.id !== sel && attn.unseen.get(s.id)) || '', status: s.status, working: isWorking(s), task: s._task || (s._bash ? 'Running a shell command' : ''), needsReview: !!s.uiRequests?.length, updatedAt: s.updatedAt, at: settleAt(s), panel: true, model, thinking: s.thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), isolated: !!s.isolated, branch: s.branch, text: (s.title + ' ' + cwd + ' ' + (p?.name || '') + ' ' + (s.prompt || '') + ' ' + model).toLowerCase() };
+      const p = projectOf(s), n = nativeOf.get(s.id);
+      const cwd = p?.path || s.cwd, working = isWorking(s);
+      // The file's title is the session's (OMP's, or one set in a terminal) unless it was renamed here; a file written after
+      // the panel last saw it (a terminal turn) moves the session's time and place. A working session's own state leads.
+      const title = n?.named && !s.renamed ? n.title : s.title;
+      const fresher = !!n && !working && n.updatedAt > s.updatedAt;
+      const at = settleAt(s), updatedAt = fresher ? n.updatedAt : s.updatedAt;
+      const model = (fresher && n.model) || sessionModel(s), thinking = fresher && n.model ? n.thinking : s.thinking;
+      return { key: 's:' + s.id, id: s.id, title, folder: p?.name || base(s.cwd), cwd, color: p?.color || pathColor(cwd), hiddenWs: !!p?.hidden, unseen: ('s:' + s.id !== sel && attn.unseen.get(s.id)) || '', status: s.status, working, task: s._task || (s._bash ? 'Running a shell command' : ''), needsReview: !!s.uiRequests?.length, updatedAt, at: fresher && n.updatedAt > at ? n.updatedAt : at, panel: true, model, thinking, workStartedAt: s.workStartedAt, workFinishedAt: s.workFinishedAt, overlap: (s._overlaps || []).map(o => o.title), isolated: !!s.isolated, branch: s.branch, fork: forkTip(n), text: (title + ' ' + cwd + ' ' + (p?.name || '') + ' ' + (s.prompt || '') + ' ' + (n?.preview || '') + ' ' + model).toLowerCase() };
     });
-    const ids = new Set(panel.map(s => s.id));
     for (const n of S.native) {
-      if (n.managedId && ids.has(n.managedId)) continue;
+      if (nativeOf.get(n.managedId) === n) continue;
       const p = projectAt(n.cwd);
-      out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: p?.name || base(n.cwd), cwd: n.cwd, color: p?.color || pathColor(n.cwd), hiddenWs: !!p?.hidden, unseen: '', status: 'history', updatedAt: n.updatedAt, at: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, text: (n.title + ' ' + n.cwd + ' ' + (p?.name || '') + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
+      out.push({ key: 'f:' + n.file, file: n.file, title: n.title, folder: p?.name || base(n.cwd), cwd: n.cwd, color: p?.color || pathColor(n.cwd), hiddenWs: !!p?.hidden, unseen: '', status: 'history', updatedAt: n.updatedAt, at: n.updatedAt, preview: n.preview, model: n.model || '', thinking: n.thinking, fork: forkTip(n), text: (n.title + ' ' + n.cwd + ' ' + (p?.name || '') + ' ' + n.preview + ' ' + (n.model || '')).toLowerCase() });
     }
     const arch = archivedKeys(), pins = pinnedKeys();
     for (const it of out) { it.archived = arch.has(it.key); it.pinned = pins.has(it.key); }
@@ -466,6 +475,7 @@
       showFolder ? `<span class="pf" style="--pc:${esc(it.color)}">${esc(it.folder)}</span>` : '',
       status ? `<span class="st">${esc(status)}</span>` : '',
       it.isolated ? `<span class="wt" title="${esc('Isolated git worktree' + (it.branch ? ' on branch ' + it.branch : ''))}">⎇ worktree</span>` : '',
+      it.fork ? `<span class="fork" title="${esc(it.fork)}">fork</span>` : '',
       it.overlap?.length ? `<span class="overlap" title="${esc('Edits the same files as ' + it.overlap.join(', '))}">⚠ overlap</span>` : '',
       it.model ? `<span class="mdl">${esc(modelLabel(it.model, it.thinking))}</span>` : '',
     ].filter(Boolean).join(' · ');
@@ -1093,11 +1103,17 @@
       </div>`;
     setIfChanged($('#topbar'), html);
   }
+  // A fork's parent (OMP's resume list shows "Forked from"), a link to it when it is in the history list.
+  const forkedFrom = n => {
+    if (!n?.parent) return '';
+    const label = 'Forked from ' + (n.parentTitle || base(n.parent)), p = S.native.find(x => norm(x.file) === norm(n.parent));
+    return p ? `<a class="fork" href="${esc(itemHash('f:' + p.file))}" title="${esc(p.file)}">${esc(label)}</a>` : `<span class="fork" title="${esc(n.parent)}">${esc(label)}</span>`;
+  };
   function renderTopbarNative(n, pv, file) {
     const title = n?.title || pv?.title || 'OMP session';
     const cwd = n?.cwd || pv?.cwd || '';
     const html = `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
-      <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(agoText(n.updatedAt))}</span>` : ''}${offlinePill()}${autoShutdownPill()}`)}</div>
+      <div class="title-block"><h1 title="${esc(title)}">${esc(title)}</h1>${metaHtml(cwd, `<span class="pill">OMP history</span>${forkedFrom(n)}${n?.model ? `<span>◆ ${esc(modelLabel(n.model, n.thinking))}</span>` : ''}${contextMeta(pv?.contextTokens, modelInfo(n?.model || pv?.model)?.contextWindow)}${n ? `<span>last active ${esc(agoText(n.updatedAt))}</span>` : ''}${offlinePill()}${autoShutdownPill()}`)}</div>
       <div class="actions">${changesButton(pv?.messages || [], 'f:' + file)}${sideButton()}
         <button class="btn sm" data-act="newHere" aria-label="New session here">＋ <span class="lbl">New here</span></button>
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
@@ -3495,7 +3511,7 @@
     const id = 'tf-' + f.name, req = f.required ? ' required' : '', lbl = `${esc(f.label)}${f.flag ? ` <code class="muted">${esc(f.flag)}</code>` : ''}`;
     if (f.type === 'bool') return `<label class="check span2"><input type="checkbox" name="${esc(f.name)}" ${v ?? f.default ? 'checked' : ''}> ${lbl}</label>`;
     if (f.type === 'select') return `<label for="${id}">${lbl}<select id="${id}" name="${esc(f.name)}"${req}>${f.options.map(o => `<option value="${esc(o)}" ${(v ?? '') === o ? 'selected' : ''}>${esc(o.replace(/^--/, '') || '(default)')}</option>`).join('')}</select></label>`;
-    if (f.type === 'session') return `<label for="${id}" class="span2">${lbl}<select id="${id}" name="${esc(f.name)}"${req}><option value="">Choose a saved session…</option>${S.native.slice(0, 200).map(n => `<option value="${esc(n.file)}" ${v === n.file ? 'selected' : ''}>${esc(n.title)} · ${esc(base(n.cwd))} · ${esc(ago(n.updatedAt))}</option>`).join('')}</select></label>`;
+    if (f.type === 'session') return `<label for="${id}" class="span2">${lbl}<select id="${id}" name="${esc(f.name)}"${req}><option value="">Choose a saved session…</option>${S.native.map(n => `<option value="${esc(n.file)}" ${v === n.file ? 'selected' : ''}>${esc(n.title)} · ${esc(base(n.cwd))} · ${esc(ago(n.updatedAt))}</option>`).join('')}</select></label>`;
     if (f.type === 'textarea') return `<label for="${id}" class="span2">${lbl}<textarea id="${id}" name="${esc(f.name)}" rows="3" maxlength="${f.max || 500}"${req}>${esc(v || '')}</textarea></label>`;
     const type = f.type === 'int' ? `type="number" step="1"${f.min !== undefined ? ` min="${f.min}"` : ''}${f.max !== undefined ? ` max="${f.max}"` : ''}` : 'type="text"';
     return `<label for="${id}">${lbl}<input id="${id}" ${type} name="${esc(f.name)}" value="${esc(v ?? '')}" placeholder="${esc(f.placeholder || (f.type === 'model' ? 'provider/model' : f.type === 'dir' ? 'Absolute folder path' : ''))}"${f.type === 'model' ? ' list="toolModels"' : ''} spellcheck="false" autocomplete="off"${req}></label>`;

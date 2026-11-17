@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { now, error, contentText, samePath, clip } from './util.mjs';
 import { toolImages } from './images.mjs';
 import { startWork, finishWork, askQuestion, parseAdvisorStatus, btwView, subagentView, goalView, loopView } from './session-views.mjs';
-import { advisorMessage, tanMessage, biliMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt } from './transcript.mjs';
+import { advisorMessage, tanMessage, biliMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt, readSessionHead, lastContext } from './transcript.mjs';
 import { launchArgs } from './launch.mjs';
 // What a session resumed after a restart is told: its interrupted turn is in OMP's session file, so it carries on from there.
 const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
@@ -222,13 +222,21 @@ export function createRunner(ctx){
   if(launches.has(s.id))return launches.get(s.id);
   const promise=(async()=>{
    for(const [key,thought] of subagentThoughts)if(thought.parentId===s.id)subagentThoughts.delete(key);
+   // Turns, title and model a terminal OMP added to the file since the companion last ran it come first; OMP resumes it.
+   await syncFromFile(s).catch(()=>{});
+   const fileTitle=s.sessionFile?(await readSessionHead(s.sessionFile).catch(()=>null))?.title||'':'';
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
    const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!hasPrompt(s))];
    const args=s.native?[...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--session-dir',sessionDir,'--continue',...pick];
-   const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!ctx.closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);if(!ctx.closing&&!ctx.pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
+   const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!ctx.closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);
+    // What this OMP wrote is in the panel already: only a later change to the file (a terminal) is read again.
+    if(s.sessionFile){const file=s.sessionFile;s._fileMark=fs.stat(file).then(st=>{if(!runners.get(s.id)?.alive&&s.sessionFile===file)s.fileSeen={size:st.size,mtime:st.mtimeMs};},()=>{});}
+    if(!ctx.closing&&!ctx.pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
    runners.set(s.id,runner);
-   try{await runner.ready;if(!s.autoTitle)await runner.setSessionName(s.title);if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await runner.setModel(s.provider,s.model);
+   // The panel's title is given to OMP only when the file has none or the user renamed the session in the panel: a title
+   // OMP gave it, or one renamed in a terminal, is the session's own (it was sent back as a user rename on every start).
+   try{await runner.ready;if(!s.autoTitle&&s.title&&s.title!==fileTitle&&(s.renamed||!fileTitle))await runner.setSessionName(s.title);if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await runner.setModel(s.provider,s.model);
     // Per-session toggles live in the OMP session, so a restarted runner gets them back.
     for(const [key,value] of Object.entries(s.prefs||{}))await runner.setPref(key,value).catch(e=>notice(s,'warning',e.message));
     await refresh(s,runner);return runner;}catch(e){runners.delete(s.id);runner.kill();throw e;}
@@ -257,19 +265,49 @@ export function createRunner(ctx){
  // Such prompts can't be matched to OMP's entries by anything but their text, so the transcript is rebuilt from OMP's own
  // entries on its active path instead (once per companion run), which carry every prompt's entry ID. The companion's notes
  // are kept in time order. read() gives OMP's entries and leaf: from the live runner, or the session file when none runs.
- async function backfillEntries(s,read){
-  s._backfilled=true;const before=s.messages;
-  const r=await read().catch(()=>null),entries=Array.isArray(r?.entries)?r.entries:[],byId=new Map(entries.map(e=>[e?.id,e])),path=new Set();
-  for(let id=r?.leafId;id&&!path.has(id);id=byId.get(id)?.parentId)path.add(id);
-  const info={},rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)),400,stashImages,info);
-  // A message sent (or any transcript change) while reading wins; the rebuild is dropped and tried again later.
-  if(!rebuilt.some(m=>m.entryId))return;
-  if(s.messages!==before||['running','queued'].includes(s.status)){s._backfilled=false;return;}
-  const t=m=>new Date(m.at).getTime()||0;
-  // The rebuild is the same conversation: a prompt cut from it (or from the old transcript) still counts.
-  if(info.promptTrimmed)s.promptTrimmed=true;
-  s.messages=capMessages(s,[...rebuilt,...before.filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)));delete s._entryCursor;scheduleSave(s);
- }
+async function backfillEntries(s,read){
+ s._backfilled=true;const before=s.messages;
+ const r=await read().catch(()=>null);
+ if(adoptEntries(s,before,r)===null)s._backfilled=false;
+}
+// OMP's entries on its active path (read() of backfillEntries) as the transcript, the companion's notes kept in time order.
+// False, changing nothing, when they hold none of OMP's prompts; null when the transcript changed meanwhile (try later).
+function adoptEntries(s,before,r){
+ const entries=Array.isArray(r?.entries)?r.entries:[],byId=new Map(entries.map(e=>[e?.id,e])),path=new Set();
+ for(let id=r?.leafId;id&&!path.has(id);id=byId.get(id)?.parentId)path.add(id);
+ const info={},rebuilt=entryMessages(entries.filter(e=>path.has(e?.id)),400,stashImages,info);
+ // A message sent (or any transcript change) while reading wins; the rebuild is dropped and tried again later.
+ if(!rebuilt.some(m=>m.entryId))return false;
+ if(s.messages!==before||['running','queued'].includes(s.status))return null;
+ const t=m=>new Date(m.at).getTime()||0;
+ // The rebuild is the same conversation: a prompt cut from it (or from the old transcript) still counts.
+ if(info.promptTrimmed)s.promptTrimmed=true;
+ s.messages=capMessages(s,[...rebuilt,...(before||[]).filter(m=>m.role==='system')].sort((a,b)=>t(a)-t(b)));delete s._entryCursor;scheduleSave(s);
+ return true;
+}
+// Whether the file moved since the companion last ran or read it (syncFromFile has something to read).
+async function fileMoved(s){
+ const file=s.sessionFile;if(!file||runners.get(s.id)?.alive||['running','queued'].includes(s.status))return false;
+ await s._fileMark;let st;try{st=await fs.stat(file);}catch{return false;}
+ const seen=s.fileSeen;if(seen?seen.size===st.size&&seen.mtime===st.mtimeMs:st.mtimeMs<=(Date.parse(s.updatedAt)||0)+5000){if(!seen)s.fileSeen={size:st.size,mtime:st.mtimeMs};return false;}
+ return st;
+}
+// A session the panel holds can be continued in a terminal (`omp --resume <file>`) while the companion runs no OMP on it:
+// the file then holds turns, a title and a model the panel never saw. Read again whenever the file moved since the companion
+// last ran or read it (s.fileSeen; for a session saved before that was kept, since its last activity). A title renamed in
+// the panel (s.renamed) stays. Callers hold the session's lock or are start(), which runs under it.
+async function syncFromFile(s){
+ const st=await fileMoved(s);if(!st)return false;const file=s.sessionFile,mark={size:st.size,mtime:st.mtimeMs};
+ let head;try{head=await readSessionHead(file);}catch{return false;}
+ const before=s.messages,r=await fileEntries(file).catch(()=>null);
+ if(runners.get(s.id)?.alive||adoptEntries(s,before,r)===null)return false;
+ if(head.title&&!s.renamed){s.title=head.title.slice(0,120);delete s.autoTitle;}
+ if(!s.modelSelector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}
+ if(!s.thinkingChoice&&head.thinking)s.thinking=head.thinking;
+ const tokens=await lastContext(file).catch(()=>undefined);if(tokens!==undefined)s.contextTokens=tokens;
+ const at=new Date(st.mtimeMs).toISOString();if(!(s.updatedAt>=at))s.updatedAt=at;
+ s.fileSeen=mark;scheduleSave(s);return true;
+}
  // The session file's entries and the leaf OMP resumes from when it loads them: the last entry, unless a model_usage entry
  // names another active leaf (OMP's own rule).
  async function fileEntries(file){
@@ -301,5 +339,5 @@ export function createRunner(ctx){
   if(info.promptTrimmed)s.promptTrimmed=true;else delete s.promptTrimmed;
   delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
- return {start,lock,refresh,autoApprove,reload,advisorStatus,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart};
+ return {start,lock,refresh,autoApprove,reload,advisorStatus,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart,syncFromFile,fileMoved};
 }

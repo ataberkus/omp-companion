@@ -1,12 +1,13 @@
 // HTTP routes for sessions: dashboard state polls, drafts, starting, resuming, pinning and archiving sessions,
 // provider usage, slash commands, and session commands.
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import { exists, now, error, text, samePath, resolveDir } from '../util.mjs';
 import { chatImages } from '../images.mjs';
-import { readSessionHead, lastContext, importMessages } from '../transcript.mjs';
+import { readSessionHead, lastContext, importMessages, cleanTitle } from '../transcript.mjs';
 import { launchOptions } from '../launch.mjs';
 export function sessionRoutes(ctx){
- const {command,start,lock,notice,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
+ const {command,start,lock,notice,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
  const archiveOrPin=async({url,body,json})=>{
     const field=url.pathname==='/api/pin'?'pinned':'archived',other=field==='pinned'?'archived':'pinned',on=body[field]!==false;
     const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
@@ -25,8 +26,9 @@ export function sessionRoutes(ctx){
     // Without ?session: the whole store, every transcript included (read for this reply only when nothing has read it yet).
     if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),sessions:store.sessions.map(s=>unread(s)?{...s,messages:readTranscript(s)}:s)});return;}
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
-    // A viewed session with no OMP process running gets its prompts' entry IDs from the session file (live ones from refresh).
-    {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive&&needsBackfill(s))void lock(s.id,async()=>{if(!runners.get(s.id)?.alive&&needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));}).catch(()=>{});}
+    // A viewed session with no OMP process running gets what a terminal OMP added to its file since (syncFromFile), and its
+    // prompts' entry IDs from the session file (live ones from refresh).
+    {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive)void(async()=>{const moved=await fileMoved(s);if(!moved&&!needsBackfill(s))return;await lock(s.id,async()=>{if(runners.get(s.id)?.alive)return;if(moved)await syncFromFile(s);if(needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));});})().catch(()=>{});}
     const id=url.searchParams.get('session'),since=url.searchParams.get('since'),od=url.searchParams.get('od')==='1',viewed=store.sessions.find(s=>s.id===id);
     const top={...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined};
     // store=<epoch>.<rev>, or empty while it holds none: the session list and the rest of the store as changes (storeDelta),
@@ -80,14 +82,18 @@ export function sessionRoutes(ctx){
    'POST /api/omp-sessions/resume':async({body,json})=>{
     const file=sessionFileParam(body.file);const images=chatImages(body);const message=typeof body.message==='string'?body.message.trim().slice(0,200000):'';
     const submitted=!!message||body.images!==undefined;
-    const existing=store.sessions.find(s=>s.sessionFile&&samePath(s.sessionFile,file));
+    // The panel's visible session on that file first; a hidden one (removed from the panel) is brought back otherwise.
+    const onFile=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file)),existing=onFile.find(s=>!s.hidden)||onFile[0];
     const gone=k=>k!=='f:'+file&&k!=='f:'+body.file;store.archived=store.archived.filter(gone);store.pinned=store.pinned.filter(gone);
-   if(existing){existing.hidden=false;if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(existing),existing));return;}
+   // Turns a terminal OMP added to the file since the panel imported or last ran it are read first (syncFromFile).
+   if(existing){existing.hidden=false;await lock(existing.id,()=>syncFromFile(existing)).catch(()=>{});if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(existing),existing));return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
-    const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||head.preview.split('\n')[0]||'Resumed session').slice(0,120);
+    const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||cleanTitle(head.preview)||'Resumed session').slice(0,120);
+    // The file as imported: a later change (a terminal OMP) is read again when the session is viewed or started.
+    const seen=await fs.stat(file).then(st=>({size:st.size,mtime:st.mtimeMs}),()=>undefined);
     const imported={},messages=await importMessages(file,400,stashImages,imported).catch(()=>[]);const contextTokens=await lastContext(file).catch(()=>undefined);messages.push({id:randomUUID(),role:'system',text:'Resumed from OMP session history. Avoid prompting it here while the same session is open in a terminal.',at:now()});
-    const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch});s.contextTokens=contextTokens;if(imported.promptTrimmed)s.promptTrimmed=true;
+    const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);const s=await createSession(p,{title,native:true,sessionFile:file,messages,selector,thinking,launch});s.contextTokens=contextTokens;if(imported.promptTrimmed)s.promptTrimmed=true;if(seen)s.fileSeen=seen;
     if(!head.title&&!launch?.noTitle)s.autoTitle=true;
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
     if(!selector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}if(!thinking&&head.thinking)s.thinking=head.thinking;
