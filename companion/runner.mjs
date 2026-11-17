@@ -44,7 +44,8 @@ export function createRunner(ctx){
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist(s);}).finally(checkAutoShutdown);
  }
  // Transcript-neutral frames (see the end of event()).
- const NEUTRAL=new Set(['subagent_event','subagent_progress','subagent_lifecycle','turn_start','turn_end']),NEUTRAL_UI=new Set(['setStatus','setWidget','custom','cancel']);
+ // agent_pause (OMP 18.22): an intermediate loop end inside one run; its messages already arrived as message events.
+ const NEUTRAL=new Set(['subagent_event','subagent_progress','subagent_lifecycle','turn_start','turn_end','agent_pause']),NEUTRAL_UI=new Set(['setStatus','setWidget','custom','cancel']);
  // A streamed thought or reply grows its own message, the last one bar unread steers: looked up from the end, since deltas
  // are most of OMP's event stream and a 600-message transcript scanned from the front cost three scans per delta. Exact:
  // the id is a fresh randomUUID, so it appears once. The copy keeps the 600 cap and backfillEntries' identity check.

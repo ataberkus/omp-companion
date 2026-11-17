@@ -89,6 +89,9 @@ class Collab {
   this.#ctx = tuiContext(io, sdk.kit, {
    get session() { return self.#session(); },
    collabHost: undefined, collabGuest: undefined,
+   // OMP 18.22's CollabGuestLink claims and releases the process through setCollabGuest (InteractiveMode's setter; the
+   // TUI also re-presents its transcript, which the dashboard reloads itself). Older builds assign collabGuest directly.
+   setCollabGuest(guest) { this.collabGuest = guest; },
    get collabController() { return self.#controller; },
    statusLine: {
     setCollabStatus: status => this.#collabStatus(status),
@@ -108,7 +111,7 @@ class Collab {
    reloadTodos: async () => {},
    handleResumeSession: async file => { if (await this.#change('switch_session', { sessionPath: file }, () => io.session.switchSession(file))) this.#replaced('The collab session ended; this is your own session again.'); },
    // Terminal widgets with no dashboard counterpart (spinners, pending-message rows, the subagent badge, editor border).
-   pendingTools: new Map(), statusContainer: ui, pendingMessagesContainer: ui, compactionQueuedMessages: [],
+   pendingTools: new Map(), statusContainer: ui, pendingMessagesContainer: ui, pendingShellContainer: ui, compactionQueuedMessages: [],
    loadingAnimation: undefined, autoCompactionLoader: undefined, retryLoader: undefined, streamingComponent: undefined, streamingMessage: undefined,
    // The TUI's running-subagent badge follows the guest's mirror of the host's agents: here, the dashboard's roster.
    syncRunningSubagentBadge: () => this.#publishAgents(),
