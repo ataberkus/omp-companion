@@ -202,6 +202,10 @@ class OmpSession {
   });
   const { session, setToolUIContext, modelFallbackMessage, mcpManager } = await sdk.createAgentSession(options);
   this.#session = session; this.#mcp = mcpManager; this.#buses = { eventBus, subagentEventBus };
+  // OMP 18.22's root (main.ts): sign-in and sign-out re-resolve the scoped model list through this refresher.
+  if (typeof session.setScopedModelsRefresher === 'function' && typeof main.rebuildScopedModels === 'function') {
+   session.setScopedModelsRefresher(async () => { await main.rebuildScopedModels(session, parsed, rt.modelRegistry, settings); });
+  }
   try {
    session.validateRetryFallbackChains();
    cliArgs.validateToolNames(parsed.tools, session.getAllToolNames());
@@ -225,7 +229,12 @@ class OmpSession {
   // Hosts can withhold goal continuation (/loop, as the TUI does while loop mode is on); OMP's own controller (fork builds) cannot.
   this.#goal = rt.goalController(session, () => void this.#settle.check(), () => this.#hosted.some(h => h.holdsGoalContinuation?.()));
   const scheduled = rt.settle.watchedScheduledTurnProbe(() => this.#goal.continuationPending, () => this.#settle);
-  this.#results = new rt.results.RpcPromptResults(session, out, scheduled);
+  // OMP 18.22's hooks: a prompt the cost gate refused reports `cost_cap` (not "aborted"), and one that ended without a
+  // run re-checks settlement. Older builds ignore the extra argument.
+  this.#results = new rt.results.RpcPromptResults(session, out, scheduled, {
+   costCapRefusal: () => session.costCapRefusal,
+   settledWithoutRun: () => void this.#settle.check(),
+  });
   this.#settle = new rt.settle.RpcSessionSettleWatcher(session, out, scheduled);
   this.#scheduled = scheduled;
   this.#subagents = new rt.subagents.RpcSubagentRegistry(subagentEventBus, out);
@@ -290,10 +299,12 @@ class OmpSession {
     if (r.cancelled) { if (r.timedOut) dialog?.onTimeout?.(); return false; }
     return 'confirmed' in r ? r.confirmed : false;
    }),
-   input: (title, placeholder, dialog) => rpc.requestRpcDialog(pending, out, dialog, undefined, { method: 'input', title, placeholder, timeout: dialog?.timeout }, r => {
-    if (r.cancelled) { if (r.timedOut) dialog?.onTimeout?.(); return undefined; }
-    return 'value' in r ? r.value : undefined;
-   }),
+   // OMP 18.22's requestRpcInput forwards `secret` (a masked field); older builds' callers never set it.
+   input: (title, placeholder, dialog) => rpc.requestRpcInput ? rpc.requestRpcInput(pending, out, title, placeholder, dialog)
+    : rpc.requestRpcDialog(pending, out, dialog, undefined, { method: 'input', title, placeholder, timeout: dialog?.timeout, ...(dialog?.secret !== undefined ? { secret: dialog.secret } : {}) }, r => {
+     if (r.cancelled) { if (r.timedOut) dialog?.onTimeout?.(); return undefined; }
+     return 'value' in r ? r.value : undefined;
+    }),
    editor: (title, prefill, dialog, editorOptions) => raced('editor', { title, prefill }, dialog, d => rpc.requestRpcEditor(pending, out, title, prefill, d, editorOptions)),
    notify: (msg, type) => fire({ method: 'notify', message: msg, notifyType: type }),
    setStatus: (key, text) => fire({ method: 'setStatus', statusKey: key, statusText: text }),
@@ -302,6 +313,9 @@ class OmpSession {
    pasteToEditor: text => fire({ method: 'set_editor_text', text }),
    getEditorText: () => '',
    onTerminalInput: () => () => {},
+   // Required by OMP 18.22's ExtensionUIContext; the dashboard redraws its transcript itself and opens no terminal links,
+   // so these are the no-ops OMP's RPC host has.
+   rerenderMessage() {}, refreshTranscript() {}, getLinkClicksAvailable: () => false,
    setWorkingMessage() {}, setFooter() {}, setHeader() {}, setTitle() {}, addAutocompleteProvider() {}, setToolsExpanded() {}, setEditorComponent() {},
    getToolsExpanded: () => false, getEditorComponent: () => undefined,
    custom: custom ? (factory, options) => custom.show(factory, options) : async () => undefined,
@@ -705,7 +719,7 @@ class OmpSession {
  #change(type, extra, timeout, change) { const command = this.#accept(type, extra); return this.#pendingInput(command, this.#serial(type, timeout, () => this.#changeNow(command, change))); }
  // The change itself, for #change and for hosted commands that already hold the command queue (/fork, /clear).
  async #changeNow(command, change) {
-  const type = command.type;
+  const type = command.type, keepsRun = type === 'branch' || type === 'fork';
   // Checked when the change runs, not when it was queued: a guest's own queued restore must not let an earlier one through.
   this.#guard('session', change);
   await this.#plan?.beforeSessionChange();
@@ -717,11 +731,12 @@ class OmpSession {
     if (change) { const data = await change(); if (!data.cancelled) this.#subagents.clear(); result = { data }; }
     else result = await this.#rt.rpc.handleRpcSessionChange(this.#session, command, this.#subagents, undefined);
    }
-   finally { await this.#goal.endSessionChange({ detachedRun: type !== 'branch' && result?.data.cancelled !== true }); await this.#goal.settled(); }
+   // As OMP's RPC host: branch and fork switch files in-process without detaching a run (fork requires idle).
+   finally { await this.#goal.endSessionChange({ detachedRun: !keepsRun && result?.data.cancelled !== true }); await this.#goal.settled(); }
   } finally { await this.#plan?.reconcile(); }
   if (!result.data.cancelled) {
    this.#gate.commitSessionChange(command);
-   if (type !== 'branch') this.#results.abortOpen();
+   if (!keepsRun) this.#results.abortOpen();
    void this.#settle.check();
    this.#eachHost(h => h.afterSessionChange?.());
    await this.#publishCommands();
@@ -754,6 +769,8 @@ class OmpSession {
     },
    });
    await this.#session.modelRegistry.refreshProvider(known.storeCredentialsAs ?? known.id, 'online');
+   // OMP 18.22's RPC login: the scoped model list follows the new credential (no-op without a refresher).
+   await this.#session.refreshScopedModels?.();
    return { providerId };
   });
  }

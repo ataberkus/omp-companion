@@ -13,7 +13,8 @@ export const host = {
    text('prompts/goals/guided-goal-interview.md'),
   ]);
   const sdk = {
-   registry: vibe.VibeSessionRegistry.global(), cfgGoalEnabled: goalSettings.cfgGoalEnabled, formatModelString: resolver.formatModelString,
+   // OMP 18.22's TUI names vibe workers' model with its upstream route (provider/id@upstream); older builds lack it.
+   registry: vibe.VibeSessionRegistry.global(), cfgGoalEnabled: goalSettings.cfgGoalEnabled, formatModelString: resolver.formatModelStringWithRouting ?? resolver.formatModelString,
    render: values => utils.prompt.render(interview, values), AgentBusyError: core.AgentBusyError,
    entries: { vibe: builtinEntry(m.builtinRegistry, 'vibe'), guided: builtinEntry(m.builtinRegistry, 'guided-goal') },
   };

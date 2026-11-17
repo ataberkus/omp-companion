@@ -50,8 +50,10 @@ export function scopeIrc(registry, bus, mainAgentId) {
    return { to: msg.to, outcome: 'failed', error: `Unknown agent "${msg.to}" — check the subagent roster or read history:// for known peers.` };
   }
   const receipt = await send.call(this, msg, opts);
-  // OMP relays to "Main" itself, and the top-level agent shows messages it sends or receives on its own. A broadcast leg
-  // is not relayed when the broadcast also reaches the top-level agent, which then shows it (OMP's suppressRelay).
+  // OMP relays to "Main" itself, and the top-level agent shows messages it sends or receives on its own. Builds before
+  // 18.22 broadcast from any agent and pass suppressRelay on a leg whose broadcast also reaches the top-level agent,
+  // which then shows it; 18.22 has no send options and lets only the top-level agent broadcast (irc/messaging.ts), so
+  // there its broadcasts return at the sender check below.
   if (receipt.outcome === 'failed' || opts?.suppressRelay || root === mainAgentId) return receipt;
   if ([msg.from, msg.to].some(id => id === root || id === mainAgentId)) return receipt;
   if (msg.broadcast && registry.listVisibleTo(msg.from).some(ref => ref.id === root)) return receipt;

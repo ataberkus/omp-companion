@@ -18,10 +18,13 @@ export const tan = {
  },
 };
 
+// OMP 18.22 removed /seance (slash-commands/seance.ts and its registry entry): a build without it has no host, silently.
 export const seance = {
  name: 'seance',
  async load(env) {
-  const [kit, { SEANCE_SLASH_COMMAND }] = await Promise.all([loadTuiKit(env), env.at('slash-commands/seance.ts')]);
+  const command = await env.optional('slash-commands/seance.ts');
+  if (!command) return null;
+  const [kit, { SEANCE_SLASH_COMMAND }] = await Promise.all([loadTuiKit(env), command]);
   const entries = [builtinEntry(env.m.builtinRegistry, 'seance')];
   return io => {
    const ctx = tuiContext(io, kit);

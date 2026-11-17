@@ -68,7 +68,10 @@ class SessionCommands {
   const picked = await ui.select(`Log out which ${provider.name} account?`, accounts.map((a, i) => ({ label: labels[i], description: a.detail })));
   const account = accounts[labels.indexOf(picked)];
   if (!account) return;
-  const { removed, remainingSource } = await this.#logout.logoutCredential(session.modelRegistry, provider.id, account.credentialId, session.sessionId);
+  // OMP 18.22 takes the session (it also refreshes the scoped model list); older builds take its model registry and ID.
+  const { removed, remainingSource } = this.#logout.logoutCredential.length >= 4
+   ? await this.#logout.logoutCredential(session.modelRegistry, provider.id, account.credentialId, session.sessionId)
+   : await this.#logout.logoutCredential(session, provider.id, account.credentialId);
   if (!removed) throw new Error(`Logout skipped: ${account.label} is no longer stored for ${provider.id}.`);
   output(`Logged out ${account.label} from ${provider.id}.${remainingSource ? ` ${provider.id} is still authenticated via ${remainingSource}.` : ''}`);
  }

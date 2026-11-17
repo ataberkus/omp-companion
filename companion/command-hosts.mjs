@@ -3,8 +3,8 @@
 //
 // A host module exports `host = { name, load(env) }`. `load` runs once per SDK copy with
 // env = { at(rel) imports an SDK src/ file, optional(rel) imports it when present, pkg(spec) imports a package, text(rel)
-// reads an SDK src/ file as text (prompt templates), m (the RUNTIME_FILES modules) } and returns `create(io)`; when it
-// throws, the command stays unavailable (and is rejected).
+// reads an SDK src/ file as text (prompt templates), m (the RUNTIME_FILES modules) } and returns `create(io)`, or null when
+// the build does not ship the command (OMP removed it); when it throws, the command stays unavailable (and is rejected).
 // `create` runs once per session with io (see OmpSession#hostIO in omp.mjs) and returns the session's host:
 //   names: string[]                command names it runs (aliases included)
 //   commands(): entry[]            its available_commands_update entries; [] while a setting turns it off
@@ -50,7 +50,7 @@ const HOSTS = [collab, fork, pause, live, todoEdit, modes, loop, tan, omfg, clea
 
 export async function loadCommandHosts(env) {
  const loaded = await Promise.all(HOSTS.map(async h => {
-  try { return { name: h.name, create: await h.load(env) }; }
+  try { const create = await h.load(env); return create ? { name: h.name, create } : null; }
   catch (e) { console.error(`/${h.name} is unavailable with this OMP build: ${e instanceof Error ? e.message : e}`); return null; }
  }));
  return loaded.filter(Boolean);
@@ -76,7 +76,7 @@ const ELSEWHERE = {
  tree: 'Use “Session tree…” in the session’s ⋯ menu', login: 'Use “Log in to a provider…” in the session’s ⋯ menu',
  setup: 'Use “Log in to a provider…” in the session’s ⋯ menu, or Settings', providers: 'Use “Log in to a provider…” in the session’s ⋯ menu, or Settings',
  settings: 'Use Settings in the sidebar', extensions: 'Use Settings in the sidebar (plugins)', skills: 'Use the Tools page (skills registry)',
- agents: 'Use the Tools page (agents)', hub: 'Use the background tasks panel', copy: 'Use “Copy last reply” in the session’s ⋯ menu',
+ agents: 'Use the Tools page (agents)', hub: 'Use the background tasks panel', subagents: 'Use the background tasks panel', copy: 'Use “Copy last reply” in the session’s ⋯ menu',
  git: 'Use “Commit changes in this folder…” or “Branch & recent commits” in the session’s ⋯ menu', restart: 'Use “Restart companion…” in the session’s ⋯ menu',
 };
 /** The 409 text for a built-in OMP runs only in its terminal UI and the companion does not host. */

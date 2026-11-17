@@ -48,6 +48,10 @@ function planModeClass(d) {
  /** Native restrictions stay active until a current, explicit approval finishes preparation. */
  return class RpcPlanMode {
   #paused = false; #workflow = 'parallel'; #entered = false; #sessionId;
+  // A paused plan's draft restored from the journal, and the plan file an approval made the execution reference.
+  // OMP 18.22's setPlanReferencePath records approval (only an approved reference reaches the model), so a restored
+  // draft is kept here instead, and the approval is journaled as approvedPlanFilePath for the session to restore.
+  #draftPath; #approvedPath;
   #previousTools; #previousModel; #suspendedModel; #pendingModel; #planRoleValue; #proposal;
   #generation = 0; #acceptProposals = false; #reviewWork = Promise.resolve(); #approvalWork; #detachReviewGate;
   // The generation a host Stop cancelled while an approval was in flight (see #executeApproval).
@@ -62,7 +66,7 @@ function planModeClass(d) {
     enabled: state?.enabled === true,
     paused: this.#paused,
     reviewPending: state?.reviewPending === true,
-    planFilePath: state?.planFilePath ?? (this.#paused ? this.session.getPlanReferencePath() : undefined),
+    planFilePath: state?.planFilePath ?? (this.#paused ? this.#referencePath() : undefined),
     workflow: state?.workflow ?? (this.#paused ? this.#workflow : undefined),
    };
   }
@@ -85,7 +89,7 @@ function planModeClass(d) {
   /** The TUI's #hasPlanModeDraftContent: the plan file or a session-local `*plan.md` holds text. */
   async hasDraft() {
    const state = this.session.getPlanModeState();
-   const candidates = new Set([state?.planFilePath || this.session.getPlanReferencePath() || 'local://PLAN.md', ...(await d.listPlanFiles(this.#fileOptions()))]);
+   const candidates = new Set([state?.planFilePath || this.#referencePath() || 'local://PLAN.md', ...(await d.listPlanFiles(this.#fileOptions()))]);
    for (const candidate of candidates) if ((await this.#read(candidate))?.trim()) return true;
    return false;
   }
@@ -110,15 +114,25 @@ function planModeClass(d) {
 
   async settle() { await this.#reviewWork; await this.#approvalWork; }
 
+  #referencePath() { return this.#draftPath ?? this.session.getPlanReferencePath(); }
+  // OMP 18.22 keeps tools registered after the snapshot (an extension's, a late MCP selection) and needs the snapshot's
+  // registered names to tell them apart; a journaled snapshot has none, so the names registered now stand in (older
+  // builds take two arguments and ignore the third). `withRead` forces `read` on for executing an approved plan.
+  #restoreTools(tools, withRead = false) {
+   const enabled = withRead ? [...new Set([...tools.enabled, 'read'])] : tools.enabled;
+   return this.session.restoreNonMCPToolPresentation(enabled, tools.mounted, tools.registered ?? this.session.getAllToolNames());
+  }
+
   #persist() {
-   const state = this.session.getPlanModeState();
-   this.session.sessionManager.appendModeChange(state?.enabled ? 'plan' : this.#paused ? 'plan_paused' : 'none', {
-    planFilePath: state?.planFilePath ?? this.session.getPlanReferencePath(),
+   const state = this.session.getPlanModeState(), mode = state?.enabled ? 'plan' : this.#paused ? 'plan_paused' : 'none';
+   this.session.sessionManager.appendModeChange(mode, {
+    planFilePath: state?.planFilePath ?? this.#referencePath(),
     workflow: state?.workflow ?? this.#workflow,
     reviewPending: state?.reviewPending === true,
     previousTools: this.#previousTools?.enabled,
     previousMountedTools: this.#previousTools?.mounted,
     previousModel: this.#previousModel ? { provider: this.#previousModel.model.provider, modelId: this.#previousModel.model.id, thinkingLevel: this.#previousModel.thinkingLevel } : undefined,
+    ...(mode === 'none' && this.#approvedPath ? { approvedPlanFilePath: this.#approvedPath } : {}),
    });
   }
 
@@ -132,7 +146,7 @@ function planModeClass(d) {
    this.#sessionId = this.session.sessionId;
    this.session.setPlanProposalHandler(null);
    this.session.setPlanModeState(undefined);
-   this.#paused = false; this.#entered = false;
+   this.#paused = false; this.#entered = false; this.#draftPath = undefined; this.#approvedPath = undefined;
    this.#previousTools = undefined; this.#previousModel = undefined; this.#pendingModel = undefined;
    const context = this.session.sessionManager.buildSessionContext();
    const data = context.modeData;
@@ -148,7 +162,7 @@ function planModeClass(d) {
    if (!this.state.available) {
     if (context.mode === 'plan' || context.mode === 'plan_paused') {
      if (savedModel) await this.#applyModel(savedModel);
-     if (savedTools) await this.session.restoreNonMCPToolPresentation(savedTools.enabled, savedTools.mounted);
+     if (savedTools) await this.#restoreTools(savedTools);
      this.#persist();
     }
     this.#publish();
@@ -156,7 +170,7 @@ function planModeClass(d) {
    }
    if (context.mode === 'plan_paused') {
     this.#paused = this.#entered = true;
-    if (typeof data?.planFilePath === 'string') this.session.setPlanReferencePath(data.planFilePath);
+    if (typeof data?.planFilePath === 'string') this.#draftPath = data.planFilePath;
    } else if (context.mode === 'plan') {
     await this.#enter(this.#workflow, typeof data?.planFilePath === 'string' ? data.planFilePath : undefined, true);
     if (savedTools) this.#previousTools = savedTools;
@@ -195,7 +209,7 @@ function planModeClass(d) {
      await this.#leave(true);
     });
    } else {
-    this.#paused = this.#entered = false;
+    this.#paused = this.#entered = false; this.#draftPath = undefined;
     this.#persist();
    }
    this.#publish();
@@ -207,12 +221,13 @@ function planModeClass(d) {
    this.#detachReviewGate = this.session.agent.addBeforeModelCall(() => this.session.getPlanModeState()?.reviewPending ? { stop: true, reason: 'plan review pending' } : undefined);
   }
 
-  async #enter(workflow, planFilePath = this.session.getPlanReferencePath() || 'local://PLAN.md', restored = false) {
+  async #enter(workflow, planFilePath = this.#referencePath() || 'local://PLAN.md', restored = false) {
    if (!this.session.hasBuiltInTool('write') && (this.session.getEnabledToolNames().includes('write') || this.session.getMountedXdevToolNames().includes('write')))
     throw new Error('Plan mode: the `write` tool is provided by an extension and cannot submit plans. Disable it to use plan mode.');
    this.#previousTools = {
     enabled: this.session.getEnabledToolNames().filter(name => !d.isMCPToolName(name)),
     mounted: this.session.getMountedXdevToolNames().filter(name => !d.isMCPToolName(name)),
+    registered: this.session.getAllToolNames(),
    };
    this.#previousModel = snapshot(this.session);
    this.#workflow = workflow;
@@ -233,6 +248,8 @@ function planModeClass(d) {
    }
    this.#paused = false;
    this.#entered = true;
+   // A new planning round: neither the restored draft nor an earlier approval is the reference any more.
+   this.#draftPath = undefined; this.#approvedPath = undefined;
    if (!restored) this.#persist();
   }
 
@@ -281,7 +298,7 @@ function planModeClass(d) {
     if (restoreModel && this.#previousModel) await this.#applyModel(this.#previousModel);
     this.#pendingModel = undefined;
     this.session.setPlanModeState(undefined);
-    if (this.#previousTools) await this.session.restoreNonMCPToolPresentation(this.#previousTools.enabled, this.#previousTools.mounted);
+    if (this.#previousTools) await this.#restoreTools(this.#previousTools);
    } catch (error) {
     this.session.setPlanModeState(state);
     try {
@@ -436,7 +453,9 @@ function planModeClass(d) {
    if (command.action === 'compact') {
     this.session.markPlanInternalAbortPending();
     try {
-     await this.session.compact(undefined, { suppressContinuation: true, internalGuidance: prompt.render(d.planModeCompactInstructionsPrompt, { planFilePath: proposal.planFilePath }) });
+     // OMP 18.22's #approvePlan: the summary is read by the model the transition restores (older builds ignore it).
+     const readerModel = executionModel?.model ?? this.#previousModel?.model ?? this.session.model;
+     await this.session.compact(undefined, { suppressContinuation: true, internalGuidance: prompt.render(d.planModeCompactInstructionsPrompt, { planFilePath: proposal.planFilePath }), readerModel });
     } catch (error) {
      if (error instanceof CompactionCancelledError || !current()) {
       if (this.#stopped === generation) await this.#approvedWithoutExecution(proposal, executionModel);
@@ -463,7 +482,7 @@ function planModeClass(d) {
     await Bun.write(d.resolvePlanFilePath(proposal.planFilePath, this.#fileOptions()), proposal.content);
    }
    if (!current()) return;
-   this.session.setPlanReferencePath(proposal.planFilePath);
+   this.session.setPlanReferencePath(proposal.planFilePath); this.#approvedPath = proposal.planFilePath;
    await this.#autosave(proposal);
    if (!current()) return;
    if (!this.session.sessionName) await this.session.sessionManager.setSessionName(d.humanizePlanTitle(proposal.title), 'auto');
@@ -477,7 +496,7 @@ function planModeClass(d) {
      await this.#leave(false, true, !compactionFailed);
      if (!current()) return;
      // Execution tools, with `read` forced on so the durable local:// plan stays reachable.
-     if (previousTools) await this.session.restoreNonMCPToolPresentation([...new Set([...previousTools.enabled, 'read'])], previousTools.mounted);
+     if (previousTools) await this.#restoreTools(previousTools, true);
      if (!current()) return;
      if (executionModel && !compactionFailed) await this.#applyModel(executionModel);
      if (!current()) return;
@@ -496,6 +515,7 @@ function planModeClass(d) {
       this.#previousModel = previousModel;
       this.#entered = true;
       this.#paused = false;
+      this.#approvedPath = undefined;
       this.session.setPlanProposalHandler(title => this.#prepareProposal(title));
       this.#installReviewGate();
       await this.session.setActiveToolPresentation(planningTools.enabled, planningTools.mounted);
@@ -515,9 +535,9 @@ function planModeClass(d) {
   async #approvedWithoutExecution(proposal, executionModel) {
    if (this.#sessionId !== this.session.sessionId || !this.state.enabled) return;
    const previousTools = this.#previousTools;
-   this.session.setPlanReferencePath(proposal.planFilePath);
+   this.session.setPlanReferencePath(proposal.planFilePath); this.#approvedPath = proposal.planFilePath;
    await this.#leave(false, true, true);
-   if (previousTools) await this.session.restoreNonMCPToolPresentation([...new Set([...previousTools.enabled, 'read'])], previousTools.mounted);
+   if (previousTools) await this.#restoreTools(previousTools, true);
    if (executionModel) await this.#applyModel(executionModel);
    await this.#autosave(proposal);
    this.#publish();
