@@ -2913,7 +2913,7 @@
   function pushButton(s) {
     if (!s.isolated || !s.branch?.startsWith('omp-web/')) return '';
     const base = pushBase(s) || 'main';
-    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder) and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.sending.has('session:' + s.id) ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
+    return `<button class="btn sm ghost" data-act="pushMain" type="button" title="Ask OMP to commit this worktree's changes on ${esc(s.branch)}, merge it into ${esc(base)} (the branch checked out in the project folder), resolving any conflicts, and push ${esc(base)}${s.status === 'running' || s.status === 'queued' ? ' (queued until it finishes)' : ''}" ${S.sending.has('session:' + s.id) ? 'disabled' : ''}>Push to ${esc(base)}</button>`;
   }
   // ---------- finish an isolated session's worktree ----------
   function wtBody(s, st) {
@@ -2994,7 +2994,7 @@
   // Replies that are not the session (branch_messages, stats, tree, ...) are the same either way.
   const sessionApi = (body, opts) => api(`/sessions/${current().id}/command?lean=1`, body, opts);
   const COMMIT_RELATED = 'Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit.';
-  const PUSH_TO_BASE = (branch, base) => `Commit this worktree's changes on its branch ${branch} with a clear commit message. Then merge ${branch} into ${base} in the project folder where ${base} is checked out (find it with \`git worktree list\`), and push ${base} to the remote. If the merge conflicts or the push fails, stop and tell me what happened. Report the commits, the merge and the push result.`;
+  const PUSH_TO_BASE = (branch, base) => `Commit this worktree's changes on its branch ${branch} with a clear commit message. Then merge ${branch} into ${base} in the project folder where ${base} is checked out (find it with \`git worktree list\`), and push ${base} to the remote. If the merge conflicts, resolve every conflict yourself, keeping the intent of both sides (read the conflicting changes on each side; don't just take one side wholesale), check the result still builds/passes the repo's existing checks where practical, then complete the merge commit. If the push is rejected because the remote ${base} moved ahead, pull it into ${base} (merge, resolving conflicts the same way) and push again. Only stop and tell me if a conflict can't be resolved without a decision from me. Report the commits, the merge (and any conflicts you resolved and how) and the push result.`;
   // Sends a prompt to session `id`, or queues it as a follow-up while OMP is working.
   function sendOrQueue(id, message) {
     const s = S.store?.sessions.find(x => x.id === id), view = 'session:' + id;
