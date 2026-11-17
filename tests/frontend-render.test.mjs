@@ -508,6 +508,19 @@ test('advisor reviews that sort after a running tool do not take the live state 
   assert.match(app.thread(), /class="activity live"/);
 });
 
+test('a working session without todos or a session file still offers its subagents in the Activity panel', async () => {
+  const s = session('s1', [], { status: 'running', todos: [], subagentList: [{ id: 'SceneLights', agent: 'task', description: 'Light the scene', status: 'running', sessionFile: '' }, { id: 'WebBans', agent: 'task', status: 'completed', sessionFile: '' }] });
+  const app = boot({ respond: url => { if (url.startsWith('/api/state')) return { body: store([s]) }; } });
+  await flush();
+  assert.ok(!app.calls.some(c => c.url.startsWith('/api/background')), 'no file to ask about yet');
+  const btn = /<button[^>]*data-act="side"[^>]*aria-label="Background tasks and advisors: 1 running"/;
+  assert.match(app.els.get('topbar').innerHTML, btn);
+  const panel = app.els.get('tasks').innerHTML;
+  assert.match(panel, /Running <span>1<\/span>[\s\S]*SceneLights[\s\S]*data-substeer="SceneLights"/);
+  assert.match(panel, /Finished <span>1<\/span>[\s\S]*WebBans/);
+  assert.match(panel, /data-tab="plan" disabled/);
+});
+
 test('sidebar polls keep keyboard focus on the same row', async () => {
   // A list whose innerHTML setter builds one focusable button per data-key, like the browser would.
   const list = document => {
