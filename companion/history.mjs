@@ -3,8 +3,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { error, text, samePath } from './util.mjs';
-import { scanJobs, readSessionHead } from './transcript.mjs';
+import { error, text, samePath, replaceFile } from './util.mjs';
+import { scanJobs, readSessionHead, cleanTitle } from './transcript.mjs';
 export function createHistory(ctx){
  const {options,store}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
@@ -14,6 +14,17 @@ export function createHistory(ctx){
  // that keeps growing replaces its entry instead of adding one per listing (every dashboard lists every 20 s, so a
  // long-running companion grew this without bound); files that left the folder drop theirs.
  const headCache=new Map();
+ // Also kept on disk (dataDir/omp-session-heads.json): reading 1,400 heads from a cold disk took 40 s at start-up, while
+ // reading only the files that changed since the last run costs little more than the listing's stats. Keyed by version and
+ // sessions folder, so a head with other fields or another folder reads every file again.
+ const headsFile=ctx.dataDir&&path.join(ctx.dataDir,'omp-session-heads.json'),HEADS_V=1;let headsDirty=false,headsTimer,headsWrite,headsClosed=false;
+ // final: the companion is closing; later reads (a warm-up still running) stay in memory.
+ async function flushHeads(final){if(final)headsClosed=true;clearTimeout(headsTimer);headsTimer=undefined;await headsWrite;if(!headsDirty||!headsFile)return;headsDirty=false;
+  const tmp=`${headsFile}.${process.pid}.tmp`;headsWrite=(async()=>{try{await fs.writeFile(tmp,JSON.stringify({v:HEADS_V,dir:ompSessionsDir,heads:Object.fromEntries(headCache)}),{mode:0o600});await replaceFile(tmp,headsFile);}catch{await fs.rm(tmp,{force:true}).catch(()=>{});}})();await headsWrite;}
+ const saveHeads=()=>{headsDirty=true;if(!headsFile||headsTimer||headsClosed)return;headsTimer=setTimeout(()=>void flushHeads(),5000);headsTimer.unref?.();};
+ async function loadHeads(){if(!headsFile)return;let d;try{d=JSON.parse(await fs.readFile(headsFile,'utf8'));}catch{return;}
+  if(d?.v!==HEADS_V||d.dir!==ompSessionsDir||!d.heads||typeof d.heads!=='object')return;
+  for(const [f,c] of Object.entries(d.heads))if(typeof c?.mtime==='number'&&typeof c.size==='number'&&c.head&&typeof c.head==='object'&&!headCache.has(f))headCache.set(f,c);}
  // Subagent transcripts' heads and results (.md) by folder, then name, each read again when its own file's mtime or size
  // moves: every dashboard viewing a live session calls background() every 3 s, and it read and parsed 320 KB of every
  // subagent transcript each time. A folder's entries are rebuilt from its listing, so files that left drop theirs; the
@@ -50,27 +61,40 @@ export function createHistory(ctx){
   return {dir,tasks,agents,subagents:subagents.filter(x=>!linked.has(x.name)&&!linkedFiles.some(f=>samePath(f,x.file))),logs:jobs};
  }
  const sessionFileParam=value=>{const file=path.resolve(text(value,'Session file',4000));if(!file.endsWith('.jsonl')||!samePath(path.dirname(path.dirname(file)),ompSessionsDir))throw error('Not an OMP session file.');return file;};
- async function readNativeSessions(limit=200){
+ // Every session file of every project folder, newest first (ties by path, so identical polls give identical ETags);
+ // `limit` keeps the newest that many for callers that want a few (the folder picker's recent list).
+ async function readNativeSessions(limit=Infinity){
   const files=[];let dirs=[];try{dirs=await fs.readdir(ompSessionsDir,{withFileTypes:true});}catch{return [];}
   await Promise.all(dirs.filter(d=>d.isDirectory()).map(async d=>{const dir=path.join(ompSessionsDir,d.name);let entries=[];try{entries=await fs.readdir(dir);}catch{return;}
    await Promise.all(entries.filter(n=>n.endsWith('.jsonl')).map(async n=>{const file=path.join(dir,n);try{const st=await fs.stat(file);if(st.size>0)files.push({file,mtime:st.mtimeMs,size:st.size});}catch{}}));}));
-  const found=new Set(files.map(f=>f.file));for(const f of headCache.keys())if(!found.has(f))headCache.delete(f);
+  const found=new Set(files.map(f=>f.file));for(const f of headCache.keys())if(!found.has(f)){headCache.delete(f);saveHeads();}
   files.sort((a,b)=>b.mtime-a.mtime||(a.file<b.file?-1:a.file>b.file?1:0));
-  // Panel sessions by file, built once: matching each of up to 200 files against every session cost files × sessions path resolutions.
-  const managed=new Map();for(const s of store.sessions)if(s.sessionFile){const k=pathKey(s.sessionFile);if(!managed.has(k))managed.set(k,s);}
+  // Panel sessions by file, built once: matching each file against every session cost files × sessions path resolutions.
+  // A hidden session (one the panel dropped) gives way to a visible one on the same file, which the dashboard merges the
+  // row into; otherwise the file showed twice, as the visible panel session and as a history row.
+  const managed=new Map();for(const s of store.sessions)if(s.sessionFile){const k=pathKey(s.sessionFile),had=managed.get(k);if(!had||(had.hidden&&!s.hidden))managed.set(k,s);}
+  // Files by path key, for fork parents: OMP's header spells the parent's path its own way.
+  const byKey=new Map(files.map(f=>[pathKey(f.file),f.file])),shown=head=>head.title||cleanTitle(head.preview).slice(0,80)||'Untitled session';
   const one=async f=>{
-   let c=headCache.get(f.file);if(c?.mtime!==f.mtime||c.size!==f.size){try{c={mtime:f.mtime,size:f.size,head:await readSessionHead(f.file)};}catch{return null;}headCache.set(f.file,c);}
+   let c=headCache.get(f.file);
+   if(c?.mtime!==f.mtime||c.size!==f.size){let head;try{head=await readSessionHead(f.file);}catch{return null;}
+    // No session header yet: OMP is still writing the file's first lines. Left out, and read again on the next listing.
+    if(!head.id)return null;c={mtime:f.mtime,size:f.size,head};headCache.set(f.file,c);saveHeads();}
    const head=c.head,managedSession=managed.get(pathKey(f.file));
-   return {file:f.file,title:head.title||head.preview.split('\n')[0].slice(0,80)||'Untitled session',cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
+   const row={file:f.file,title:shown(head),named:!!head.title,cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
+   if(head.parent){const pf=byKey.get(pathKey(head.parent)),ph=pf&&headCache.get(pf)?.head;row.parent=pf||head.parent;row.parentTitle=ph?shown(ph):path.basename(head.parent,'.jsonl');}
+   return row;
   };
-  // Under Bun the start-up warm-up below outlasts createCompanion: 16 heads at a time, so a request that comes in meanwhile
-  // waits for one batch's parses, not 200. Node finishes it inside createCompanion, all at once.
-  const list=files.slice(0,limit),n=process.versions.bun?16:list.length||1,rows=[];for(let i=0;i<list.length;i+=n)rows.push(...await Promise.all(list.slice(i,i+n).map(one)));
+  // 32 heads at a time: a first listing reads every file's head and tail (up to 320 KB each), and 1,500 files' reads at
+  // once held all of that in memory together.
+  const list=Number.isFinite(limit)?files.slice(0,limit):files,rows=[];for(let i=0;i<list.length;i+=32)rows.push(...await Promise.all(list.slice(i,i+32).map(one)));
+  // A parent read later in the same pass than its fork (forks are newer, so listed first) gets its title now.
+  const titles=new Map(rows.filter(Boolean).map(r=>[r.file,r.title]));for(const r of rows)if(r?.parent&&titles.has(r.parent))r.parentTitle=titles.get(r.parent);
   return rows.filter(Boolean);
  }
- // The first listing reads up to 200 heads (~125 ms for 150 files) on the first dashboard load's path, so it starts with
- // the companion; a request meanwhile waits for it rather than reading the same heads again, then lists from the cache.
- let warming=readNativeSessions().catch(()=>{});
+ // The first listing reads every head the disk copy lacks (the first dashboard load's path), so it starts with the
+ // companion; a request meanwhile waits for it rather than reading the same heads again, then lists from the cache.
+ let warming=loadHeads().then(()=>readNativeSessions()).catch(()=>{});
  const listNativeSessions=async limit=>{if(warming){await warming;warming=undefined;}return readNativeSessions(limit);};
- return {background,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions};
+ return {background,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions,flushHeads};
 }

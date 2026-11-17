@@ -89,7 +89,8 @@ export const editFiles=d=>{if(!d||typeof d!=='object')return undefined;const lis
 export const toolSummary=t=>`${t.status==='running'?'':t.status==='error'?'Error · ':'Done · '}${t.name}  ${t.intent||t.args.slice(0,300)}`;
 // `!command` runs from the composer: OMP records them as bashExecution messages ({command, output, exitCode, cancelled}).
 export const shellRecord=(command,r)=>{const t=toolRecord('bash',{command:String(command||'')},'You ran this command');t.user=true;if(r){t.status=r.cancelled||(typeof r.exitCode==='number'&&r.exitCode!==0)?'error':'done';t.result=clip(String(r.output||'')+(r.cancelled?'\n(cancelled)':typeof r.exitCode==='number'&&r.exitCode!==0?`\n(exit code ${r.exitCode})`:''),8000);}return t;};
-// Native OMP session files: first lines hold {type:'title'} and {type:'session',cwd,id,timestamp}; model changes can appear anywhere.
+// Native OMP session files: a fixed-width {type:'title'} slot on the first line (rewritten in place on every rename),
+// then {type:'session',cwd,id,timestamp,title?,parentSession?}; model, level and title changes can appear anywhere.
 // `reasoning` is the level the session last ran with: the spawn's ":level" suffix, a level change, or the effort sent with a request ("auto" resolves there).
 function scanModel(head,f){
  if(f.type==='model_change'&&f.model)head.model=String(f.model).replace(/:.*$/,'');
@@ -97,14 +98,48 @@ function scanModel(head,f){
  else if(f.type==='session_init'){const l=String(f.resolvedModel||'').split(':').pop();if(l!=='auto'&&THINKING.includes(l))head.reasoning=l;}
  else if(f.type==='message'&&f.message?.role==='assistant'){const m=f.message;if(m.provider&&m.model)head.model=`${m.provider}/${m.model}`;const e=m.requestControls?.effort?.topLevel;if(typeof e==='string'&&e)head.reasoning=e;}
 }
+// scanModel over the tail's lines newest first, each field set by the newest frame that carries it (what scanning them in
+// order leaves), and the newest title change. Only lines that can carry one are parsed: a 256 KB tail is mostly tool output.
+function scanTail(head,lines){
+ const got={};
+ for(let i=lines.length-1;i>=0;i--){const line=lines[i];
+  const kind=line.includes('"title_change"')?'title':line.includes('"model_change"')||line.includes('"thinking_level_change"')||line.includes('"session_init"')?'model':!(got.model&&got.reasoning)&&line.includes('"role":"assistant"')?'model':'';
+  if(!kind||(kind==='title'&&got.title))continue;let f;try{f=JSON.parse(line);}catch{continue;}
+  if(f.type==='title_change'&&typeof f.title==='string'){got.title=true;head._change={title:f.title,at:f.timestamp||''};continue;}
+  const was={model:head.model,thinking:head.thinking,reasoning:head.reasoning};scanModel(head,f);
+  for(const k of ['model','thinking','reasoning']){if(head[k]===was[k])continue;if(got[k])head[k]=was[k];else got[k]=true;}
+ }
+ return got;
+}
+// A title as OMP's session list shows it (session-listing.ts sanitizeSessionName): its first line, no control characters.
+export const cleanTitle=v=>typeof v==='string'?v.split(/\r?\n/)[0].replace(/[\x00-\x1F\x7F]/g,'').trim():'';
+// The start of a user prompt from a line the read window cut off (a first prompt longer than 64 KB): its first string.
+function cutPrompt(line){
+ const r=line.indexOf('"role":"user"');if(r<0)return '';
+ const at=[line.indexOf('"text":"',r),line.indexOf('"content":"',r)].filter(i=>i>=0);if(!at.length)return '';
+ const start=line.indexOf(':"',Math.min(...at))+2;let j=start;
+ while(j<line.length&&j-start<4000){const ch=line[j];if(ch==='"')break;if(ch==='\\'){const n=line[j+1]==='u'?6:2;if(j+n>line.length)break;j+=n;}else j++;}
+ try{return JSON.parse('"'+line.slice(start,j)+'"');}catch{return '';}
+}
+// title: the one OMP's resume list shows. The first-line slot when the file has one (an empty slot: no title), unless a
+// title change is newer than the slot; a legacy file without a slot takes its newest title change, then its header's.
+// parent: the session file this one was forked from (header parentSession). id stays empty while OMP has not written the
+// header yet (a file it is creating).
 export async function readSessionHead(file){
- const fh=await fs.open(file,'r');try{const size=(await fh.stat()).size;const buf=Buffer.alloc(64*1024);const {bytesRead}=await fh.read(buf,0,buf.length,0);const head={title:'',cwd:'',id:'',createdAt:'',preview:'',model:'',thinking:'',reasoning:''};
-  for(const line of buf.subarray(0,bytesRead).toString('utf8').split('\n').slice(0,80)){let f;try{f=JSON.parse(line);}catch{continue;}
-   if(f.type==='title'&&f.title)head.title=f.title;else if(f.type==='title_change'&&f.title&&!head.title)head.title=f.title;else if(f.type==='session'){head.cwd=f.cwd||'';head.id=f.id||'';head.createdAt=f.timestamp||'';}
-   else if(f.type==='message'&&f.message?.role==='user'&&!head.preview)head.preview=contentText(f.message.content).slice(0,240);
-   scanModel(head,f);}
-  if(size>buf.length){const tail=Buffer.alloc(Math.min(256*1024,size-buf.length));const r=await fh.read(tail,0,tail.length,size-tail.length);
-   for(const line of tail.subarray(0,r.bytesRead).toString('utf8').split('\n').slice(1)){let f;try{f=JSON.parse(line);}catch{continue;}scanModel(head,f);}}
+ const fh=await fs.open(file,'r');try{const size=(await fh.stat()).size;const buf=Buffer.alloc(Math.min(64*1024,size));const {bytesRead}=await fh.read(buf,0,buf.length,0);
+  const head={title:'',cwd:'',id:'',createdAt:'',preview:'',model:'',thinking:'',reasoning:'',parent:''};let slot,header;
+  for(const line of buf.subarray(0,bytesRead).toString('utf8').split('\n').slice(0,80)){let f;try{f=JSON.parse(line);}catch{if(!head.preview&&line.startsWith('{"type":"message"'))head.preview=cutPrompt(line).slice(0,240);continue;}
+   if(f?.type==='title'&&typeof f.title==='string')slot={title:f.title,at:f.updatedAt||''};
+   else if(f?.type==='title_change'&&typeof f.title==='string')head._change={title:f.title,at:f.timestamp||''};
+   else if(f?.type==='session'&&!header){header=f;head.cwd=typeof f.cwd==='string'?f.cwd:'';head.id=typeof f.id==='string'?f.id:'';head.createdAt=typeof f.timestamp==='string'?f.timestamp:'';head.parent=typeof f.parentSession==='string'?f.parentSession:'';}
+   else if(f?.type==='message'&&f.message?.role==='user'&&!head.preview)head.preview=contentText(f.message.content).slice(0,240);
+   if(f&&typeof f==='object')scanModel(head,f);}
+  // The last 32 KB usually holds the last reply's model; up to 256 KB is read only when it does not (a long final turn).
+  if(size>buf.length){const keep={model:head.model,thinking:head.thinking,reasoning:head.reasoning,_change:head._change};
+   for(const n of [32*1024,256*1024]){const len=Math.min(n,size-buf.length);Object.assign(head,keep);const tail=Buffer.alloc(len);const r=await fh.read(tail,0,len,size-len);
+    if(scanTail(head,tail.subarray(0,r.bytesRead).toString('utf8').split('\n').slice(1)).model||len<n)break;}}
+  const change=head._change;delete head._change;
+  head.title=cleanTitle(change&&(!slot||change.at>slot.at)?change.title:slot?slot.title:change?change.title:header?.title);
   return head;}finally{await fh.close();}
 }
 export async function readTail(file,max){const fh=await fs.open(file,'r');try{const {size}=await fh.stat();const n=Math.min(size,max);const buf=Buffer.alloc(n);await fh.read(buf,0,n,size-n);const t=buf.toString('utf8');return n<size?t.slice(t.indexOf('\n')+1):t;}finally{await fh.close();}}
