@@ -17,6 +17,6 @@
     "@tauri-apps/cli": "^2.12.1"
   },
   "dependencies": {
-    "@oh-my-pi/pi-coding-agent": "18.12.5"
+    "@oh-my-pi/pi-coding-agent": "18.22.0"
   }
 }

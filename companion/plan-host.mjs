@@ -1,5 +1,5 @@
 // Native plan mode (/plan, /plan-review, plan approval) for OMP builds that do not ship modes/rpc/rpc-plan-mode.ts
-// (released builds so far). Same public API and frames as that module's RpcPlanMode (plan_mode_changed, plan_review,
+// (released builds through 18.22.0). Same public API and frames as that module's RpcPlanMode (plan_mode_changed, plan_review,
 // plan_review_clear; approve_plan actions preserve/fresh/compact/refine), built on the plan-mode mechanism the shipped
 // terminal UI uses (interactive-mode.ts #enterPlanMode, #exitPlanMode, handlePlanApproval, #approvePlan):
 // - the session's plan-proposal handler receives the model's `xd://propose` write; the planning turn is then stopped
