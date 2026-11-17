@@ -80,7 +80,7 @@ async function sync({ entry, dataDir, prune = () => false, timeout = 20 * 60 * 1
   let cli;
   try { cli = (await exec(entry, ['--version'], { env: cliEnv(entry, env), timeout: 30000, windowsHide: true })).stdout; }
   catch (e) { return { status: 'skipped', output: `OMP SDK not updated: could not read the OMP CLI version (${errorTail(e)}).` }; }
-  // `omp --version` prints `omp/18.12.5`; anything else (a prerelease, another program) is not an SDK release to install.
+  // `omp --version` prints `omp/18.22.0`; anything else (a prerelease, another program) is not an SDK release to install.
   const version = /^omp\/(\d+\.\d+\.\d+)\s*$/m.exec(String(cli))?.[1];
   if (!version) return { status: 'skipped', output: `OMP SDK not updated: unrecognized OMP CLI version "${String(cli).trim().slice(0, 100)}".` };
   const copy = newerCopies(dataDir)[0], active = versionAt(copy ?? bundledSrc());

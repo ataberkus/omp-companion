@@ -1,4 +1,4 @@
-// `/goal` for OMP builds that do not ship modes/rpc/rpc-goal-slash.ts (released builds so far). Same contract as that
+// `/goal` for OMP builds that do not ship modes/rpc/rpc-goal-slash.ts (released builds through 18.22.0). Same contract as that
 // module (parseRpcGoalSlash, rpcGoalModeState, rpcGoalCommands, runRpcGoalSlash), run on the RpcGoalController every
 // OMP build ships. That controller lacks what the patched one adds for prompt hosts, so GoalController supplies it:
 // goals auto-continue under goal.continuationModes' "interactive" profile (the shipped controller only reads "rpc"),
