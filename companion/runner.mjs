@@ -3,24 +3,15 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { now, error, contentText, samePath, clip } from './util.mjs';
+import { now, error, contentText, samePath, clip, antigravityFailure } from './util.mjs';
 import { toolImages } from './images.mjs';
 import { startWork, finishWork, askQuestion, parseAdvisorStatus, btwView, subagentView, goalView, loopView } from './session-views.mjs';
 import { advisorMessage, tanMessage, biliMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt, readSessionHead, lastContext } from './transcript.mjs';
-import { launchArgs } from './launch.mjs';
+import { launchArgs, agySessionArgs } from './launch.mjs';
 // What a session resumed after a restart is told: its interrupted turn is in OMP's session file, so it carries on from there.
 const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
 // ...and, when OMP restored subagents the restart cut off, that they run again under their old ids (so it does not spawn them anew).
 const restoredPrompt=ids=>`${RESTART_PROMPT} Your interrupted subagents (${ids.join(', ')}) were restored and go on with their tasks; their results arrive as before.`;
-// OMP's antigravity-cli provider relays the Antigravity CLI's own request failures ("⚠ API error (attempt N): RESOURCE_EXHAUSTED
-// (code 429): …") as reply text with stopReason "stop", so a quota or provider failure reads as a finished answer. A reply made
-// only of those lines is that failure: its last line, the CLI's final attempt.
-const AGY_ERROR=/^⚠ API error \(attempt \d+\): /;
-function replyError(m){
- if(m.stopReason!=='stop'||m.provider!=='antigravity-cli'||m.content?.some(b=>b.type!=='text'))return;
- const lines=contentText(m.content).split('\n').map(l=>l.trim()).filter(Boolean);
- if(lines.length&&lines.every(l=>AGY_ERROR.test(l)))return `Antigravity CLI: ${lines.at(-1).slice(2)}`;
-}
 export function createRunner(ctx){
  const {omp,append,place,notice,commands,locks,dataDir,activity,persist,scheduleSave,runners,launches,subagentThoughts,stashImages,attention,slashList,rateLimitHint,connectionHint,scheduleResume,cancelResume,dropSteers}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
@@ -133,8 +124,11 @@ export function createRunner(ctx){
    const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;s._connectionLost=m.stopReason==='error'?connectionHint(m.errorMessage):undefined;
     // The provider answered: automatic resends after lost connections count from zero again.
     if(m.stopReason!=='error'&&m.stopReason!=='aborted')delete s._connectionAttempt;
-    // A provider error, or an Antigravity CLI failure relayed as reply text (replyError).
-    const failure=m.stopReason==='error'?m.errorMessage||'OMP provider failed.':replyError(m);
+    // A provider error, or an Antigravity CLI failure relayed as reply text (antigravityFailure). OMP may end such a reply in
+    // error itself (its loop detector reads the CLI's repeated attempt lines as a loop): the CLI's reason is the real one.
+    // An aborted reply is the user's Stop, which pauses.
+    const relayed=m.stopReason!=='aborted'?antigravityFailure(m):undefined;
+    const failure=m.stopReason==='error'?relayed||m.errorMessage||'OMP provider failed.':relayed;
     // A failed attempt inside OMP's retry saga is shown by the retry indicator; the saga's end reports it (retriesStopped).
     if(failure&&s.status!=='paused'&&s.status!=='done'&&!retryStopped(s)){s.status='error';s.error=failure;if(!s._retry)failed(s);}
     // An abort of the retried run ends the saga in its error; the user's Stop (abort drops _retry first) pauses.
@@ -161,8 +155,8 @@ export function createRunner(ctx){
   if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)&&!(s._interrupt&&f.id!==s._interrupt)){
    if(f.id&&f.id===s._interrupt)delete s._interrupt;
    // A terminal prompt_result follows the run's last agent_end, so OMP has stopped retrying by now. Its error is the
-   // run's own (message_end usually reported it already: shown once).
-   if(f.status==='error'){const shown=s.status==='error';s.status='error';s.error=f.error?.message||s.error||'OMP reported an error.';if(!shown)failed(s);scheduleResume(s);}
+   // run's own; one message_end already reported stays as shown (an Antigravity CLI failure OMP ended under another reason).
+   if(f.status==='error'){const shown=s.status==='error'&&s.error;s.status='error';s.error=shown||f.error?.message||'OMP reported an error.';if(!shown)failed(s);scheduleResume(s);}
    else if(f.status==='aborted'){if(s._retry)retriesStopped(s,s._retry.attempt,'Retry cancelled');else if(!retryStopped(s)){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}}
    else if(f.status==='completed'&&f.sessionSettled===true)settle(s);
    if(f.status==='error'||f.status==='aborted')finishWork(s);
@@ -273,7 +267,11 @@ export function createRunner(ctx){
    const fileTitle=s.sessionFile?(await readSessionHead(s.sessionFile).catch(()=>null))?.title||'':'';
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
-   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!hasPrompt(s))];
+   // The Antigravity CLI profile (launch.mjs: its own prompt and tool set) follows the model this run starts with; a model
+   // switch elsewhere keeps it in step (session-command set_model), since OMP fixes prompt and tools when it starts.
+   const sel=s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'');
+   const agy=agySessionArgs(sel,s.launch);s._agy=agy.length>0;
+   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!hasPrompt(s)),...agy];
    const args=s.native?[...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--session-dir',sessionDir,'--continue',...pick];
    const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!ctx.closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);
     // What this OMP wrote is in the panel already: only a later change to the file (a terminal) is read again.

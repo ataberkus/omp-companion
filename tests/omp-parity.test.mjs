@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createCompanion, internals } from '../companion/server.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
-const { launchOptions, launchArgs, treeView, todoPhases } = internals;
+const { launchOptions, launchArgs, agySessionArgs, AGY_PROMPT, AGY_TOOLS, treeView, todoPhases } = internals;
 
 test('launch options validate input and build --flag=value argv', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'omp-launch-'));
@@ -22,6 +22,23 @@ test('launch options validate input and build --flag=value argv', async () => {
     for (const bad of [{ approvalMode: 'never' }, { noLsp: 'yes' }, { smol: '--yolo' }, { tools: 'read;rm' }, { maxTime: '5 minutes' }, { addDirs: ['relative/dir'] }, { systemPrompt: 'x'.repeat(8001) }, []])
       await assert.rejects(launchOptions(bad), undefined, JSON.stringify(bad));
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('an Antigravity CLI session gets its own prompt and tool set; other providers none', () => {
+  // Antigravity answers 429 for OMP's own system prompt, so those sessions send the companion's and skip the MCP route docs.
+  assert.deepEqual(agySessionArgs('antigravity-cli/gemini-4-hydrogen'), [`--system-prompt=${AGY_PROMPT}`, `--tools=${AGY_TOOLS.join(',')}`]);
+  assert.deepEqual(agySessionArgs(''), []);
+  assert.deepEqual(agySessionArgs('anthropic/claude-opus-5-5'), []);
+  // The prompt is not OMP's, whose text the provider refuses; the tool set stays a built-in one.
+  assert.match(AGY_PROMPT, /^You are an autonomous coding agent/);
+  assert.ok(!AGY_PROMPT.includes('trusted coding assistant'));
+  for (const tool of ['read', 'write', 'edit', 'bash', 'grep', 'glob']) assert.ok(AGY_TOOLS.includes(tool));
+  // A prompt or tool list the user chose wins; a prompt alone still trims the tools.
+  assert.deepEqual(agySessionArgs('antigravity-cli/x', { systemPrompt: 'Be brief' }), [`--tools=${AGY_TOOLS.join(',')}`]);
+  assert.deepEqual(agySessionArgs('antigravity-cli/x', { tools: ['read'] }), [`--system-prompt=${AGY_PROMPT}`]);
+  assert.deepEqual(agySessionArgs('antigravity-cli/x', { systemPrompt: 'Be brief', tools: ['read'] }), []);
+  // Tool-less sessions stay tool-less; the prompt is still swapped.
+  assert.deepEqual(agySessionArgs('antigravity-cli/x', { noTools: true }), [`--system-prompt=${AGY_PROMPT}`]);
 });
 
 test('session tree keeps conversation nodes, indents at forks and marks the active path', () => {

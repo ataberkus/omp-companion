@@ -31,3 +31,19 @@ export function launchArgs(o,first){
  if(o.systemPrompt)a.push('--system-prompt='+o.systemPrompt);if(o.appendSystemPrompt)a.push('--append-system-prompt='+o.appendSystemPrompt);
  return a;
 }
+// The Antigravity CLI refuses a request that carries OMP's own system prompt: the account tier answers `⚠ API error
+// (attempt 1): RESOURCE_EXHAUSTED (code 429)` for its text, not its size (the same prompt sent through a plain ACP client
+// fails, while a short one and every other provider's answer pass). A session on an antigravity-cli model therefore sends
+// the companion's own prompt, and a built-in tool set instead of the default one: the MCP/xd tool-route docs that come with
+// the full set (`# xd:// Tool Devices`, `# Internal URLs`) hit the same refusal, `--tools` leaves them out.
+// The agent keeps its file and shell tools; what it loses is the skills list, the MCP tool catalogue and plan-mode extras.
+export const AGY_PROMPT='You are an autonomous coding agent working in the user\u2019s repository. Read the code before you change it, keep every change small and in the style of the file around it, and use bash for commands and tests. Verify a change with the project\u2019s own checks before you report it. Finish with a short report of what changed and what still needs attention, in the language the user writes in.';
+export const AGY_TOOLS=['read','write','edit','bash','grep','glob'];
+export function agySessionArgs(selector,launch){
+ if(!/^antigravity-cli\//.test(selector||''))return [];
+ // A system prompt or tool list the user chose for this session wins; a prompt alone still needs the tool list trimmed.
+ // `--no-tools` stays tool-less rather than being given a list back.
+ const tools=launch?.tools||launch?.noTools?[]:[`--tools=${AGY_TOOLS.join(',')}`];
+ return [...(launch?.systemPrompt?[]:[`--system-prompt=${AGY_PROMPT}`]),...tools];
+}
+
