@@ -2261,7 +2261,8 @@
       const j = jobs.find(x => x.id === a.id);
       const status = /run|pend|start|queue/i.test(a.status) ? 'running' : /fail|error|abort/i.test(a.status) ? 'error' : a.status ? 'done' : '';
       // A task's transcript not on this machine (a collab guest's: the host's) is the one its roster entry names.
-      if (j) { if (status === 'running' && live) j.status = 'running'; j.live = a; if (!j.transcript && a.remote && a.sessionFile) j.transcript = a.sessionFile; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
+      // For local subagents the scan usually finds it; registry sessionFile fills the gap when the scan hasn't yet.
+      if (j) { if (status === 'running' && live) j.status = 'running'; j.live = a; if (!j.transcript && a.sessionFile) j.transcript = a.sessionFile; if (!j.model) { j.model = a.model; j.thinking = a.thinkingLevel; } }
       else if (a.id) jobs.push({ id: a.id, type: 'task', agent: a.agent, title: a.description || a.id, status: live ? status || 'running' : 'stale', startedAt: a.startedAt || firstSeen(a.id), transcript: a.sessionFile, model: a.model, thinking: a.thinkingLevel, cost: a.cost, summary: a.result, live: a });
     }
     // A registry entry newer than the reply may already have its transcript listed there: one card per subagent.
@@ -5402,6 +5403,17 @@
       const e2 = S.bg.get(bgFile());
       const j = bgJobs(e2?.data, bgSession()).find(x => x.id === subName.dataset.subname && x.transcript);
       if (j) openSub(j.transcript); else { toast('That subagent transcript is not available yet.'); loadBg(bgFile(), true); }
+      return;
+    }
+    // Clicking the job card body (not a button/details) opens the subagent transcript.
+    const jobCard = !t.closest('button, summary, .job-acts') && t.closest('.job[data-key]');
+    if (jobCard) {
+      const id = jobCard.dataset.key.replace(/^job:/, '');
+      const e2 = S.bg.get(bgFile());
+      const j = bgJobs(e2?.data, bgSession()).find(x => x.id === id);
+      if (j?.type === 'bash') { /* bash jobs have no transcript to open */ }
+      else if (j?.transcript) openSub(j.transcript);
+      else { toast('Subagent transcript is not available yet.'); loadBg(bgFile(), true); }
       return;
     }
     if (!t.closest('.menu')) closeMenus();
