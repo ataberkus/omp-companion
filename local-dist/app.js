@@ -57,16 +57,101 @@
     return out + esc(code.slice(last));
   }
 
+  // ---------- math ----------
+  // KaTeX 0.19.1, vendored in local-dist/vendor/katex (woff2 fonts only), loads the first time a message has math. Until it
+  // has loaded, or when it can't (a missing file, the tests' vm), a formula shows its TeX source as text.
+  const KATEX = '/vendor/katex/';
+  // trust: false leaves \href, \url and \includegraphics inert; maxSize and maxExpand cap crafted input.
+  const KATEX_OPTS = { throwOnError: false, trust: false, strict: 'ignore', output: 'htmlAndMathml', maxSize: 50, maxExpand: 1000 };
+  const MATH_MAX = 20000; // longer TeX shows as source: KaTeX's own limits don't bound plain length
+  let katexLoad = null, katexFailures = 0;
+  function loadKatex() {
+    if (katexLoad || globalThis.katex || !document.head || !document.createElement) return;
+    const els = [];
+    const add = (tag, attrs) => new Promise((ok, fail) => { const el = Object.assign(document.createElement(tag), attrs, { onload: ok, onerror: fail }); els.push(el); document.head.appendChild(el); });
+    katexLoad = Promise.all([add('link', { rel: 'stylesheet', href: KATEX + 'katex.min.css' }), add('script', { src: KATEX + 'katex.min.js' })])
+      .then(() => { if (!globalThis.katex) throw new Error('KaTeX did not load'); })
+      .then(() => {
+        // Copying a selection with formulas puts their TeX on the clipboard, as $…$ and $$…$$.
+        add('script', { src: KATEX + 'contrib/copy-tex.min.js' }).catch(() => {});
+        // Markup rendered while KaTeX was missing shows source: drop every cache holding it and render the view again.
+        mathCache.clear(); mdCache.clear(); mdNew.length = 0; bodyCache.clear(); partSets.clear();
+        S.lastSig = ''; update();
+      }, () => {
+        // A failed load (offline phone, missing file) is tried again a minute later, up to 5 times, not on every render.
+        els.forEach(el => el.remove?.());
+        if (++katexFailures < 5) setTimeout(() => { katexLoad = null; loadKatex(); }, 60000);
+      });
+  }
+  const mathCache = new Map();
+  // TeX → KaTeX markup, or null while KaTeX isn't loaded. Bad TeX comes back as KaTeX's .katex-error span: the source, with
+  // the parse error as its title.
+  function tex2html(tex, display) {
+    const k = globalThis.katex;
+    if (!k) { loadKatex(); return null; }
+    return memo(mathCache, (display ? 'D' : 'I') + tex, () => {
+      try {
+        if (tex.length > MATH_MAX) throw new Error(`Formula longer than ${MATH_MAX} characters`);
+        return k.renderToString(tex, { ...KATEX_OPTS, displayMode: display });
+      } catch (e) { return `<span class="katex-error" title="${esc(String(e?.message || e))}">${esc(tex)}</span>`; }
+    }, 2000);
+  }
+  const isMathError = html => html.startsWith('<span class="katex-error"');
+  const mathInline = (tex, src) => { const h = tex2html(tex, false); return h == null ? `<span class="math-src">${esc(src)}</span>` : `<span class="math-inline">${h}</span>`; };
+  // Display math: scrolls sideways when wide; the title shows its TeX, the button copies it (see copyBlock). The button's
+  // label is CSS content, so a copied selection holds the formula's TeX and not "Copy LaTeX".
+  const mathBlock = (tex, tag = 'div') => {
+    const h = tex2html(tex, true);
+    return `<${tag} class="math-block${h == null ? ' pending' : ''}" data-tex="${esc(tex)}"><button type="button" class="copy" data-copy aria-label="Copy LaTeX source"></button><${tag} class="math-scroll" title="${esc(tex)}">${h ?? `<code class="math-src">${esc(tex)}</code>`}</${tag}></${tag}>`;
+  };
+  // ```latex and ```tex also hold whole documents and snippets that aren't formulas: those stay code blocks.
+  const isFormula = (code, lang) => !!code.trim() && (/^math$/i.test(lang) || (!/\\(documentclass|usepackage|begin\s*\{document\})/.test(code) && !isMathError(tex2html(code.trim(), true) ?? '')));
+  // $…$ and \(…\) inline, $$…$$ and \[…\] display, held like code spans so emphasis, links and escaping never reach inside.
+  // A single $ follows pandoc: no space after the opener, none before the closer and no digit after it, so "$5 and $10"
+  // stays text. \$ is a literal dollar. One pass collects the delimiters; each kind's closer is found by a pointer that only
+  // moves forward, so text full of unmatched $ is scanned once rather than again from every opener.
+  const PAIR = { '$': '$', '$$': '$$', '\\(': '\\)', '\\[': '\\]' };
+  const isSpace = c => c === undefined || /\s/.test(c);
+  const isCloser = p => !isSpace(p.s[p.at - 1]) && !/\d/.test(p.s[p.at + 1] || '');
+  function holdMath(s, hold) {
+    if (!s.includes('$') && !s.includes('\\')) return s;
+    const toks = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '\\') { if ('$()[]'.includes(s[i + 1] || '_')) toks.push({ s, at: i, kind: c + s[i + 1] }); i++; }
+      else if (c === '$') toks.push({ s, at: i, kind: s[i + 1] === '$' ? (i++, '$$') : '$' });
+    }
+    const ptr = {};
+    const find = (kind, from, ok) => { let k = Math.max(ptr[kind] ?? 0, from); while (k < toks.length && !(toks[k].kind === kind && (!ok || ok(toks[k])))) k++; ptr[kind] = k; return k < toks.length ? k : -1; };
+    let out = '', last = 0;
+    for (let t = 0; t < toks.length; t++) {
+      const { at, kind } = toks[t];
+      if (kind === '\\$') { out += s.slice(last, at) + hold('$'); last = at + 2; continue; }
+      const pair = PAIR[kind];
+      if (!pair || (kind === '$' && isSpace(s[at + 1]))) continue;
+      const k = find(pair, t + 1, kind === '$' ? isCloser : null);
+      if (k < 0) continue;
+      const end = toks[k].at, tex = s.slice(at + kind.length, end);
+      if (!tex.trim() || tex.includes('\u0000')) continue; // empty, or around a code span
+      out += s.slice(last, at) + hold(kind === '$' || kind === '\\(' ? mathInline(tex, s.slice(at, end + pair.length)) : mathBlock(tex.trim(), 'span'));
+      last = end + pair.length; t = k;
+    }
+    return out + s.slice(last);
+  }
+
   function inline(src, breaks) {
     src = String(src).replace(/\u0000/g, ''); // NUL delimits the placeholder slots below
     const slots = [];
     const hold = html => `\u0000${slots.push(html) - 1}\u0000`;
+    const unhold = s => s.replace(/\u0000(\d+)\u0000/g, (_, i) => slots[+i]);
     let s = src.replace(/(`+)([\s\S]*?[^`])\1(?!`)/g, (_, __, code) => hold(`<code>${esc(code.replace(/^ (.*) $/, '$1'))}</code>`));
-    const link = (u, t) => hold(`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`);
+    s = holdMath(s, hold);
+    // Link text keeps the code and math held in it; a URL stops at a held slot.
+    const link = (u, t) => hold(`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${unhold(esc(t))}</a>`);
     // Link text excludes '[' and bold bodies stop at the next delimiter, so no opener rescans the rest of the text (crafted input froze the tab).
-    s = s.replace(/<((?:https?:\/\/|mailto:)[^\s<>]+)>/g, (_, u) => link(u, u));
-    s = s.replace(/\[([^[\]\n]+)\]\(((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+)(?:\s+"[^"]*")?\)/g, (_, t, u) => link(u, t));
-    s = s.replace(/(^|[\s(])(https?:\/\/(?:[^\s<>()]|\([^\s<>()]*\))*(?:[^\s<>().,;:!?'"]|\([^\s<>()]*\)))/g, (_, pre, u) => pre + link(u, u));
+    s = s.replace(/<((?:https?:\/\/|mailto:)[^\s<>\u0000]+)>/g, (_, u) => link(u, u));
+    s = s.replace(/\[([^[\]\n]+)\]\(((?:https?:\/\/|mailto:)(?:[^\s()\u0000]|\([^\s()\u0000]*\))+)(?:\s+"[^"]*")?\)/g, (_, t, u) => link(u, t));
+    s = s.replace(/(^|[\s(])(https?:\/\/(?:[^\s<>()\u0000]|\([^\s<>()\u0000]*\))*(?:[^\s<>().,;:!?'"\u0000]|\([^\s<>()\u0000]*\)))/g, (_, pre, u) => pre + link(u, u));
     s = esc(s);
     s = s.replace(/\*\*(?=\S)((?:[^*]|\*(?!\*))*?\S)\*\*/g, '<strong>$1</strong>')
       .replace(/__(?=\S)((?:[^_]|_(?!_))*?\S)__(?!\w)/g, '<strong>$1</strong>')
@@ -74,14 +159,34 @@
       .replace(/(^|[^_\w])_(?=\S)([^_\n]*?\S)_(?!\w)/g, '$1<em>$2</em>')
       .replace(/~~(?=\S)((?:[^~]|~(?!~))*?\S)~~/g, '<del>$1</del>');
     s = breaks ? s.replace(/\n/g, '<br>') : s.replace(/(?<! ) {2,}\n/g, '<br>').replace(/\n/g, ' '); // lookbehind: a long space run is scanned once, not from every space
-    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => slots[+i]);
+    return unhold(s);
   }
 
   const LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
   const FENCE = /^\s{0,3}(```+|~~~+)\s*([^\s`]*)/;
+  const MATH_OPEN = /^\s*(\$\$|\\\[)(.*)$/;
   const isTableSep = l => l.includes('|') && /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/.test(l.trim());
   const indentOf = l => l.match(/^\s*/)[0].replace(/\t/g, '    ').length;
-  const cells = l => l.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
+  // A | inside $…$, $$…$$ or \(…\) belongs to the formula, not the row. Each pattern stops at the next delimiter of its kind.
+  const MATH_SPAN = /\$\$[^$]+\$\$|\$[^$\s](?:[^$]*[^$\s])?\$(?!\d)|\\\((?:[^\\]|\\[^()])*\\\)/g;
+  const cells = l => l.trim().replace(/\u0001/g, '').replace(MATH_SPAN, m => m.replace(/\|/g, '\u0001')).replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|').replace(/\u0001/g, '|'));
+  // A display formula starting a line ($$ or \[) and its lines up to the closer; null when unclosed (still streaming: it
+  // shows as text until the closer arrives) or text follows the closer. unclosed: closers already known to be missing
+  // from the rest of the message, so a run of unclosed openers is not rescanned to the end from each.
+  function mathLines(lines, i, m, unclosed) {
+    const close = m[1] === '$$' ? '$$' : '\\]';
+    if (unclosed.has(close)) return null;
+    const body = [];
+    for (let j = i, rest = m[2]; ; rest = lines[++j]) {
+      if (j >= lines.length) { unclosed.add(close); return null; }
+      const at = rest.indexOf(close);
+      if (at < 0) { body.push(rest); continue; }
+      if (rest.slice(at + close.length).trim()) return null;
+      body.push(rest.slice(0, at));
+      const tex = body.join('\n').trim();
+      return tex ? { tex, next: j + 1 } : null;
+    }
+  }
 
   // Rendering is pure in (text, breaks); cache it so every poll doesn't re-parse and re-highlight the whole thread. Only
   // top-level calls: nested list items and quotes render inside their parent's entry, and caching them too pushed a long
@@ -102,7 +207,8 @@
     if (depth > 20) return `<p>${inline(String(src ?? '').trim(), breaks)}</p>`;
     const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
     let out = '', i = 0;
-    const isBlockStart = l => FENCE.test(l) || /^\s{0,3}#{1,6}\s/.test(l) || /^\s*>/.test(l) || LIST.test(l) || /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l);
+    const unclosed = new Set();
+    const isBlockStart = l => FENCE.test(l) || MATH_OPEN.test(l) || /^\s{0,3}#{1,6}\s/.test(l) || /^\s*>/.test(l) || LIST.test(l) || /^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l);
     while (i < lines.length) {
       const line = lines[i];
       if (!line.trim()) { i++; continue; }
@@ -113,11 +219,14 @@
         i++;
         const close = new RegExp(`^\\s{0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}\\s*$`);
         while (i < lines.length && !close.test(lines[i])) body.push(lines[i++]);
+        const closed = i < lines.length; // a ```math still streaming shows as code until it closes
         i++;
         const code = body.join('\n');
+        if (closed && /^(math|latex|tex)$/i.test(lang) && isFormula(code, lang)) { out += mathBlock(code.trim()); continue; }
         out += `<div class="codeblock"><div class="bar"><span>${esc(lang || 'text')}</span><button class="copy" data-copy>Copy</button></div><pre><code>${lang && !/^(text|txt|plain|plaintext|console|log|output)$/i.test(lang) ? highlight(code, lang) : esc(code)}</code></pre></div>`;
         continue;
       }
+      if ((m = line.match(MATH_OPEN)) && (m = mathLines(lines, i, m, unclosed))) { out += mathBlock(m.tex); i = m.next; continue; }
       if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) { out += `<h${m[1].length}>${inline(m[2].trimEnd().replace(/(^|\s)#+$/, '').trim())}</h${m[1].length}>`; i++; continue; }
       if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { out += '<hr>'; i++; continue; }
       if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
@@ -313,6 +422,8 @@
     let ok = false; try { ok = document.execCommand('copy'); } catch {}
     t.remove(); done(ok);
   }
+  // A code block's or display formula's Copy button: the code, or the formula's TeX source.
+  const copyBlock = btn => { const m = btn.closest('.math-block'); if (m) copy(m.dataset.tex, 'LaTeX copied'); else copy(btn.closest('.codeblock').querySelector('code').textContent, 'Code copied'); };
 
   // ---------- data model ----------
   const panelSessions = () => (S.store?.sessions || []).filter(s => !s.hidden);
@@ -5312,7 +5423,7 @@
     }
     if (t.closest('#modal')) {
       const mc = t.closest('[data-copy]');
-      if (mc) { copy(mc.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
+      if (mc) { copyBlock(mc); return; }
       // The backdrop only dismisses a dialog with nothing typed into it.
       const dirty = [...t.closest('#modal').querySelectorAll('textarea,input:not([type=checkbox]):not([type=radio])')].some(f => f.value.trim());
       if ((t.id === 'modal' && !dirty) || t.closest('[data-modal-close]')) closeModal();
@@ -5420,7 +5531,7 @@
     }
     if (!t.closest('.menu')) closeMenus();
     const copyBtn = t.closest('[data-copy]');
-    if (copyBtn) { copy(copyBtn.closest('.codeblock').querySelector('code').textContent, 'Code copied'); return; }
+    if (copyBtn) { copyBlock(copyBtn); return; }
     const ct = t.closest('[data-copy-text]');
     if (ct) { copy(ct.dataset.copyText); closeMenu(ct.closest('.menu')); return; }
     const ns = t.closest('[data-new-session]');

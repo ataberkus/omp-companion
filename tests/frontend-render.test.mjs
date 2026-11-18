@@ -4,11 +4,12 @@ import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runInNewContext } from 'node:vm';
+import { createContext, runInContext } from 'node:vm';
 import { createCompanion } from '../companion/server.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 const source = await readFile(new URL('../local-dist/app.js', import.meta.url), 'utf8');
+const katexSource = await readFile(new URL('../local-dist/vendor/katex/katex.min.js', import.meta.url), 'utf8');
 const flush = async (n = 10) => { for (let i = 0; i < n; i++) await new Promise(setImmediate); };
 const at = (s = 0) => new Date(Date.UTC(2026, 0, 1) + s * 1000).toISOString();
 const session = (id, messages, extra = {}) => ({ id, title: 'Chat ' + id, cwd: '/project', status: 'paused', messages, updatedAt: at(), ...extra });
@@ -17,7 +18,8 @@ const reply = (id, text, s = 0) => ({ id, role: 'assistant', text, at: at(s) });
 
 // Real app.js in a vm with just enough DOM: elements keep the innerHTML the app writes.
 // phone: matchMedia answers like a phone (the drawer layouts' query matches); storage: localStorage's contents.
-function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session: saved = {}, phone = false, storage = {} } = {}) {
+// head: collects the elements appended to document.head (none without it: no head, like a page that can't load KaTeX).
+function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session: saved = {}, phone = false, storage = {}, head } = {}) {
   const calls = [], timers = [], toasts = [], listeners = {}, winListeners = {}, stored = { ...saved };
   const node = id => ({
     id, tagName: 'DIV', innerHTML: '', value: '', style: {}, dataset: {}, children: [], attributes: [], hidden: false, scrollHeight: 0, scrollTop: 0, clientHeight: 0,
@@ -27,7 +29,7 @@ function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session:
   });
   const els = new Map('app main list conn input thread topbar newBtn scrim groupBy disconnect slash scroller tasks chatPlan extras questions queued statusLine modelSlot hint buttons imagePreview toasts composer-wrap composer promptRail tokenInput search sidebar home'.split(' ').map(id => [id, node(id)]));
   const document = {
-    hidden: false, activeElement: null, body: node('body'),
+    hidden: false, activeElement: null, compatMode: 'CSS1Compat', body: node('body'), head: head && { appendChild: el => head.push(el) },
     getElementById: id => els.get(id) || null, querySelector: sel => els.get(sel.replace(/^[#.]/, '')) || null, querySelectorAll: () => [], createElement: tag => node(tag),
     addEventListener: (type, fn, capture) => { if (!capture) (listeners[type] ||= []).push(fn); },
   };
@@ -41,16 +43,17 @@ function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session:
     const status = r.status || 200;
     return { ok: status < 400, status, headers: { get: k => r.headers?.[k] ?? null }, json: async () => { call.read = true; return structuredClone(r.body ?? {}); }, text: async () => { call.read = true; return ''; } };
   };
-  runInNewContext(source, {
+  const ctx = createContext({
     document, window: { innerHeight: 900, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
     location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: q => ({ matches: phone && q.includes('max-width: 820px') }), Date, console: { ...console, error() {} }, confirm: () => true,
     localStorage: { getItem: k => storage[k] ?? null, setItem() {} }, sessionStorage: { getItem: k => k in stored ? stored[k] : token, setItem: (k, v) => { stored[k] = String(v); }, removeItem: k => { delete stored[k]; } },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, fetch,
   });
+  runInContext(source, ctx);
   const loops = () => timers.filter(t => t.fn.name === 'loop');
   const poll = async () => { await loops().at(-1).fn().catch(() => {}); await flush(); };
   const go = async h => { location.hash = h; winListeners.hashchange.forEach(fn => fn()); await flush(); };
-  return { els, calls, timers, toasts, loops, poll, go, document, location, listeners, stored, thread: () => els.get('thread').innerHTML };
+  return { els, calls, timers, toasts, loops, poll, go, document, location, listeners, stored, ctx, thread: () => els.get('thread').innerHTML };
 }
 const stateOf = st => url => url.startsWith('/api/state') ? { body: typeof st === 'function' ? st(url) : st } : undefined;
 // Renders one assistant reply through the real thread and returns its bubble HTML.
@@ -366,6 +369,12 @@ test('crafted markdown renders fast and deep nesting does not overflow the stack
     '<https://'.repeat(20000),
     '- '.repeat(1000) + 'x',
     '>'.repeat(4000) + ' x',
+    '$a '.repeat(50000),
+    '$'.repeat(100000),
+    '\\('.repeat(50000) + '\\)',
+    '\\[\n'.repeat(10000), // linear, but each line is its own paragraph: 20,000 cost ~35 ms like 20,000 plain paragraphs
+    '$$x\n'.repeat(10000),
+    'a|b\n|--|--|\n' + '| $|'.repeat(30000),
   ];
   await renderReply('warm up **the** [jit](https://x.dev)');
   // Best of 3: a shared CI runner can stall one render for hundreds of ms; a real
@@ -400,6 +409,57 @@ test('markdown keeps normal output, links parentheses and autolinks safely, and 
   assert.match(html, /curl -fsSL https:\/\/example\.com\/install\.sh \| sh<\/code>/, 'bash: no // comment colouring');
   assert.match(html, /<code>for x in list do done<\/code>/, 'unlabeled fence: no keyword colouring');
   assert.match(html, /<span class="tok-c">\/\/ note<\/span>/, 'C-like languages keep // comments');
+});
+
+// The screenshot's reply (2-a, 2-b) plus the cases around it: code, prices, escapes, markdown inside formulas, tables, fences.
+const MATH_REPLY = [
+  '2-a)', '', '$F(s)=\\ln(s+2)-\\ln(s-1)$', '', "$F'(s)=\\dfrac{1}{s+2}-\\dfrac{1}{s-1}$", '',
+  '$\\mathcal L\\{tf(t)\\}=-F\'(s)=\\dfrac{1}{s-1}-\\dfrac{1}{s+2}$', '', '$$\\boxed{f(t)=\\dfrac{e^{t}-e^{-2t}}{t}}$$', '',
+  "Let: $u=s+1$, $G=\\dfrac{u}{u^2+4}$ and $-G'=\\dfrac{(s+1)^2-4}{\\left((s+1)^2+4\\right)^2}$", '',
+  '$$', '\\begin{aligned} a_1 &= b_1 \\\\ c &= d \\end{aligned} \\tag{1}', '$$', '',
+  'Costs $5 and $10, code `$x_1$` stays, \\$7 is a dollar, $a_b * c_d * e_f$ has no emphasis and \\(x^2\\) is inline.', '',
+  '| f | value |', '|---|---|', '| $|x|$ | $\\|v\\|$ |', '',
+  '- item $\\frac{1}{2}$', '> quoted $\\sqrt{2}$', '',
+  'Bad: $\\frac{1}{$ here, link $\\href{javascript:alert(1)}{x}$.', '',
+  '```math', '\\int_0^1 x\\,dx', '```', '', '```latex', '\\documentclass{article}', '```',
+].join('\n');
+
+test('math renders with KaTeX once it loads lazily, and as its source until then', async () => {
+  const head = [];
+  const app = boot({ head, respond: stateOf(store([session('s1', [reply('m1', MATH_REPLY)])])) });
+  await flush();
+  let html = app.thread();
+  assert.match(html, /<span class="math-src">\$F\(s\)=\\ln\(s\+2\)-\\ln\(s-1\)\$<\/span>/, 'before KaTeX: the source, as text');
+  assert.match(html, /class="math-block pending"/);
+  assert.deepEqual(head.map(e => e.href || e.src), ['/vendor/katex/katex.min.css', '/vendor/katex/katex.min.js'], 'loaded once, on the first formula');
+  runInContext(katexSource, app.ctx);
+  head.forEach(e => e.onload());
+  await flush();
+  html = app.thread();
+  assert.equal(head.at(-1).src, '/vendor/katex/contrib/copy-tex.min.js');
+  assert.doesNotMatch(html, /math-src|pending/, 'every formula re-rendered once KaTeX loaded');
+  assert.equal((html.match(/<span class="math-inline"><span class="(katex|katex-error)"/g) || []).length, 14);
+  assert.equal((html.match(/katex-error/g) || []).length, 1, 'only the bad formula fails');
+  assert.match(html, /<math xmlns="http:\/\/www\.w3\.org\/1998\/Math\/MathML"/, 'MathML for screen readers');
+  assert.match(html, /<div class="math-block" data-tex="\\boxed\{f\(t\)=\\dfrac\{e\^\{t\}-e\^\{-2t\}\}\{t\}\}"><button type="button" class="copy" data-copy aria-label="Copy LaTeX source"><\/button><div class="math-scroll" title="\\boxed[^"]*"><span class="katex-display">/);
+  assert.match(html, /data-tex="\\begin\{aligned\} a_1 &amp;= b_1 \\\\ c &amp;= d \\end\{aligned\} \\tag\{1\}"/, 'a $$ block over several lines');
+  assert.match(html, /data-tex="\\int_0\^1 x\\,dx"/, '```math is display math');
+  assert.match(html, /<code>\\documentclass\{article\}<\/code>/, 'a ```latex document stays code');
+  assert.match(html, /Costs \$5 and \$10, code <code>\$x_1\$<\/code> stays, \$7 is a dollar, <span class="math-inline">/);
+  assert.doesNotMatch(html, /<em>|<strong>/, 'no emphasis from _ and * inside formulas');
+  assert.equal((html.match(/<td>/g) || []).length, 2, 'a | inside a formula does not split the row');
+  assert.match(html, /<li>item <span class="math-inline">/);
+  assert.match(html, /<blockquote><p>quoted <span class="math-inline">/);
+  assert.match(html, /<span class="katex-error" title="ParseError: KaTeX parse error: [^"]+"[^>]*>\\frac\{1\}\{<\/span>/, 'bad TeX keeps its source, the error as title');
+  assert.doesNotMatch(html, /href="javascript/, '\\href stays inert');
+});
+
+test('math without KaTeX: nothing throws, prices and plain markdown stay as they were, an unclosed formula is text', async () => {
+  const html = await renderReply(['Costs $5 and $10.', '', 'Streaming $$', '\\frac{a}{', '', 'and $x', '', '**bold** $$x$$ mid'].join('\n'));
+  assert.match(html, /<p>Costs \$5 and \$10\.<\/p>/);
+  assert.match(html, /<p>Streaming \$\$ \\frac\{a\}\{<\/p>/);
+  assert.match(html, /<p>and \$x<\/p>/);
+  assert.match(html, /<p><strong>bold<\/strong> <span class="math-block pending" data-tex="x">/);
 });
 
 const toolSession = (tool, extra) => session('s1', [{ id: 'u1', role: 'user', text: 'go', at: at() }, { id: 't1', role: 'tool', at: at(1), tool }], extra);
