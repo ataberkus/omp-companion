@@ -305,7 +305,7 @@ async function syncFromFile(s){
  if(!s.modelSelector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}
  if(!s.thinkingChoice&&head.thinking)s.thinking=head.thinking;
  const tokens=await lastContext(file).catch(()=>undefined);if(tokens!==undefined)s.contextTokens=tokens;
- const at=new Date(st.mtimeMs).toISOString();if(!(s.updatedAt>=at))s.updatedAt=at;
+ const at=new Date(Date.parse(head.updatedAt)||st.mtimeMs).toISOString();if(!(s.updatedAt>=at))s.updatedAt=at;
  s.fileSeen=mark;scheduleSave(s);return true;
 }
  // The session file's entries and the leaf OMP resumes from when it loads them: the last entry, unless a model_usage entry

@@ -179,10 +179,14 @@ export function createWorkspaces(ctx){
    // Registered workspaces first (most recently used first), then folders from OMP's history. Worktrees the panel made for
    // isolated sessions are not folders anyone picks; their sessions belong to the project they were made from.
    const wtRoot=path.join(dataDir,'worktrees'),inWorktrees=p=>{const r=path.relative(wtRoot,p);return r===''||(!!r&&!r.startsWith('..')&&!path.isAbsolute(r));};
-   const lastUse=p=>store.sessions.filter(s=>s.projectId===p.id).reduce((a,s)=>s.updatedAt>a?s.updatedAt:a,'');
+   // A project's recency is the newest of its panel sessions and any native OMP session in its folder: one continued in a
+   // terminal (a fresh native updatedAt) must not be shadowed by an older store time. Native sessions are listed once here.
+   const native=await listNativeSessions(120);
+   const nativeAt=p=>native.reduce((a,s)=>s.cwd&&samePath(s.cwd,p.path)&&s.updatedAt>a?s.updatedAt:a,'');
+   const lastUse=p=>{const b=store.sessions.filter(s=>s.projectId===p.id).reduce((a,s)=>s.updatedAt>a?s.updatedAt:a,'');const n=nativeAt(p);return n>b?n:b;};
    const recent=[];const addRecent=async(p,name,lastUsed,projectId)=>{if(p&&!inWorktrees(p)&&!recent.some(r=>samePath(r.path,p))&&await exists(p))recent.push({path:p,name:name||path.basename(p)||p,lastUsed,...(projectId?{project:projectId}:{})});};
    for(const p of store.projects.filter(p=>!p.hidden).map(p=>({p,at:lastUse(p)})).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,8).map(x=>x.p))await addRecent(p.path,p.name,lastUse(p)||undefined,p.id);
-   for(const s of await listNativeSessions(120)){if(recent.length>=12)break;await addRecent(s.cwd,'',s.updatedAt);}
+   for(const s of native){if(recent.length>=12)break;await addRecent(s.cwd,'',s.updatedAt);}
    return {path:'',parent:null,roots,recent,dirs:[]};
   }
   const dir=await resolveDir(value);const entries=await fs.readdir(dir,{withFileTypes:true}).catch(e=>{throw error(`Cannot read directory: ${e.message}`);});

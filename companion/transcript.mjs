@@ -113,6 +113,10 @@ function scanTail(head,lines){
 }
 // A title as OMP's session list shows it (session-listing.ts sanitizeSessionName): its first line, no control characters.
 export const cleanTitle=v=>typeof v==='string'?v.split(/\r?\n/)[0].replace(/[\x00-\x1F\x7F]/g,'').trim():'';
+// The newest frame timestamp in a tail (scanned from the end): a session's real last activity, independent of the file's
+// mtime. Frames are appended in time order, so the first line from the end that carries a top-level string timestamp is the
+// newest; a few trailing lines without one (a cut final line, a frame OMP wrote without a timestamp) are skipped.
+function newestAt(lines){for(let i=lines.length-1,tries=0;i>=0&&tries<60;i--){const line=lines[i];if(!line)continue;tries++;let f;try{f=JSON.parse(line);}catch{continue;}if(f&&typeof f.timestamp==='string')return f.timestamp;}return '';}
 // The start of a user prompt from a line the read window cut off (a first prompt longer than 64 KB): its first string.
 function cutPrompt(line){
  const r=line.indexOf('"role":"user"');if(r<0)return '';
@@ -124,20 +128,25 @@ function cutPrompt(line){
 // title: the one OMP's resume list shows. The first-line slot when the file has one (an empty slot: no title), unless a
 // title change is newer than the slot; a legacy file without a slot takes its newest title change, then its header's.
 // parent: the session file this one was forked from (header parentSession). id stays empty while OMP has not written the
-// header yet (a file it is creating).
+// header yet (a file it is creating). updatedAt: the newest activity time — the newest frame timestamp or the slot's
+// updatedAt (a rename bumps it in place) — which a file's mtime trails when OMP holds the file open; on Windows the write
+// time is not flushed to disk until the handle closes, so a session continued in a terminal for days keeps an old mtime.
 export async function readSessionHead(file){
  const fh=await fs.open(file,'r');try{const size=(await fh.stat()).size;const buf=Buffer.alloc(Math.min(64*1024,size));const {bytesRead}=await fh.read(buf,0,buf.length,0);
-  const head={title:'',cwd:'',id:'',createdAt:'',preview:'',model:'',thinking:'',reasoning:'',parent:''};let slot,header;
+  const head={title:'',cwd:'',id:'',createdAt:'',updatedAt:'',preview:'',model:'',thinking:'',reasoning:'',parent:''};let slot,header;
   for(const line of buf.subarray(0,bytesRead).toString('utf8').split('\n').slice(0,80)){let f;try{f=JSON.parse(line);}catch{if(!head.preview&&line.startsWith('{"type":"message"'))head.preview=cutPrompt(line).slice(0,240);continue;}
-   if(f?.type==='title'&&typeof f.title==='string')slot={title:f.title,at:f.updatedAt||''};
+   if(f?.type==='title'&&typeof f.title==='string'){slot={title:f.title,at:f.updatedAt||''};if(typeof f.updatedAt==='string'&&f.updatedAt>head.updatedAt)head.updatedAt=f.updatedAt;}
    else if(f?.type==='title_change'&&typeof f.title==='string')head._change={title:f.title,at:f.timestamp||''};
    else if(f?.type==='session'&&!header){header=f;head.cwd=typeof f.cwd==='string'?f.cwd:'';head.id=typeof f.id==='string'?f.id:'';head.createdAt=typeof f.timestamp==='string'?f.timestamp:'';head.parent=typeof f.parentSession==='string'?f.parentSession:'';}
    else if(f?.type==='message'&&f.message?.role==='user'&&!head.preview)head.preview=contentText(f.message.content).slice(0,240);
-   if(f&&typeof f==='object')scanModel(head,f);}
-  // The last 32 KB usually holds the last reply's model; up to 256 KB is read only when it does not (a long final turn).
+   if(f&&typeof f==='object'){scanModel(head,f);if(typeof f.timestamp==='string'&&f.timestamp>head.updatedAt)head.updatedAt=f.timestamp;}}
+  // The last 32 KB usually holds the last reply's model and the newest frame's time; up to 256 KB is read only when the
+  // model is not there (a long final turn). Both tail reads end at EOF, so either sees the newest frame.
   if(size>buf.length){const keep={model:head.model,thinking:head.thinking,reasoning:head.reasoning,_change:head._change};
    for(const n of [32*1024,256*1024]){const len=Math.min(n,size-buf.length);Object.assign(head,keep);const tail=Buffer.alloc(len);const r=await fh.read(tail,0,len,size-len);
-    if(scanTail(head,tail.subarray(0,r.bytesRead).toString('utf8').split('\n').slice(1)).model||len<n)break;}}
+    const lines=tail.subarray(0,r.bytesRead).toString('utf8').split('\n').slice(1);const at=newestAt(lines);if(at>head.updatedAt)head.updatedAt=at;
+    if(scanTail(head,lines).model||len<n)break;}}
+  if(!head.updatedAt)head.updatedAt=head.createdAt;
   const change=head._change;delete head._change;
   head.title=cleanTitle(change&&(!slot||change.at>slot.at)?change.title:slot?slot.title:change?change.title:header?.title);
   return head;}finally{await fh.close();}
