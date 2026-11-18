@@ -110,12 +110,13 @@ test('a companion started without a restart note resumes nothing', async t => {
   assert.equal(c.omp.sessions.length, 0, 'no OMP was started');
 });
 
-test('a session that cannot resume stays paused with a note; the others still resume', async t => {
+test('a session that cannot resume stays in error with a note (not Idle); the others still resume', async t => {
   const omp = fakeOmp(s => s.args[s.args.indexOf('--session-dir') + 1].endsWith('bad') ? { prompt() { throw new Error('Provider unavailable.'); } } : {});
   const c = await start(t, () => ({ omp, resume: ['bad', 'run'] }), [['bad', 'paused']]);
   const byId = id => c.app.store.sessions.find(s => s.id === id);
-  assert.ok(await waitFor(() => byId('bad').status === 'paused' && byId('run').status === 'running'));
-  assert.equal(byId('bad').error, undefined);
+  assert.ok(await waitFor(() => byId('bad').error?.startsWith('Automatic resume failed') && byId('run').status === 'running'));
+  assert.equal(byId('bad').status, 'error');
+  assert.equal(byId('bad').error, 'Automatic resume failed: Provider unavailable.');
   assert.ok(byId('bad').messages.some(m => m.role === 'system' && m.text === 'Automatic resume failed: Provider unavailable.'));
 });
 

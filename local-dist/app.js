@@ -2965,7 +2965,9 @@
       placeholder = fresh ? 'What should OMP do?' : s.status === 'done' ? 'Send a message to reopen this session…' : 'Reply to continue…';
       hintText = 'Enter to send · Shift+Enter new line · / commands · !cmd shell';
       btns = `<button class="btn primary" data-act="send" ${has && !busy ? '' : 'disabled'}>${sending ? 'Sending…' : 'Send ↵'}</button>`;
-      if (s.status === 'error') status = `<span class="grow">⚠ ${esc(s.error || 'OMP reported an error.')}</span><button class="btn sm" data-act="retry">Retry last message</button>`;
+      // An automatic resume the companion scheduled (rate limit, lost connection; auto-approve) is shown with its time.
+      const resume = s.connectionResume || s.rateLimitResume;
+      if (s.status === 'error') status = `<span class="grow">⚠ ${esc(s.error || 'OMP reported an error.')}${resume ? ` · Resending automatically at ${esc(clock(resume.at))}${s.connectionResume?.attempt ? ` (attempt ${+s.connectionResume.attempt} of 3)` : ''}` : ''}</span><button class="btn sm" data-act="retry">Retry last message</button>`;
       else if (s.status === 'review') status = `<span class="grow">OMP finished. Review the result, reply to keep going, or mark it done.</span>`;
       else if (s.status === 'paused' && !fresh) status = `<span class="grow">Idle. Reply to continue from where it left off.</span>`;
     }

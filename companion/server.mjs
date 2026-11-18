@@ -122,12 +122,12 @@ export async function createCompanion(options={}){
  const close=async onProgress=>{ctx.closing=true;clearInterval(refreshTimer);clearTimeout(accountTimer);dropViewer(1001,'The companion is closing.');for(const c of cliProcs.values())c.kill();clearTimeout(ctx.saveTimer);const enhanceStops=stopAllEnhance();const probeStops=[...commandProbes].map(r=>r.kill());const sessionStops=pauseSessions(onProgress);await Promise.all([...servers].map(closeServer));const paused=await sessionStops;await Promise.all(probeStops);await enhanceStops;await ctx.branchRun;await ctx.storageRun;await ctx.flushHeads(true);return paused;};
  // Drafts left by a closed tab or a crash: the in-tab draft text is gone, so the session would come back empty.
  for(const s of store.sessions.filter(x=>x.draft))await discardDraft(s).catch(e=>console.error('Draft cleanup failed:',e.message));
- // A rate-limit resume saved before a restart: re-armed; one already due fires right away.
- for(const s of store.sessions)if(s.rateLimitResume)armResume(s);
+ // An automatic resume (rate limit, lost connection) saved before a restart: re-armed; one already due fires right away.
+ for(const s of store.sessions)if(s.rateLimitResume||s.connectionResume)armResume(s);
  // Sessions that were working when the last companion restarted or the desktop app updated (options.resume, from the restart
- // or update note) carry on; a rate-limit wait is re-armed above instead. Normal starts, quits and crash recovery pass none, so they stay paused.
+ // or update note) carry on; an automatic resume is re-armed above instead. Normal starts, quits and crash recovery pass none, so they stay paused.
  {const resume=new Set(Array.isArray(options.resume)?options.resume:[]);
-  for(const s of store.sessions)if(resume.has(s.id)&&s.status==='paused'&&!s.hidden&&!s.rateLimitResume)void resumeAfterRestart(s).catch(e=>console.error('Automatic resume failed:',e.message));}
+  for(const s of store.sessions)if(resume.has(s.id)&&s.status==='paused'&&!s.hidden&&!s.rateLimitResume&&!s.connectionResume)void resumeAfterRestart(s).catch(e=>console.error('Automatic resume failed:',e.message));}
 // closeScreen: the desktop host rebinds a listener (LAN toggle, tailnet), and a device that lost access must not keep watching; the viewer reconnects if still allowed.
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
 await persist();return {server,serve,closeServer,unserve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
