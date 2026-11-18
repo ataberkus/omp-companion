@@ -37,6 +37,8 @@ process.stdin.on('end', () => {
   if (input.includes('FAIL')) { process.stderr.write('Warning: MCP server "x" failed to connect\\nModel "@enhance" not found\\n\\nRun \`omp models find <pattern>\` to search, or \`omp models\` to list all.\\n'); process.exit(1); }
   // A provider that never answered: the reason is in OMP's frames only, stderr stays empty.
   if (input.includes('FRAMEERR')) { emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 10, errorMessage: 'openrouter: 402 Insufficient credits.' }); emit({ type: 'turn_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'openrouter: 402 Insufficient credits.' } }); process.exitCode = 1; return; }
+  // The Antigravity CLI relays its failed request as reply text (with a thinking block beside it); OMP exits 0.
+  if (input.includes('AGYQUOTA')) { emit({ type: 'message_end', message: { role: 'assistant', provider: 'antigravity-cli', stopReason: 'stop', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '\\n⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).\\n' }] } }); return; }
   emit({ type: 'session', cwd: process.cwd() });
   if (input.includes('EMPTY')) return;
   emit({ type: 'tool_execution_start', toolName: 'read', args: { path: join(process.cwd(), 'src', 'a.js') } });
@@ -267,6 +269,14 @@ test('a run that dies with an empty stderr reports the reason from OMP\'s frames
   const job = await settle(body.id);
   assert.equal(job.status, 'error');
   assert.equal(job.error, 'openrouter: 402 Insufficient credits.');
+});
+
+test('an Antigravity CLI failure relayed as reply text is the error, never the enhanced draft', async t => {
+  const { call, settle } = await boot(t);
+  const { body } = await call('/enhance', { session: 'session', text: 'AGYQUOTA' });
+  const job = await settle(body.id);
+  assert.equal(job.status, 'error');
+  assert.equal(job.error, 'Antigravity CLI: API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota). Antigravity rejects this client\u2019s system prompt at the account tier: sign in to Google models with an API key, or choose another provider for this session.');
 });
 
 test('empty result is an error, not a blank draft', async t => {

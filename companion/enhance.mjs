@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { exists, now, error, text, contentText, resolveDir } from './util.mjs';
+import { exists, now, error, text, contentText, resolveDir, antigravityFailure } from './util.mjs';
 import { IMAGE_EXT, chatImages } from './images.mjs';
 import { ENHANCE_MODES, ENHANCE_LOOKUP_ENV } from './enhance-prompts.mjs';
 // One deadline for an enhance run, owned by the server's watchdog (it names the timeout). A slow model at a high
@@ -98,7 +98,7 @@ export function createEnhance(ctx){
   const job={id,sessionId:s?.id||null,status:'running',step:'',model:pick.label,mode,text:'',error:'',dir};
   const child=spawn(ompExecutable,[...ompPrefix,...(options.enhancePrefix||[]),...enhanceArgs({model:pick.model,thinking:pick.thinking,overlay:enhanceOverlay,system:enhanceSystems[mode],guard:enhanceGuard,images:files})],{cwd,stdio:['pipe','pipe','pipe'],windowsHide:true,env:{...process.env,NO_COLOR:'1',FORCE_COLOR:'0',[ENHANCE_LOOKUP_ENV]:String(ENHANCE_MODES[mode].lookups)}});
   job.child=child;enhanceJobs.set(id,job);
-  let stderr='',answer='',failure='';
+  let stderr='',answer='',failure='',relayed='';
   child.stdin.on('error',()=>{});child.stdin.end(enhanceInput(draft,s?.messages??[]),'utf8');
   child.stderr.on('data',b=>{stderr=(stderr+b).slice(-8000);});
   createInterface({input:child.stdout,crlfDelay:Infinity}).on('line',line=>{let f;try{f=JSON.parse(line);}catch{return;}
@@ -107,17 +107,18 @@ export function createEnhance(ctx){
    const why=String(f.message?.errorMessage||f.errorMessage||(f.type==='agent_end'?f.messages?.at(-1)?.errorMessage:'')||'').trim();
    if(why)failure=why;
    if(f.type==='tool_execution_start')job.step=stepLabel(f.toolName,f.args,cwd);
-   else if(f.type==='message_end'&&f.message?.role==='assistant')answer=contentText(f.message.content);});
+   // An Antigravity CLI failure relayed as reply text is the run's error, never the enhanced prompt; the latest reply decides.
+   else if(f.type==='message_end'&&f.message?.role==='assistant'){relayed=antigravityFailure(f.message)||'';answer=relayed?'':contentText(f.message.content);}});
   const timer=setTimeout(()=>{job.timedOut=true;child.kill();},ENHANCE_TIMEOUT_MS);timer.unref();
   job.closed=new Promise(resolve=>{let done=false;const finish=async(code,err)=>{if(done)return;done=true;clearTimeout(timer);
    const out=cleanEnhanced(answer);
    if(job.timedOut)Object.assign(job,{status:'error',error:'Enhance timed out.'});
    else if(job.stopped)job.status='cancelled';
    else if(code===0&&!err&&out)Object.assign(job,{status:'done',text:out});
-   else if(code===0&&!err)Object.assign(job,{status:'error',error:failure||'The enhancer returned no text.'});
+   else if(code===0&&!err)Object.assign(job,{status:'error',error:relayed||failure||'The enhancer returned no text.'});
    // OMP prints the error first and a "Run `omp …`" hint after it; skip warnings (e.g. MCP connect failures). A run that
    // died with nothing on stderr (a provider that never answered) reports the reason its frames carried, not the code.
-   else Object.assign(job,{status:'error',error:err?.message||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||failure||`OMP exited (${code}).`});
+   else Object.assign(job,{status:'error',error:err?.message||relayed||stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').split(/\r?\n/).map(l=>l.trim()).find(l=>l&&!/^warning:/i.test(l))||failure||`OMP exited (${code}).`});
    delete job.child;job.finishedAt=now();
    await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});
    setTimeout(()=>{if(enhanceJobs.get(id)===job)enhanceJobs.delete(id);},5*60000).unref();

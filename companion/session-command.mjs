@@ -9,7 +9,7 @@ import { textTokens, imagesTokens, chatImages } from './images.mjs';
 import { finishWork, askAnswers, btwView, modelUsage, modelUsageText, todoPhases } from './session-views.mjs';
 import { THINKING, toolSummary, shellRecord, readSessionHead, treeView, userPrompt } from './transcript.mjs';
 import { worktreeChanges, gitLog, gitCommit } from './git.mjs';
-import { launchOptions } from './launch.mjs';
+import { launchOptions, agySessionArgs } from './launch.mjs';
 export function createSessionCommand(ctx){
  const {start,append,notice,store,refresh,dataDir,execOmp,activity,persist,scheduleSave,runners,accountsChanged,autoApprove,cancelResume,dropSteers,reload,advisorStatus,retriesStopped}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
@@ -172,7 +172,12 @@ export function createSessionCommand(ctx){
    const live=runners.get(s.id)?.alive&&s._thinkingLevels?.length&&(!selector||selector===`${s.provider}/${s.model}`);
    if(live&&thinking&&thinking!=='auto'&&!s._thinkingLevels.includes(thinking))throw error(`${s.model} has no ${thinking} reasoning level; it offers ${s._thinkingLevels.join(', ')}.`,409);
    if(selector)s.modelSelector=selector;if(thinking)s.thinkingChoice=thinking;
-   const runner=runners.get(s.id);if(runner?.alive){const i=selector.indexOf('/');if(selector)await runner.setModel(selector.slice(0,i),selector.slice(i+1));if(thinking)await runner.setThinking(thinking);await refresh(s,runner);}
+   const runner=runners.get(s.id);
+   // A model on the other side of the Antigravity CLI boundary needs the other launch (its own prompt and tool set): OMP
+   // fixes those when it starts, so an idle OMP is stopped and the next prompt starts it that way.
+   const agy=agySessionArgs(selector||s.modelSelector,s.launch).length>0;
+   if(runner?.alive&&s._agy!==undefined&&s._agy!==agy&&!['running','queued'].includes(s.status)&&!s._task&&!s._bash){await runner.kill();s._agy=agy;}
+   if(runner?.alive&&!runner.stopping){const i=selector.indexOf('/');if(selector)await runner.setModel(selector.slice(0,i),selector.slice(i+1));if(thinking)await runner.setThinking(thinking);await refresh(s,runner);}
    else{if(selector){const i=selector.indexOf('/');s.provider=selector.slice(0,i);s.model=selector.slice(i+1);}if(thinking)s.thinking=thinking;}
    await persist(s);return s;
   }
@@ -362,7 +367,15 @@ export function createSessionCommand(ctx){
    await advisorStatus(s,runner);await persist(s);return s;}
   if(body.type==='prompt'&&s.status==='running'&&!slashCommand)throw error('This session is running. Use Steer or Queue follow-up.');
   try{
-   const runner=await start(s);
+   let runner=await start(s);
+   // OMP fixes prompt and tools when it starts, so a process that came up on an Antigravity model without the Antigravity
+   // launch (its model was OMP's default, or a switch landed while a turn ran) would be refused with 429. It is restarted
+   // with that profile (launch.mjs) before the turn, once.
+   if(prompting&&s._agy!==true){
+    const live=await runner.state().catch(()=>null);
+    // The live model is what the restart must launch with: the session never had a selector of its own.
+    if(live?.model&&agySessionArgs(`${live.model.provider}/${live.model.id}`,s.launch).length>0){s.provider=live.model.provider;s.model=live.model.id;await runner.kill().catch(()=>{});runner=await start(s);}
+   }
    // Before the turn starts: OMP refuses to change the account mid-stream.
    if(prompting&&s.status!=='running')await applyAccount(s,runner);
    if(prompting&&/^\/plan(?:-review)?(?:\s|$)/.test(body.message)&&!s._planSupported)throw error('This OMP build has no RPC plan mode. Use an updated OMP build; /plan was not sent to the model.');
