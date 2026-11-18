@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCompanion } from '../companion/server.mjs';
@@ -101,4 +101,27 @@ test('a panel session continued in a terminal shows the turns, title and model t
   [, s] = await c.post('/omp-sessions/resume', { file });
   assert.equal(s.title, 'Mine');
   assert.ok(s.messages.some(m => m.text === 'more'));
+});
+
+test('a session continued while OMP holds the file open shows its real last activity, not the file mtime', async t => {
+  const c = await companion(t, []);
+  const recent = new Date(Date.now() - 50 * 60 * 1000).toISOString(); // ~50 min ago, the last terminal turn
+  const old = '2026-11-15T12:00:00.000Z';
+  const stale = new Date(Date.now() - 2 * 86400 * 1000); // mtime two days behind the content (Windows lazy write time)
+  // A large transcript: the recent turn sits past the 64 KB head window, so only the tail read can see its timestamp.
+  const big = 'x'.repeat(300 * 1024);
+  const file = join(c.bucket, 'held.jsonl');
+  await writeFile(file, slot('REVRS: Project Aeon', old) + header('held', c.proj) + user('u1', 'first', old) + reply('r1', 'u1', big, 'm1', old));
+  await appendFile(file, user('u2', 'terminal question', recent) + reply('r2', 'u2', 'terminal answer', 'm9', recent));
+  await utimes(file, stale, stale);
+  // An untouched older session, with a fresh mtime, must not outrank the held one once activity (not mtime) orders the list.
+  const other = join(c.bucket, 'other.jsonl');
+  await writeFile(other, slot('Older', old) + header('other', c.proj) + user('o1', 'hi', old) + reply('or1', 'o1', 'ok', 'm1', old));
+  await c.start();
+  const [, list] = await c.get('/omp-sessions');
+  const row = list.sessions.find(s => s.id === 'held');
+  assert.ok(row, 'the held session is listed');
+  assert.equal(row.updatedAt, recent, 'updatedAt is the newest transcript timestamp, not the two-day-old mtime');
+  assert.ok(row.size > 300 * 1024, 'the large file is listed with its real size');
+  assert.equal(list.sessions[0].id, 'held', 'ordered by real activity, ahead of the fresher-mtime older session');
 });

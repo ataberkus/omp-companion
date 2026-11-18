@@ -81,16 +81,23 @@ export function createHistory(ctx){
     // No session header yet: OMP is still writing the file's first lines. Left out, and read again on the next listing.
     if(!head.id)return null;c={mtime:f.mtime,size:f.size,head};headCache.set(f.file,c);saveHeads();}
    const head=c.head,managedSession=managed.get(pathKey(f.file));
-   const row={file:f.file,title:shown(head),named:!!head.title,cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(f.mtime).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
+   // Last activity from the transcript (head.updatedAt: the newest frame or rename time), not the file's mtime: OMP can hold
+   // the file open while a terminal continues it, and Windows does not flush the write time until the handle closes, so mtime
+   // can trail the transcript by days (or, for a just-copied file, lead stale content). mtime is only the fallback.
+   const at=Date.parse(head.updatedAt)||f.mtime;
+   const row={file:f.file,title:shown(head),named:!!head.title,cwd:head.cwd,id:head.id,preview:head.preview,createdAt:head.createdAt,updatedAt:new Date(at).toISOString(),size:f.size,managedId:managedSession?.id,model:head.model,thinking:head.thinking};
    if(head.parent){const pf=byKey.get(pathKey(head.parent)),ph=pf&&headCache.get(pf)?.head;row.parent=pf||head.parent;row.parentTitle=ph?shown(ph):path.basename(head.parent,'.jsonl');}
    return row;
   };
   // 32 heads at a time: a first listing reads every file's head and tail (up to 320 KB each), and 1,500 files' reads at
-  // once held all of that in memory together.
-  const list=Number.isFinite(limit)?files.slice(0,limit):files,rows=[];for(let i=0;i<list.length;i+=32)rows.push(...await Promise.all(list.slice(i,i+32).map(one)));
+  // once held all of that in memory together. Every head is read (then cached) so the list can order by last activity, not
+  // mtime; `limit` slices only after that order is known.
+  const rows=[];for(let i=0;i<files.length;i+=32)rows.push(...await Promise.all(files.slice(i,i+32).map(one)));
   // A parent read later in the same pass than its fork (forks are newer, so listed first) gets its title now.
   const titles=new Map(rows.filter(Boolean).map(r=>[r.file,r.title]));for(const r of rows)if(r?.parent&&titles.has(r.parent))r.parentTitle=titles.get(r.parent);
-  return rows.filter(Boolean);
+  // Newest activity first; ties by path so identical polls give identical ETags.
+  const ok=rows.filter(Boolean).sort((a,b)=>a.updatedAt<b.updatedAt?1:a.updatedAt>b.updatedAt?-1:a.file<b.file?-1:a.file>b.file?1:0);
+  return Number.isFinite(limit)?ok.slice(0,limit):ok;
  }
  // The first listing reads every head the disk copy lacks (the first dashboard load's path), so it starts with the
  // companion; a request meanwhile waits for it rather than reading the same heads again, then lists from the cache.
