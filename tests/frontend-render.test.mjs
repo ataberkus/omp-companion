@@ -522,6 +522,36 @@ test('a working session without todos or a session file still offers its subagen
   assert.match(panel, /data-tab="plan" disabled/);
 });
 
+test('finished background work shows subagents and background tasks apart, and the filter picks one kind', async () => {
+  const s = session('s1', [], { status: 'review', todos: [], sessionFile: '/x/s1.jsonl' });
+  const app = boot({ respond: url => {
+    if (url.startsWith('/api/state')) return { body: store([s]) };
+    if (url.startsWith('/api/background')) return { body: { live: false, agents: [], subagents: [], tasks: [
+      { id: 'ParserFix', type: 'task', agent: 'task', title: 'Fix the parser', status: 'done', finishedAt: at(3) },
+      { id: 'bg-1', type: 'bash', title: 'npm test', command: 'npm test', status: 'done', finishedAt: at(4) },
+      { id: 'LexerFix', type: 'task', agent: 'task', title: 'Fix the lexer', status: 'error', finishedAt: at(2) },
+    ] } };
+  } });
+  await flush();
+  await app.poll(); await app.poll();
+  let panel = app.els.get('tasks').innerHTML;
+  assert.match(panel, /Finished <span>3<\/span>/);
+  assert.match(panel, /data-kind="all">All <small>3<\/small>[\s\S]*data-kind="subagent">Subagents <small>2<\/small>[\s\S]*data-kind="bash">Background tasks <small>1<\/small>/);
+  // All: one group per kind, each holding only its own cards.
+  const [, subs, bash] = panel.split(/class="side-label finished-kind"/);
+  assert.match(subs, /^>Subagents <span>2<\/span>/);
+  assert.match(subs, /ParserFix[\s\S]*LexerFix/);
+  assert.doesNotMatch(subs, /bg-1|npm test/);
+  assert.match(bash, /^>Background tasks <span>1<\/span>[\s\S]*npm test/);
+  assert.doesNotMatch(bash, /ParserFix|LexerFix/);
+  const act = { dataset: { act: 'finishedKind', kind: 'bash' }, closest: () => null };
+  app.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-act]' ? act : null } });
+  panel = app.els.get('tasks').innerHTML;
+  assert.match(panel, /aria-pressed="true" data-act="finishedKind" data-kind="bash"/);
+  assert.match(panel, /npm test/);
+  assert.doesNotMatch(panel, /ParserFix|LexerFix|finished-kind/);
+});
+
 test('sidebar polls keep keyboard focus on the same row', async () => {
   // A list whose innerHTML setter builds one focusable button per data-key, like the browser would.
   const list = document => {

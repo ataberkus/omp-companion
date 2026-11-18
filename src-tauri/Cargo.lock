@@ -2617,10 +2617,19 @@ dependencies = [
 name = "omp-control-room"
 version = "1.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "brotli-decompressor",
  "dunce",
+ "futures-util",
  "libc",
+ "minisign-verify",
  "parking_lot",
+ "reqwest",
+ "rustls",
+ "semver",
+ "serde",
  "serde_json",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

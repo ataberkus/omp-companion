@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>OMP Control Room update</title>
+<link rel="stylesheet" href="app.css"/>
+<!-- The desktop app's update window (src-tauri/src/update.rs). No IPC: Rust calls window.ompUpdate(state) with what to
+     show, and the buttons navigate to /__update/<action>, which the app cancels and acts on. -->
+<style>
+body{overflow:auto;display:flex;flex-direction:column;min-height:100%;user-select:none;-webkit-user-select:none}
+main{flex:1;display:flex;flex-direction:column;gap:16px;padding:24px 26px 20px;max-width:620px;width:100%;margin:0 auto}
+main[hidden]{display:none}
+.head{display:flex;align-items:center;gap:12px}
+.head .logo{flex:none;width:40px;height:40px;border-radius:11px;font-size:22px}
+.head h1{margin:0;font-size:19px;line-height:1.25;letter-spacing:-.02em;font-weight:650}
+.head p{margin:2px 0 0;color:var(--muted);font-size:13px}
+.lead{margin:0;color:var(--fg-soft)}
+.size{display:inline-flex;align-self:flex-start;gap:6px;padding:3px 9px;border-radius:999px;background:var(--accent-soft);border:1px solid var(--accent-line);font-size:12.5px;font-weight:600;color:var(--fg)}
+.warn{margin:0;padding:10px 12px;border-radius:9px;border:1px solid color-mix(in oklch,var(--amber) 45%,transparent);background:color-mix(in oklch,var(--amber) 10%,transparent);color:var(--fg);font-size:13px}
+.notes{flex:1;min-height:90px;max-height:46vh;overflow:auto;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--card);font-size:13px;user-select:text;-webkit-user-select:text;overflow-wrap:anywhere}
+.notes:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.notes h2,.notes h3,.notes h4{margin:12px 0 6px;font-size:13.5px;letter-spacing:-.01em}
+.notes>:first-child{margin-top:0}
+.notes p{margin:0 0 8px}
+.notes ul{margin:0 0 8px;padding-left:18px}
+.notes li{margin:2px 0}
+.notes code{font:12px var(--mono);background:var(--code-inline-bg);padding:1px 4px;border-radius:4px}
+.notes a{color:var(--accent)}
+.notes .empty{color:var(--faint)}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.step{display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:4px 10px;padding:8px 10px;border-radius:9px;color:var(--faint)}
+.step .mark{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--input);display:grid;place-items:center;font-size:10px;line-height:1}
+.step.done{color:var(--fg-soft)}
+.step.done .mark{border-color:var(--green);background:var(--green);color:var(--bg)}
+.step.now{background:var(--card);border:1px solid var(--border);color:var(--fg)}
+.step.now .mark{border-color:var(--accent);border-top-color:transparent;animation:spin .9s linear infinite}
+.step .label{font-weight:600}
+.step .pct{font:12px var(--mono);color:var(--muted)}
+.step .bar,.step .detail{grid-column:2 / 4}
+.step .detail{font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.bar{height:6px;border-radius:99px;background:var(--active);overflow:hidden}
+.bar>i{display:block;height:100%;width:0;border-radius:inherit;background:var(--brand);transition:width .2s linear}
+.bar.indeterminate>i{width:35%;animation:slide 1.2s ease-in-out infinite}
+.bg-progress{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--muted)}
+.error{display:flex;flex-direction:column;gap:10px}
+.error .advice{margin:0;color:var(--fg-soft)}
+.error details{font-size:12.5px;color:var(--muted)}
+.error details pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px var(--mono);margin:6px 0 0;padding:8px 10px;border-radius:8px;background:var(--card);border:1px solid var(--border);user-select:text;-webkit-user-select:text;max-height:140px;overflow:auto}
+.big{display:grid;place-items:center;width:56px;height:56px;border-radius:50%;margin:8px auto 0;font-size:26px}
+.big.ok{background:color-mix(in oklch,var(--green) 18%,transparent);color:var(--green)}
+.big.err{background:color-mix(in oklch,var(--red) 18%,transparent);color:var(--red)}
+.summary{text-align:center}
+.summary h1{margin:4px 0 0;font-size:20px}
+.summary p{margin:4px 0 0;color:var(--muted)}
+.foot{margin-top:auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;padding-top:4px}
+.foot .hint{margin-right:auto;font-size:12px;color:var(--faint)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
+@media (prefers-reduced-motion:reduce){.step.now .mark,.bar.indeterminate>i{animation:none}.bar>i{transition:none}}
+</style>
+</head>
+<body>
+<main id="view" hidden></main>
+<div id="say" class="skip-link" role="status" aria-live="polite" aria-atomic="true"></div>
+<script>
+(() => {
+  'use strict';
+  const view = document.getElementById('view');
+  const say = document.getElementById('say');
+  const PHASES = { download: 'Downloading', verify: 'Verifying', prepare: 'Preparing files', save: 'Saving sessions', install: 'Installing', restart: 'Restarting' };
+  let last = null;
+  let lastKey = '';
+  let spoken = '';
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const pct = (p) => Math.round(Math.max(0, Math.min(1, p)) * 100);
+
+  // Release notes: a small, safe subset of Markdown. Everything is escaped first; only http(s) links become links.
+  function inline(text) {
+    return esc(text)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+      .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2">$2</a>');
+  }
+  function markdown(src) {
+    const out = [];
+    let list = false, para = [];
+    const flush = () => {
+      if (para.length) out.push(`<p>${inline(para.join(' '))}</p>`);
+      para = [];
+    };
+    const close = () => { if (list) { out.push('</ul>'); list = false; } };
+    for (const raw of String(src || '').replace(/\r/g, '').split('\n')) {
+      const line = raw.trimEnd();
+      let m;
+      if (!line.trim()) { flush(); close(); continue; }
+      if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) {
+        flush(); close();
+        const level = Math.min(4, m[1].length + 1);
+        out.push(`<h${level}>${inline(m[2])}</h${level}>`);
+      } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+        flush();
+        if (!list) { out.push('<ul>'); list = true; }
+        out.push(`<li>${inline(m[1])}</li>`);
+      } else {
+        close();
+        para.push(line.trim());
+      }
+    }
+    flush(); close();
+    return out.join('') || '<p class="empty">No release notes.</p>';
+  }
+
+  const go = (action) => { location.href = '/__update/' + action; };
+  const btn = (action, label, primary, extra = '') => `<button type="button" class="btn${primary ? ' primary' : ''}" data-act="${action}" ${extra}>${esc(label)}</button>`;
+  const head = (title, sub) => `<div class="head"><div class="logo" aria-hidden="true">π</div><div><h1 id="title">${esc(title)}</h1>${sub ? `<p>${esc(sub)}</p>` : ''}</div></div>`;
+  const bar = (progress) => progress == null
+    ? '<div class="bar indeterminate" role="progressbar" aria-label="In progress"><i></i></div>'
+    : `<div class="bar" role="progressbar" aria-label="Progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct(progress)}"><i style="width:${pct(progress)}%"></i></div>`;
+  const busy = (n) => n > 0
+    ? `<p class="warn">${n === 1 ? '1 session is' : `${n} sessions are`} still working. ${n === 1 ? 'It is' : 'They are'} paused and saved before the update, and resume${n === 1 ? 's' : ''} when the app is back.</p>`
+    : '';
+  const notes = (s) => `<div class="notes" tabindex="0" role="region" aria-label="Release notes">${markdown(s.notes)}</div>`;
+
+  function phases(s) {
+    const list = s.phases || [];
+    const at = list.indexOf(s.phase);
+    return `<ol class="steps" aria-label="Update steps">${list.map((p, i) => {
+      const cls = i < at ? 'done' : i === at ? 'now' : '';
+      const state = i < at ? 'done' : i === at ? 'in progress' : 'waiting';
+      const extra = i === at
+        ? `${bar(s.progress)}${s.detail ? `<span class="detail">${esc(s.detail)}</span>` : ''}`
+        : '';
+      const right = i === at && s.progress != null ? `<span class="pct">${pct(s.progress)}%</span>` : '<span></span>';
+      return `<li class="step ${cls}" aria-current="${i === at ? 'step' : 'false'}"><span class="mark" aria-hidden="true">${i < at ? '✓' : ''}</span><span class="label">${esc(PHASES[p] || p)}<span class="skip-link"> (${state})</span></span>${right}${extra}</li>`;
+    }).join('')}</ol>`;
+  }
+
+  // What the screen reader hears: the step and every 25 %, not each tick.
+  function announcement(s) {
+    switch (s.state) {
+      case 'checking': return 'Checking for updates';
+      case 'uptodate': return `OMP Control Room is up to date`;
+      case 'available': return `Version ${s.version} is available`;
+      case 'ready': return `Version ${s.version} is ready to install`;
+      case 'updated': return `Updated to version ${s.version}`;
+      case 'error': return `${s.error?.title || 'Update failed'}. ${s.error?.advice || ''}`;
+      case 'downloading':
+      case 'applying': {
+        const step = PHASES[s.phase] || 'Updating';
+        return s.progress == null ? step : `${step} ${Math.floor(pct(s.progress) / 25) * 25}%`;
+      }
+    }
+    return '';
+  }
+
+  function render(s) {
+    let html = '', key = s.state, focus = null;
+    switch (s.state) {
+      case 'checking':
+        html = head('Checking for updates…', s.current ? `You have version ${s.current}` : '') + bar(null);
+        break;
+      case 'uptodate':
+        html = `<div class="summary"><div class="big ok" aria-hidden="true">✓</div><h1 id="title">You're up to date</h1><p>OMP Control Room ${esc(s.current)} is the newest version.</p></div>`
+          + `<div class="foot">${btn('close', 'Close', true)}</div>`;
+        focus = 'close';
+        break;
+      case 'available':
+      case 'ready': {
+        const ready = s.state === 'ready';
+        const progress = !ready && s.downloading
+          ? `<div class="bg-progress">${bar(s.progress ?? null)}<span>Downloading in the background${s.progress != null ? ` · ${pct(s.progress)}%` : ''}</span></div>`
+          : '';
+        html = head(ready ? `Version ${s.version} is ready` : `Version ${s.version} is available`, `You have version ${s.current}`)
+          + (s.size ? `<span class="size">${esc(s.size)}</span>` : '')
+          + busy(s.busy) + notes(s) + progress
+          + `<div class="foot"><span class="hint">${ready ? 'Or it installs when you quit.' : ''}</span>${btn('later', 'Later', false)}${btn('install', ready ? 'Restart to update' : 'Install now', true)}</div>`;
+        focus = 'install';
+        key += s.version;
+        break;
+      }
+      case 'downloading':
+        html = head(`Downloading ${s.version}`, s.size || `You have version ${s.current}`) + phases(s)
+          + `<div class="foot"><span class="hint">You can keep working; it installs when you choose.</span>${btn('cancel', 'Cancel', false)}${btn('close', 'Hide', false)}${btn('install', 'Install when ready', true)}</div>`;
+        focus = 'install';
+        key += s.version;
+        break;
+      case 'applying': {
+        const cancellable = ['download', 'verify', 'prepare'].includes(s.phase);
+        html = head(`Updating to ${s.version}`, s.current ? `From version ${s.current}${s.size ? ` · ${s.size}` : ''}` : '') + busy(s.phase === 'save' ? 0 : s.busy) + phases(s)
+          + `<div class="foot"><span class="hint">${cancellable ? '' : 'OMP Control Room restarts by itself.'}</span>${cancellable ? btn('cancel', 'Cancel', false) : ''}</div>`;
+        focus = cancellable ? 'cancel' : null;
+        key += s.version + cancellable;
+        break;
+      }
+      case 'error': {
+        const e = s.error || {};
+        html = `<div class="summary"><div class="big err" aria-hidden="true">!</div><h1 id="title">${esc(e.title || 'The update did not work')}</h1>${s.version ? `<p>Version ${esc(s.version)} · you still have ${esc(s.current)}</p>` : ''}</div>`
+          + `<div class="error" role="alert"><p class="advice">${esc(e.advice || '')}</p>${e.detail ? `<details><summary>Details</summary><pre>${esc(e.detail)}</pre></details>` : ''}</div>`
+          + `<div class="foot">${btn('close', 'Close', false)}${e.retry ? btn('retry', 'Retry', true) : ''}</div>`;
+        focus = e.retry ? 'retry' : 'close';
+        key += e.kind;
+        break;
+      }
+      case 'updated':
+        html = `<div class="summary"><div class="big ok" aria-hidden="true">✓</div><h1 id="title">Updated to ${esc(s.version)}</h1><p>${s.from ? `From version ${esc(s.from)}. ` : ''}Opening your dashboard…</p></div>`
+          + `<div style="margin-top:8px">${bar(null)}</div>`
+          + `<div class="foot">${btn('close', 'Close', false)}</div>`;
+        break;
+      default:
+        return;
+    }
+    // Scroll position and focus survive progress ticks; a new state focuses its main button.
+    const scroll = view.querySelector('.notes')?.scrollTop ?? 0;
+    const hadFocus = document.activeElement?.dataset?.act;
+    view.innerHTML = html;
+    view.hidden = false;
+    const n = view.querySelector('.notes');
+    if (n) n.scrollTop = scroll;
+    if (key !== lastKey) {
+      lastKey = key;
+      const target = focus && view.querySelector(`[data-act="${focus}"]`);
+      (target || view.querySelector('#title'))?.focus?.();
+    } else if (hadFocus) {
+      view.querySelector(`[data-act="${hadFocus}"]`)?.focus();
+    }
+    const text = announcement(s);
+    if (text && text !== spoken) say.textContent = spoken = text;
+    document.title = s.state === 'applying' || s.state === 'downloading'
+      ? `${s.progress != null ? pct(s.progress) + '% · ' : ''}OMP Control Room update`
+      : 'OMP Control Room update';
+  }
+
+  view.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    const act = b.dataset.act;
+    // One click per action: the app answers with a new state.
+    view.querySelectorAll('button[data-act]').forEach((x) => { x.disabled = true; });
+    go(act);
+    setTimeout(() => view.querySelectorAll('button[data-act]').forEach((x) => { x.disabled = false; }), 1500);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !last) return;
+    if (['uptodate', 'error', 'updated', 'available', 'ready', 'downloading'].includes(last.state)) go('close');
+  });
+
+  window.ompUpdate = (s) => {
+    if (!s || typeof s !== 'object') return;
+    last = s;
+    render(s);
+  };
+})();
+</script>
+</body>
+</html>

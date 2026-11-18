@@ -25,8 +25,9 @@ export function createLifecycle(ctx){
   checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
  // Every session stops as on quit: running (or queued) ones become paused, the rest keep their status; workspace.json is saved.
  // Resolves with the IDs of the visible sessions it paused: the ones a restart, or the desktop app's update, resumes. close()
- // resolves with them too; shutdown and a plain quit ignore them.
- const pauseSessions=async()=>{ctx.pausing++;try{const paused=[];const stops=[...runners.values()].map(r=>r.kill());for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);return paused;}finally{ctx.pausing--;}};
+ // resolves with them too; shutdown and a plain quit ignore them. onProgress({done,total}) counts the stopped sessions and
+ // the final save: the desktop app's update window shows it while it waits.
+ const pauseSessions=async onProgress=>{ctx.pausing++;try{const paused=[];const live=[...runners.values()];let done=0;const total=live.length+1;const step=()=>{done++;try{onProgress?.({done,total});}catch{}};onProgress?.({done,total});const stops=live.map(r=>Promise.resolve(r.kill()).finally(step));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);step();return paused;}finally{ctx.pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
  // Work left: a running or queued turn, or a compaction/handoff/shell command in progress. Queued messages of a running
  // session are covered by its status (and by the session lock while settle() dispatches them); those of a stopped session
