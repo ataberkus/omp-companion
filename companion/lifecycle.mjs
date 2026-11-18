@@ -3,9 +3,13 @@
 import { now } from './util.mjs';
 import { finishWork } from './session-views.mjs';
 import { shutdownHost } from './system.mjs';
+// A session whose turn ended can still have subagents at work (OMP's background `task` jobs; a live roster entry). It
+// counts as working until they finish, and a restart pauses and resumes it so they go on (runner.mjs resumeAfterRestart).
+const subagentsWorking=s=>!!s.subagentList?.some(a=>/run|pend|start|queue/i.test(a.status));
+const working=s=>s.status==='running'||s.status==='queued'||subagentsWorking(s);
 // Sessions the desktop app's quit and update prompts count as still working: the dashboard's "In panel" set (not hidden),
-// with a turn running or queued. review and paused wait for the user, so they don't count.
-export const busySessions=sessions=>sessions.filter(s=>!s.hidden&&(s.status==='running'||s.status==='queued')).length;
+// with a turn running or queued, or subagents at work. review and paused wait for the user, so they don't count otherwise.
+export const busySessions=sessions=>sessions.filter(s=>!s.hidden&&working(s)).length;
 export function createLifecycle(ctx){
  const {options,store,refresh,locks,persist,scheduleSave,runners,launches,canRestart}=ctx;
  // "Shut down PC when all work is done" (⋯ menu). Process-local, never saved: a restarted companion does not turn the PC off by itself.
@@ -23,16 +27,18 @@ export function createLifecycle(ctx){
   for(const [id,r] of runners){const s=r.alive&&!refreshing.has(id)&&store.sessions.find(x=>x.id===id);if(!s)continue;
    refreshing.add(id);void refresh(s,r).then(()=>{if(!ctx.closing)scheduleSave([],true);},e=>console.error('Background refresh failed:',e.message)).finally(()=>{refreshing.delete(id);checkAutoShutdown();checkAutoRestart();});}
   checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
- // Every session stops as on quit: running (or queued) ones become paused, the rest keep their status; workspace.json is saved.
- // Resolves with the IDs of the visible sessions it paused: the ones a restart, or the desktop app's update, resumes. close()
- // resolves with them too; shutdown and a plain quit ignore them. onProgress({done,total}) counts the stopped sessions and
- // the final save: the desktop app's update window shows it while it waits.
- const pauseSessions=async onProgress=>{ctx.pausing++;try{const paused=[];const live=[...runners.values()];let done=0;const total=live.length+1;const step=()=>{done++;try{onProgress?.({done,total});}catch{}};onProgress?.({done,total});const stops=live.map(r=>Promise.resolve(r.kill()).finally(step));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;if(['running','queued'].includes(s.status)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);step();return paused;}finally{ctx.pausing--;}};
+ // Every session stops as on quit: working ones (a running or queued turn, or subagents at work) become paused, the rest
+ // keep their status; workspace.json is saved. Resolves with the IDs of the visible sessions it paused: the ones a restart,
+ // or the desktop app's update, resumes. close() resolves with them too; shutdown and a plain quit ignore them.
+ // onProgress({done,total}) counts the stopped sessions and the final save: the desktop app's update window shows it while it waits.
+ // Working is read before the runners stop: their exit marks the subagents stopped.
+ const pauseSessions=async onProgress=>{ctx.pausing++;try{const paused=[];const stopping=new Set(store.sessions.filter(working));const live=[...runners.values()];let done=0;const total=live.length+1;const step=()=>{done++;try{onProgress?.({done,total});}catch{}};onProgress?.({done,total});const stops=live.map(r=>Promise.resolve(r.kill()).finally(step));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';if(stopping.has(s)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);step();return paused;}finally{ctx.pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
- // Work left: a running or queued turn, or a compaction/handoff/shell command in progress. Queued messages of a running
- // session are covered by its status (and by the session lock while settle() dispatches them); those of a stopped session
- // only go out with the user's next message, so they must not hold the shutdown forever. The panel's isWorking matches.
- const workPending=()=>store.sessions.some(s=>['running','queued'].includes(s.status)||s._task||s._bash);
+ // Work left: a running or queued turn, subagents at work, or a compaction/handoff/shell command in progress. Queued
+ // messages of a running session are covered by its status (and by the session lock while settle() dispatches them); those
+ // of a stopped session only go out with the user's next message, so they must not hold the shutdown forever. The panel's
+ // isWorking matches, bar subagents (the panel has only the viewed session's roster).
+ const workPending=()=>store.sessions.some(s=>working(s)||s._task||s._bash);
  // Runs after every settled turn and every background refresh (which catches stops, failures and exits). A held lock or a
  // starting runner means a prompt is mid-flight, so it waits for the next check. Fires at most once per arming.
  function checkAutoShutdown(){

@@ -10,6 +10,8 @@ import { advisorMessage, tanMessage, biliMessage, collabPrompt, thinkingText, to
 import { launchArgs } from './launch.mjs';
 // What a session resumed after a restart is told: its interrupted turn is in OMP's session file, so it carries on from there.
 const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
+// ...and, when OMP restored subagents the restart cut off, that they run again under their old ids (so it does not spawn them anew).
+const restoredPrompt=ids=>`${RESTART_PROMPT} Your interrupted subagents (${ids.join(', ')}) were restored and go on with their tasks; their results arrive as before.`;
 export function createRunner(ctx){
  const {omp,append,place,notice,commands,locks,dataDir,activity,persist,scheduleSave,runners,launches,subagentThoughts,stashImages,attention,slashList,rateLimitHint,scheduleResume,cancelResume,dropSteers}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
@@ -18,15 +20,22 @@ export function createRunner(ctx){
  const command=(...args)=>ctx.command(...args);
  // A restart (Restart companion, or the automatic one after an OMP update) ended the turns of the sessions that were
  // working: OMP is relaunched on each one's session file and asked to carry on. Queued at once, so the reloaded panel
- // shows them working while OMP starts; a session that cannot resume stays paused with a note.
+ // shows them working while OMP starts; a session that cannot resume stays paused with a note. Its subagents the restart
+ // parked mid-turn go on first, as `omp --restore` has them (registered before the prompt, so a turn waiting on them
+ // finds them); a restore that fails only costs those subagents, with a warning.
  function resumeAfterRestart(s){
   s.status='queued';s.error=undefined;append(s,'system','Companion restarted; resuming this session.');
   return lock(s.id,async()=>{
    if(ctx.closing||s.status!=='queued')return;
    try{
-    await start(s);if(ctx.closing)return;
+    const runner=await start(s);if(ctx.closing)return;
+    let restored;try{restored=await runner.restore();}catch(e){notice(s,'warning',`Subagents could not be restored: ${e.message}`);}
+    if(ctx.closing)return;
+    // OMP already goes on with the session's own turn (agent_start marks it running).
+    if(restored?.turn)return;
     // command() reports a failed send as the session's error instead of throwing.
-    const r=await command(s,{type:'prompt',message:RESTART_PROMPT});
+    const ids=Array.isArray(restored?.subagents)?restored.subagents:[];
+    const r=await command(s,{type:'prompt',message:ids.length?restoredPrompt(ids):RESTART_PROMPT});
     if(r?.status==='error')throw new Error(r.error||'OMP did not accept the prompt.');
    }catch(e){if(ctx.closing)return;finishWork(s);s.status='paused';s.error=undefined;notice(s,'error',`Automatic resume failed: ${e.message}`);await persist(s);}
   });
@@ -232,6 +241,8 @@ export function createRunner(ctx){
    const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!ctx.closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);
     // What this OMP wrote is in the panel already: only a later change to the file (a terminal) is read again.
     if(s.sessionFile){const file=s.sessionFile;s._fileMark=fs.stat(file).then(st=>{if(!runners.get(s.id)?.alive&&s.sessionFile===file)s.fileSeen={size:st.size,mtime:st.mtimeMs};},()=>{});}
+    // Its subagents ran in this OMP: none is at work any more (a restart revives the ones it parked; see resumeAfterRestart).
+    for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';
     if(!ctx.closing&&!ctx.pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
    runners.set(s.id,runner);
    // The panel's title is given to OMP only when the file has none or the user renamed the session in the panel: a title
