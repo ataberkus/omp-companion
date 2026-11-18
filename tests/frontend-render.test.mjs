@@ -16,7 +16,8 @@ const store = sessions => ({ projects: [], sessions, archived: [] });
 const reply = (id, text, s = 0) => ({ id, role: 'assistant', text, at: at(s) });
 
 // Real app.js in a vm with just enough DOM: elements keep the innerHTML the app writes.
-function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session: saved = {} } = {}) {
+// phone: matchMedia answers like a phone (the drawer layouts' query matches); storage: localStorage's contents.
+function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session: saved = {}, phone = false, storage = {} } = {}) {
   const calls = [], timers = [], toasts = [], listeners = {}, winListeners = {}, stored = { ...saved };
   const node = id => ({
     id, tagName: 'DIV', innerHTML: '', value: '', style: {}, dataset: {}, children: [], attributes: [], hidden: false, scrollHeight: 0, scrollTop: 0, clientHeight: 0,
@@ -42,8 +43,8 @@ function boot({ hash = '#/s/s1', token = 'tok', respond, elements = {}, session:
   };
   runInNewContext(source, {
     document, window: { innerHeight: 900, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
-    location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: () => ({ matches: false }), Date, console: { ...console, error() {} }, confirm: () => true,
-    localStorage: { getItem: () => null, setItem() {} }, sessionStorage: { getItem: k => k in stored ? stored[k] : token, setItem: (k, v) => { stored[k] = String(v); }, removeItem: k => { delete stored[k]; } },
+    location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: q => ({ matches: phone && q.includes('max-width: 820px') }), Date, console: { ...console, error() {} }, confirm: () => true,
+    localStorage: { getItem: k => storage[k] ?? null, setItem() {} }, sessionStorage: { getItem: k => k in stored ? stored[k] : token, setItem: (k, v) => { stored[k] = String(v); }, removeItem: k => { delete stored[k]; } },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, fetch,
   });
   const loops = () => timers.filter(t => t.fn.name === 'loop');
@@ -685,4 +686,29 @@ test('sessions saved before the trimmed-prompt flag existed: a full transcript w
   await page.go('#/s/few');
   await until(() => /Chat few/.test(page.els.get('topbar').innerHTML));
   assert.doesNotMatch(page.els.get('topbar').innerHTML, markDone);
+});
+
+test('phone: a running session gets the one-row composer, plugin pills and folded widgets; hidden plugins only count in "Plugins (N)"', async () => {
+  const s = session('s1', [reply('m1', 'hello')], {
+    status: 'running',
+    _status: { usage: 'Claude 5h ██░ 69% left', git: 'main ↑2', blank: '   ' },
+    _widgets: { todo: ['Next: tests', 'Then: ship'], 'collab-qr': ['▄▄ ▄', '█ ██'] },
+  });
+  const phone = boot({ phone: true, storage: { 'omp-hidden-plugins': '["git"]' }, respond: stateOf(store([s])) });
+  await flush();
+  const extras = phone.els.get('extras').innerHTML, buttons = phone.els.get('buttons').innerHTML;
+  assert.match(extras, /data-plugin-open="usage"[^>]*aria-label="usage: Claude 5h ██░ 69% left"/);
+  assert.match(extras, /<span class="ext-bar">██░<\/span>/, 'progress bars run in monospace');
+  assert.doesNotMatch(extras, /data-plugin-open="git"/, 'a plugin turned off in the sheet leaves the strip');
+  assert.doesNotMatch(extras, /blank/, 'an empty status is no plugin');
+  assert.match(extras, /Plugins \(4\)/, 'the hidden plugin is still reachable from the sheet');
+  assert.match(extras, /<details class="extra-wdg"[^>]*data-key="wdg:todo"/, 'widgets fold on a phone');
+  assert.match(extras, /<pre class="extra-widget" title="collab-qr">/, 'the QR code stays whole, so it can be scanned');
+  assert.match(buttons, /composer-send/);
+  assert.match(buttons, /composer-more/, 'Stop & send moves into ⋯');
+
+  const desktop = boot({ respond: stateOf(store([s])) });
+  await flush();
+  assert.doesNotMatch(desktop.els.get('extras').innerHTML, /ext-pill|extra-wdg/, 'desktop keeps its status lines and open widgets');
+  assert.doesNotMatch(desktop.els.get('buttons').innerHTML, /composer-more/);
 });

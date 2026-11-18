@@ -210,6 +210,10 @@
   try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; S.groupBy = localStorage.getItem('omp-group-by') || 'time'; } catch {}
   S.advReviews = true; S.advImportant = false; S.advHidden = false;
   try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; S.advHidden = localStorage.getItem('omp-adv-hidden') === '1'; } catch {}
+  // Phones: the composer shrinks to one row while OMP works (omp-compact-composer, on unless '0'); plugins hidden from the
+  // status strip above it (omp-hidden-plugins, a JSON array of extension keys). Per device, like the other omp- keys.
+  S.compactComposer = true; S.hiddenPlugins = new Set();
+  try { S.compactComposer = localStorage.getItem('omp-compact-composer') !== '0'; const h = JSON.parse(localStorage.getItem('omp-hidden-plugins') || '[]'); if (Array.isArray(h)) S.hiddenPlugins = new Set(h.map(String)); } catch {}
   // OMP_WEB_NO_TOKEN: the companion embeds the token in the page, so nothing asks for it.
   const metaToken = document.querySelector('meta[name="omp-token"]')?.content || '';
   S.token = metaToken;
@@ -609,7 +613,7 @@
     main().innerHTML = `
       <div class="topbar" id="topbar"></div>
       <div class="chat-plan" id="chatPlan" hidden></div>
-      <div class="body"><div class="scroller" id="scroller"><div class="thread" id="thread"></div></div><nav class="prompt-rail" id="promptRail" aria-label="Your prompts (Alt+↑/↓)"></nav><aside class="tasks" id="tasks" hidden></aside></div>
+      <div class="body"><div class="scroller" id="scroller"><div class="thread" id="thread"></div></div><nav class="prompt-rail" id="promptRail" aria-label="Your prompts (Alt+↑/↓)"></nav><aside class="tasks" id="tasks" hidden></aside><button type="button" class="jump-latest" id="jumpLatest" data-act="jumpLatest" hidden><span aria-hidden="true">↓</span> <span id="jumpLatestLabel">Latest</span></button></div>
       <div class="composer-wrap">
         <section class="btw" id="btw" aria-label="Side question" hidden><div class="btw-head" id="btwHead"></div><div class="btw-body" id="btwBody" aria-live="polite"></div><div id="btwForm"></div></section>
         <div class="extras" id="extras" hidden></div>
@@ -622,7 +626,7 @@
           <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <div class="composer-bar"><span class="bar-tools"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span id="commitSlot"></span></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
+          <div class="composer-bar"><button type="button" class="btn sm ghost composer-toggle" data-act="composerToggle" aria-expanded="true" aria-controls="composerTools" aria-label="Hide composer options" title="Hide composer options"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><span class="bar-tools" id="composerTools"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span id="commitSlot"></span></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
         </div>
       </div>`;
     const input = $('#input');
@@ -631,12 +635,19 @@
     input.value = drafts.get(S.view) || '';
     fitComposer(input);
     railObserver.disconnect(); railObserver.observe($('#scroller')); railObserver.observe($('#thread'));
+    stickObserver.disconnect(); stickObserver.observe($('#scroller'));
+    S.reading = false; scrollStuck = true; composerHold = false; fitStack();
     ghostObserver.disconnect(); ghostObserver.observe(input);
     if (c.kind === 'native') loadPreview(c.file);
     if (c.kind === 'sub') { $('.composer').hidden = true; loadSub(c.file, true); return; }
     if (c.kind === 'changes') { $('.composer-wrap').hidden = true; $('#thread').classList.add('wide'); return; }
     loadBg(bgFile(), true);
-    setTimeout(() => { if ($('#questions')?.hidden) input.focus(); }, 0);
+    // A phone opening a running session starts on the one-row composer: focusing it would open it at once.
+    setTimeout(() => {
+      const s = c.kind === 'session' && S.store?.sessions.find(x => x.id === c.id);
+      if (phone() && S.compactComposer && s && (s.status === 'running' || s.status === 'queued')) return;
+      if ($('#questions')?.hidden) input.focus();
+    }, 0);
   }
   // Composer drafts per view, text and attached images, saved to the companion (debounced) so they survive reloads and show
   // up on other devices. draftSynced: view → { text, names, at } last agreed with the server, names being the attached
@@ -714,15 +725,122 @@
   // The composer grows with its text up to 40% of the window. On touch screens the cap is a third of what is visible,
   // which shrinks while the on-screen keyboard is up, so a long paste never covers the conversation and the toolbar.
   const composerMax = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches ? (window.visualViewport?.height || window.innerHeight) / 3 : window.innerHeight * 0.4;
-  const autosize = el => { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, composerMax()) + 'px'; };
+  // Phones (the drawer layouts' query): everything under the chat (side question, plugins, questions, queue, status, composer)
+  // gets at most 35% of the visible height, or 50% of what the on-screen keyboard leaves; past that the stack scrolls with
+  // the composer pinned at its bottom. The keyboard is up when the visible area is well short of the tallest seen at this width.
+  const phoneMq = typeof matchMedia === 'function' ? matchMedia('(max-width: 820px), (pointer: coarse) and (max-height: 500px)') : null;
+  const phone = () => !!phoneMq?.matches;
+  let vvTall = 0, vvWidth = 0;
+  function stackBudget() {
+    const vv = window.visualViewport, h = vv?.height || window.innerHeight, w = vv?.width || innerWidth;
+    if (w !== vvWidth) { vvWidth = w; vvTall = 0; }
+    vvTall = Math.max(vvTall, h);
+    return Math.round(h * (h < vvTall * 0.8 ? 0.5 : 0.35));
+  }
+  const autosize = el => {
+    el.style.height = 'auto';
+    let cap = composerMax();
+    // The phone composer's draft also stays inside the stack's budget, beside the toolbar under it.
+    if (el.id === 'input' && phone()) { const box = el.closest?.('.composer'), chrome = (box?.offsetHeight || 0) - (el.offsetHeight || 0); if (chrome >= 0) cap = Math.max(44, Math.min(cap, stackBudget() - chrome - 8)); }
+    el.style.height = Math.min(el.scrollHeight, cap) + 'px';
+  };
   // Typing is not the only thing that changes how tall a draft is: re-fit the composer when its width changes (sidebar,
   // side panels, rotation, shown again after being hidden) and when the window or the visible area (keyboard) changes the cap.
   const fitWidths = new WeakMap();
   const fitObserver = new ResizeObserver(entries => { for (const e of entries) { const w = Math.round(e.contentRect.width); if (fitWidths.get(e.target) !== w) { fitWidths.set(e.target, w); autosize(e.target); } } });
   const fitComposer = el => { autosize(el); fitObserver.disconnect(); fitObserver.observe(el); };
-  const refit = () => { for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); };
+  const fitStack = () => { const wrap = $('.composer-wrap'); if (wrap && phone()) wrap.style.setProperty?.('--stack-max', stackBudget() + 'px'); };
+  const refit = () => { fitStack(); for (const el of [$('#input'), $('#homePrompt')]) if (el) autosize(el); };
   addEventListener('resize', refit);
   window.visualViewport?.addEventListener('resize', refit);
+  // Crossing into or out of the phone layout changes the composer's buttons and the plugin strip's markup.
+  phoneMq?.addEventListener?.('change', () => { refit(); update(); });
+
+  // ---------- phone composer: one row while OMP works ----------
+  // While a session runs, a phone shows the composer as one row (draft, send, stop) until it is used: focus, a draft or an
+  // image opens the full composer (chips, Queue, Stop & send). Classes on .composer-wrap switch the two; nothing is
+  // re-rendered. busy: the session runs with the preference on; compact: busy and not in use.
+  // composerHold: a tap inside the open composer stack keeps it open, so a chip tapped (iOS gives buttons no focus) is
+  // still there when its click lands; the next tap elsewhere lets it close.
+  let composerHold = false;
+  function composerMode(s) {
+    const wrap = $('.composer-wrap'), input = $('#input');
+    if (!wrap || !input) return;
+    const busy = phone() && S.compactComposer && !!s && (s.status === 'running' || s.status === 'queued');
+    const draft = !!input.value.trim() || attached().length > 0;
+    const active = document.activeElement, inUse = !!active && !!$('.composer')?.contains?.(active);
+    const compact = busy && !draft && !inUse && !composerHold;
+    if (wrap._mode === `${busy}${compact}${draft}`) return;
+    wrap._mode = `${busy}${compact}${draft}`;
+    // The chat gives or takes the composer's change in height: one at the bottom stays there, others keep what they show.
+    const sc = $('#scroller'), stuck = !!sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 48;
+    wrap.classList.toggle('busy', busy); wrap.classList.toggle('compact', compact); wrap.classList.toggle('has-draft', draft);
+    const tog = $('.composer-toggle');
+    if (tog) { const label = compact ? 'Show composer options' : 'Hide composer options'; tog.setAttribute('aria-expanded', String(!compact)); tog.setAttribute('aria-label', label); tog.title = label; }
+    fitStack(); autosize(input); pinStack();
+    if (stuck) sc.scrollTop = sc.scrollHeight;
+  }
+  // Over its budget the stack scrolls; it rests at its bottom, so what sits on the composer (queue tab, plugin strip) shows
+  // and older panels scroll away, unless the user scrolled it up (_scrolled, until they scroll back down), a question
+  // waits for an answer up there, or the focus is in one of those panels.
+  function pinStack() {
+    const w = $('.composer-wrap'), a = document.activeElement;
+    if (!w || !phone() || w._scrolled || w.scrollHeight <= w.clientHeight || !$('#questions')?.hidden || (a && w.contains(a) && !$('.composer')?.contains(a))) return;
+    w.scrollTop = w.scrollHeight;
+  }
+  const syncComposerMode = () => { if (current().kind === 'session') composerMode(S.store?.sessions.find(x => x.id === current().id)); };
+  document.addEventListener('focusin', e => { if (e.target.closest?.('.composer')) syncComposerMode(); });
+  // After the focus has gone wherever it goes (a chip's picker, a menu), not in between.
+  document.addEventListener('focusout', e => { if (e.target.closest?.('.composer')) setTimeout(syncComposerMode, 0); });
+  document.addEventListener('pointerdown', e => {
+    const wrap = $('.composer-wrap'), open = !!wrap?.classList.contains('busy') && !wrap.classList.contains('compact');
+    const hold = open && !!e.target.closest?.('.composer-wrap');
+    if (hold !== composerHold) { composerHold = hold; setTimeout(syncComposerMode, 0); }
+  }, true);
+  function toggleComposer() {
+    const wrap = $('.composer-wrap'), input = $('#input');
+    if (!wrap) return;
+    if (wrap.classList.contains('compact')) composerHold = true;
+    else { composerHold = false; if (document.activeElement && $('.composer')?.contains(document.activeElement)) document.activeElement.blur(); }
+    syncComposerMode();
+    if (!wrap.classList.contains('compact')) $('#composerTools')?.querySelector('button:not([disabled])')?.focus({ preventScroll: true });
+    else input?.blur();
+  }
+
+  // ---------- phone reading mode: scrolled up, the stack steps aside ----------
+  // Reading older output (well above the bottom) hides the plugin strip and the queue tab and shows "↓ Latest" with the
+  // number of new thread parts since; back near the bottom (hysteresis, so the stack's own change can't flip it) undoes it.
+  // jumpUntil: "↓ Latest" brings the stack back first and then scrolls; its own smooth scroll must not count as reading.
+  let readBase = 0, jumpUntil = 0;
+  function setReading(on) {
+    const wrap = $('.composer-wrap'), btn = $('#jumpLatest');
+    if (!!S.reading === on || !wrap || !btn) return;
+    S.reading = on;
+    if (on) readBase = $('#thread')?.children.length || 0;
+    wrap.classList.toggle('reading', on); btn.hidden = !on;
+  }
+  function syncReading() {
+    const sc = $('#scroller'), btn = $('#jumpLatest');
+    if (!sc || !btn) return;
+    const d = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+    if (d < 80) { jumpUntil = 0; setReading(false); }
+    else if (d > 240 && Date.now() > jumpUntil) setReading(true);
+    if (!S.reading) return;
+    const n = Math.max(0, ($('#thread')?.children.length || 0) - readBase), label = n ? `${n} new` : 'Latest';
+    const el = $('#jumpLatestLabel');
+    if (el && el.textContent !== label) { el.textContent = label; btn.setAttribute('aria-label', n ? `Jump to the latest output, ${n} new` : 'Jump to the latest output'); }
+  }
+  function jumpLatest() {
+    const sc = $('#scroller');
+    if (!sc) return;
+    // Far behind, a smooth scroll would take seconds through everything since: jump straight there instead.
+    const far = sc.scrollHeight - sc.scrollTop - sc.clientHeight > sc.clientHeight * 3;
+    jumpUntil = Date.now() + 1500; setReading(false);
+    sc.scrollTo?.({ top: sc.scrollHeight, behavior: reduceMotion() || far ? 'auto' : 'smooth' });
+  }
+  // The chat's box shrinks when the stack grows (composer opening, keyboard, a question arriving): one read at the bottom stays there.
+  let scrollStuck = true;
+  const stickObserver = new ResizeObserver(() => { const sc = $('#scroller'); if (sc && scrollStuck) sc.scrollTop = sc.scrollHeight; });
 
   const previewLoading = new Set();
   async function loadPreview(file) {
@@ -1039,6 +1157,15 @@
   // The session has had a prompt of the user's: one in its transcript, or one the companion's 600-message cap trimmed out
   // of it (promptTrimmed) after a long autonomous run. Fresh sessions (nothing sent, a /btw only) have neither.
   const hasPrompt = s => !!s.promptTrimmed || !!s.messages?.some(m => m.role === 'user');
+  // Phone-only ⋯ items (CSS hides them wider): the plan mode switch whose idle strip phones hide, and the compact composer.
+  function phoneMenuItems(s) {
+    const mode = s.planMode, supported = mode?.available === true;
+    const plan = (supported || s._planSupported === true && mode?.available !== false) && s._planSupported !== false && mode?.available !== false;
+    const busy = S.planBusy.has(s.id) || ['running', 'queued'].includes(s.status) || s._task || s._bash;
+    const on = supported && !!mode.enabled;
+    return (plan ? `<button class="phone-only" data-plan-toggle="${esc(s.id)}" aria-pressed="${on}" title="Toggle native plan mode (Alt+Shift+P)" ${busy ? 'disabled' : ''}><span class="check" aria-hidden="true">${on ? '✓' : ''}</span>Plan mode (read-only planning)</button>` : '')
+      + `<button class="phone-only" data-act="compactPref" aria-pressed="${S.compactComposer}"><span class="check" aria-hidden="true">${S.compactComposer ? '✓' : ''}</span>Shrink the composer while OMP works</button><div class="menu-sep phone-only"></div>`;
+  }
   function renderTopbarSession(s) {
     const p = projectOf(s);
     const extra = [
@@ -1061,6 +1188,7 @@
       <div class="title-block"><h1 title="${esc(s.title)}">${esc(s.title)}</h1>${metaHtml(p?.path || s.cwd, extra)}</div>
       <div class="actions">${btn.join('')}
         <div class="menu"><button class="btn sm ghost" data-act="menu" aria-label="More" aria-expanded="false">⋯</button><div class="menu-pop">
+          ${phoneMenuItems(s)}
           <button data-act="newHere">New session in this folder</button>
           <button data-act="terminal" data-path="${esc(s.cwd)}">Open terminal in this folder</button>
           <button data-copy-text="${esc(s.cwd)}">Copy working directory</button>
@@ -1624,6 +1752,7 @@
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { if (fresh !== draft) fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+    syncReading();
   }
 
   // ---------- prompt rail: one tick per user prompt, placed like a scrollbar annotation ----------
@@ -1995,6 +2124,8 @@
     const active = (s?.todos || []).flatMap(ph => ph.tasks || []).filter(t => t.status === 'in_progress');
     const busy = S.planBusy.has(s?.id) || ['running', 'queued'].includes(s?.status) || s?._task || s?._bash;
     const proposal = s?._planReview, pending = proposal && !S.planSubmitted.has(s.id + ':' + proposal.id);
+    // Phones hide an idle strip (plan mode off, nothing to review, no task plan): its toggle is in the ⋯ menu then.
+    el.classList.toggle('plan-idle', !pending && !(supported && (mode.enabled || mode.paused)) && !total);
     const modeLabel = supported ? pending ? 'Awaiting approval · read-only' : mode.enabled ? 'On · read-only planning' : mode.paused ? 'Paused' : 'Off' : s?._planSupported === false ? 'Requires updated OMP RPC support' : mode?.available === false ? 'Disabled in OMP settings (plan.enabled)' : 'Enable read-only planning before your first prompt';
     setIfChanged(el, `${showPlan ? `<div class="native-plan"><span class="grow"><strong>Plan mode</strong> <span class="muted">${modeLabel}${supported && mode.workflow ? ' · ' + esc(mode.workflow) : ''}</span></span>${s._planSupported !== false && mode?.available !== false ? `<button class="btn sm" data-plan-toggle="${esc(s.id)}" ${supported ? `aria-pressed="${!!mode.enabled}"` : ''} title="Toggle native plan mode (Alt+Shift+P)" ${busy ? 'disabled' : ''}>${supported ? mode.enabled ? 'Turn off' : 'Turn on' : 'Enable plan mode'}</button>` : ''}${supported ? `<button class="btn sm ${pending ? 'primary' : 'ghost'}" data-plan-review="${esc(s.id)}" ${busy || !mode.enabled && !pending ? 'disabled' : ''}>${pending ? 'Review plan' : 'Reopen review'}</button>` : ''}</div>` : ''}${total ? `<button class="chat-plan-link" type="button" data-act="openPlan" title="Open task plan tab"><strong>Task plan <span>${done}/${total}</span></strong><span class="chat-plan-current">${active.length ? active.map(t => esc(t.content)).join(' · ') : 'No task in progress'}</span><span aria-hidden="true">→</span></button>` : ''}`);
   }
@@ -2789,9 +2920,16 @@
     } else if (s.status === 'running' || s.status === 'queued') {
       placeholder = 'Steer OMP while it works…';
       hintText = (command ? 'Enter runs command' + hotkeyHint('follow_up', 'queues for later') : 'Enter steers now' + hotkeyHint('interrupt', 'stops & sends') + hotkeyHint('follow_up', 'queues'));
-      btns = `<button class="btn" data-act="follow_up" ${has && !busy ? '' : 'disabled'} title="Send after OMP finishes${esc(hotkeyList('follow_up').length ? ` (${hotkeyList('follow_up').join(', ')})` : '')}">Queue</button>
+      const queueBtn = `<button class="btn" data-act="follow_up" ${has && !busy ? '' : 'disabled'} title="Send after OMP finishes${esc(hotkeyList('follow_up').length ? ` (${hotkeyList('follow_up').join(', ')})` : '')}">Queue</button>`;
+      const stopSendTitle = `Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}`;
+      // Phones: one row beside the draft. Empty, it is an arrow and ■; in use, Queue and Steer with Stop & send and Stop
+      // under ⋯. CSS picks per state from the same buttons, so opening the composer re-renders nothing.
+      if (phone() && S.compactComposer) btns = `${queueBtn}<button class="btn primary composer-send" data-act="${command ? 'send' : 'steer'}" ${has && !busy ? '' : 'disabled'} aria-label="${command ? 'Run command' : 'Steer'}" title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}"><svg class="send-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg><span class="send-lbl">${command ? 'Run ↵' : 'Steer ↵'}</span></button>`
+        + `<div class="menu composer-more"><button class="btn" type="button" data-act="menu" aria-label="More: Stop &amp; send, Stop" aria-haspopup="true" aria-expanded="false">⋯</button><div class="menu-pop">${has && !command && !busy ? `<button data-act="interrupt" title="${stopSendTitle}">■ Stop &amp; send</button>` : ''}<button class="danger" data-act="abort">■ Stop the current turn</button></div></div>`
+        + `<button class="btn danger composer-abort" data-act="abort" title="Stop the current turn" aria-label="Stop the current turn">■</button>`;
+      else btns = `${queueBtn}
         <button class="btn primary" data-act="${command ? 'send' : 'steer'}" ${has && !busy ? '' : 'disabled'} title="${command ? 'Run this slash command now (Enter)' : 'Redirect the current work at the next tool or turn boundary (Enter)'}">${command ? 'Run ↵' : 'Steer ↵'}</button>
-        ${has && !command && !busy ? `<button class="btn" data-act="interrupt" title="Stop the current turn and send this instead${esc(hotkeyList('interrupt').length ? ` (${hotkeyList('interrupt').join(', ')})` : '')}">■ Stop &amp; send</button>` : ''}
+        ${has && !command && !busy ? `<button class="btn" data-act="interrupt" title="${stopSendTitle}">■ Stop &amp; send</button>` : ''}
         <button class="btn danger" data-act="abort" title="Stop the current turn" aria-label="Stop the current turn">■</button>`;
     } else {
       const fresh = s.messages ? !hasPrompt(s) : !s.prompt && !s.workStartedAt;
@@ -2831,6 +2969,8 @@
     line.className = 'status-line' + (s?.status === 'error' || (s?.draft && S.enhanceFail.has(S.view)) ? ' err' : '');
     setIfChanged(line, status);
     renderGhost();
+    composerMode(s);
+    pinStack();
   }
 
   // ---------- extension UI: links, widgets, status, notifications ----------
@@ -2842,9 +2982,23 @@
     if (link) parts.push(`<div class="extra-link"><span class="grow">${esc(link.instructions || 'OMP needs you to open this link to continue.')}</span>${safeUrl ? `<a class="btn sm primary" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">Open link</a>` : `<code>${esc(link.url)}</code>`}<button class="btn sm ghost" data-copy-text="${esc(link.url)}">Copy</button><button class="btn sm ghost" data-act="dismissUrl" data-id="${esc(link.id)}" aria-label="Dismiss link">✕</button></div>`);
     // /loop: what it repeats and its budget; Stop pauses it (the next prompt resumes it), this turns it off.
     if (s?._loop) parts.push(`<div class="extra-loop" role="status"><span aria-hidden="true">↻</span><span class="grow">${esc(s._loop.description)}${s._loop.prompt ? ` · <span class="loop-prompt" title="${esc(s._loop.prompt)}">${esc(s._loop.prompt)}</span>` : ''}${s._loop.state === 'paused' ? ' · send a prompt to resume' : ''}</span><button class="btn sm ghost" data-act="loopOff" title="Turn loop mode off (/loop off)">Stop loop</button></div>`);
-    for (const [key, lines] of Object.entries(s?._widgets || {})) parts.push(`<pre class="extra-widget" title="${esc(key)}">${esc(plain(lines.join('\n')))}</pre>`);
-    const status = Object.entries(s?._status || {});
-    if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
+    // Phones: plugins take one sideways-scrolling row of pills (status) and folded cards (widgets); the full text is in the
+    // Plugins sheet. Plugins hidden there ("Show in strip" off) leave the row and the cards, not the sheet.
+    const mobile = phone(), plugins = pluginsOf(s), changed = [];
+    if (mobile) {
+      const shown = plugins.filter(p => !S.hiddenPlugins.has(p.key));
+      for (const p of shown) if (p.widget) parts.push(p.key === 'collab-qr' ? `<pre class="extra-widget" title="collab-qr">${esc(p.widget)}</pre>`
+        : `<details class="extra-wdg" data-key="wdg:${esc(p.key)}"><summary><b>${esc(p.key)}</b><span class="wdg-first">${barText(p.widget.split('\n').find(l => l.trim()) || '')}</span></summary><pre>${esc(p.widget)}</pre></details>`);
+      const pills = shown.filter(p => p.status);
+      for (const p of pills) { const k = s.id + '\0' + p.key, was = pillPrev.get(k); if (was !== undefined && was !== p.status) changed.push(p.key); pillPrev.set(k, p.status); }
+      // One plugin: its pill opens the sheet. More, or every pill hidden: a Plugins (N) pill too, the way back to hidden ones.
+      const all = plugins.length > 1 || (plugins.length && !pills.length) ? `<button type="button" class="ext-pill ext-all" data-act="plugins" aria-haspopup="dialog" aria-label="All plugins (${plugins.length})">Plugins (${plugins.length})</button>` : '';
+      if (pills.length || all) parts.push(`<div class="extra-strip" data-key="strip" role="group" aria-label="Plugin status">${pills.map(p => `<button type="button" class="ext-pill" data-plugin-open="${esc(p.key)}" aria-haspopup="dialog" aria-label="${esc(p.key)}: ${esc(p.status)}" title="${esc(p.status)}"><b>${esc(p.key)}</b><span class="ext-val">${barText(p.status)}</span></button>`).join('')}${all}</div>`);
+    } else {
+      for (const [key, lines] of Object.entries(s?._widgets || {})) parts.push(`<pre class="extra-widget" title="${esc(key)}">${esc(plain(lines.join('\n')))}</pre>`);
+      const status = Object.entries(s?._status || {});
+      if (status.length) parts.push(`<div class="extra-status">${status.map(([k, v]) => `<span title="${esc(k)}">${esc(plain(v))}</span>`).join('')}</div>`);
+    }
     // Another active session in the same folder (no worktree) edited the same files: one may overwrite the other.
     // Phones show one line (who + a file-count toggle); the explanation and paths appear only when expanded.
     for (const o of s?._overlaps || []) {
@@ -2853,6 +3007,43 @@
     }
     el.hidden = !parts.length;
     setIfChanged(el, parts.join(''));
+    // A changed status flashes its pill once (a still highlight with reduced motion).
+    for (const k of changed) {
+      const pill = el.querySelector(`[data-plugin-open="${CSS.escape(k)}"]`), cls = reduceMotion() ? 'flash-still' : 'flash';
+      if (!pill) continue;
+      pill.classList.add(cls);
+      setTimeout(() => pill.classList.remove(cls), 1600);
+    }
+    const sheet = $('#modal');
+    if (sheet?._plugins && sheet._plugins === s?.id) { const body = sheet.querySelector('.modal-body'); if (body) setIfChanged(body, pluginSheet(s)); }
+  }
+  // Plugin output by extension key: status text (ANSI and empty values dropped) and widget lines, for the strip and the sheet.
+  function pluginsOf(s) {
+    const status = new Map(Object.entries(s?._status || {}).map(([k, v]) => [k, plain(v).trim()]).filter(([, v]) => v));
+    const widgets = new Map(Object.entries(s?._widgets || {}).map(([k, lines]) => [k, plain([].concat(lines).join('\n'))]).filter(([, v]) => v.trim()));
+    return [...new Set([...status.keys(), ...widgets.keys()])].map(key => ({ key, status: status.get(key) || '', widget: widgets.get(key) || '' }));
+  }
+  const pillPrev = new Map(); // session id + NUL + key → status text last shown, to flash pills whose text changed
+  // Block-character bars (█▮▯░▒▓■□▰▱…) in a monospace run, so every cell has the same width and a glyph from one font.
+  const barText = t => esc(t).replace(/[\u2580-\u259f\u25a0\u25a1\u25aa-\u25af\u25b0\u25b1\u2b1b\u2b1c]+/g, m => `<span class="ext-bar">${m}</span>`);
+  const pluginSheet = s => {
+    const list = pluginsOf(s);
+    if (!list.length) return '<p class="muted">No plugin output in this session right now.</p>';
+    return `<div class="plugin-list">${list.map(p => `<section class="plugin-card" data-plugin-card="${esc(p.key)}" aria-label="${esc(p.key)}"><div class="plugin-head"><strong>${esc(p.key)}</strong><label class="plugin-pin"><input type="checkbox" data-plugin-pin="${esc(p.key)}" ${S.hiddenPlugins.has(p.key) ? '' : 'checked'}> Show in strip</label></div>${p.status ? `<p class="plugin-status">${barText(p.status)}</p>` : ''}${p.widget ? `<pre class="plugin-widget${p.key === 'collab-qr' ? ' qr' : ''}">${esc(p.widget)}</pre>` : ''}</section>`).join('')}</div>`;
+  };
+  // The Plugins sheet: every plugin's full status and widgets, with its strip switch. Live while open (renderExtras).
+  function openPlugins(key, trigger) {
+    const s = S.store?.sessions.find(x => x.id === current().id);
+    if (!s) return;
+    const before = $('#modal');
+    modal('Plugins', pluginSheet(s));
+    const m = $('#modal');
+    if (!m || m === before) return;
+    m._plugins = s.id; m.classList.add('plugins-sheet');
+    // A poll may rebuild the strip while the sheet is open: focus goes back to the same pill, found again by its key.
+    if (trigger) Object.defineProperty(m, '_returnFocus', { configurable: true, get: () => trigger.isConnected ? trigger : $(`#extras [data-plugin-open="${CSS.escape(trigger.dataset.pluginOpen || '')}"]`) || $('#extras [data-act="plugins"]') || trigger });
+    const card = key && m.querySelector(`[data-plugin-card="${CSS.escape(key)}"]`);
+    if (card) { card.scrollIntoView({ block: 'nearest' }); card.querySelector('input')?.focus({ preventScroll: true }); }
   }
   // Toast notifications that arrived since this session was last on screen; the first look only records where we are.
   function showNotices(s) {
@@ -5010,7 +5201,9 @@
   document.addEventListener('click', e => {
     const t = e.target;
     const planToggle = t.closest('[data-plan-toggle]'), planReview = t.closest('[data-plan-review]');
-    if (planToggle) { togglePlan(planToggle.dataset.planToggle); return; }
+    if (planToggle) { closeMenu(planToggle.closest('.menu')); togglePlan(planToggle.dataset.planToggle); return; }
+    const pluginOpen = t.closest('[data-plugin-open]');
+    if (pluginOpen) { openPlugins(pluginOpen.dataset.pluginOpen, pluginOpen); return; }
     if (planReview) { openPlanReview(planReview.dataset.planReview); return; }
     const of = t.closest('[data-open-file]');
     if (of) { e.preventDefault(); e.stopPropagation(); openFile(of.dataset.openFile, +of.dataset.line || 0); return; }
@@ -5222,7 +5415,12 @@
     if (!a) return;
     const act = a.dataset.act, c = current();
     if (act === 'nav') setNav(!$('#app').classList.contains('nav-open'), true);
-    else if (act === 'menu') { const m = a.closest('.menu'), open = !m.classList.contains('open'); closeMenus(); if (open) { m.classList.add('open'); a.setAttribute('aria-expanded', 'true'); } }
+    else if (act === 'menu') {
+      const m = a.closest('.menu'), open = !m.classList.contains('open'); closeMenus();
+      if (open) { m.classList.add('open'); a.setAttribute('aria-expanded', 'true'); }
+      // The phone composer's ⋯ sits in a scrolling stack that would clip it: it opens fixed, above its button.
+      if (open && m.classList.contains('composer-more')) { const r = a.getBoundingClientRect(), w = $('.composer-wrap'); w?.style.setProperty('--more-bottom', Math.round(innerHeight - r.top + 6) + 'px'); w?.style.setProperty('--more-right', Math.round(innerWidth - r.right) + 'px'); }
+    }
     // First target with a layout box: the hidden desktop ☰ and unrendered fields don't count.
     else if (act === 'skip') [$('#input'), $('#homePrompt'), $('#pathInput'), ...main().querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),a[href],[tabindex="0"]')].find(n => n?.getClientRects().length)?.focus();
     else if (act === 'advisor') { closeMenu(a.closest('.menu')); advisorCommand(a.dataset.advisor); }
@@ -5231,9 +5429,13 @@
     else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.view !== S.view || x.name !== a.dataset.name); saveDraft(S.view); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
-    else if (act === 'abort' || act === 'complete') sessionCommand(act);
+    else if (act === 'abort' || act === 'complete') { closeMenu(a.closest('.menu')); sessionCommand(act); }
     else if (act === 'stopCommands') sessionCommand('stop_commands', { run: a.dataset.run });
-    else if (act === 'interrupt') send('interrupt');
+    else if (act === 'interrupt') { closeMenu(a.closest('.menu')); send('interrupt'); }
+    else if (act === 'composerToggle') toggleComposer();
+    else if (act === 'jumpLatest') jumpLatest();
+    else if (act === 'compactPref') { closeMenu(a.closest('.menu')); S.compactComposer = !S.compactComposer; try { localStorage.setItem('omp-compact-composer', S.compactComposer ? '1' : '0'); } catch {} composerHold = false; update(); }
+    else if (act === 'plugins') openPlugins('', a);
     else if (act === 'homeLaunch') openLaunch('home');
     else if (act === 'clearTodos') { if (confirm('Clear the task plan for this session?')) editTodos(phases => { phases.length = 0; }); }
     else if (['compact', 'tree', 'lastReply', 'cycleModel', 'cycleThinking', 'launch', 'newSession', 'switchSession', 'share', 'commit'].includes(act)) {
@@ -5547,7 +5749,12 @@
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
     else if (d.tagName === 'DETAILS') { touched.add(d); const p = d.open && d.matches('.job-thought') && d.querySelector('pre'); if (p && !touched.has(p)) p.scrollTop = p.scrollHeight; }
   }, true);
-  document.addEventListener('scroll', e => { if (e.target instanceof Element) touched.add(e.target); if (e.target.id === 'scroller') markPromptRail(); else if (e.target.id === 'input' && ghost) renderGhost(); }, true);
+  document.addEventListener('scroll', e => {
+    if (e.target instanceof Element) touched.add(e.target);
+    if (e.target.id === 'scroller') { const sc = e.target; scrollStuck = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 48; markPromptRail(); syncReading(); }
+    else if (e.target.classList?.contains('composer-wrap')) { const w = e.target; w._scrolled = w.scrollHeight - w.scrollTop - w.clientHeight > 4; }
+    else if (e.target.id === 'input' && ghost) renderGhost();
+  }, true);
   // Moving the caret off the end hides the suggestion; returning brings it back.
   document.addEventListener('selectionchange', () => { if (ghost) renderGhost(); });
   document.addEventListener('input', e => {
@@ -5568,6 +5775,7 @@
     else if (t.matches('.ask-other[data-single]') && t.value) t.closest('fieldset').querySelectorAll('input[type=radio]').forEach(x => { x.checked = false; });
   });
   document.addEventListener('change', e => {
+    if (e.target.dataset?.pluginPin != null) { const k = e.target.dataset.pluginPin; if (e.target.checked) S.hiddenPlugins.delete(k); else S.hiddenPlugins.add(k); try { localStorage.setItem('omp-hidden-plugins', JSON.stringify([...S.hiddenPlugins])); } catch {} update(); return; }
     if (e.target.matches?.('[data-advset]')) { advisorAction(e.target.checked ? 'on' : 'off'); return; }
     if (e.target.matches?.('[data-advhidden]')) { S.advHidden = e.target.checked; try { localStorage.setItem('omp-adv-hidden', S.advHidden ? '1' : '0'); } catch {} e.target.closest('.adv-menu')?.querySelectorAll('[data-advreviews],[data-advimportant]').forEach(x => { x.disabled = S.advHidden; }); S.lastSig = ''; update(); return; }
     if (e.target.matches?.('[data-advreviews]')) { S.advReviews = e.target.checked; try { localStorage.setItem('omp-adv-reviews', S.advReviews ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
