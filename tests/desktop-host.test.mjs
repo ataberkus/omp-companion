@@ -84,12 +84,13 @@ test('host reports ready, serves the dashboard, answers busy/lan/links and quits
 
 // The quit/update prompt counts what the dashboard's "In panel" filter shows: a hidden session (a removed one, or a
 // draft whose worktree Windows still held) is out of the panel, so it never asks "N sessions are still working".
-test('busy counts running and queued panel sessions, not hidden ones, review or paused', () => {
+test('busy counts running and queued panel sessions and ones with subagents at work, not hidden ones, review or paused', () => {
   const s = (status, hidden) => ({ id: status + (hidden ? '-hidden' : ''), status, ...(hidden ? { hidden: true } : {}) });
   assert.equal(busySessions([s('running'), s('queued')]), 2);
   assert.equal(busySessions([s('running', true), s('queued', true)]), 0);
   assert.equal(busySessions([s('review'), s('paused'), s('done'), s('error')]), 0);
   assert.equal(busySessions([s('running'), s('running', true), s('queued', true), s('review')]), 1);
+  assert.equal(busySessions([{ ...s('review'), subagentList: [{ id: 'a', status: 'running' }] }, { ...s('paused'), subagentList: [{ id: 'b', status: 'stopped' }] }]), 1);
 });
 
 // Like network access, screen sharing starts off at every launch: OMP_WEB_SCREEN is for the plain companion, the tray decides here.

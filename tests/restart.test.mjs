@@ -75,12 +75,14 @@ test('Restart companion pauses and saves sessions before relaunching, stops only
 
 test('Restart companion hands the IDs of the visible working sessions to the relaunch', async t => {
   const handed = [];
-  const c = await start(t, () => ({ restart: async resume => { handed.push(resume); return null; } }), [['queued', 'queued'], ['hidden', 'running'], ['idle', 'paused']]);
+  const c = await start(t, () => ({ restart: async resume => { handed.push(resume); return null; } }), [['queued', 'queued'], ['hidden', 'running'], ['idle', 'paused'], ['subs', 'review']]);
   const byId = id => c.app.store.sessions.find(s => s.id === id);
   byId('run').status = 'running';byId('queued').status = 'queued';byId('hidden').status = 'running';byId('hidden').hidden = true;
+  byId('subs').subagentList = [{ id: '0-Scout', status: 'running' }, { id: '1-Fix', status: 'completed' }];
   assert.deepEqual(await c.call('/restart', {}), [200, { ok: true }]);
-  assert.deepEqual(handed, [['run', 'queued']], 'hidden and idle sessions are not resumed');
-  assert.deepEqual(['run', 'queued', 'hidden', 'idle'].map(id => byId(id).status), ['paused', 'paused', 'paused', 'paused']);
+  assert.deepEqual(handed, [['run', 'queued', 'subs']], 'hidden and idle sessions are not resumed; one whose turn ended with subagents at work is');
+  assert.deepEqual(['run', 'queued', 'hidden', 'idle', 'subs'].map(id => byId(id).status), ['paused', 'paused', 'paused', 'paused', 'paused']);
+  assert.deepEqual(byId('subs').subagentList.map(a => a.status), ['stopped', 'completed'], 'the restart stopped the one at work');
 });
 
 const waitFor = async (check, ms = 3000) => { for (const end = Date.now() + ms; !check() && Date.now() < end;) await new Promise(r => setTimeout(r, 10)); return check(); };
@@ -117,6 +119,29 @@ test('a session that cannot resume stays paused with a note; the others still re
   assert.ok(byId('bad').messages.some(m => m.role === 'system' && m.text === 'Automatic resume failed: Provider unavailable.'));
 });
 
+test('a resumed session first has OMP restore the subagents the restart cut off, and is told they run again', async t => {
+  const sessionOf = s => s.args[s.args.indexOf('--session-dir') + 1];
+  const omp = fakeOmp(s => ({
+    prompt() { this.emit({ type: 'agent_start' }); return {}; },
+    restore() { return sessionOf(s).endsWith('turn') ? (this.emit({ type: 'agent_start' }), { turn: true, subagents: [] }) : { turn: false, subagents: ['0-Scout', '1-Fix'] }; },
+  }));
+  const c = await start(t, () => ({ omp, resume: ['run', 'turn'] }), [['turn', 'paused']]);
+  const byId = id => c.app.store.sessions.find(s => s.id === id);
+  assert.ok(await waitFor(() => byId('run').status === 'running' && byId('turn').status === 'running'));
+  const run = omp.sessions.find(s => sessionOf(s).endsWith('run'));
+  assert.deepEqual(run.calls.map(x => x.method).filter(m => m === 'restore' || m === 'prompt'), ['restore', 'prompt'], 'subagents are restored before the prompt goes out');
+  assert.deepEqual(omp.sent('prompt').map(([input]) => input.message), ['Continue where you left off; the companion was restarted. Your interrupted subagents (0-Scout, 1-Fix) were restored and go on with their tasks; their results arrive as before.'], 'a session whose own turn OMP restored gets no extra prompt');
+});
+
+test('a failed subagent restore warns and still resumes the session', async t => {
+  const omp = fakeOmp({ prompt() { this.emit({ type: 'agent_start' }); return {}; }, restore() { throw new Error('registry unavailable'); } });
+  const c = await start(t, () => ({ omp, resume: ['run'] }));
+  const run = c.app.store.sessions.find(s => s.id === 'run');
+  assert.ok(await waitFor(() => run.status === 'running'));
+  assert.deepEqual(omp.sent('prompt').map(([input]) => input.message), ['Continue where you left off; the companion was restarted.']);
+  assert.ok(run.messages.some(m => /Subagents could not be restored: registry unavailable/.test(m.text)));
+});
+
 test('without a launcher that starts it again, Restart companion is refused and not offered', async t => {
   const c = await start(t, () => ({}));
   assert.equal((await c.call('/state?session='))[1].canRestart, false);
@@ -125,7 +150,7 @@ test('without a launcher that starts it again, Restart companion is refused and 
   assert.match(body.error, /start\.bat/);
 });
 
-test('after an OMP update the companion restarts by itself, but only once no session is working', async t => {
+test('after an OMP update the companion restarts by itself, but only once no session or subagent is working', async t => {
   const events = [];
   const c = await start(t, () => ({ restart: async () => { events.push('prepare'); return async () => { events.push('relaunch'); }; } }));
   const s = c.app.store.sessions.find(x => x.id === 'run');
@@ -133,7 +158,10 @@ test('after an OMP update the companion restarts by itself, but only once no ses
   c.app.restartWhenIdle();
   await new Promise(r => setTimeout(r, 100));
   assert.deepEqual(events, [], 'a running session holds the restart');
-  s.status = 'review';
+  s.status = 'review';s.subagentList = [{ id: '0-Scout', status: 'running' }];
   await new Promise(r => setTimeout(r, 4500)); // the 4 s background refresh re-checks
+  assert.deepEqual(events, [], 'a background subagent still at work holds it too');
+  s.subagentList[0].status = 'completed';
+  await new Promise(r => setTimeout(r, 4500));
   assert.deepEqual(events, ['prepare', 'relaunch']);
 });

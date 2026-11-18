@@ -45,7 +45,7 @@ async function loadRuntime(src) {
  const optional = rel => existsSync(path.join(src, rel)) ? at(rel) : null;
  const pkg = spec => import(pathToFileURL(Bun.resolveSync(spec, src)).href);
  const names = Object.keys(RUNTIME_FILES);
- const [modules, oauth, tuiTheme, words, forkPlan, goalSlash, mcpReauth, sessionSettle] = await Promise.all([
+ const [modules, oauth, tuiTheme, words, forkPlan, goalSlash, mcpReauth, sessionSettle, restore] = await Promise.all([
   Promise.all(names.map(name => at(RUNTIME_FILES[name]))),
   pkg('@oh-my-pi/pi-ai/oauth'), pkg('@oh-my-pi/pi-tui/theme'), pkg('@oh-my-pi/pi-tui/prompt/word-completion'),
   // Plan-mode and /goal hosting ship only in some OMP builds; state() reports plan mode only when it does.
@@ -54,6 +54,8 @@ async function loadRuntime(src) {
   optional('mcp/oauth-reauth.ts'),
   // OMP 18.13+ moved rpc-session-settle's isRpcSessionSettled here as isSessionSettled.
   optional('session/session-settle.ts'),
+  // OMP 18.22+: `omp --restore` (task/restore.ts) — a session goes on with the subagent turns its last process cut off.
+  optional('task/restore.ts'),
  ]);
  const m = Object.fromEntries(names.map((name, i) => [name, modules[i]]));
  // Builds without OMP's RPC plan mode get the companion's (plan-host.mjs); without its pieces plan mode stays unsupported.
@@ -85,7 +87,7 @@ async function loadRuntime(src) {
  const mcpConfig = () => mcp ??= loadMcpConfig({ at, pkg, settings }).catch(e => { mcp = undefined; throw e; });
  const isSettled = m.settle.isRpcSessionSettled ?? sessionSettle?.isSessionSettled;
  if (!isSettled) throw new Error(`This OMP build has no session settle check (${src}). Update the companion.`);
- return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, isSettled, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
+ return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, isSettled, restore, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
 }
 
 // The companion's /goal host for OMP builds without modes/rpc/rpc-goal-slash.ts. Without the pieces it needs, /goal stays
@@ -635,6 +637,14 @@ class OmpSession {
  // A host that stands in for this session's agents (a collab guest: the room host's subagents, run through its Agent Hub).
  #roster() { for (const h of this.#hosted) { const r = h.agents?.(); if (r) return r; } }
  subagents() { return this.#serial('get_subagents', 30000, async () => plain({ subagents: this.#roster()?.list() ?? this.#subagents.getSubagents() })); }
+ /** What `omp --restore` does on start, for a session reopened after a companion restart: every subagent its last run
+  *  left mid-turn (parked, not killed) goes on as a background job of this session under its old id, and the session's
+  *  own turn goes on when OMP finds it unfinished. { turn, subagents: ids }; nothing on builds without task/restore.ts. */
+ restore() {
+  return this.#serial('restore', 30000, async () => this.#rt.restore
+   ? plain(await this.#rt.restore.restoreSession(this.#session, this.#buses))
+   : { turn: false, subagents: [] });
+ }
  // A subagent transcript the roster keeps from elsewhere (a collab guest's copy of the room host's), brought up to date
  // before the dashboard reads it; false when the file is not the roster's. Not serialized: the host's reply may take seconds.
  subagentTranscript(file) { return this.#call('subagent_transcript', 30000, async () => (await this.#roster()?.transcript?.(file)) ?? false); }

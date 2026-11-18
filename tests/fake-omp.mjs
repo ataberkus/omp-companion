@@ -9,6 +9,7 @@ const DEFAULTS = {
  commands: () => ({ commands: [] }),
  entries: () => ({ entries: [], leafId: null }),
  subagents: () => ({ subagents: [] }),
+ restore: () => ({ turn: false, subagents: [] }),
 };
 
 /**
@@ -32,7 +33,7 @@ const METHODS = ['prompt', 'steer', 'followUp', 'interrupt', 'abort', 'removeQue
  'lastAssistantText', 'sessionStats', 'branchMessages', 'exportHtml', 'setTodos', 'setSessionName', 'setModel', 'cycleModel',
  'availableModels', 'setThinking', 'cycleThinking', 'setPref', 'compact', 'bash', 'abortBash', 'handoff', 'newSession',
  'switchSession', 'branch', 'loginProviders', 'login', 'btw', 'btwCancel', 'btwHistory', 'cancelSubagent', 'steerSubagent', 'messageSubagent',
- 'predictWord', 'predictFeedback', 'setPlanMode', 'reviewPlan', 'approvePlan'];
+ 'predictWord', 'predictFeedback', 'setPlanMode', 'reviewPlan', 'approvePlan', 'restore'];
 
 class FakeSession {
  alive = true; stopping = false; startedAt = Date.now(); calls = [];
