@@ -104,7 +104,7 @@ export function sessionRoutes(ctx){
    'POST /api/sessions/:id/command':async({url,body,json})=>{
    const match=url.pathname.match(/^\/api\/sessions\/([^/]+)\/command$/);
    // Answers, auto-approve, ghost text, side questions, subagent controls and read-only git views must get through while a command holds the lock.
-   const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','editor_text_applied'];
+   const unlocked=['answer','auto_approve','stop_commands','predict_word','predict_word_feedback','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','subagent_message','changes_worktree','git_log','git_commit','worktree_status','editor_text_applied'];
    // Commands answer with the session; one whose transcript nothing has read yet gets it read for the reply only (deferTranscript).
    // ?lean=1 (the dashboard, whose polls carry the transcript) leaves out the transcript and /btw answers and reads nothing:
    // every prompt sent got the whole transcript back (600 messages: ~0.7-0.9 MB gzipped) before the dashboard polled.

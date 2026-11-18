@@ -31,7 +31,7 @@ export function fakeOmp(handlers = {}) {
 const METHODS = ['prompt', 'steer', 'followUp', 'interrupt', 'abort', 'removeQueued', 'state', 'commands', 'entries', 'tree', 'subagents',
  'lastAssistantText', 'sessionStats', 'branchMessages', 'exportHtml', 'setTodos', 'setSessionName', 'setModel', 'cycleModel',
  'availableModels', 'setThinking', 'cycleThinking', 'setPref', 'compact', 'bash', 'abortBash', 'handoff', 'newSession',
- 'switchSession', 'branch', 'loginProviders', 'login', 'btw', 'btwCancel', 'btwHistory', 'cancelSubagent', 'steerSubagent',
+ 'switchSession', 'branch', 'loginProviders', 'login', 'btw', 'btwCancel', 'btwHistory', 'cancelSubagent', 'steerSubagent', 'messageSubagent',
  'predictWord', 'predictFeedback', 'setPlanMode', 'reviewPlan', 'approvePlan'];
 
 class FakeSession {

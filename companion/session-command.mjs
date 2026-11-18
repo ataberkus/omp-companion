@@ -43,7 +43,7 @@ export function createSessionCommand(ctx){
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
-  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','stop_commands','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','changes_worktree','git_log','git_commit','worktree_status','worktree_finish','editor_text_applied'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
+  const allowed=['prompt','steer','follow_up','edit_follow_up','cancel_follow_up','cancel_steer','edit_steer','send_follow_up','answer','auto_approve','abort','stop_commands','complete','compact','hide','set_model','advisor','plan_mode','plan_review','plan_approve','rename','pref','abort_retry','bash','abort_bash','stats','export','branch_messages','branch','edit_last','regenerate','handoff','login_providers','login','tree','new_session','switch_session','interrupt','cycle_model','cycle_thinking','todos','last_reply','launch','predict_word','predict_word_feedback','discard','btw','btw_cancel','btw_history','subagent_cancel','subagent_steer','subagent_message','changes_worktree','git_log','git_commit','worktree_status','worktree_finish','editor_text_applied'];if(!allowed.includes(body.type))throw error('Unsupported session command.');
   // Draft sessions (created by Enhance on New session) become normal on their first send. Cleared before any await,
   // so a discard can never act on a session whose first message is being dispatched; restored if nothing was sent.
   if(s.draft&&['prompt','steer','follow_up','interrupt','bash','send_follow_up'].includes(body.type)){
@@ -87,6 +87,13 @@ export function createSessionCommand(ctx){
    const message=text(body.message,'Message',20000);
    try{await runner.steerSubagent(id,message);}catch(e){throw error(e.message,409);}
    return {steered:true};
+  }
+  // Message any subagent of this session by its transcript, finished ones included (omp.mjs messageSubagent).
+  if(body.type==='subagent_message'){
+   const file=text(body.file,'Subagent transcript',4000),message=text(body.message,'Message',20000),runner=runners.get(s.id);
+   if(!runner?.alive)throw error('Continue the parent session first: its OMP is not running.',409);
+   try{await runner.messageSubagent(file,message);}catch(e){throw error(e.message,409);}
+   return {sent:true};
   }
   if(body.type==='changes_worktree')return worktreeChanges(s,body.base==='head'?'head':'start');
   if(body.type==='git_log')return gitLog(s);
