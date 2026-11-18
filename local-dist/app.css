@@ -314,6 +314,29 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .codeblock pre{margin:0;padding:12px 14px;overflow-x:auto;font:12.5px/1.55 var(--mono)}
 .codeblock code{padding:0;border:0;background:none;font:inherit}
 .tok-c{color:var(--faint);font-style:italic}.tok-s{color:var(--tok-s)}.tok-k{color:var(--tok-k)}.tok-n{color:var(--cyan)}
+/* math (KaTeX, loaded on first use): formulas take the text color and size around them; display math scrolls sideways
+   instead of widening the column. The Copy LaTeX label is CSS content so a copied selection holds only the formula's TeX. */
+.md .katex{font-size:1.1em;color:inherit}
+.md .math-inline{overflow-wrap:normal}
+.md .math-block{position:relative;display:block;margin:0 0 .9em}
+.md p>.math-block,.md li>.math-block{margin:.4em 0}
+.md .math-scroll{display:block;overflow-x:auto;overflow-y:hidden;padding:2px 0;overflow-wrap:normal}
+.md .math-block .katex-display{margin:.4em 0}
+.md .math-block .copy{position:absolute;top:0;right:0;z-index:1;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font:12px var(--sans);padding:2px 8px;border-radius:6px;opacity:0;transition:opacity .12s;user-select:none;-webkit-user-select:none}
+.md .math-block .copy::before{content:"Copy LaTeX"}
+.md .math-block:hover .copy,.md .math-block .copy:focus-visible{opacity:1}
+.md .math-block .copy:hover{background:var(--hover);color:var(--fg)}
+.md .math-block.pending .math-src,.md .math-src{font:.88em var(--mono)}
+.md .math-block.pending .math-src{display:block;padding:8px 12px;white-space:pre-wrap;background:var(--codeblock-bg)}
+.md .math-src{padding:0;border:0;background:none}
+.md .katex-error{font:.88em var(--mono);color:var(--red)!important;text-decoration:underline dashed;text-underline-offset:3px;cursor:help;overflow-wrap:anywhere}
+@media (hover:none),(pointer:coarse){
+  .md .math-block{display:flex;flex-direction:column}
+  .md .math-block .copy{position:static;order:2;align-self:flex-end;opacity:1;min-height:44px;padding:0 12px;border-color:transparent;background:none}
+}
+/* A \tag sits at the display's right edge, over a formula wider than a phone; there it follows the formula instead. */
+@media (max-width:820px){.md .math-scroll .katex-display>.katex>.katex-html>.katex-tag{position:static;margin-left:1em}}
+@media (prefers-reduced-motion:reduce){.md .math-block .copy{transition:none}}
 
 /* composer */
 .composer-wrap{padding:0 24px 18px;display:flex;flex-direction:column;min-height:0;max-height:70vh;max-height:70dvh}
