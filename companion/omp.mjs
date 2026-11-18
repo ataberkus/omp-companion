@@ -45,7 +45,7 @@ async function loadRuntime(src) {
  const optional = rel => existsSync(path.join(src, rel)) ? at(rel) : null;
  const pkg = spec => import(pathToFileURL(Bun.resolveSync(spec, src)).href);
  const names = Object.keys(RUNTIME_FILES);
- const [modules, oauth, tuiTheme, words, forkPlan, goalSlash, mcpReauth, sessionSettle, restore] = await Promise.all([
+ const [modules, oauth, tuiTheme, words, forkPlan, goalSlash, mcpReauth, sessionSettle, restore, mcpManager] = await Promise.all([
   Promise.all(names.map(name => at(RUNTIME_FILES[name]))),
   pkg('@oh-my-pi/pi-ai/oauth'), pkg('@oh-my-pi/pi-tui/theme'), pkg('@oh-my-pi/pi-tui/prompt/word-completion'),
   // Plan-mode and /goal hosting ship only in some OMP builds; state() reports plan mode only when it does.
@@ -56,6 +56,7 @@ async function loadRuntime(src) {
   optional('session/session-settle.ts'),
   // OMP 18.22+: `omp --restore` (task/restore.ts) — a session goes on with the subagent turns its last process cut off.
   optional('task/restore.ts'),
+  optional('mcp/manager.ts'),
  ]);
  const m = Object.fromEntries(names.map((name, i) => [name, modules[i]]));
  // Builds without OMP's RPC plan mode get the companion's (plan-host.mjs); without its pieces plan mode stays unsupported.
@@ -71,6 +72,7 @@ async function loadRuntime(src) {
  m.authSync.createAuthStorageSettingsSync(settings, authStorage);
  const modelRegistry = new m.registryMod.ModelRegistry(authStorage, undefined, { settings });
  m.discovery.initializeWithSettings(settings);
+ scopeMcpCwd(mcpManager?.MCPManager);
  // Every session of this process shares OMP's agent registry and IRC bus: partition them by session (irc-scope.mjs).
  scopeIrc(m.agentRegistry.AgentRegistry.global(), m.ircBus.IrcBus.global(), m.agentRegistry.MAIN_AGENT_ID);
  await modelRegistry.hydrateCredentialScopedModelCaches();
@@ -88,6 +90,29 @@ async function loadRuntime(src) {
  const isSettled = m.settle.isRpcSessionSettled ?? sessionSettle?.isSessionSettled;
  if (!isSettled) throw new Error(`This OMP build has no session settle check (${src}). Update the companion.`);
  return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, isSettled, restore, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
+}
+
+// OMP starts a stdio MCP server without its own `cwd` in the process's project folder (getProjectDir), which in this one
+// process is the companion's folder for every session: Serena's --project-from-cwd then finds no project. Each session's
+// MCP manager loads configs for the session's folder, so its stdio servers are given that folder, as `omp` run there would.
+function scopeMcpCwd(MCPManager) {
+ const discover = MCPManager?.prototype?.discoverAndConnect;
+ if (typeof discover !== 'function' || discover.scoped) return;
+ const scoped = function (options) {
+  const load = this.loadConfigs;
+  if (typeof load === 'function' && !load.scoped) {
+   const inCwd = async (cwd, opts) => {
+    const loaded = await load.call(this, cwd, opts);
+    for (const config of Object.values(loaded?.configs ?? {})) if (config?.type === 'stdio' && !config.cwd) config.cwd = cwd;
+    return loaded;
+   };
+   inCwd.scoped = true;
+   this.loadConfigs = inCwd;
+  }
+  return discover.call(this, options);
+ };
+ scoped.scoped = true;
+ MCPManager.prototype.discoverAndConnect = scoped;
 }
 
 // The companion's /goal host for OMP builds without modes/rpc/rpc-goal-slash.ts. Without the pieces it needs, /goal stays
