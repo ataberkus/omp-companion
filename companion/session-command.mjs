@@ -11,7 +11,7 @@ import { THINKING, toolSummary, shellRecord, readSessionHead, treeView, userProm
 import { worktreeChanges, gitLog, gitCommit } from './git.mjs';
 import { launchOptions } from './launch.mjs';
 export function createSessionCommand(ctx){
- const {start,append,notice,store,refresh,dataDir,execOmp,activity,persist,scheduleSave,runners,accountsChanged,autoApprove,cancelResume,dropSteers,reload,advisorStatus}=ctx;
+ const {start,append,notice,store,refresh,dataDir,execOmp,activity,persist,scheduleSave,runners,accountsChanged,autoApprove,cancelResume,dropSteers,reload,advisorStatus,retriesStopped}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
  const sent=(...args)=>ctx.sent(...args);
  const discardDraft=(...args)=>ctx.discardDraft(...args);
@@ -218,11 +218,19 @@ export function createSessionCommand(ctx){
    // Slow mode belongs to the live model (Anthropic's is OMP's global config), so it is not replayed on restarts.
    if(body.key!=='slowMode')(s.prefs??={})[body.key]=body.value;await refresh(s,runner);await persist(s);return s;
   }
+  // Stop (■) ends the turn and pauses the session. Stop retrying ends OMP's retry saga, a retried request in flight
+  // included: the turn failed, so the session stays in error with the error OMP was retrying, for Retry last message.
+  // Without a retry in progress it is a Stop.
   if(body.type==='abort'||body.type==='abort_retry'){
-   // Retry-only abort cancels backoff, but not an in-flight request or scheduled continuation.
+   const retry=body.type==='abort_retry'?s._retry:undefined;
+   // Set first, so the frames the abort flushes read as the user's Stop (runner.mjs: no retry error, no error report).
+   if(!retry){delete s._retry;s.status='paused';}
    const runner=runners.get(s.id);if(runner?.alive)await runner.abort();
-   finishWork(s);s.status='paused';s.error=undefined;dropSteers(s);cancelResume(s,'session stopped');
-   delete s._promptId;delete s._promptMsg;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;
+   // Ends the saga unless the abort's own frames (auto_retry_end, the aborted message) already did.
+   if(retry)retriesStopped(s,retry.attempt,'Retry cancelled');
+   else{s.status='paused';s.error=undefined;delete s._connectionAttempt;}
+   finishWork(s);dropSteers(s);cancelResume(s,'session stopped');
+   delete s._promptId;delete s._promptMsg;delete s._interrupt;delete s._retry;delete s._compacting;delete s.uiRequests;delete s._planReview;delete s._rateLimit;delete s._connectionLost;
    await persist(s);return s;
   }
   if(body.type==='abort_bash'){const runner=runners.get(s.id);if(runner?.alive)await runner.abortBash();return s;}
@@ -243,7 +251,7 @@ export function createSessionCommand(ctx){
    if(JSON.stringify(launch??null)!==JSON.stringify(s.launch??null)){
     if(launch)s.launch=launch;else delete s.launch;
     // Launch flags are read at startup, so a live runner restarts (idle only) to apply them.
-    if(runners.get(s.id)?.alive){const prev=s.status;runners.get(s.id).kill();for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));await start(s);s.status=prev;s.error=undefined;}
+    if(runners.get(s.id)?.alive){const prev=s.status,prevError=s.error;runners.get(s.id).kill();for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));await start(s);s.status=prev;s.error=prev==='error'?prevError:undefined;}
     append(s,'system',launch?'Launch options updated. OMP restarted with them.':'Launch options cleared. OMP restarted with its defaults.');
    }
    await persist(s);return s;
@@ -342,9 +350,9 @@ export function createSessionCommand(ctx){
     // A running OMP reads its advisors only at startup, so the session is restarted (while idle) to pick up the new model.
     if(['running','queued'].includes(s.status))throw error('Wait for this turn to finish, then change the advisor model.');
     const where=await setAdvisorModel(text(body.model,'Advisor model',300));
-    const prev=s.status;runners.get(s.id)?.kill();
+    const prev=s.status,prevError=s.error;runners.get(s.id)?.kill();
     for(let i=0;i<50&&runners.has(s.id);i++)await new Promise(r=>setTimeout(r,100));
-    const fresh=await start(s);s.status=prev;s.error=undefined;
+    const fresh=await start(s);s.status=prev;s.error=prev==='error'?prevError:undefined;
     s._silentAdvisorUntil=Date.now()+5000;await fresh.prompt({message:'/advisor on'});
     append(s,'system',`Advisor model set to ${body.model} (${where}).`);
     await advisorStatus(s,fresh);await persist(s);return s;
@@ -362,8 +370,9 @@ export function createSessionCommand(ctx){
    // Stop & send: OMP aborts the turn and starts this prompt in one step (interrupt).
    const interrupt=body.type==='interrupt';
    const kind=slashCommand?'prompt':interrupt?'interrupt':body.type,wasRunning=['running','queued'].includes(s.status);
-   // A message of the user's own supersedes a pending rate-limit resume; slash commands (say /usage) leave it armed.
-   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(body.type==='prompt'||interrupt){delete s._streamId;delete s._thinkId;}s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   // A message of the user's own supersedes a pending automatic resume; slash commands (say /usage) leave it armed. Only the
+   // companion's own resend after a lost connection (rate-limit.mjs, body.resume) keeps counting resends in a row.
+   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(!body.resume)delete s._connectionAttempt;if(body.type==='prompt'||interrupt){delete s._streamId;delete s._thinkId;}s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
    const id=randomUUID();
    if((kind==='prompt'||interrupt)&&!slashCommand){s._promptId=id;s._promptMsg=msg.id;}
    if(interrupt){s._interrupt=id;delete s._retry;}

@@ -22,7 +22,7 @@ function replyError(m){
  if(lines.length&&lines.every(l=>AGY_ERROR.test(l)))return `Antigravity CLI: ${lines.at(-1).slice(2)}`;
 }
 export function createRunner(ctx){
- const {omp,append,place,notice,commands,locks,dataDir,activity,persist,scheduleSave,runners,launches,subagentThoughts,stashImages,attention,slashList,rateLimitHint,scheduleResume,cancelResume,dropSteers}=ctx;
+ const {omp,append,place,notice,commands,locks,dataDir,activity,persist,scheduleSave,runners,launches,subagentThoughts,stashImages,attention,slashList,rateLimitHint,connectionHint,scheduleResume,cancelResume,dropSteers}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
  const sendQueued=(...args)=>ctx.sendQueued(...args);
  const checkAutoShutdown=(...args)=>ctx.checkAutoShutdown(...args);
@@ -46,7 +46,7 @@ export function createRunner(ctx){
     const ids=Array.isArray(restored?.subagents)?restored.subagents:[];
     const r=await command(s,{type:'prompt',message:ids.length?restoredPrompt(ids):RESTART_PROMPT});
     if(r?.status==='error')throw new Error(r.error||'OMP did not accept the prompt.');
-   }catch(e){if(ctx.closing)return;finishWork(s);s.status='paused';s.error=undefined;notice(s,'error',`Automatic resume failed: ${e.message}`);await persist(s);}
+   }catch(e){if(ctx.closing)return;finishWork(s);s.status='error';s.error=`Automatic resume failed: ${e.message}`;notice(s,'error',s.error);await persist(s);}
   });
  }
  function settle(s,promptId=s._promptId,run=s._run){
@@ -60,6 +60,23 @@ export function createRunner(ctx){
    if(s.status!=='running')finishWork(s);
    scheduleSave(s);
   }).catch(e=>{s.status='error';finishWork(s);s.error=`Could not send queued message: ${e.message}`;void persist(s);}).finally(checkAutoShutdown);
+ }
+ // Late frames of a run whose retries ended (retriesStopped) leave its error as it is, until the next run starts.
+ const retryStopped=s=>!!s._retryStopped&&s.status==='error';
+ // The first report of a run's error (s.error): its transcript card, the activity feed and the attention ping, once.
+ function failed(s){append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}
+ // A retry saga that ended without a successful turn (OMP gave up, or the retry was stopped: Stop retrying, or an abort of
+ // the retried run the companion did not start) leaves the session in error with the error OMP was retrying, reported
+ // once with OMP's note. A session the user stopped (■) or completed keeps its status. A lost connection OMP already
+ // retried is not resent by the companion as well (scheduleResume).
+ function retriesStopped(s,attempt,finalError,retry=s._retry){
+  delete s._retry;delete s._connectionLost;
+  if(retryStopped(s))return;
+  append(s,'system',`Retries stopped after attempt ${attempt}${finalError?`: ${finalError}`:'.'}`);
+  if(s.status==='paused'||s.status==='done')return;
+  const shown=s.status==='error';
+  s.status='error';s.error=s.error||retry?.error||finalError||'OMP stopped retrying.';s._retryStopped=true;
+  if(!shown){activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}
  }
  // Transcript-neutral frames (see the end of event()).
  // agent_pause (OMP 18.22): an intermediate loop end inside one run; its messages already arrived as message events.
@@ -83,7 +100,7 @@ export function createRunner(ctx){
   // Advisor toggles print command_output, which is not progress on the turn itself.
   if(f.type!=='command_output')s.lastActivityAt=now();
   // A run whose last message never ended (abort, crash) must not stream the next thought or reply into the old one.
-  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;delete s._thinkId;delete s._streamId;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
+  if(f.type==='agent_start'){s._run=(s._run||0)+1;delete s._settled;delete s._interrupt;delete s._titling;delete s._thinkId;delete s._streamId;delete s._retryStopped;cancelResume(s);startWork(s);s.status='running';s.error=undefined;}
   if(f.type==='auto_compaction_start')s._compacting=true;
   if(f.type==='auto_compaction_end'){
    s._compacting=!!f.willRetry;
@@ -113,7 +130,16 @@ export function createRunner(ctx){
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
   if(f.type==='message_start'&&f.message?.role==='assistant'&&!f.mirrored&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;const runner=runners.get(s.id);if(runner)void runner.prompt({message:'/rename'}).catch(()=>{delete s._titling;});}
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;const failed=m.stopReason==='error'?m.errorMessage||'OMP provider failed.':replyError(m);if(failed&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=failed;append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage&&!f.mirrored){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;s._connectionLost=m.stopReason==='error'?connectionHint(m.errorMessage):undefined;
+    // The provider answered: automatic resends after lost connections count from zero again.
+    if(m.stopReason!=='error'&&m.stopReason!=='aborted')delete s._connectionAttempt;
+    // A provider error, or an Antigravity CLI failure relayed as reply text (replyError).
+    const failure=m.stopReason==='error'?m.errorMessage||'OMP provider failed.':replyError(m);
+    // A failed attempt inside OMP's retry saga is shown by the retry indicator; the saga's end reports it (retriesStopped).
+    if(failure&&s.status!=='paused'&&s.status!=='done'&&!retryStopped(s)){s.status='error';s.error=failure;if(!s._retry)failed(s);}
+    // An abort of the retried run ends the saga in its error; the user's Stop (abort drops _retry first) pauses.
+    else if(m.stopReason==='aborted'&&!s._interrupt){if(s._retry)retriesStopped(s,s._retry.attempt,'Retry cancelled');else if(!retryStopped(s))s.status='paused';}
+    const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage&&!f.mirrored){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    // A collab guest's prompt (collab-prompt): on the host, and in guests' sessions mirrored from it. A guest's own prompt,
    // already shown when sent (and forwarded, never run here), is the one it echoes: it takes the author, nothing is added.
    const prompt=m.role==='custom'&&collabPrompt(m,randomUUID(),now());
@@ -134,9 +160,10 @@ export function createRunner(ctx){
   // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
   if(f.type==='prompt_result'&&f.agentInvoked!==false&&!(f.id&&f.id!==s._promptId)&&!(s._interrupt&&f.id!==s._interrupt)){
    if(f.id&&f.id===s._interrupt)delete s._interrupt;
-   // A terminal prompt_result follows the run's last agent_end, so OMP has stopped retrying by now.
-   if(f.status==='error'){s.status='error';s.error=f.error?.message||'OMP reported an error.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);scheduleResume(s);}
-   else if(f.status==='aborted'){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}
+   // A terminal prompt_result follows the run's last agent_end, so OMP has stopped retrying by now. Its error is the
+   // run's own (message_end usually reported it already: shown once).
+   if(f.status==='error'){const shown=s.status==='error';s.status='error';s.error=f.error?.message||s.error||'OMP reported an error.';if(!shown)failed(s);scheduleResume(s);}
+   else if(f.status==='aborted'){if(s._retry)retriesStopped(s,s._retry.attempt,'Retry cancelled');else if(!retryStopped(s)){s.status='paused';activity(s,`Stopped ${s.title}`,'paused');}}
    else if(f.status==='completed'&&f.sessionSettled===true)settle(s);
    if(f.status==='error'||f.status==='aborted')finishWork(s);
    dropSteers(s);
@@ -199,8 +226,9 @@ export function createRunner(ctx){
   }
   // A hosted command still working after its run returned (/cleanse, /omfg): the dashboard offers Stop for it.
   if(f.type==='command_run'){const key=String(f.key||'').slice(0,80);s._commandRuns??={};if(f.active)s._commandRuns[key]=String(f.label||key).slice(0,200);else delete s._commandRuns[key];}
-  if(f.type==='auto_retry_start'&&s.status!=='paused'&&s.status!=='done'){s.status='running';s.error=undefined;s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};}
-  if(f.type==='auto_retry_end'){delete s._retry;if(!f.success)append(s,'system',`Retries stopped after attempt ${f.attempt}${f.finalError?`: ${f.finalError}`:'.'}`);}
+  // OMP took the failure over: a lost connection it retries is not resent by the companion as well.
+  if(f.type==='auto_retry_start'&&s.status!=='paused'&&s.status!=='done'&&!retryStopped(s)){s.status='running';s.error=undefined;delete s._connectionLost;s._retry={attempt:f.attempt,maxAttempts:f.maxAttempts,delayMs:f.delayMs,error:String(f.errorMessage||'').slice(0,1000),at:now()};}
+  if(f.type==='auto_retry_end'){if(f.success)delete s._retry;else retriesStopped(s,f.attempt,f.finalError);}
   if(f.type==='retry_fallback_applied')append(s,'system',`Switched from ${f.from} to fallback model ${f.to}${f.reason?` (${f.reason})`:''}.`);
   if(f.type==='model_changed'){const runner=runners.get(s.id);if(runner)void refresh(s,runner);}
   if(f.type==='thinking_level_changed'&&f.thinkingLevel)s.thinking=f.thinkingLevel;
@@ -252,7 +280,8 @@ export function createRunner(ctx){
     if(s.sessionFile){const file=s.sessionFile;s._fileMark=fs.stat(file).then(st=>{if(!runners.get(s.id)?.alive&&s.sessionFile===file)s.fileSeen={size:st.size,mtime:st.mtimeMs};},()=>{});}
     // Its subagents ran in this OMP: none is at work any more (a restart revives the ones it parked; see resumeAfterRestart).
     for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';
-    if(!ctx.closing&&!ctx.pausing){finishWork(s);s.status=stopping?(s.status==='done'?'done':'paused'):'error';s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
+    // Stopped on purpose (Remove, a restart to apply launch options): working sessions pause, a done or failed one keeps its status and error.
+    if(!ctx.closing&&!ctx.pausing){finishWork(s);const kept=stopping&&['done','error'].includes(s.status);s.status=kept?s.status:stopping?'paused':'error';if(!kept)s.error=stopping?undefined:e.message;if(!stopping)attention(s,'error',e.message);void persist(s);}}});
    runners.set(s.id,runner);
    // The panel's title is given to OMP only when the file has none or the user renamed the session in the panel: a title
    // OMP gave it, or one renamed in a terminal, is the session's own (it was sent back as a user rename on every start).
@@ -359,5 +388,5 @@ async function syncFromFile(s){
   if(info.promptTrimmed)s.promptTrimmed=true;else delete s.promptTrimmed;
   delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
- return {start,lock,refresh,autoApprove,reload,advisorStatus,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart,syncFromFile,fileMoved};
+ return {start,lock,refresh,autoApprove,reload,advisorStatus,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart,syncFromFile,fileMoved,retriesStopped};
 }

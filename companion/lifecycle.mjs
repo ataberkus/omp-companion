@@ -28,11 +28,12 @@ export function createLifecycle(ctx){
    refreshing.add(id);void refresh(s,r).then(()=>{if(!ctx.closing)scheduleSave([],true);},e=>console.error('Background refresh failed:',e.message)).finally(()=>{refreshing.delete(id);checkAutoShutdown();checkAutoRestart();});}
   checkAutoShutdown();checkAutoRestart();},4000);refreshTimer.unref();
  // Every session stops as on quit: working ones (a running or queued turn, or subagents at work) become paused, the rest
- // keep their status; workspace.json is saved. Resolves with the IDs of the visible sessions it paused: the ones a restart,
+ // keep their status (a failed one with subagents still at work too: it stays in error); workspace.json is saved. Resolves
+ // with the IDs of the visible sessions it paused: the ones a restart,
  // or the desktop app's update, resumes. close() resolves with them too; shutdown and a plain quit ignore them.
  // onProgress({done,total}) counts the stopped sessions and the final save: the desktop app's update window shows it while it waits.
  // Working is read before the runners stop: their exit marks the subagents stopped.
- const pauseSessions=async onProgress=>{ctx.pausing++;try{const paused=[];const stopping=new Set(store.sessions.filter(working));const live=[...runners.values()];let done=0;const total=live.length+1;const step=()=>{done++;try{onProgress?.({done,total});}catch{}};onProgress?.({done,total});const stops=live.map(r=>Promise.resolve(r.kill()).finally(step));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';if(stopping.has(s)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);step();return paused;}finally{ctx.pausing--;}};
+ const pauseSessions=async onProgress=>{ctx.pausing++;try{const paused=[];const stopping=new Set(store.sessions.filter(s=>working(s)&&s.status!=='error'));const live=[...runners.values()];let done=0;const total=live.length+1;const step=()=>{done++;try{onProgress?.({done,total});}catch{}};onProgress?.({done,total});const stops=live.map(r=>Promise.resolve(r.kill()).finally(step));for(const s of store.sessions){finishWork(s);delete s._compacting;delete s.uiRequests;for(const a of s.subagentList||[])if(/run|pend|start|queue/i.test(a.status))a.status='stopped';if(stopping.has(s)){if(!s.hidden)paused.push(s.id);s.status='paused';}}await Promise.allSettled([...locks.values()]);await persist();await Promise.all(stops);step();return paused;}finally{ctx.pausing--;}};
  const shutdownPc=async()=>{await pauseSessions();await (options.shutdownHost||shutdownHost)();};
  // Work left: a running or queued turn, subagents at work, or a compaction/handoff/shell command in progress. Queued
  // messages of a running session are covered by its status (and by the session lock while settle() dispatches them); those

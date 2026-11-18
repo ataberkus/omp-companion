@@ -8,7 +8,7 @@ import { createCompanion } from '../companion/server.mjs';
 import { fakeOmp } from './fake-omp.mjs';
 
 for (const type of ['abort', 'abort_retry']) for (const phase of ['backoff', 'request']) {
-  test(`${type} stops retries during ${phase} and leaves the session resumable`, async t => {
+  test(`${type} stops retries during ${phase}: Stop pauses, Stop retrying keeps the error for Retry`, async t => {
     const dir = await mkdtemp(join(tmpdir(), 'omp-retry-stop-'));
     let app;
     t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
@@ -64,14 +64,19 @@ for (const type of ['abort', 'abort_retry']) for (const phase of ['backoff', 're
     await post({ type: 'prompt', message: phase });
     await waitForRetry();
     const stopped = await post({ type });
-    assert.equal(stopped.status, 'paused');
+    // Stop (■) ends the turn; Stop retrying gives up on the failed turn, which stays an error the user can retry.
+    const expected = type === 'abort' ? 'paused' : 'error';
+    assert.equal(stopped.status, expected);
     assert.equal(stopped._retry, undefined, 'Stopped sessions must not keep displaying retry progress');
-    assert.equal(stopped.error, undefined);
+    assert.equal(stopped.error, type === 'abort' ? undefined : '503 overloaded');
     const attempts = (await post({ type: 'stats' })).stats.attempts;
     await new Promise(r => setTimeout(r, 350));
     assert.equal((await post({ type: 'stats' })).stats.attempts, attempts, 'No retry may run after Stop returns');
-    assert.equal(session.status, 'paused');
+    assert.equal(session.status, expected, 'Late frames of the stopped run leave its status');
     assert.equal(session._retry, undefined);
+    const system = session.messages.filter(m => m.role === 'system').map(m => m.text);
+    assert.equal(system.filter(t => t === '503 overloaded').length, 1, 'Each attempt\'s error is not added again; the first one is shown once');
+    if (type === 'abort_retry') assert.equal(system.filter(t => t.startsWith('Retries stopped after attempt ')).length, 1);
 
     await post({ type: 'prompt', message: phase });
     await waitForRetry();
