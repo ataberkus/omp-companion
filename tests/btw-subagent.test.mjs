@@ -105,8 +105,14 @@ test('subagents of the session can be stopped and steered; other ids and a stopp
   assert.equal((await command({ type: 'subagent_cancel', id: 'Other' }))[0], 404);
   assert.equal((await sent('cancelSubagent')).length, 1);
 
+  // Any subagent by transcript, finished ones included: OMP resolves and revives it (omp.mjs messageSubagent).
+  assert.deepEqual((await command({ type: 'subagent_message', file: '/s/Sub-2.jsonl', message: 'Also cover the parser.' }))[1], { sent: true });
+  assert.deepEqual((await sent('messageSubagent')).map(([file, message]) => [file, message]), [['/s/Sub-2.jsonl', 'Also cover the parser.']]);
+  assert.equal((await command({ type: 'subagent_message', file: '/s/Sub-2.jsonl', message: ' ' }))[0], 400);
+
   // OMP exited: the subagent is still listed, but nothing can reach it.
   let last;
   for (let i = 0; i < 100 && last !== 409; i++) { [last] = await command({ type: 'subagent_steer', id: 'Sub-1', message: 'x' }); if (last !== 409) await new Promise(r => setTimeout(r, 20)); }
   assert.equal(last, 409);
+  assert.equal((await command({ type: 'subagent_message', file: '/s/Sub-2.jsonl', message: 'x' }))[0], 409);
 });

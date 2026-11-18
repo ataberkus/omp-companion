@@ -41,6 +41,8 @@ export function createHistory(ctx){
   await Promise.all(entries.filter(e=>e.isFile()).map(async e=>{const f=path.join(dir,e.name);let st;try{st=await fs.stat(f);}catch{return;}
    if(e.name.endsWith('.jsonl')){const name=e.name.slice(0,-6),md=path.join(dir,name+'.md');let c=known?.get(name);
     if(!c?.head||c.mtime!==st.mtimeMs||c.size!==st.size){let head;try{head=await readSessionHead(f);}catch{}c={mtime:st.mtimeMs,size:st.size,head,md:c?.md};}
+    // OMP's selective-commit journal (commit/selective/journal.ts) shares the folder: no session header, so no subagent.
+    if(name==='changes'&&c.head&&!c.head.id){seen.set(name,c);return;}
     const ms=await fs.stat(md).catch(()=>null);let r=ms&&c.md?.mtime===ms.mtimeMs&&c.md.size===ms.size?c.md:undefined;
     if(ms&&!r)try{r={mtime:ms.mtimeMs,size:ms.size,result:(await fs.readFile(md,'utf8')).slice(0,4000)};}catch{}
     c={...c,md:r};seen.set(name,c);const head=c.head||{},result=r?.result||'';

@@ -639,7 +639,7 @@
     S.reading = false; scrollStuck = true; composerHold = false; fitStack();
     ghostObserver.disconnect(); ghostObserver.observe(input);
     if (c.kind === 'native') loadPreview(c.file);
-    if (c.kind === 'sub') { $('.composer').hidden = true; loadSub(c.file, true); return; }
+    if (c.kind === 'sub') { $('.composer').hidden = true; const tools = $('#composerTools'); if (tools) tools.hidden = true; loadSub(c.file, true); return; }
     if (c.kind === 'changes') { $('.composer-wrap').hidden = true; $('#thread').classList.add('wide'); return; }
     loadBg(bgFile(), true);
     // A phone opening a running session starts on the one-row composer: focusing it would open it at once.
@@ -898,6 +898,7 @@
     const c = current();
     if (c.kind === 'session') { const s = S.store?.sessions.find(x => x.id === c.id); if (s) renderComposer(s); }
     else if (c.kind === 'native') renderComposer(null, S.native.find(x => x.file === c.file) || S.previews.get(c.file));
+    else if (c.kind === 'sub') renderSubComposer(c.file);
   }
 
   // ---------- ghost-text word completion (OMP predict_word, engine from spelling.autocomplete) ----------
@@ -2351,7 +2352,7 @@
     const e = S.subs.get(file);
     const parent = S.subParent.get(file);
     const name = base(file).replace(/\.jsonl$/, '');
-    const advisor = name === '__advisor' || name.startsWith('__advisor.');
+    const advisor = subAdvisor(file);
     const d = e?.data;
     const active = !advisor && d && (d.active ?? Date.now() - new Date(d.updatedAt).getTime() < 120000);
     setIfChanged($('#topbar'), `<button class="btn sm ghost menu-btn" data-act="nav" aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar">☰</button>
@@ -2364,9 +2365,27 @@
     let result = (d.result || '').trim();
     if (/^[[{]/.test(result)) result = '```json\n' + result + '\n```';
     const tail = result ? `<div class="sub-result"><div class="side-label">Result</div><div class="md">${md(result)}</div></div>` : '';
-    renderThread(d.messages || [], active ? 'running' : 'history', file, { head: `<div class="history-note">Read-only transcript of ${advisor ? 'an advisor reviewing' : 'a subagent started by'} ${parent ? `<a href="${esc(parent.hash)}">${esc(parent.title)}</a>` : 'its parent session'}.</div>`, tail, extra: result.length, speaker: advisor ? 'Advisor' : 'OMP' });
+    const owner = !advisor && subOwner(file);
+    renderThread(d.messages || [], active ? 'running' : 'history', file, { head: `<div class="history-note">${owner ? 'Transcript' : 'Read-only transcript'} of ${advisor ? 'an advisor reviewing' : 'a subagent started by'} ${parent ? `<a href="${esc(parent.hash)}">${esc(parent.title)}</a>` : 'its parent session'}.</div>`, tail, extra: result.length, speaker: advisor ? 'Advisor' : 'OMP' });
     const line = $('#statusLine');
-    setIfChanged(line, `<span class="grow">${advisor ? 'Advisors review the parent session. Manage them from the parent chat.' : 'Subagents run inside their parent session. Stop or steer a running one from the parent’s Activity panel.'}</span>${parent ? `<a class="btn sm" href="${esc(parent.hash)}">Back to parent</a>` : ''}`);
+    setIfChanged(line, `<span class="grow">${advisor ? 'Advisors review the parent session. Manage them from the parent chat.' : owner ? 'Messages go to this subagent, not its parent: a running one is steered, a finished one starts a new turn.' : 'Subagents run inside their parent session. Stop or steer a running one from the parent’s Activity panel.'}</span>${parent ? `<a class="btn sm" href="${esc(parent.hash)}">Back to parent</a>` : ''}`);
+    renderSubComposer(file);
+  }
+  const subAdvisor = file => { const name = base(file).replace(/\.jsonl$/, ''); return name === '__advisor' || name.startsWith('__advisor.'); };
+  // The companion session whose OMP started this subagent: its transcript sits in that session's artifact folder.
+  const subOwner = file => S.store?.sessions.find(s => { const root = s.sessionFile?.replace(/\.jsonl$/, ''); return root && file.startsWith(root) && /[\\/]/.test(file[root.length] || ''); }) || null;
+  // OMP's Agent Hub chat (TUI, Tern): the user talks to the subagent itself; the parent's OMP must be running to reach it.
+  function renderSubComposer(file) {
+    const owner = !subAdvisor(file) && subOwner(file), input = $('#input'), composer = $('.composer');
+    if (!input || !composer) return;
+    composer.hidden = !owner;
+    if (!owner) return;
+    const live = !['paused', 'done'].includes(owner.status), sending = S.sending.has(S.view);
+    const placeholder = live ? 'Message this subagent…' : 'Continue the parent session to message this subagent';
+    if (input.placeholder !== placeholder) input.placeholder = placeholder;
+    input.readOnly = !live;
+    $('#hint').textContent = live ? 'Enter sends to the subagent · Shift+Enter new line' : '';
+    setIfChanged($('#buttons'), `<button class="btn primary" data-act="send" ${live && input.value.trim() && !sending ? '' : 'disabled'}>${sending ? 'Sending…' : 'Send ↵'}</button>`);
   }
   function openSub(file) {
     const c = current();
@@ -3521,6 +3540,7 @@
     keepSpaceAccept();
     const sendView = S.view;
     S.enhanceFail.delete(sendView);
+    if (c.kind === 'sub') return sendSub(c.file, text, attachment);
     // "/btw question" opens the side-question panel instead of joining the conversation.
     if (!retry && /^\/btw(\s|$)/i.test(text)) {
       if (c.kind !== 'session') return toast('Continue this session first, then ask a side question.', 'err');
@@ -3574,6 +3594,20 @@
       S.sending.delete(pendingView); S.lastSig = ''; update();
       afterSend(sendView);
     }
+  }
+  async function sendSub(file, text, attachment) {
+    const owner = subOwner(file), input = $('#input'), view = S.view;
+    if (!owner) return toast('This subagent’s parent session is not in the panel.', 'err');
+    if (attachment.length) return toast('Subagent messages are text only.', 'err');
+    if (!text) return;
+    S.sending.set(view, { text, at: Date.now() }); input.value = ''; drafts.delete(view); autosize(input); update();
+    try {
+      await api(`/sessions/${encodeURIComponent(owner.id)}/command?lean=1`, { type: 'subagent_message', file, message: text });
+      toast('Sent to the subagent');
+    } catch (e) {
+      toast(e.message, 'err');
+      drafts.set(view, text); if (S.view === view && !input.value) { input.value = text; autosize(input); }
+    } finally { S.sending.delete(view); update(); loadSub(file, true); }
   }
   async function sessionCommand(type, extra) {
     const c = current();

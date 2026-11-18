@@ -16,7 +16,7 @@ import { loadCommandHosts, unhostedMessage } from './command-hosts.mjs';
 import { RUNTIME_FILES, ompSources } from './omp-sdk.mjs';
 import { loadCustomUI, customUI } from './custom-ui.mjs';
 import { loadMcpConfig } from './mcp-config.mjs';
-import { scopeIrc } from './irc-scope.mjs';
+import { scopeIrc, treeRoot } from './irc-scope.mjs';
 
 export const NOT_RUNNING = 'OMP process is not running.';
 const READY_MS = 30000;
@@ -790,6 +790,22 @@ class OmpSession {
    if (roster) { await roster.steer(subagentId, text); return; }
    const failure = await this.#rt.rpc.handleRpcSteerSubagent(this.#subagents, subagentId, text);
    if (failure) throw new Error(failure);
+  });
+ }
+ // Any subagent of this session (running, finished or parked) by its transcript, as its user: OMP's Agent Hub chat in the
+ // TUI/Tern. ensureLive revives a finished one, then the prompt runs on the subagent's own session (steered into a running
+ // turn, else a new turn); its reply lands in its transcript. OMP's steer_subagent RPC reaches only running subagents.
+ // Subagents of an earlier process are not in the registry: the companion installs no cold reviver (main.ts does, per process).
+ messageSubagent(sessionFile, text) {
+  return this.#serial('message_subagent', 120000, async () => {
+   const registry = this.#rt.agentRegistry.AgentRegistry.global(), root = this.#session.getAgentId?.(), want = path.resolve(sessionFile);
+   const ref = registry.list().find(r => r.kind === 'sub' && r.sessionFile && path.resolve(r.sessionFile) === want);
+   if (!ref || !root || treeRoot(registry, ref.id) !== root) throw new Error('This subagent can no longer be messaged: OMP keeps only the subagents started since this session last opened.');
+   const session = await this.#rt.agentLifecycle.AgentLifecycleManager.global().ensureLive(ref.id);
+   const accepted = Promise.withResolvers();
+   const off = session.subscribe(e => { if (e.type === 'agent_start') accepted.resolve(); });
+   session.prompt(text, { streamingBehavior: 'steer', throwOnDrop: true }).then(() => accepted.resolve(), e => accepted.reject(e));
+   try { await accepted.promise; } catch (e) { throw new Error(`The subagent refused the message: ${message(e)}`); } finally { off(); }
   });
  }
  predictWord(text, cursor) {
