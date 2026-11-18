@@ -12,6 +12,15 @@ import { launchArgs } from './launch.mjs';
 const RESTART_PROMPT='Continue where you left off; the companion was restarted.';
 // ...and, when OMP restored subagents the restart cut off, that they run again under their old ids (so it does not spawn them anew).
 const restoredPrompt=ids=>`${RESTART_PROMPT} Your interrupted subagents (${ids.join(', ')}) were restored and go on with their tasks; their results arrive as before.`;
+// OMP's antigravity-cli provider relays the Antigravity CLI's own request failures ("⚠ API error (attempt N): RESOURCE_EXHAUSTED
+// (code 429): …") as reply text with stopReason "stop", so a quota or provider failure reads as a finished answer. A reply made
+// only of those lines is that failure: its last line, the CLI's final attempt.
+const AGY_ERROR=/^⚠ API error \(attempt \d+\): /;
+function replyError(m){
+ if(m.stopReason!=='stop'||m.provider!=='antigravity-cli'||m.content?.some(b=>b.type!=='text'))return;
+ const lines=contentText(m.content).split('\n').map(l=>l.trim()).filter(Boolean);
+ if(lines.length&&lines.every(l=>AGY_ERROR.test(l)))return `Antigravity CLI: ${lines.at(-1).slice(2)}`;
+}
 export function createRunner(ctx){
  const {omp,append,place,notice,commands,locks,dataDir,activity,persist,scheduleSave,runners,launches,subagentThoughts,stashImages,attention,slashList,rateLimitHint,scheduleResume,cancelResume,dropSteers}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
@@ -104,7 +113,7 @@ export function createRunner(ctx){
   // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
   if(f.type==='message_start'&&f.message?.role==='assistant'&&!f.mirrored&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;const runner=runners.get(s.id);if(runner)void runner.prompt({message:'/rename'}).catch(()=>{delete s._titling;});}
   if(f.type==='message_end'){
-   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;if(m.stopReason==='error'&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=m.errorMessage||'OMP provider failed.';append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage&&!f.mirrored){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
+   const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;const failed=m.stopReason==='error'?m.errorMessage||'OMP provider failed.':replyError(m);if(failed&&s.status!=='paused'&&s.status!=='done'){s.status='error';s.error=failed;append(s,'system',s.error);activity(s,`${s.title}: ${s.error}`,'error');attention(s,'error',s.error);}else if(m.stopReason==='aborted'&&!s._interrupt){s.status='paused';}const th=thinkingText(m.content);if(th)append(s,'thinking',th.slice(-40000),s._thinkId||randomUUID());const v=contentText(m.content);if(v){const msg=append(s,'assistant',v,s._streamId||randomUUID());if(msg&&m.provider&&m.model)msg.model=`${m.provider}/${m.model}`;}if(m.provider&&m.model){s.provider=m.provider;s.model=m.model;}delete s._streamId;delete s._thinkId;if(m.usage&&!f.mirrored){s.tokens+=(m.usage.totalTokens||((m.usage.input||0)+(m.usage.output||0)));s.cost+=m.usage.cost?.total||0;}}
    // A collab guest's prompt (collab-prompt): on the host, and in guests' sessions mirrored from it. A guest's own prompt,
    // already shown when sent (and forwarded, never run here), is the one it echoes: it takes the author, nothing is added.
    const prompt=m.role==='custom'&&collabPrompt(m,randomUUID(),now());
