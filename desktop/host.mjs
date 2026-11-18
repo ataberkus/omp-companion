@@ -1,7 +1,8 @@
 // Companion host for the Tauri shell: runs the companion and talks line-delimited JSON over stdin/stdout.
 // Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something)
 //   | {"event":"screen","address"} (a device started viewing and controlling this PC; address null when it stopped)
-//   | {"event":"restart"} (Restart companion, or the restart after an OMP SDK update: the host exits next, and the shell starts a new one).
+//   | {"event":"restart"} (Restart companion, or the restart after an OMP SDK update: the host exits next, and the shell starts a new one)
+//   | {"event":"quit-progress","done","total"} (an update quit stopping the sessions, before its reply).
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 //   {"cmd":"quit","resume":true} (an app update) also leaves the resume note below before replying, so the new version
 //   resumes the sessions that were working; a plain quit does not.
@@ -162,7 +163,7 @@ function closeTailnet() {
 }
 
 // companion.close() closes every listener, the tailnet one included, and resolves with the IDs of the sessions it paused.
-const shutdown = () => { clearTimeout(tailnetRetry); return (closing ??= companion ? companion.close() : Promise.resolve()); };
+const shutdown = onProgress => { clearTimeout(tailnetRetry); return (closing ??= companion ? companion.close(onProgress) : Promise.resolve()); };
 
 // The resume note: an app update (the tray's Install update, or a newer installer asking the app to quit) or a restart
 // (Restart companion) writes {at, resume} here, and the next host resumes those sessions. Tray Quit, sign-out and crash
@@ -201,7 +202,8 @@ async function handle(line) {
   const { id, cmd } = msg;
   if (cmd === 'quit') {
     try {
-      const paused = await shutdown();
+      // An update quit reports each stopped session ({"event":"quit-progress","done","total"}) for the update window.
+      const paused = await shutdown(msg.resume === true ? ({ done, total }) => send({ event: 'quit-progress', done, total }) : undefined);
       // Written before the reply: the shell waits for it, then the installer replaces the app's files.
       if (msg.resume === true) await writeUpdateNote(paused).catch(e => console.error(`Could not save the sessions to resume after the update: ${e.message}`));
     } finally { send({ id, ok: true }, () => process.exit(0)); }

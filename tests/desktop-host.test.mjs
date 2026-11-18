@@ -47,8 +47,19 @@ async function startHost(t, setup, env = {}, nodeArgs = []) {
     }
   };
   let id = 0;
-  const request = async msg => { const req = { id: ++id, ...msg }; child.stdin.write(JSON.stringify(req) + '\n'); const res = await next(); assert.equal(res.id, req.id); return res; };
-  return { dir, port, child, exited, next, request, stderr: () => log };
+  // Events the host sent while a request was pending (quit-progress during an update quit).
+  const events = [];
+  const request = async msg => {
+    const req = { id: ++id, ...msg };
+    child.stdin.write(JSON.stringify(req) + '\n');
+    for (;;) {
+      const res = await next();
+      if (res.event && res.id === undefined) { events.push(res); continue; }
+      assert.equal(res.id, req.id);
+      return res;
+    }
+  };
+  return { dir, port, child, exited, next, request, events, stderr: () => log };
 }
 
 test('host reports ready, serves the dashboard, answers busy/lan/links and quits cleanly', async t => {
@@ -150,12 +161,18 @@ const statuses = async (port, token) => Object.fromEntries((await (await fetch(`
 const waitFor = async (check, ms = 5000) => { for (const end = Date.now() + ms; !(await check()) && Date.now() < end;) await new Promise(r => setTimeout(r, 20)); return check(); };
 
 test('a fresh update note resumes its sessions at launch and is deleted; an update quit writes the working ones for the next version', async t => {
-  const { dir, port, exited, next, request } = await startHost(t, seedSessions({ at: Date.now(), resume: ['run'] }), {}, fakeOmpHost);
+  const { dir, port, exited, next, request, events } = await startHost(t, seedSessions({ at: Date.now(), resume: ['run'] }), {}, fakeOmpHost);
   const { token } = await next();
   assert.equal(await noteOf(dir), 'ENOENT', 'used up at launch, so a later launch or crash recovery resumes nothing');
   assert.ok(await waitFor(async () => (await statuses(port, token)).run === 'running'), 'the listed session carries on');
   assert.equal((await statuses(port, token)).idle, 'paused', 'a session not in the note stays paused');
   assert.deepEqual(await request({ cmd: 'quit', resume: true }), { id: 1, ok: true });
+  // The app's update window shows these as Saving sessions: one step per stopped session, then the final save.
+  const progress = events.filter(e => e.event === 'quit-progress');
+  assert.ok(progress.length >= 1, 'an update quit reports its progress');
+  const lastStep = progress.at(-1);
+  assert.equal(lastStep.done, lastStep.total, 'the last report says all is saved');
+  assert.ok(lastStep.total >= 2, 'the running session and the final save');
   assert.equal(await exited, 0);
   const note = await noteOf(dir);
   assert.deepEqual(Object.keys(note).sort(), ['at', 'resume'], 'no token: the app gets a new one at every launch');

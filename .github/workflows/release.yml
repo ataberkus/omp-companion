@@ -12,6 +12,10 @@
 # secrets (Settings > Secrets and variables > Actions): TAURI_SIGNING_PRIVATE_KEY, the contents of the private key
 # matching plugins.updater.pubkey, and TAURI_SIGNING_PRIVATE_KEY_PASSWORD, its password (empty for a key without one).
 # Without the key the job fails before building instead of publishing a release installed apps can't update to.
+# The Windows job also packs the in-app updater's archives (scripts/pack-update.mjs: the app, and the runtime that
+# node_modules and Bun make), signs them with the same key, uploads them and adds them to latest.json as
+# platforms["windows-x86_64-fast"]; installed Windows apps update from those without running the installer. The last
+# job adds that entry again after the macOS jobs rewrote latest.json.
 name: Release
 
 on:
@@ -138,6 +142,44 @@ jobs:
           releaseBody: See the commits since the previous release.
           releaseDraft: false
           prerelease: false
+
+      - name: Pack the in-app update archives
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/pack-update.mjs pack --out omp-update
+
+      - name: Publish them and list them in latest.json
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+          BASE: https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          gh release upload $env:TAG (Get-ChildItem omp-update -File).FullName --clobber
+          gh release download $env:TAG --pattern latest.json --dir manifest --clobber
+          node scripts/pack-update.mjs manifest manifest/latest.json omp-update/omp-update-windows-x86_64.json $env:BASE
+          gh release upload $env:TAG manifest/latest.json --clobber
+
+  # The macOS jobs rewrite latest.json; add the Windows in-app update entry again (idempotent), also when a Mac build failed.
+  fast-manifest:
+    needs: [windows, macos]
+    if: always() && needs.windows.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: List the in-app update archives in latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.windows.outputs.version }}
+          BASE: https://github.com/${{ github.repository }}/releases/download/v${{ needs.windows.outputs.version }}/
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --pattern latest.json --pattern omp-update-windows-x86_64.json --dir manifest --clobber
+          node scripts/pack-update.mjs manifest manifest/latest.json manifest/omp-update-windows-x86_64.json "$BASE"
+          gh release upload "$TAG" manifest/latest.json --clobber
 
   # The Mac builds of the same commit, added to the release the Windows job published, under its version.
   macos:

@@ -19,11 +19,23 @@ serde_json = "1"
 dunce = "1"
 parking_lot = "0.12"
 tauri-plugin-updater = "2"
+# In-app updates (src/update.rs, src/fast.rs). Every one is already in the tree through tauri-plugin-updater or tauri:
+# a resumable streaming download (reqwest, futures-util, rustls with the ring provider the plugin uses), minisign
+# signatures checked as the file streams (minisign-verify, base64), and the .tar.br update archives (tar, brotli-decompressor).
+serde = { version = "1", features = ["derive"] }
+semver = "1"
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+futures-util = { version = "0.3", default-features = false }
+minisign-verify = "0.3"
+base64 = "0.22"
+tar = { version = "0.4", default-features = false }
+brotli-decompressor = "6"
 
 # The installer's quit-for-update event (quit_on_installer_request in src/main.rs); the job object that holds Bun and
 # everything it starts (src/host.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Registry", "Win32_Storage_FileSystem"] }
 
 # Ends Bun's process group (src/host.rs).
 [target.'cfg(unix)'.dependencies]

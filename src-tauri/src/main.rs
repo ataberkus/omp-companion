@@ -1,7 +1,10 @@
 // OMP Control Room desktop shell: runs the companion through the bundled Bun and shows the dashboard.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod fast;
 mod host;
+mod update;
 
 use host::{Host, Ready};
 use parking_lot::Mutex;
@@ -23,7 +26,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_updater::Update;
 use tauri_plugin_window_state::StateFlags;
 
 const TITLE: &str = "OMP Control Room";
@@ -62,7 +65,7 @@ struct Shell {
     hung: AtomicBool,
     // Set when the companion said it is restarting itself (Restart companion): its exit is meant, not a crash.
     restarting: AtomicBool,
-    // A newer signed release found by the update check; the tray offers to install it.
+    // A newer signed release found by the update check (src/update.rs prepares and installs it; the tray offers it).
     update: Mutex<Option<Update>>,
     updating: AtomicBool,
 }
@@ -143,6 +146,8 @@ fn on_event(app: AppHandle) -> impl Fn(Value) + Send + 'static {
                 shell.restarting.store(true, Ordering::SeqCst);
             }
         }
+        // An update quit saving the sessions: the update window's progress.
+        Some("quit-progress") => update::saving(&app, msg["done"].as_u64().unwrap_or(0), msg["total"].as_u64().unwrap_or(1)),
         _ => {}
     }
 }
@@ -179,9 +184,17 @@ fn main_url(shell: &Shell) -> Url {
 }
 
 fn boot(app: AppHandle) {
+    // An interrupted or failed update is undone, and an update prepared by an earlier run installed, before Bun starts.
+    if update::startup(&app) == update::Boot::Exit {
+        return;
+    }
     let (host, ready) = match spawn_host(&app, None) {
         Ok(started) => started,
         Err(e) => {
+            // A version swapped in moments ago whose companion does not start: the previous one comes back instead.
+            if update::companion_failed(&app, &e) {
+                return;
+            }
             error_dialog(&app, e);
             app.exit(1);
             return;
@@ -385,12 +398,12 @@ fn utc_now() -> String {
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-fn check_for_update(app: &AppHandle) -> Result<Option<Update>, String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    tauri::async_runtime::block_on(updater.check()).map_err(|e| e.to_string())
+fn check_for_update(app: &AppHandle) -> Result<Option<Update>, update::Failure> {
+    update::check(app)
 }
 
 // Checks the latest GitHub release shortly after start and then every few hours. Offline or no release: try again later.
+// A newer release downloads in the background (resuming what an earlier run left), and the tray offers it once it is ready.
 fn update_loop(app: AppHandle) {
     thread::sleep(Duration::from_secs(20));
     loop {
@@ -398,117 +411,34 @@ fn update_loop(app: AppHandle) {
             return;
         }
         match check_for_update(&app) {
-            Ok(Some(update)) => offer_update(&app, update, true),
-            Ok(None) => {}
-            Err(e) => eprintln!("update check: {e}"),
+            Ok(Some(update)) => offer_update(&app, update),
+            Ok(None) => update::log(&app, "check: up to date"),
+            // Offline for a while needs no message; the log keeps it.
+            Err(e) => update::log(&app, format!("check failed: {e:?}")),
         }
         thread::sleep(UPDATE_EVERY);
     }
 }
 
-// Puts "Install update" in the tray; a version the user was already told about is not announced again.
-fn offer_update(app: &AppHandle, update: Update, notify: bool) {
-    let shell = app.state::<Shell>();
-    let version = update.version.clone();
-    let known = shell.update.lock().replace(update).is_some_and(|old| old.version == version);
-    refresh_menu(app);
-    if notify && !known {
-        let body = format!("OMP Control Room {version} is available. Choose Install update in {TRAY} menu.");
-        let _ = app.notification().builder().title(TITLE).body(body).show();
-    }
+// Remembers the release, starts its background download and puts it in the tray; src/update.rs announces it once ready.
+fn offer_update(app: &AppHandle, update: Update) {
+    update::offer(app, update);
 }
 
+// Check for updates in the tray: the update window shows checking, up to date, available (Install now / Later) or the error.
 fn check_now(app: &AppHandle) {
-    match check_for_update(app) {
-        Ok(Some(update)) => {
-            offer_update(app, update, false);
-            install_update(app);
-        }
-        Ok(None) => {
-            app.dialog()
-                .message(format!("OMP Control Room {} is up to date.", app.package_info().version))
-                .title(TITLE)
-                .kind(MessageDialogKind::Info)
-                .blocking_show();
-        }
-        Err(e) => error_dialog(app, format!("Could not check for updates\n\n{e}")),
-    }
+    update::check_now(app);
 }
 
 fn busy_sessions(shell: &Shell) -> u64 {
     shell.host().request(json!({ "cmd": "busy" }), Duration::from_secs(10)).ok().and_then(|r| r["busy"].as_u64()).unwrap_or(0)
 }
 
-// Download first (the app keeps working meanwhile), then stop the companion as on Quit but with the update note (the new
-// version resumes the sessions that were working), then run the installer, which closes the app, replaces its files and
-// starts the new version.
+// The tray's Install update / Restart to update: the update window asks (version, notes, working sessions, Install
+// now / Later) instead of a native dialog. Install now saves the sessions with the update note (the new version resumes
+// the ones that were working), swaps the new version in and starts it; see src/update.rs.
 fn install_update(app: &AppHandle) {
-    let shell = app.state::<Shell>();
-    let Some(update) = shell.update.lock().clone() else { return };
-    if shell.quitting.load(Ordering::SeqCst) || shell.updating.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let busy = busy_sessions(&shell);
-    let mut message = format!("Install OMP Control Room {}? The app closes, installs the update and starts again.", update.version);
-    if busy > 0 {
-        let working = if busy == 1 {
-            "1 session is still working; it pauses for the update and carries on by itself when the new version starts.".to_owned()
-        } else {
-            format!("{busy} sessions are still working; they pause for the update and carry on by themselves when the new version starts.")
-        };
-        message.push_str(&format!(" {working}"));
-    }
-    if let Some(notes) = update.body.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
-        let notes: String = notes.chars().take(1500).collect();
-        message.push_str(&format!("\n\n{notes}"));
-    }
-    let confirmed = app
-        .dialog()
-        .message(message)
-        .title(TITLE)
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom("Install".into(), "Not now".into()))
-        .blocking_show();
-    if !confirmed {
-        shell.updating.store(false, Ordering::SeqCst);
-        return;
-    }
-    let tray = app.tray_by_id("main");
-    let mut shown = 0;
-    let mut received = 0usize;
-    let progress = |chunk: usize, total: Option<u64>| {
-        received += chunk;
-        let Some(total) = total.filter(|t| *t > 0) else { return };
-        let percent = (received as u64 * 100 / total).min(100);
-        if percent >= shown + 5 {
-            shown = percent;
-            if let Some(tray) = &tray {
-                let _ = tray.set_tooltip(Some(format!("{TITLE} — downloading update {percent} %")));
-            }
-        }
-    };
-    // download() checks the signature against the public key in tauri.conf.json before returning the bytes.
-    let bytes = match tauri::async_runtime::block_on(update.download(progress, || {})) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            shell.updating.store(false, Ordering::SeqCst);
-            refresh_menu(app);
-            return error_dialog(app, format!("Could not download the update\n\n{e}"));
-        }
-    };
-    if shell.quitting.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    stop_companion(app, true);
-    // Windows: on success the installer takes over and install() exits this process. macOS: install() swaps the app
-    // bundle in place and returns, so start the new version (the old companion is already stopped).
-    match update.install(bytes) {
-        Ok(()) => app.restart(),
-        Err(e) => {
-            error_dialog(app, format!("Could not install the update. Sessions were paused and saved; start OMP Control Room again to keep using this version.\n\n{e}"));
-            app.exit(1);
-        }
-    }
+    update::show_prompt(app);
 }
 
 fn same_origin(url: &Url, port: u16) -> bool {
@@ -712,6 +642,8 @@ fn create_main(app: &AppHandle) {
             if !shown.swap(true, Ordering::SeqCst) {
                 let _ = window.show();
                 let _ = window.set_focus();
+                // This version works: confirm a fresh update, close the "Updated to X" screen, clean up.
+                update::dashboard_ready(window.app_handle());
             }
         })
         .build();
@@ -737,18 +669,14 @@ fn show_main(app: &AppHandle) {
 // The tray's update entry; development builds have none (they run the repo's files).
 enum UpdateItem {
     Hidden,
-    Check,
-    Install(String),
-    Installing,
+    Update(update::TrayItem),
 }
 
 fn update_item(shell: &Shell) -> UpdateItem {
     if cfg!(debug_assertions) {
         UpdateItem::Hidden
-    } else if shell.updating.load(Ordering::SeqCst) {
-        UpdateItem::Installing
     } else {
-        shell.update.lock().as_ref().map_or(UpdateItem::Check, |u| UpdateItem::Install(u.version.clone()))
+        UpdateItem::Update(update::tray_item(shell))
     }
 }
 
@@ -774,9 +702,14 @@ fn build_menu(app: &AppHandle, lan: bool, screen: bool, viewer: Option<&str>, li
     let separator = PredefinedMenuItem::separator(app)?;
     let update_item = match update {
         UpdateItem::Hidden => None,
-        UpdateItem::Check => Some(MenuItem::with_id(app, "check_update", "Check for updates", true, None::<&str>)?),
-        UpdateItem::Install(version) => Some(MenuItem::with_id(app, "update", format!("Install update {version}…"), true, None::<&str>)?),
-        UpdateItem::Installing => Some(MenuItem::new(app, "Installing update…", false, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Check) => Some(MenuItem::with_id(app, "check_update", "Check for updates", true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Downloading(percent)) => {
+            let label = percent.map_or("Preparing update…".to_owned(), |p| format!("Downloading update {p} %…"));
+            Some(MenuItem::with_id(app, "update_window", label, true, None::<&str>)?)
+        }
+        UpdateItem::Update(update::TrayItem::Install(version)) => Some(MenuItem::with_id(app, "update", format!("Install update {version}…"), true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Ready(version)) => Some(MenuItem::with_id(app, "update", format!("Restart to update {version}…"), true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Installing) => Some(MenuItem::with_id(app, "update_window", "Installing update…", true, None::<&str>)?),
     };
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![&open, &lan_item, &copy];
@@ -865,6 +798,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         "quit" => quit(&app, false),
         "update" => install_update(&app),
         "check_update" => check_now(&app),
+        "update_window" => update::focus(&app),
         _ => {
             let Some(i) = id.strip_prefix("link:").and_then(|i| i.parse::<usize>().ok()) else { return };
             let url = app.state::<Shell>().links.lock().get(i).map(|(_, url)| url.clone());
@@ -977,7 +911,8 @@ fn on_app_menu_event(app: &AppHandle, event: MenuEvent) {
 // sessions that were working. The tray's and the app menu's Quit ask first and leave them paused.
 fn quit(app: &AppHandle, for_update: bool) {
     let shell = app.state::<Shell>();
-    if shell.quitting.swap(true, Ordering::SeqCst) {
+    // An update being installed quits by itself.
+    if update::applying() || shell.quitting.swap(true, Ordering::SeqCst) {
         return;
     }
     if !for_update {
@@ -1003,6 +938,10 @@ fn quit(app: &AppHandle, for_update: bool) {
         }
     }
     stop_companion(app, for_update);
+    // An update ready to install goes in on the way out (not when an installer asked: it installs its own version).
+    if !for_update {
+        update::apply_on_quit(app);
+    }
     app.exit(0);
 }
 
@@ -1055,6 +994,13 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
         return;
     }
     let WindowEvent::CloseRequested { api, .. } = event else { return };
+    // The update window closes (a download keeps going), except while the update is being installed.
+    if window.label() == update::WINDOW {
+        if update::applying() {
+            api.prevent_close();
+        }
+        return;
+    }
     if window.label() != "main" {
         return;
     }
@@ -1071,13 +1017,25 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
 }
 
 fn main() {
+    // The update warm-up: started once from the staged folder so antivirus scans the new exe before the restart.
+    if std::env::args().any(|a| a == "--omp-warmup") {
+        return;
+    }
+    // Started by the version that just swapped this one in: wait until it is gone, or the single-instance check below
+    // would hand this launch to it.
+    #[cfg(windows)]
+    if let Some(pid) = std::env::args().find_map(|a| a.strip_prefix("--omp-wait-pid=").and_then(|p| p.parse().ok())) {
+        update::wait_for_pid(pid);
+    }
     let builder = tauri::Builder::default()
-        // First: a second instance focuses the first and never reaches setup or the Bun spawn.
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
+        // First: a second instance focuses the first and never reaches setup or the Bun spawn. During an update it shows
+        // the update window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| if update::busy() { update::focus(app) } else { show_main(app) }))
         // VISIBLE excluded: quitting while hidden in the tray must not start the next launch invisible.
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .with_denylist(&[update::WINDOW])
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())

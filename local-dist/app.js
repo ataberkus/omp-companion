@@ -207,7 +207,7 @@
   S.sideOpen = innerWidth > 1100;
   try { const v = localStorage.getItem('omp-side'); if (v && innerWidth > 1100) S.sideOpen = v === '1'; } catch {}
   S.home.model = ''; S.home.thinking = '';
-  try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; S.groupBy = localStorage.getItem('omp-group-by') || 'time'; } catch {}
+  try { S.expandAll = localStorage.getItem('omp-expand-activity') === '1'; S.diffMode = localStorage.getItem('omp-diff-mode') || ''; S.groupBy = localStorage.getItem('omp-group-by') || 'time'; S.finishedKind = localStorage.getItem('omp-finished-kind') || 'all'; } catch {}
   S.advReviews = true; S.advImportant = false; S.advHidden = false;
   try { S.advReviews = localStorage.getItem('omp-adv-reviews') !== '0'; S.advImportant = localStorage.getItem('omp-adv-important') === '1'; S.advHidden = localStorage.getItem('omp-adv-hidden') === '1'; } catch {}
   // OMP_WEB_NO_TOKEN: the companion embeds the token in the page, so nothing asks for it.
@@ -2157,11 +2157,20 @@
     S.sideCounts = { running: running.length, jobs: jobs.length, advisors: advisors.length, total, activity };
     el.hidden = !(S.sideOpen && (total || activity));
     const tab = total && S.sideTab === 'plan' ? 'plan' : 'activity';
-    const shown = finished.slice(0, 60);
+    // Finished splits into subagents and background tasks (bash jobs): the filter shows one kind, All shows both as
+    // separate groups. The filter only appears when both kinds are there.
+    const finKinds = [['subagent', 'Subagents', finished.filter(j => j.type !== 'bash')], ['bash', 'Background tasks', finished.filter(j => j.type === 'bash')]];
+    const finKind = finKinds.some(([k, , list]) => k === S.finishedKind && list.length) ? S.finishedKind : 'all';
+    const finList = list => { const shown = list.slice(0, 60); return shown.map(jobCard).join('') + (list.length > shown.length ? `<div class="side-empty">and ${list.length - shown.length} older</div>` : ''); };
+    const bothKinds = finKinds.every(([, , list]) => list.length);
+    const finFilter = bothKinds ? `<div class="side-tabs finished-filter" role="group" aria-label="Show finished">${[['all', 'All', finished], ...finKinds].map(([k, label, list]) => `<button type="button" class="${finKind === k ? 'on' : ''}" aria-pressed="${finKind === k}" data-act="finishedKind" data-kind="${k}">${label} <small>${list.length}</small></button>`).join('')}</div>` : '';
+    const finBody = finKind === 'all'
+      ? (bothKinds ? finKinds.map(([, label, list]) => `<div class="side-label finished-kind">${label} <span>${list.length}</span></div>${finList(list)}`).join('') : finList(finished))
+      : finList(finKinds.find(([k]) => k === finKind)[2]);
     setIfChanged(el, `<div class="side-head"><div class="side-tabs" role="group" aria-label="Session panel"><button type="button" class="${tab === 'plan' ? 'on' : ''}" aria-pressed="${tab === 'plan'}" data-act="sideTab" data-tab="plan" ${total ? '' : 'disabled'}>Plan${total ? ` <small>${done}/${total}</small>` : ''}</button><button type="button" class="${tab === 'activity' ? 'on' : ''}" aria-pressed="${tab === 'activity'}" data-act="sideTab" data-tab="activity">Activity${running.length ? ` <small>${running.length}</small>` : ''}</button></div><button class="btn sm ghost" data-act="closeSide" aria-label="Close panel">✕</button></div>
       ${tab === 'plan' ? `<div class="side-plan"><div class="side-plan-progress"><span>${done} of ${total} complete</span><progress value="${done}" max="${total}"></progress></div>${planPhases(s, current().kind === 'session')}${current().kind === 'session' ? '<button class="btn sm ghost todo-clear" data-act="clearTodos">Clear task plan</button>' : ''}</div>` :
         `${jobs.length ? `${e?.error ? `<div class="side-sec"><div class="side-empty">Could not read background work: ${esc(e.error)}</div></div>` : ''}<div class="side-sec"><div class="side-label">Running <span>${running.length}</span></div>${running.map(jobCard).join('') || '<div class="side-empty">Nothing running right now.</div>'}</div>
-      ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${shown.map(jobCard).join('')}${finished.length > shown.length ? `<div class="side-empty">and ${finished.length - shown.length} older</div>` : ''}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
+      ${finished.length ? `<details class="side-sec" ${S.finishedOpen ? 'open' : ''} data-finished><summary class="side-label">Finished <span>${finished.length}</span></summary>${finFilter}${finBody}</details>` : ''}` : `<div class="side-sec"><div class="side-empty">${e?.error ? 'Could not read background work: ' + esc(e.error) : 'No background work yet.'}</div></div>`}
       ${advisors.length ? `<div class="side-sec"><div class="side-label">Advisors <span>${advisors.length}</span></div>${advisors.map(x => `<div class="job"><div class="job-top"><b>${esc(x.name === '__advisor' ? 'Default' : x.name.slice('__advisor.'.length))}</b><span class="dur">${esc(ago(x.updatedAt))}</span></div>${x.model ? `<div class="job-sub">${esc(modelName(x.model))}</div>` : ''}<button class="btn sm ghost job-open" data-sub="${esc(x.file)}">Open transcript →</button></div>`).join('')}</div>` : ''}`}`);
     // A live Reasoning box follows new text until the user scrolls it (swapHtml keeps it pinned while it sits at the bottom).
     el.querySelectorAll('.job-thought[open] pre').forEach(p => { if (!touched.has(p)) p.scrollTop = p.scrollHeight; });
@@ -5266,6 +5275,7 @@
       try { localStorage.setItem('omp-side', S.sideOpen ? '1' : '0'); } catch {}
       $('#topbar')._html = ''; update();
     }
+    else if (act === 'finishedKind') { S.finishedKind = a.dataset.kind; try { localStorage.setItem('omp-finished-kind', S.finishedKind); } catch {} update(); }
     else if (act === 'expandAll') { S.expandAll = !S.expandAll; groupOpen.clear(); try { localStorage.setItem('omp-expand-activity', S.expandAll ? '1' : '0'); } catch {} closeMenu(a.closest('.menu')); S.lastSig = ''; $('#topbar')._html = ''; update(); }
     // Opens on the computer running the companion (cmd on Windows), also when the panel is used from a phone.
     else if (act === 'terminal') { closeMenu(a.closest('.menu')); api('/terminal', { path: a.dataset.path }).then(r => toast(`Opened a terminal in ${r.path}`), e => toast(e.message, 'err')); }

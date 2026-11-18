@@ -16,7 +16,8 @@
 ; Clean replace. node_modules/, companion/, local-dist/ and desktop/ never mix two versions, so files an older version
 ; shipped and this one doesn't (a package npm hoisted differently, say) can't shadow the new ones. The installer moves
 ; them into .previous\ (a rename, instant) before the new files go in and deletes that folder in the background once
-; it's done. The uninstaller deletes them and any .previous\ outright, older versions' leftovers included.
+; it's done. The uninstaller deletes them and any .previous\ outright, older versions' leftovers included. Both also
+; delete .update\, where the in-app updater (src-tauri/src/update.rs) keeps its downloads and prepared versions.
 ;
 ; node_modules/ only when it changed. Its ~12,000 files (OMP's SDK and what it needs) are most of an install's time,
 ; and most releases don't change them. They are not a Tauri resource: this file packs src-tauri/runtime/ (staged by
@@ -129,6 +130,7 @@ FunctionEnd
   RMDir /r "$INSTDIR\local-dist"
   RMDir /r "$INSTDIR\desktop"
   RMDir /r "$INSTDIR\.previous"
+  RMDir /r "$INSTDIR\.update"
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
@@ -137,6 +139,9 @@ FunctionEnd
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     ; What an earlier update's background delete didn't finish.
     RMDir /r "$INSTDIR\.previous"
+    ; The in-app updater's downloads, prepared versions and swap journal (src-tauri/src/fast.rs): this install replaces
+    ; all of it, and a journal left behind would make the next start undo this install.
+    RMDir /r "$INSTDIR\.update"
     CreateDirectory "$INSTDIR\.previous"
     !insertmacro OMP_RUNTIME_CURRENT $R5
     ${If} $R5 != 1

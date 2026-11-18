@@ -9,7 +9,11 @@
 // faster. The path is short on purpose: makensis can't open files whose path passes 259 characters, it gets them as
 // <repo>\src-tauri\runtime\<package path>, and the deepest package paths are over 150 characters long.
 // Files are hard links into node_modules/ (copies where linking fails). The stage is rebuilt when package-lock.json,
-// node_modules/.package-lock.json or this script change (src-tauri/runtime.stamp); delete src-tauri/runtime/ to force it.
+// node_modules/.package-lock.json, the Bun that build.rs bundles (OMP_BUN, else the one on PATH) or this script change
+// (src-tauri/runtime.stamp); delete src-tauri/runtime/ to force it.
+// The stamp also names the runtime update artifact (scripts/pack-update.mjs: node_modules plus bun.exe), so an installed
+// app downloads the runtime only when its node_modules\.runtime-id differs from the release's stamp.
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -40,11 +44,22 @@ if (!lockText.length || !fs.existsSync(modules)) {
   console.error('stage-runtime: package-lock.json or node_modules/ is missing; run npm ci first.');
   process.exit(1);
 }
+// The Bun build.rs copies into the app (src-tauri/build.rs bundle_bun): part of the runtime update artifact.
+function bunPath() {
+  if (process.env.OMP_BUN) return process.env.OMP_BUN;
+  try { return execFileSync('bun', ['-p', 'process.execPath'], { encoding: 'utf8', windowsHide: true }).trim(); } catch { return ''; }
+}
+const bun = read(bunPath());
+if (!bun.length) {
+  console.error('stage-runtime: Bun is not on PATH (or OMP_BUN names no file); it is bundled into the app.');
+  process.exit(1);
+}
 const stamp = createHash('sha256')
   .update(read(fileURLToPath(import.meta.url)))
   .update(lockText)
   .update(read(path.join(modules, '.package-lock.json')))
   .update(`${process.platform}-${process.arch}`)
+  .update(createHash('sha256').update(bun).digest())
   .digest('hex');
 if (fs.existsSync(dest) && read(stampFile).toString() === stamp) {
   console.log('stage-runtime: src-tauri/runtime is up to date.');
