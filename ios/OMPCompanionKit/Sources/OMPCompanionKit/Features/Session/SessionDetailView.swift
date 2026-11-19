@@ -40,6 +40,27 @@ public struct SessionDetailView: View {
         store.isArchived(liveSession)
     }
 
+    private func performMenuAction(_ action: SessionActionsMenu.Action) {
+        let session = liveSession
+        switch action {
+        case .modes: showModesSheet = true
+        case .btw: showBtwSheet = true
+        case .togglePin: Task { await store.togglePin(for: session) }
+        case .rename:
+            renameDraft = session.title
+            showRenameAlert = true
+        case .rewind: showRewindSheet = true
+        case .tree: showTreeSheet = true
+        case .stats: showStatsSheet = true
+        case .usage: showUsageSheet = true
+        case .formulaSize: showFormulaSizeSheet = true
+        case .terminal: Task { await store.openTerminalOnHost(path: session.cwd) }
+        case .markDone: Task { await store.completeSession(session) }
+        case .toggleArchive: Task { await store.toggleArchive(for: session) }
+        case .hide: Task { await store.hideSession(session) }
+        }
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
             // Inspector Tab Bar
@@ -93,105 +114,22 @@ public struct SessionDetailView: View {
                     .accessibilityLabel("Stop active turn")
                 }
 
-                Menu {
-                    Button {
-                        showModesSheet = true
-                    } label: {
-                        Label("Modes, Model & Context Controls", systemImage: "slider.horizontal.3")
-                    }
-
-                    Button {
-                        showBtwSheet = true
-                    } label: {
-                        Label("Side Questions (/btw)", systemImage: "bubble.left.and.text.bubble.right")
-                    }
-
-                    Divider()
-
-                    Button {
-                        Task { await store.togglePin(for: liveSession) }
-                    } label: {
-                        Label(isPinned ? "Unpin Session" : "Pin Session", systemImage: isPinned ? "pin.slash" : "pin")
-                    }
-                    .disabled(!store.canPerformMutatingActions)
-
-                    Button {
-                        renameDraft = liveSession.title
-                        showRenameAlert = true
-                    } label: {
-                        Label("Rename Session", systemImage: "pencil")
-                    }
-                    .disabled(!store.canPerformMutatingActions)
-
-                    if !liveSession.isWorking {
-                        Button {
-                            showRewindSheet = true
-                        } label: {
-                            Label("Rewind / Branch Turn…", systemImage: "arrow.uturn.backward.circle")
-                        }
-                        .disabled(!store.canPerformMutatingActions)
-                    }
-
-                    Button {
-                        showTreeSheet = true
-                    } label: {
-                        Label("Conversation Tree", systemImage: "point.3.connected.trianglepath.dotted")
-                    }
-
-                    Button {
-                        showStatsSheet = true
-                    } label: {
-                        Label("Stats & HTML Export", systemImage: "chart.bar.doc.horizontal")
-                    }
-
-                    Button {
-                        showUsageSheet = true
-                    } label: {
-                        Label("Provider Quotas", systemImage: "gauge.with.needle")
-                    }
-
-                    Button {
-                        showFormulaSizeSheet = true
-                    } label: {
-                        Label("Formula Size…", systemImage: "x.squareroot")
-                    }
-                    Divider()
-
-                    Button {
-                        Task { await store.openTerminalOnHost(path: liveSession.cwd) }
-                    } label: {
-                        Label("Open Terminal on Host", systemImage: "terminal")
-                    }
-                    .disabled(!store.canPerformMutatingActions)
-
-                    if !liveSession.isWorking && liveSession.status != .done {
-                        Button {
-                            Task { await store.completeSession(liveSession) }
-                        } label: {
-                            Label("Mark Done", systemImage: "checkmark.circle")
-                        }
-                        .disabled(!store.canPerformMutatingActions)
-                    }
-
-                    if !liveSession.isWorking {
-                        Button {
-                            Task { await store.toggleArchive(for: liveSession) }
-                        } label: {
-                            Label(isArchived ? "Restore from Archive" : "Archive Session", systemImage: isArchived ? "tray.and.arrow.up" : "archivebox")
-                        }
-                        .disabled(!store.canPerformMutatingActions)
-                    }
-
-                    Button(role: .destructive) {
-                        Task { await store.hideSession(liveSession) }
-                    } label: {
-                        Label("Hide from Sidebar", systemImage: "eye.slash")
-                    }
-                    .disabled(!store.canPerformMutatingActions || liveSession.status == .running)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .accessibilityLabel("Session actions")
+            }
+            // Own item and an equatable view: polls replace `liveSession` every few seconds, and rebuilding the open
+            // menu's content made a scrolled ⋯ menu jump back to its top (the web had the same bug, 2697a39).
+            ToolbarItem(placement: .topBarTrailing) {
+                SessionActionsMenu(
+                    state: SessionActionsMenu.MenuState(
+                        isPinned: isPinned,
+                        isArchived: isArchived,
+                        isWorking: liveSession.isWorking,
+                        isDone: liveSession.status == .done,
+                        isRunning: liveSession.status == .running,
+                        canMutate: store.canPerformMutatingActions
+                    ),
+                    perform: performMenuAction
+                )
+                .equatable()
             }
         }
         // Hidden keyboard shortcuts for iPadOS / external keyboards (Cmd+1..5)
@@ -532,5 +470,101 @@ public struct SessionDetailView: View {
         } catch {
             store.showToast(error.localizedDescription, isError: true)
         }
+    }
+}
+
+/// The session's ⋯ menu. Equatable on `state` only, so SwiftUI skips rebuilding it (and the open menu keeps its scroll
+/// position) when a poll changes the session without changing anything the menu shows.
+struct SessionActionsMenu: View, Equatable {
+    struct MenuState: Equatable {
+        let isPinned: Bool
+        let isArchived: Bool
+        let isWorking: Bool
+        let isDone: Bool
+        let isRunning: Bool
+        let canMutate: Bool
+    }
+
+    enum Action {
+        case modes, btw, togglePin, rename, rewind, tree, stats, usage, formulaSize, terminal, markDone, toggleArchive, hide
+    }
+
+    let state: MenuState
+    let perform: (Action) -> Void
+
+    static func == (lhs: SessionActionsMenu, rhs: SessionActionsMenu) -> Bool {
+        lhs.state == rhs.state
+    }
+
+    var body: some View {
+        Menu {
+            Button { perform(.modes) } label: {
+                Label("Modes, Model & Context Controls", systemImage: "slider.horizontal.3")
+            }
+            Button { perform(.btw) } label: {
+                Label("Side Questions (/btw)", systemImage: "bubble.left.and.text.bubble.right")
+            }
+
+            Divider()
+
+            Button { perform(.togglePin) } label: {
+                Label(state.isPinned ? "Unpin Session" : "Pin Session", systemImage: state.isPinned ? "pin.slash" : "pin")
+            }
+            .disabled(!state.canMutate)
+
+            Button { perform(.rename) } label: {
+                Label("Rename Session", systemImage: "pencil")
+            }
+            .disabled(!state.canMutate)
+
+            if !state.isWorking {
+                Button { perform(.rewind) } label: {
+                    Label("Rewind / Branch Turn…", systemImage: "arrow.uturn.backward.circle")
+                }
+                .disabled(!state.canMutate)
+            }
+
+            Button { perform(.tree) } label: {
+                Label("Conversation Tree", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+            Button { perform(.stats) } label: {
+                Label("Stats & HTML Export", systemImage: "chart.bar.doc.horizontal")
+            }
+            Button { perform(.usage) } label: {
+                Label("Provider Quotas", systemImage: "gauge.with.needle")
+            }
+            Button { perform(.formulaSize) } label: {
+                Label("Formula Size…", systemImage: "x.squareroot")
+            }
+
+            Divider()
+
+            Button { perform(.terminal) } label: {
+                Label("Open Terminal on Host", systemImage: "terminal")
+            }
+            .disabled(!state.canMutate)
+
+            if !state.isWorking && !state.isDone {
+                Button { perform(.markDone) } label: {
+                    Label("Mark Done", systemImage: "checkmark.circle")
+                }
+                .disabled(!state.canMutate)
+            }
+
+            if !state.isWorking {
+                Button { perform(.toggleArchive) } label: {
+                    Label(state.isArchived ? "Restore from Archive" : "Archive Session", systemImage: state.isArchived ? "tray.and.arrow.up" : "archivebox")
+                }
+                .disabled(!state.canMutate)
+            }
+
+            Button(role: .destructive) { perform(.hide) } label: {
+                Label("Hide from Sidebar", systemImage: "eye.slash")
+            }
+            .disabled(!state.canMutate || state.isRunning)
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("Session actions")
     }
 }
