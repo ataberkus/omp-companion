@@ -306,6 +306,9 @@
     planBusy: new Set(), planSubmitted: new Set(),
     enhance: new Map(), // view → { id, original, model, step } while an enhance runs
     enhanceFail: new Map(), // view → why its last enhance failed, on its draft until the draft is sent or enhanced again
+    // view → { original, enhanced, mode: 'undo' | 'redo' | 'offer' } once an enhance lands: the composer's Undo/Redo
+    // control, which outlives toasts and survives view switches until the draft is sent, discarded or the control dismissed.
+    enhanceUndo: new Map(),
     // view → its in-flight send: { text, imagePreview, queued, at } for a composer message, {} for other prompts. Keyed by
     // view, so a send still going out to one session never blocks another session's composer.
     sending: new Map(),
@@ -1120,6 +1123,20 @@
     ['max', 'Best-in-class', 'Reads the draft as a product brief: the full feature set the best products of its kind have, including the ones you didn\'t name, built with the repo\'s stack; the repo\'s existing checks, testing left to the agent. Up to 12 lookups.'],
   ];
   const enhanceModeLabel = mode => (ENHANCE_MODES.find(m => m[0] === mode) || ENHANCE_MODES[0])[1];
+  // The composer's lasting enhance control: Undo restores the pre-enhance draft, Redo puts the result back, and an offer
+  // applies a result that arrived after the draft changed. It sits in the toolbar (not a toast) until the draft is sent,
+  // discarded, dismissed, or replaced by another enhance, and its state is kept per view.
+  function enhanceUndoControl(view) {
+    const st = S.enhanceUndo.get(view);
+    if (!st || S.enhance.has(view)) return '';
+    const offer = st.mode === 'offer', redo = st.mode === 'redo';
+    const label = offer ? 'Use enhanced' : redo ? 'Redo' : 'Undo';
+    const title = offer ? 'Apply enhanced prompt' : redo ? 'Reapply enhanced prompt' : 'Restore original prompt (Ctrl+Z)';
+    return `<span class="enhance-undo" role="group" aria-label="Enhance result">`
+      + `<button class="btn sm ghost enhance-undo-btn" data-act="enhanceUndo" type="button" aria-label="${esc(title)}" title="${esc(title)}">${label}</button>`
+      + `<button class="btn sm ghost enhance-undo-dismiss" data-act="enhanceUndoDismiss" type="button" aria-label="Dismiss the enhance result" title="Dismiss the enhance result">×</button>`
+      + `</span>`;
+  }
   // ✨ plus its mode picker; the picker saves the mode for every composer (same as Settings › Enhance › Mode) and hides while one runs.
   function enhanceButton(view, draft) {
     if (S.enhance.has(view)) return `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`;
@@ -1128,7 +1145,8 @@
       : !enhanceBlocked(draft, images) ? '' : draft.trim() ? 'Slash and shell commands are not enhanced' : 'Type a draft or attach an image to enhance';
     const mode = S.store?.enhanceMode || 'full';
     return `<button class="btn sm ghost enhance-btn" data-act="enhance" type="button" aria-label="Enhance prompt" title="${why || `Rewrite this draft with project context: ${esc(enhanceModeLabel(mode))} (Ctrl+Shift+E)`}" ${why ? 'disabled' : ''}>✨</button>`
-      + `<select class="enhance-mode" data-enhmode aria-label="Enhance mode" title="Enhance mode">${ENHANCE_MODES.map(([v, t, d]) => `<option value="${v}" title="${esc(d)}" ${v === mode ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
+      + `<select class="enhance-mode" data-enhmode aria-label="Enhance mode" title="Enhance mode">${ENHANCE_MODES.map(([v, t, d]) => `<option value="${v}" title="${esc(d)}" ${v === mode ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`
+      + enhanceUndoControl(view);
   }
   const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
   // An enhance counts as running from here (✕, read-only composer, no draft pull or discard), before its request goes out.
@@ -1168,12 +1186,42 @@
   }
   function applyEnhanced(view, original, text) {
     S.enhanceFail.delete(view);
-    const input = S.view === view ? $('#input') : null;
-    if (!input) { if ((drafts.get(view) ?? '') === original) drafts.set(view, text); return; }
+    const input = S.view === view ? ($('#input') || $('#homePrompt')) : null;
+    // Left the view while it ran: keep its draft (and the control) for the return, with the same offer rule.
+    if (!input) {
+      const draft = drafts.get(view) ?? '';
+      if (draft === original) {
+        drafts.set(view, text);
+        S.enhanceUndo.set(view, { original, enhanced: text, mode: 'undo' });
+      } else S.enhanceUndo.set(view, { original: draft, enhanced: text, mode: 'offer' });
+      refreshComposer();
+      return;
+    }
     // The user (or an extension) changed the draft meanwhile: offer the result instead of overwriting.
-    if (input.value !== original) return toast('Enhanced prompt ready', '', { label: 'Use enhanced prompt', run: () => { if (S.view === view) replaceDraft($('#input'), text); } });
+    if (input.value !== original) {
+      S.enhanceUndo.set(view, { original: input.value, enhanced: text, mode: 'offer' });
+      refreshComposer();
+      return;
+    }
     replaceDraft(input, text);
-    toast('Prompt enhanced', '', { label: 'Undo', run: () => { if (S.view === view) replaceDraft($('#input'), original); } });
+    if (input.id === 'homePrompt') S.home.prompt = input.value;
+    S.enhanceUndo.set(view, { original, enhanced: text, mode: 'undo' });
+    refreshComposer();
+  }
+  // Undo/Redo/Use enhanced: swaps the composer between the enhance's two drafts and keeps the control in step. The record
+  // itself lives in S.enhanceUndo, so it is still there after reading the result, switching views, or a failed enhance.
+  function enhanceUndoStep() {
+    const view = S.view, st = S.enhanceUndo.get(view);
+    if (!st) return;
+    const input = $('#input') || $('#homePrompt');
+    if (!input) return;
+    const back = st.mode === 'undo';
+    replaceDraft(input, back ? st.original : st.enhanced);
+    if (input.id === 'homePrompt') S.home.prompt = input.value;
+    S.enhanceUndo.set(view, { ...st, mode: back ? 'redo' : 'undo' });
+    refreshComposer();
+    const field = $('#homePrompt') || $('#input');
+    if (field) { autosize(field); saveDraft(view); field.focus(); }
   }
   // insertText keeps the swap on the browser's undo stack (Ctrl+Z); plain assignment is the fallback.
   function replaceDraft(input, text) {
@@ -1232,7 +1280,7 @@
     discardView(prev);
   }
   function discardView(view) {
-    S.enhance.delete(view); S.enhanceFail.delete(view); S.ownDrafts.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
+    S.enhance.delete(view); S.enhanceFail.delete(view); S.enhanceUndo.delete(view); S.ownDrafts.delete(view); drafts.delete(view); S.attachments = S.attachments.filter(a => a.view !== view);
     api(`/sessions/${encodeURIComponent(view.slice('session:'.length))}/command`, { type: 'discard' }).then(() => refresh()).catch(() => {});
   }
   // After a send settles: if the user left its draft session meanwhile, let the server decide (no-op once sent).
@@ -1244,7 +1292,7 @@
   // cleaned it up): its text and images go back to New session instead of staying in a view that no longer exists.
   function rescueDraft(view) {
     const { home } = S.ownDrafts.get(view);
-    S.ownDrafts.delete(view); S.enhance.delete(view); S.enhanceFail.delete(view); S.discardAfterSend.delete(view);
+    S.ownDrafts.delete(view); S.enhance.delete(view); S.enhanceFail.delete(view); S.enhanceUndo.delete(view); S.discardAfterSend.delete(view);
     clearTimeout(draftTimers.get(view)); draftTimers.delete(view);
     const text = Map.prototype.get.call(drafts, view) || '';
     Map.prototype.delete.call(drafts, view); // not saved: the companion keeps no draft for a removed session
@@ -3684,7 +3732,7 @@
     if ((!text && !attachment.length) || S.sending.has(S.view) || S.enhance.has(S.view)) return;
     keepSpaceAccept();
     const sendView = S.view;
-    S.enhanceFail.delete(sendView);
+    S.enhanceFail.delete(sendView); S.enhanceUndo.delete(sendView);
     if (c.kind === 'sub') return sendSub(c.file, text, attachment);
     // "/btw question" opens the side-question panel instead of joining the conversation.
     if (!retry && /^\/btw(\s|$)/i.test(text)) {
@@ -5116,6 +5164,7 @@
   async function startSession() {
     const l = S.home.listing, view = S.view;
     if (!l || S.sending.has(view)) return;
+    S.enhanceUndo.delete(view);
     S.sending.set(view, {}); renderHome();
     const attachment = attached();
     S.attachments = S.attachments.filter(a => a.view !== view);
@@ -5639,6 +5688,8 @@
     else if (act === 'advisor') { closeMenu(a.closest('.menu')); advisorCommand(a.dataset.advisor); }
     else if (act === 'attach') $('#imageInput')?.click();
     else if (act === 'enhance') enhanceCurrent();
+    else if (act === 'enhanceUndo') enhanceUndoStep();
+    else if (act === 'enhanceUndoDismiss') { S.enhanceUndo.delete(S.view); refreshComposer(); ($('#homePrompt') || $('#input'))?.focus(); }
     else if (act === 'removeImage') { S.attachments = S.attachments.filter(x => x.view !== S.view || x.name !== a.dataset.name); saveDraft(S.view); update(); renderAttachments(); $('#input')?.focus(); $('#homePrompt')?.focus(); }
     else if (act === 'send') send();
     else if (act === 'steer' || act === 'follow_up') send(act);
@@ -5990,12 +6041,21 @@
   document.addEventListener('selectionchange', () => { if (ghost) renderGhost(); });
   document.addEventListener('input', e => {
     const t = e.target;
-    if (t.id === 'input') { drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); predictWord(t); }
+    if (t.id === 'input') {
+      // A hand edit makes a restored draft's Redo, and an unapplied offer, stale; Undo of the result itself still applies.
+      const u = S.enhanceUndo.get(S.view);
+      if (u && u.mode !== 'undo') S.enhanceUndo.delete(S.view);
+      drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); predictWord(t);
+    }
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
     else if (t.id === 'setChanged') { S.set.changed = t.checked; renderSettings(); }
     else if (t.id === 'pickerQ') { S.picker.q = t.value; S.picker.hi = 0; S.picker.tapped = -1; renderPicker(); }
-    else if (t.id === 'homePrompt') { S.home.prompt = t.value; autosize(t); S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value)); }
+    else if (t.id === 'homePrompt') {
+      const u = S.enhanceUndo.get(S.view);
+      if (u && u.mode !== 'undo') S.enhanceUndo.delete(S.view);
+      S.home.prompt = t.value; autosize(t); S.slash = null; renderSlash(); const he = $('#homeEnhance'); if (he) setIfChanged(he, enhanceButton(S.view, t.value));
+    }
     else if (t.id === 'swInput') { $('#modal')._switcher.hi = 0; renderSwitcher(); }
     else if (t.id === 'isolate') S.home.isolate = t.checked;
     else if (t.id === 'homeAdvisor') S.home.advisor = t.checked;
