@@ -163,6 +163,9 @@ public struct DashboardView: View {
                         .listRowBackground(Color.clear)
                         .listRowInsets(EdgeInsets())
                 }
+            } else if isFailedWithoutData {
+                // The error banner above explains why the list is empty; "No Sessions Yet" would claim the host has none.
+                EmptyView()
             } else if filteredSessions.isEmpty {
                 Section {
                     OMPEmptyStateView(
@@ -814,6 +817,13 @@ public struct DashboardView: View {
             return "Finished turn — ready for review"
         }
         return nil
+    }
+
+    /// Nothing has been read from this host and the last poll failed: the list is unknown, not empty.
+    private var isFailedWithoutData: Bool {
+        guard store.snapshot.sessions.isEmpty else { return false }
+        if case .error = store.connectionStatus { return true }
+        return false
     }
 
     private var emptyStateTitle: String {

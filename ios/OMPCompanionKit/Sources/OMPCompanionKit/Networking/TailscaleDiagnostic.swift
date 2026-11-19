@@ -153,12 +153,20 @@ public enum TailscaleDiagnostic {
         }
     }
 
+    /// A reply that is JSON but not the shape this build expects, naming the endpoint and the field, e.g.
+    /// `/api/state → sx.changed[3].status: expected String`, so the mismatch can be found without guessing.
+    public static func decodingFailure(_ error: DecodingError, endpoint: String?) -> CompanionAPIError {
+        let detail = DecodingDiagnostics.describe(error)
+        let location = endpoint.map { "\($0) → \(detail)" } ?? detail
+        return CompanionAPIError(kind: .decodingFailed, serverMessage: "Could not decode companion JSON at \(location)")
+    }
+
     public static func classifyTransport(_ error: Error, host: HostProfile?) -> CompanionAPIError {
         if let apiError = error as? CompanionAPIError {
             return apiError
         }
-        if error is DecodingError {
-            return CompanionAPIError(kind: .decodingFailed, serverMessage: "Could not decode companion JSON: \(error.localizedDescription)")
+        if let decodingError = error as? DecodingError {
+            return decodingFailure(decodingError, endpoint: nil)
         }
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain {

@@ -38,6 +38,12 @@ public struct AppToast: Identifiable, Equatable, Sendable {
     }
 }
 
+private struct NativePreviewCacheEntry {
+    let updatedAt: String
+    let preview: NativeSessionPreview
+    let storedAt: Date
+}
+
 @Observable
 @MainActor
 public final class AppStore {
@@ -72,6 +78,8 @@ public final class AppStore {
     public private(set) var nativeSessions: [NativeSessionSummary] = []
     public private(set) var nativeSessionsDir: String?
     public private(set) var isLoadingNativeSessions: Bool = false
+    /// Why the last history refresh failed; nil once one succeeds.
+    public private(set) var nativeSessionsError: String?
     public private(set) var advisorConfig: AdvisorConfigResponse?
 
     // MARK: - Navigation & Sheet State
@@ -105,6 +113,11 @@ public final class AppStore {
     private var pollTask: Task<Void, Never>?
     private var lastEtag: String?
     private var nativeSessionsEtag: String?
+    /// Incremented by every poll and every local change to the store; a poll reply is applied only if it is still the newest.
+    private var pollGeneration: UInt64 = 0
+    private var nativeSessionsGeneration: UInt64 = 0
+    private var hasLoadedNativeSessions = false
+    private var nativePreviewCache: [String: NativePreviewCacheEntry] = [:]
     private var lastCacheSaveAt: Date = .distantPast
     private var hasReceivedLiveSnapshotForHost = false
     private var lastActivityFetchAt: Date = .distantPast
@@ -369,20 +382,16 @@ public final class AppStore {
         notificationManager.resetTracking(for: id)
 
         if activeHostID == id {
+            stopPolling()
             activeHostID = hosts.first?.id
-            syncReducer.reset()
-            lastEtag = nil
-            snapshot = StoreSnapshot()
-            activityItems = []
-            selectedSessionID = nil
-            isDetailActiveOnCompact = false
+            resetHostScopedState()
             persistHostMetadata()
             if let nextID = activeHostID {
                 await hydrateOfflineCache(for: nextID)
                 startPolling()
                 await forceSync()
+                Task { await refreshModelsAndActivity() }
             } else {
-                stopPolling()
                 connectionStatus = .disconnected
             }
         } else {
@@ -400,27 +409,10 @@ public final class AppStore {
         stopPolling()
         activeHostID = hostID
         persistHostMetadata()
-
-        syncReducer.reset()
-        lastEtag = nil
-        nativeSessionsEtag = nil
-        lastNativeSessionsFetchAt = .distantPast
-        hasReceivedLiveSnapshotForHost = false
-        selectedSessionID = nil
-        isDetailActiveOnCompact = false
-        selectedSessionTab = .chat
-        snapshot = StoreSnapshot()
-        activityItems = []
-        nativeSessions = []
-        nativeSessionsDir = nil
-        advisorConfig = nil
-        cachedDiffsBySession = [:]
-        availableModels = []
-        commandsBySession = [:]
-        commandsByPath = [:]
-        priorDroppedSteerIds = []
+        resetHostScopedState()
 
         await hydrateOfflineCache(for: hostID)
+        guard activeHostID == hostID else { return }
         startPolling()
         await forceSync()
         Task { await refreshModelsAndActivity() }
@@ -475,8 +467,12 @@ public final class AppStore {
     // MARK: - Sync Engine & Offline Cache
 
     private func hydrateOfflineCache(for hostID: UUID) async {
-        if let cached = await offlineCache.load(hostID: hostID) {
+        let cached = await offlineCache.load(hostID: hostID)
+        // The host may have changed while the cache file was read.
+        guard hostID == activeHostID else { return }
+        if let cached {
             snapshot = await offlineCache.hydratedSnapshot(from: cached)
+            guard hostID == activeHostID else { return }
             activityItems = cached.activity
             cachedDiffsBySession = cached.diffs
             connectionStatus = .offline(
@@ -487,6 +483,39 @@ public final class AppStore {
         } else {
             connectionStatus = .connecting
         }
+    }
+
+    /// Forgets everything read from the previous host: sync cursors and ETags (a 304 against them would keep the old
+    /// host's data), the store, history, previews and catalogs. Bumping the generations drops replies still in flight.
+    private func resetHostScopedState() {
+        syncReducer.reset()
+        pollGeneration &+= 1
+        nativeSessionsGeneration &+= 1
+        lastEtag = nil
+        nativeSessionsEtag = nil
+        lastNativeSessionsFetchAt = .distantPast
+        lastActivityFetchAt = .distantPast
+        hasReceivedLiveSnapshotForHost = false
+        hasLoadedNativeSessions = false
+        selectedSessionID = nil
+        selectedNativeSessionFile = nil
+        isDetailActiveOnCompact = false
+        selectedSessionTab = .chat
+        snapshot = StoreSnapshot()
+        activityItems = []
+        nativeSessions = []
+        nativeSessionsDir = nil
+        nativeSessionsError = nil
+        isLoadingNativeSessions = false
+        nativePreviewCache = [:]
+        advisorConfig = nil
+        cachedDiffsBySession = [:]
+        cachedToolImages = [:]
+        availableModels = []
+        commandsBySession = [:]
+        commandsByPath = [:]
+        priorDroppedSteerIds = []
+        lastTailscaleInfo = nil
     }
 
     private func persistOfflineCacheNow() async {
@@ -548,25 +577,37 @@ public final class AppStore {
         notificationManager.triggerHaptic(.selection)
     }
 
+    /// One poll of `/api/state`. Polls can overlap (the poll loop, `forceSync` after an action or a return to the
+    /// foreground, `selectSession`): each takes a generation number, and a reply is applied only if no newer poll or
+    /// local change started since and the host is unchanged, so a slow older reply never overwrites newer state.
     public func pollOnce() async {
         guard let host = activeHost, let client = activeClient else {
             connectionStatus = .disconnected
             return
         }
+        pollGeneration &+= 1
+        let generation = pollGeneration
+        let isCurrent = { [weak self] in
+            guard let self else { return false }
+            return self.pollGeneration == generation && self.activeHost?.id == host.id
+        }
         if !hasReceivedLiveSnapshotForHost && snapshot.sessions.isEmpty {
             isInitialLoading = true
         }
-        defer { isInitialLoading = false }
+        defer { if isCurrent() { isInitialLoading = false } }
 
         do {
             let sid = selectedSessionID
+            // An ETag only stands for a reply this store applied: without one for this host, ask for the whole reply.
+            let etag = hasReceivedLiveSnapshotForHost ? lastEtag : nil
             let result = try await client.fetchState(
                 sessionId: sid,
                 since: syncReducer.sinceToken(for: sid),
                 storeToken: syncReducer.storeToken,
                 orderDelta: true,
-                etag: lastEtag
+                etag: etag
             )
+            guard isCurrent(), sid == selectedSessionID else { return }
 
             switch result {
             case .notModified:
@@ -619,11 +660,14 @@ public final class AppStore {
             if Date().timeIntervalSince(lastNativeSessionsFetchAt) > 20 {
                 Task { await refreshNativeSessions() }
             }
-        } catch let apiError as CompanionAPIError {
+        } catch {
+            guard isCurrent() else { return }
+            let apiError = (error as? CompanionAPIError) ?? TailscaleDiagnostic.classifyTransport(error, host: host)
             if apiError.kind == .cancelled { return }
             reachabilityByHost[host.id] = .unreachable(apiError.localizedDescription)
             if hasReceivedLiveSnapshotForHost || !snapshot.sessions.isEmpty {
                 let cachedAt = await offlineCache.load(hostID: host.id)?.savedAt
+                guard isCurrent() else { return }
                 connectionStatus = .offline(
                     cachedAt: cachedAt,
                     errorMessage: apiError.localizedDescription,
@@ -632,10 +676,6 @@ public final class AppStore {
             } else {
                 connectionStatus = .error(errorMessage: apiError.localizedDescription, errorKind: apiError.kind)
             }
-        } catch {
-            let apiError = TailscaleDiagnostic.classifyTransport(error, host: host)
-            reachabilityByHost[host.id] = .unreachable(apiError.localizedDescription)
-            connectionStatus = .error(errorMessage: apiError.localizedDescription, errorKind: apiError.kind)
         }
     }
 
@@ -676,7 +716,7 @@ public final class AppStore {
     // MARK: - Shared Catalog & Metadata Refreshers
 
     public func refreshModelsAndActivity() async {
-        guard let client = activeClient else { return }
+        guard activeClient != nil else { return }
         async let modelsTask: Void = refreshModels()
         async let nativeTask: Void = refreshNativeSessions(force: true)
         async let advisorTask: Void = refreshAdvisorConfig()
@@ -716,13 +756,19 @@ public final class AppStore {
         }
     }
 
+    /// Refreshes the OMP history list. Overlapping calls (the list's `.task`, pull-to-refresh, the poll loop's periodic
+    /// refresh) all send, but only the newest reply for the current host is applied; a 304 keeps the list only when
+    /// this host's list was actually loaded under that ETag.
     public func refreshNativeSessions(force: Bool = false) async {
-        guard let client = activeClient else { return }
-        if force { nativeSessionsEtag = nil }
+        guard let client = activeClient, let hostID = activeHostID else { return }
+        if force || !hasLoadedNativeSessions { nativeSessionsEtag = nil }
+        nativeSessionsGeneration &+= 1
+        let generation = nativeSessionsGeneration
         lastNativeSessionsFetchAt = Date()
         if nativeSessions.isEmpty { isLoadingNativeSessions = true }
-        defer { isLoadingNativeSessions = false }
-        if let res = try? await client.fetchOmpSessions(etag: nativeSessionsEtag) {
+        do {
+            let res = try await client.fetchOmpSessions(etag: nativeSessionsEtag)
+            guard generation == nativeSessionsGeneration, hostID == activeHostID else { return }
             switch res {
             case .notModified:
                 break
@@ -730,15 +776,33 @@ public final class AppStore {
                 nativeSessionsEtag = tag
                 nativeSessionsDir = data.dir
                 nativeSessions = data.sessions
+                hasLoadedNativeSessions = true
+            }
+            nativeSessionsError = nil
+        } catch {
+            guard generation == nativeSessionsGeneration, hostID == activeHostID else { return }
+            if let apiError = error as? CompanionAPIError, apiError.kind == .cancelled {
+                // Leave the spinner to the request that superseded this one.
+            } else {
+                nativeSessionsError = error.localizedDescription
             }
         }
+        isLoadingNativeSessions = false
     }
 
+    /// The activity log from `GET /api/activity`, which carries nothing else (the whole store reply also carries every
+    /// transcript, hundreds of MB on a busy host).
     public func refreshActivityOnly() async {
-        guard let client = activeClient else { return }
+        guard let client = activeClient, let hostID = activeHostID else { return }
         lastActivityFetchAt = Date()
-        if let full = try? await client.fetchFullState() {
-            activityItems = full.activity ?? []
+        do {
+            let res = try await client.fetchActivity()
+            guard hostID == activeHostID else { return }
+            activityItems = res.activity
+        } catch {
+            guard hostID == activeHostID else { return }
+            if let apiError = error as? CompanionAPIError, apiError.kind == .cancelled { return }
+            showToast("Activity: \(error.localizedDescription)", isError: true)
         }
     }
     public func refreshCommandsIfNeeded(for sessionId: String, force: Bool = false) async {
@@ -779,6 +843,25 @@ public final class AppStore {
         syncReducer.integrateSessionReply(session, into: &mutable)
         snapshot = mutable
         lastEtag = nil
+        // A poll sent before this reply could carry the session's older state: drop it.
+        pollGeneration &+= 1
+    }
+
+    // MARK: - OMP History Preview Cache
+
+    /// The last preview read for a history file, reused while the file is unchanged so reopening a preview shows it at
+    /// once (the sheet still refreshes it). Keyed by file and its `updatedAt`, so a changed file is never shown stale.
+    public func cachedNativePreview(file: String, updatedAt: String) -> NativeSessionPreview? {
+        guard let entry = nativePreviewCache[file], entry.updatedAt == updatedAt else { return nil }
+        return entry.preview
+    }
+
+    public func rememberNativePreview(_ preview: NativeSessionPreview, file: String, updatedAt: String) {
+        if nativePreviewCache[file] == nil, nativePreviewCache.count >= 12,
+           let oldest = nativePreviewCache.min(by: { $0.value.storedAt < $1.value.storedAt })?.key {
+            nativePreviewCache.removeValue(forKey: oldest)
+        }
+        nativePreviewCache[file] = NativePreviewCacheEntry(updatedAt: updatedAt, preview: preview, storedAt: Date())
     }
 
     public func abortActiveSession() async {
@@ -793,29 +876,56 @@ public final class AppStore {
     }
 
     public func togglePin(for session: SessionSummary) async {
-        guard let client = activeClient else { return }
-        let target = !isPinned(session)
-        do {
-            let res = try await client.setPinned(key: session.panelKey, pinned: target)
-            snapshot.pinned = res.pinned
-            snapshot.archived = res.archived
+        if await setPinned(key: session.panelKey, pinned: !isPinned(session)) {
             notificationManager.triggerHaptic(.selection)
-        } catch {
-            showToast(error.localizedDescription, isError: true)
         }
     }
 
     public func toggleArchive(for session: SessionSummary) async {
-        guard let client = activeClient else { return }
-        let target = !isArchived(session)
-        do {
-            let res = try await client.setArchived(key: session.panelKey, archived: target)
-            snapshot.pinned = res.pinned
-            snapshot.archived = res.archived
+        if await setArchived(key: session.panelKey, archived: !isArchived(session)) {
             notificationManager.triggerHaptic(.selection)
+        }
+    }
+
+    /// Pins or unpins any panel key (`s:<id>` for a session, `f:<file>` for an OMP history transcript). The reply's
+    /// lists are applied at once, and polls already in flight are dropped so a reply read before the change cannot put
+    /// the old lists back; a fresh poll then confirms them.
+    @discardableResult
+    public func setPinned(key: String, pinned: Bool) async -> Bool {
+        guard let client = activeClient else { return false }
+        let hostID = activeHostID
+        do {
+            let res = try await client.setPinned(key: key, pinned: pinned)
+            guard hostID == activeHostID else { return false }
+            applyListMutation(pinned: res.pinned, archived: res.archived)
+            await forceSync()
+            return true
         } catch {
             showToast(error.localizedDescription, isError: true)
+            return false
         }
+    }
+
+    @discardableResult
+    public func setArchived(key: String, archived: Bool) async -> Bool {
+        guard let client = activeClient else { return false }
+        let hostID = activeHostID
+        do {
+            let res = try await client.setArchived(key: key, archived: archived)
+            guard hostID == activeHostID else { return false }
+            applyListMutation(pinned: res.pinned, archived: res.archived)
+            await forceSync()
+            return true
+        } catch {
+            showToast(error.localizedDescription, isError: true)
+            return false
+        }
+    }
+
+    private func applyListMutation(pinned: [String], archived: [String]) {
+        pollGeneration &+= 1
+        snapshot.pinned = pinned
+        snapshot.archived = archived
     }
 
     public func completeSession(_ session: SessionSummary) async {

@@ -55,6 +55,18 @@ public struct NativeHistoryView: View {
                         SkeletonListPlaceholder(count: 5)
                             .listRowBackground(Color.clear)
                     }
+                } else if let error = store.nativeSessionsError, store.nativeSessions.isEmpty {
+                    Section {
+                        OMPEmptyStateView(
+                            systemImage: "exclamationmark.triangle",
+                            title: "Could Not Load History",
+                            message: error,
+                            actionTitle: "Retry"
+                        ) {
+                            Task { await store.refreshNativeSessions(force: true) }
+                        }
+                        .listRowBackground(Color.clear)
+                    }
                 } else if filteredSessions.isEmpty {
                     Section {
                         OMPEmptyStateView(
@@ -103,19 +115,29 @@ public struct NativeHistoryView: View {
             }
             .task {
                 await store.refreshNativeSessions()
-                if let file = store.selectedNativeSessionFile,
-                   let match = store.nativeSessions.first(where: { $0.file == file }) {
-                    previewingItem = match
-                    store.selectedNativeSessionFile = nil
-                }
+                openRequestedPreview()
             }
-            .sheet(item: $previewingItem) { item in
+            .onChange(of: store.selectedNativeSessionFile) { _, _ in
+                openRequestedPreview()
+            }
+            .sheet(item: $previewingItem, onDismiss: {
+                // Picks up a title, size or pin change made while the preview was open.
+                Task { await store.refreshNativeSessions() }
+            }) { item in
                 NativeSessionPreviewSheet(store: store, summary: item) { resumed in
                     dismiss()
                     Task { await store.selectSession(resumed.id, tab: .chat) }
                 }
             }
         }
+    }
+
+    /// Opens the preview another screen asked for (`selectedNativeSessionFile`), once the list holds that file.
+    private func openRequestedPreview() {
+        guard let file = store.selectedNativeSessionFile,
+              let match = store.nativeSessions.first(where: { $0.file == file }) else { return }
+        store.selectedNativeSessionFile = nil
+        previewingItem = match
     }
 
     @ViewBuilder
@@ -206,25 +228,11 @@ public struct NativeHistoryView: View {
     }
 
     private func togglePin(_ item: NativeSessionSummary) async {
-        guard let client = store.activeClient else { return }
-        let isPinned = store.snapshot.pinned.contains(item.panelKey)
-        do {
-            _ = try await client.setPinned(key: item.panelKey, pinned: !isPinned)
-            await store.forceSync()
-        } catch {
-            store.showToast(error.localizedDescription, isError: true)
-        }
+        await store.setPinned(key: item.panelKey, pinned: !store.snapshot.pinned.contains(item.panelKey))
     }
 
     private func toggleArchive(_ item: NativeSessionSummary) async {
-        guard let client = store.activeClient else { return }
-        let isArchived = store.snapshot.archived.contains(item.panelKey)
-        do {
-            _ = try await client.setArchived(key: item.panelKey, archived: !isArchived)
-            await store.forceSync()
-        } catch {
-            store.showToast(error.localizedDescription, isError: true)
-        }
+        await store.setArchived(key: item.panelKey, archived: !store.snapshot.archived.contains(item.panelKey))
     }
 }
 
@@ -246,6 +254,7 @@ private struct NativeSessionPreviewSheet: View {
     @State private var launchOptions: SessionLaunchOptions?
     @State private var showLaunchOptions = false
     @State private var isResuming = false
+    @State private var lightboxImage: LightboxImagePayload?
 
     var body: some View {
         NavigationStack {
@@ -261,7 +270,7 @@ private struct NativeSessionPreviewSheet: View {
                                 .ompCard(palette)
                         }
 
-                        if isLoading {
+                        if isLoading && preview == nil {
                             SkeletonListPlaceholder(count: 4)
                         } else if let preview {
                             if preview.messages.isEmpty {
@@ -271,8 +280,10 @@ private struct NativeSessionPreviewSheet: View {
                                     message: "Resume this session below to send a prompt."
                                 )
                             } else {
-                                ForEach(preview.messages) { msg in
-                                    previewMessageCard(msg)
+                                LazyVStack(alignment: .leading, spacing: 12) {
+                                    ForEach(preview.messages) { msg in
+                                        previewMessageCard(msg)
+                                    }
                                 }
                             }
                         }
@@ -292,8 +303,11 @@ private struct NativeSessionPreviewSheet: View {
                     Button("Close") { dismiss() }
                 }
             }
-            .task {
+            .task(id: summary.file) {
                 await loadPreview()
+            }
+            .sheet(item: $lightboxImage) { payload in
+                ImageLightboxSheet(payload: payload)
             }
             .sheet(isPresented: $showLaunchOptions) {
                 LaunchOptionsSheet(
@@ -343,29 +357,41 @@ private struct NativeSessionPreviewSheet: View {
 
     @ViewBuilder
     private func previewMessageCard(_ msg: TranscriptMessage) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(msg.role.rawValue.uppercased())
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(msg.role == .user ? palette.accent : palette.muted)
-                Spacer()
-                if let at = msg.at {
-                    Text(CompanionFormatters.relativeDate(at))
-                        .font(.caption2)
-                        .foregroundStyle(palette.muted)
+        switch msg.role {
+        case .tool:
+            ToolExecutionCard(
+                store: store,
+                sessionCwd: preview?.cwd ?? summary.cwd ?? "",
+                message: msg,
+                onTapImage: { data, title in lightboxImage = LightboxImagePayload(title: title, data: data) }
+            )
+        case .thinking:
+            ThinkingTraceCard(message: msg)
+        default:
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(msg.role.rawValue.uppercased())
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(msg.role == .user ? palette.accent : palette.muted)
+                    Spacer()
+                    if let at = msg.at {
+                        Text(CompanionFormatters.relativeDate(at))
+                            .font(.caption2)
+                            .foregroundStyle(palette.muted)
+                    }
+                }
+                if msg.role == .assistant {
+                    MarkdownView(text: msg.text)
+                } else {
+                    Text(msg.text)
+                        .font(.callout)
+                        .foregroundStyle(palette.foreground)
+                        .textSelection(.enabled)
                 }
             }
-            if msg.role == .assistant {
-                MarkdownView(text: msg.text)
-            } else {
-                Text(msg.text)
-                    .font(.callout)
-                    .foregroundStyle(palette.foreground)
-                    .textSelection(.enabled)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .ompCard(palette)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .ompCard(palette)
     }
 
     private var resumeBar: some View {
@@ -442,18 +468,34 @@ private struct NativeSessionPreviewSheet: View {
         .background(palette.surface)
     }
 
+    /// Loads this sheet's preview. The sheet's `.task(id:)` cancels it when the sheet closes or shows another file,
+    /// and a reply for a file this sheet no longer shows is dropped, so a slow earlier request never lands on the
+    /// next session's preview.
     private func loadPreview() async {
+        let file = summary.file
+        if let cached = store.cachedNativePreview(file: file, updatedAt: summary.updatedAt) {
+            preview = cached
+            errorMessage = nil
+            isLoading = false
+        }
         guard let client = store.activeClient else {
             isLoading = false
+            if preview == nil { errorMessage = "No companion host is selected." }
             return
         }
-        isLoading = true
-        defer { isLoading = false }
+        if preview == nil { isLoading = true }
         do {
-            preview = try await client.previewOmpSession(file: summary.file)
+            let fresh = try await client.previewOmpSession(file: file)
+            guard !Task.isCancelled, file == summary.file else { return }
+            store.rememberNativePreview(fresh, file: file, updatedAt: summary.updatedAt)
+            preview = fresh
+            errorMessage = nil
         } catch {
+            guard !Task.isCancelled, file == summary.file else { return }
+            if let apiError = error as? CompanionAPIError, apiError.kind == .cancelled { return }
             errorMessage = error.localizedDescription
         }
+        isLoading = false
     }
 
     private func resumeNow() async {

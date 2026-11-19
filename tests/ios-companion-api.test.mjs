@@ -77,3 +77,20 @@ test('web dashboard includes Pair iOS App button and valid SVG QR generator', as
   assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 \d+ \d+"/);
   assert.match(svg, /<path fill="#111" d="(?:M\d+,\d+h1v1h-1z)+"\/>/);
 });
+
+test('GET /api/activity returns the activity log without the session store', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'omp-ios-activity-'));
+  const dataDir = join(dir, 'data');
+  await mkdir(dataDir, { recursive: true });
+  const entry = { id: 'a1', projectId: 'p1', sessionId: 's1', text: 'Finished the fix', type: 'done', at: '2026-11-19T10:00:00.000Z' };
+  await writeFile(join(dataDir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [entry], archived: [], pinned: [] }));
+  const app = await createCompanion({ dataDir, omp: fakeOmp(() => ({})) });
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  const port = app.server.address().port;
+
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/activity`)).status, 401);
+  const body = await fetch(`http://127.0.0.1:${port}/api/activity`, { headers: { Authorization: `Bearer ${app.token}` } }).then(r => r.json());
+  assert.deepEqual(body, { activity: [entry] });
+});
