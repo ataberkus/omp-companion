@@ -66,7 +66,7 @@ public struct TodoPlanView: View {
                 .listRowBackground(palette.card)
 
                 if let planMd = session._planReview?.markdownContent, !planMd.isEmpty {
-                    MarkdownView(planMd)
+                    MarkdownView(text: planMd)
                         .padding(.vertical, 4)
                         .listRowBackground(palette.card)
                 }

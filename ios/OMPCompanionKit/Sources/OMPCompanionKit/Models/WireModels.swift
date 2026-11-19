@@ -487,7 +487,7 @@ public struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         self.promptTrimmed = promptTrimmed
         self.error = error
         self.createdAt = createdAt
-        self.updatedAt = updatedAt
+        self.updatedAt = updatedAt ?? ""
         self.lastActivityAt = lastActivityAt
         self.workStartedAt = workStartedAt
         self.workFinishedAt = workFinishedAt

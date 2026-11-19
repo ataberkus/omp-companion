@@ -815,7 +815,7 @@ public struct PlanReviewSheet: View {
                             }
                         }
 
-                        MarkdownView(plan.markdownContent)
+                        MarkdownView(text: plan.markdownContent)
                             .ompCard(palette)
 
                         VStack(alignment: .leading, spacing: 10) {

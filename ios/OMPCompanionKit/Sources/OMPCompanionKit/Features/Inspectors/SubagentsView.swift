@@ -286,7 +286,7 @@ private struct SubagentTranscriptSheet: View {
                                             .font(.caption2.weight(.bold))
                                             .foregroundStyle(msg.role == .user ? palette.accent : palette.green)
                                         if !msg.text.isEmpty {
-                                            MarkdownView(msg.text)
+                                            MarkdownView(text: msg.text)
                                         }
                                         if let tool = msg.tool {
                                             Text("\(tool.name): \(tool.intent ?? tool.args ?? tool.status)")

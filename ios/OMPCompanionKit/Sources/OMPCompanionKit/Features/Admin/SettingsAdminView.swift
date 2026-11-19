@@ -74,7 +74,7 @@ public struct SettingsAdminView: View {
                         .listRowBackground(palette.card)
                     }
 
-                    Toggle("Attention Notifications", isOn: $store.notificationManager.notificationsEnabled)
+                    Toggle("Attention Notifications", isOn: Binding(get: { store.notificationManager.notificationsEnabled }, set: { store.notificationManager.notificationsEnabled = $0 }))
                         .listRowBackground(palette.card)
 
                     if store.notificationManager.authorizationStatus == .notDetermined {
@@ -103,7 +103,7 @@ public struct SettingsAdminView: View {
                         .listRowBackground(palette.card)
                     }
 
-                    Toggle("Haptic Feedback", isOn: $store.notificationManager.hapticsEnabled)
+                    Toggle("Haptic Feedback", isOn: Binding(get: { store.notificationManager.hapticsEnabled }, set: { store.notificationManager.hapticsEnabled = $0 }))
                         .listRowBackground(palette.card)
                 }
 

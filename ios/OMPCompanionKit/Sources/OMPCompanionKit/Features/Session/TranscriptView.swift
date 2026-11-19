@@ -390,7 +390,7 @@ public struct TranscriptView: View {
             }
 
             if !msg.text.isEmpty {
-                MarkdownView(msg.text)
+                MarkdownView(text: msg.text)
             }
         }
         .padding(12)
@@ -439,7 +439,7 @@ public struct TranscriptView: View {
             }
 
             if !msg.text.isEmpty {
-                MarkdownView(msg.text)
+                MarkdownView(text: msg.text)
             }
 
             if let notes = msg.notes, !notes.isEmpty {
@@ -1041,7 +1041,7 @@ public struct BtwSideSheet: View {
                 .foregroundStyle(palette.accent)
 
             if !answer.isEmpty {
-                MarkdownView(answer)
+                MarkdownView(text: answer)
             } else if status == "running" {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)

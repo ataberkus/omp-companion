@@ -349,8 +349,8 @@ public struct QuickStartSheet: View {
             if let data = try? await item.loadTransferable(type: Data.self) {
                 let existingBytes = attachments.reduce(0) { $0 + $1.base64Data.utf8.count }
                 do {
-                    let processed = try ImageAttachmentProcessor.process(
-                        rawData: data,
+                    let processed = try ImageAttachmentProcessor.processRawImageData(
+                        data,
                         suggestedName: "photo.jpg",
                         existingBase64Bytes: existingBytes
                     )
@@ -369,8 +369,8 @@ public struct QuickStartSheet: View {
             guard let data = try? Data(contentsOf: url) else { continue }
             let existingBytes = attachments.reduce(0) { $0 + $1.base64Data.utf8.count }
             do {
-                let processed = try ImageAttachmentProcessor.process(
-                    rawData: data,
+                let processed = try ImageAttachmentProcessor.processRawImageData(
+                    data,
                     suggestedName: url.lastPathComponent,
                     existingBase64Bytes: existingBytes
                 )
