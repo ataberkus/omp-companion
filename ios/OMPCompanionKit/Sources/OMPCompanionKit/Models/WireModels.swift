@@ -144,6 +144,23 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         self.canRestart = canRestart
         self.autoShutdown = autoShutdown
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        projects = c.lossyArray(WorkspaceProject.self, forKey: .projects) ?? []
+        sessions = c.lossyArray(SessionSummary.self, forKey: .sessions) ?? []
+        archived = c.lossyArray(String.self, forKey: .archived) ?? []
+        pinned = c.lossyArray(String.self, forKey: .pinned) ?? []
+        ui = c.lenient(SidebarUI.self, forKey: .ui)
+        drafts = c.lenient([String: Double].self, forKey: .drafts)
+        editor = c.lenient(String.self, forKey: .editor)
+        enhanceMode = c.lenient(String.self, forKey: .enhanceMode)
+        accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
+        activity = c.lossyArray(ActivityItem.self, forKey: .activity)
+        instance = c.lenient(String.self, forKey: .instance)
+        canRestart = c.lenientFlag(forKey: .canRestart)
+        autoShutdown = c.lenient(AutoShutdownState.self, forKey: .autoShutdown)
+    }
 }
 
 public struct StatePollResponse: Codable, Sendable {
@@ -164,6 +181,28 @@ public struct StatePollResponse: Codable, Sendable {
     public var instance: String?
     public var canRestart: Bool?
     public var autoShutdown: AutoShutdownState?
+
+    // `sx` and `tx` stay strict at their own level (a store delta without its epoch/rev cannot be applied); everything
+    // inside them is lenient.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sx = try c.decodeIfPresent(StoreDelta.self, forKey: .sx)
+        tx = try c.decodeIfPresent(TranscriptDelta.self, forKey: .tx)
+        btw = c.lossyArray(BtwRecord.self, forKey: .btw)
+        projects = c.lossyArray(WorkspaceProject.self, forKey: .projects)
+        sessions = c.lossyArray(SessionSummary.self, forKey: .sessions)
+        archived = c.lossyArray(String.self, forKey: .archived)
+        pinned = c.lossyArray(String.self, forKey: .pinned)
+        ui = c.lenient(SidebarUI.self, forKey: .ui)
+        drafts = c.lenient([String: Double].self, forKey: .drafts)
+        editor = c.lenient(String.self, forKey: .editor)
+        enhanceMode = c.lenient(String.self, forKey: .enhanceMode)
+        accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
+        activity = c.lossyArray(ActivityItem.self, forKey: .activity)
+        instance = c.lenient(String.self, forKey: .instance)
+        canRestart = c.lenientFlag(forKey: .canRestart)
+        autoShutdown = c.lenient(AutoShutdownState.self, forKey: .autoShutdown)
+    }
 }
 
 public struct StoreTop: Codable, Hashable, Sendable {
@@ -178,6 +217,21 @@ public struct StoreTop: Codable, Hashable, Sendable {
     public var instance: String?
     public var canRestart: Bool?
     public var autoShutdown: AutoShutdownState?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        projects = c.lossyArray(WorkspaceProject.self, forKey: .projects) ?? []
+        archived = c.lossyArray(String.self, forKey: .archived) ?? []
+        pinned = c.lossyArray(String.self, forKey: .pinned) ?? []
+        ui = c.lenient(SidebarUI.self, forKey: .ui)
+        drafts = c.lenient([String: Double].self, forKey: .drafts)
+        editor = c.lenient(String.self, forKey: .editor)
+        enhanceMode = c.lenient(String.self, forKey: .enhanceMode)
+        accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
+        instance = c.lenient(String.self, forKey: .instance)
+        canRestart = c.lenientFlag(forKey: .canRestart)
+        autoShutdown = c.lenient(AutoShutdownState.self, forKey: .autoShutdown)
+    }
 }
 
 public struct StoreDelta: Codable, Sendable {
@@ -186,6 +240,15 @@ public struct StoreDelta: Codable, Sendable {
     public var top: StoreTop?
     public var order: [String]?
     public var changed: [SessionSummary]?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        epoch = try c.decode(String.self, forKey: .epoch)
+        rev = try c.decode(Int.self, forKey: .rev)
+        top = c.lenient(StoreTop.self, forKey: .top)
+        order = c.lossyArray(String.self, forKey: .order)
+        changed = c.lossyArray(SessionSummary.self, forKey: .changed)
+    }
 }
 
 public struct TranscriptDelta: Codable, Sendable {
@@ -196,6 +259,17 @@ public struct TranscriptDelta: Codable, Sendable {
     public var orderEdit: OrderEdit?
     public var changed: [TranscriptMessage]?
     public var messages: [TranscriptMessage]?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        session = try c.decode(String.self, forKey: .session)
+        epoch = c.lenient(String.self, forKey: .epoch)
+        rev = c.lenient(Int.self, forKey: .rev)
+        order = c.lossyArray(String.self, forKey: .order)
+        orderEdit = c.lenient(OrderEdit.self, forKey: .orderEdit)
+        changed = c.lossyArray(TranscriptMessage.self, forKey: .changed)
+        messages = c.lossyArray(TranscriptMessage.self, forKey: .messages)
+    }
 }
 
 public struct OrderEdit: Codable, Hashable, Sendable {
@@ -290,6 +364,12 @@ public enum SessionStatus: String, Codable, Hashable, Sendable {
     case paused
     case done
     case error
+
+    /// A status this build does not know yet reads as paused (idle) rather than failing the session.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = SessionStatus(rawValue: raw) ?? .paused
+    }
 
     public var label: String {
         switch self {
@@ -534,6 +614,86 @@ public struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
         self._btw = _btw
     }
 
+    // Lenient: only `id` is required. An unexpected value in any other field reads as its default instead of failing
+    // the whole store reply (the companion sends `worktreeRemoved` as the ISO time the worktree was removed).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        projectId = c.lenient(String.self, forKey: .projectId)
+        title = c.lenient(String.self, forKey: .title) ?? ""
+        cwd = c.lenient(String.self, forKey: .cwd) ?? ""
+        status = c.lenient(SessionStatus.self, forKey: .status) ?? .paused
+        branch = c.lenient(String.self, forKey: .branch)
+        isolated = c.lenientFlag(forKey: .isolated)
+        baseSha = c.lenient(String.self, forKey: .baseSha)
+        worktreeRemoved = c.lenientFlag(forKey: .worktreeRemoved)
+        native = c.lenientFlag(forKey: .native)
+        sessionFile = c.lenient(String.self, forKey: .sessionFile)
+        modelSelector = c.lenient(String.self, forKey: .modelSelector)
+        thinkingChoice = c.lenient(String.self, forKey: .thinkingChoice)
+        provider = c.lenient(String.self, forKey: .provider)
+        model = c.lenient(String.self, forKey: .model)
+        thinking = c.lenient(String.self, forKey: .thinking)
+        tokens = c.lenient(Int.self, forKey: .tokens)
+        cost = c.lenient(Double.self, forKey: .cost)
+        contextPercent = c.lenient(Double.self, forKey: .contextPercent)
+        contextTokens = c.lenient(Int.self, forKey: .contextTokens)
+        contextWindow = c.lenient(Int.self, forKey: .contextWindow)
+        tps = c.lenient(Double.self, forKey: .tps)
+        autoApprove = c.lenientFlag(forKey: .autoApprove)
+        autoTitle = c.lenientFlag(forKey: .autoTitle)
+        renamed = c.lenientFlag(forKey: .renamed)
+        draft = c.lenientFlag(forKey: .draft)
+        promptTrimmed = c.lenientFlag(forKey: .promptTrimmed)
+        error = c.lenient(String.self, forKey: .error)
+        createdAt = c.lenient(String.self, forKey: .createdAt)
+        updatedAt = c.lenient(String.self, forKey: .updatedAt) ?? ""
+        lastActivityAt = c.lenient(String.self, forKey: .lastActivityAt)
+        workStartedAt = c.lenient(String.self, forKey: .workStartedAt)
+        workFinishedAt = c.lenient(String.self, forKey: .workFinishedAt)
+        hidden = c.lenientFlag(forKey: .hidden)
+        fast = c.lenient(FastModeState.self, forKey: .fast)
+        autoCompaction = c.lenientFlag(forKey: .autoCompaction)
+        modes = c.lenient(SessionModes.self, forKey: .modes)
+        prefs = c.lenient(SessionPrefs.self, forKey: .prefs)
+        launch = c.lenient(SessionLaunchOptions.self, forKey: .launch)
+        planMode = c.lenient(PlanModeState.self, forKey: .planMode)
+        goal = c.lenient(GoalState.self, forKey: .goal)
+        advisor = c.lenient(AdvisorState.self, forKey: .advisor)
+        todos = c.lossyArray(TodoPhase.self, forKey: .todos)
+        subagents = c.lenient(Int.self, forKey: .subagents)
+        subagentList = c.lossyArray(SubagentInfo.self, forKey: .subagentList)
+        vibeMode = c.lenient(VibeModeState.self, forKey: .vibeMode)
+        queuedMessages = c.lossyArray(QueuedMessage.self, forKey: .queuedMessages)
+        messages = c.lossyArray(TranscriptMessage.self, forKey: .messages)
+        uiRequests = c.lossyArray(UIRequest.self, forKey: .uiRequests)
+        _overlaps = c.lossyArray(SessionOverlap.self, forKey: ._overlaps)
+        _status = c.lenient([String: String].self, forKey: ._status)
+        _widgets = c.lenient([String: [String]].self, forKey: ._widgets)
+        _commandRuns = c.lenient([String: String].self, forKey: ._commandRuns)
+        _notices = c.lossyArray(SessionNotice.self, forKey: ._notices)
+        _retry = c.lenient(RetryState.self, forKey: ._retry)
+        _openUrl = c.lenient(OpenUrlPrompt.self, forKey: ._openUrl)
+        _editorText = c.lenient(EditorTextPrompt.self, forKey: ._editorText)
+        _rateLimit = c.lenient(RateLimitHint.self, forKey: ._rateLimit)
+        _connectionLost = c.lenientFlag(forKey: ._connectionLost)
+        _planReview = c.lenient(PlanProposal.self, forKey: ._planReview)
+        _planSupported = c.lenientFlag(forKey: ._planSupported)
+        _goalSupported = c.lenientFlag(forKey: ._goalSupported)
+        _goalAvailable = c.lenientFlag(forKey: ._goalAvailable)
+        _unhosted = c.lenient([String].self, forKey: ._unhosted)
+        _thinkingLevels = c.lenient([String].self, forKey: ._thinkingLevels)
+        _slow = c.lenient(SlowModeState.self, forKey: ._slow)
+        _cacheWarming = c.lenient(String.self, forKey: ._cacheWarming)
+        _loop = c.lenient(LoopState.self, forKey: ._loop)
+        _task = c.lenient(String.self, forKey: ._task)
+        _bash = c.lenient(String.self, forKey: ._bash)
+        rateLimitResume = c.lenient(AutoResumeWindow.self, forKey: .rateLimitResume)
+        connectionResume = c.lenient(ConnectionResumeWindow.self, forKey: .connectionResume)
+        _compacting = c.lenientFlag(forKey: ._compacting)
+        _btw = c.lossyArray(BtwRecord.self, forKey: ._btw)
+    }
+
     public var isWorking: Bool {
         status == .running || status == .queued
     }
@@ -639,14 +799,14 @@ public struct TranscriptMessage: Codable, Identifiable, Hashable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        role = try c.decodeIfPresent(MessageRole.self, forKey: .role) ?? .system
-        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
-        at = try c.decodeIfPresent(String.self, forKey: .at)
-        startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt)
-        model = try c.decodeIfPresent(String.self, forKey: .model)
-        from = try c.decodeIfPresent(String.self, forKey: .from)
-        adv = try c.decodeIfPresent(String.self, forKey: .adv)
-        hasImage = try c.decodeIfPresent(Bool.self, forKey: .hasImage)
+        role = c.lenient(MessageRole.self, forKey: .role) ?? .system
+        text = c.lenient(String.self, forKey: .text) ?? ""
+        at = c.lenient(String.self, forKey: .at)
+        startedAt = c.lenient(String.self, forKey: .startedAt)
+        model = c.lenient(String.self, forKey: .model)
+        from = c.lenient(String.self, forKey: .from)
+        adv = c.lenient(String.self, forKey: .adv)
+        hasImage = c.lenientFlag(forKey: .hasImage)
         // imagePreview on companion can be either a single String or [String]
         if let arr = try? c.decodeIfPresent([String].self, forKey: .imagePreview) {
             imagePreview = arr
@@ -655,12 +815,12 @@ public struct TranscriptMessage: Codable, Identifiable, Hashable, Sendable {
         } else {
             imagePreview = nil
         }
-        steer = try c.decodeIfPresent(SteerState.self, forKey: .steer)
-        entryId = try c.decodeIfPresent(String.self, forKey: .entryId)
-        ompAt = try c.decodeIfPresent(Double.self, forKey: .ompAt)
-        tool = try c.decodeIfPresent(ToolRecord.self, forKey: .tool)
-        notes = try c.decodeIfPresent([AdvisorNote].self, forKey: .notes)
-        sourceTimestamp = try c.decodeIfPresent(Double.self, forKey: .sourceTimestamp)
+        steer = c.lenient(SteerState.self, forKey: .steer)
+        entryId = c.lenient(String.self, forKey: .entryId)
+        ompAt = c.lenient(Double.self, forKey: .ompAt)
+        tool = c.lenient(ToolRecord.self, forKey: .tool)
+        notes = c.lossyArray(AdvisorNote.self, forKey: .notes)
+        sourceTimestamp = c.lenient(Double.self, forKey: .sourceTimestamp)
     }
 }
 
@@ -722,6 +882,28 @@ public struct ToolRecord: Codable, Hashable, Sendable {
         self.tasks = tasks
         self.command = command
         self.exitCode = exitCode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = c.lenient(String.self, forKey: .name) ?? "tool"
+        intent = c.lenient(String.self, forKey: .intent)
+        // The companion sends `args` as JSON text (clipped at 6,000 chars); an object from another build reads as its JSON.
+        if let text = c.lenient(String.self, forKey: .args) {
+            args = text
+        } else if let value = c.lenient(JSONValue.self, forKey: .args), value != .null {
+            args = value.displayString
+        } else {
+            args = nil
+        }
+        status = c.lenient(String.self, forKey: .status) ?? "done"
+        result = c.lenient(String.self, forKey: .result)
+        ms = c.lenient(Int.self, forKey: .ms)
+        images = c.lossyArray(ToolImageRef.self, forKey: .images)
+        files = c.lossyArray(ToolFileDiff.self, forKey: .files)
+        tasks = c.lossyArray(ToolTaskItem.self, forKey: .tasks)
+        command = c.lenient(String.self, forKey: .command)
+        exitCode = c.lenient(Int.self, forKey: .exitCode)
     }
 }
 
@@ -1112,6 +1294,12 @@ public struct TodoPhase: Codable, Hashable, Identifiable, Sendable {
         self.name = name
         self.tasks = tasks
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = c.lenient(String.self, forKey: .name) ?? ""
+        tasks = c.lossyArray(TodoItem.self, forKey: .tasks) ?? []
+    }
 }
 
 public enum TodoStatus: String, Codable, Hashable, CaseIterable, Sendable {
@@ -1120,6 +1308,12 @@ public enum TodoStatus: String, Codable, Hashable, CaseIterable, Sendable {
     case completed
     case abandoned
     case blocked
+
+    /// A status this build does not know yet reads as pending rather than failing the plan.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = TodoStatus(rawValue: raw) ?? .pending
+    }
 
     public var label: String {
         switch self {
@@ -1147,6 +1341,24 @@ public struct TodoItem: Codable, Hashable, Identifiable, Sendable {
         self.details = details
         self.notes = notes
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        content = try c.decode(String.self, forKey: .content)
+        status = c.lenient(TodoStatus.self, forKey: .status) ?? .pending
+        blocker = c.lenient(String.self, forKey: .blocker)
+        details = c.lenient(String.self, forKey: .details)
+        notes = c.lenient([String].self, forKey: .notes)
+    }
+}
+
+public struct ActivityResponse: Codable, Hashable, Sendable {
+    public var activity: [ActivityItem]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        activity = c.lossyArray(ActivityItem.self, forKey: .activity) ?? []
+    }
 }
 
 public struct ActivityItem: Codable, Identifiable, Hashable, Sendable {
@@ -1156,6 +1368,16 @@ public struct ActivityItem: Codable, Identifiable, Hashable, Sendable {
     public var text: String
     public var type: String // update | review | error | done | paused
     public var at: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        projectId = c.lenient(String.self, forKey: .projectId)
+        sessionId = c.lenient(String.self, forKey: .sessionId)
+        text = c.lenient(String.self, forKey: .text) ?? ""
+        type = c.lenient(String.self, forKey: .type) ?? "update"
+        at = c.lenient(String.self, forKey: .at) ?? ""
+    }
 }
 
 public struct AutoShutdownError: Codable, Hashable, Sendable {
@@ -1211,6 +1433,17 @@ public struct BtwRecord: Codable, Identifiable, Hashable, Sendable {
     public var error: String?
     public var createdAt: Double
     public var followUps: [BtwTurn]?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        question = c.lenient(String.self, forKey: .question) ?? ""
+        answer = c.lenient(String.self, forKey: .answer) ?? ""
+        status = c.lenient(String.self, forKey: .status) ?? "complete"
+        error = c.lenient(String.self, forKey: .error)
+        createdAt = c.lenient(Double.self, forKey: .createdAt) ?? 0
+        followUps = c.lossyArray(BtwTurn.self, forKey: .followUps)
+    }
 }
 
 public struct BtwTurn: Codable, Hashable, Identifiable, Sendable {
@@ -1220,6 +1453,15 @@ public struct BtwTurn: Codable, Hashable, Identifiable, Sendable {
     public var status: String
     public var error: String?
     public var createdAt: Double
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        question = c.lenient(String.self, forKey: .question) ?? ""
+        answer = c.lenient(String.self, forKey: .answer) ?? ""
+        status = c.lenient(String.self, forKey: .status) ?? "complete"
+        error = c.lenient(String.self, forKey: .error)
+        createdAt = c.lenient(Double.self, forKey: .createdAt) ?? 0
+    }
 }
 
 // MARK: - Workspaces, History, Subagents & Files
@@ -1271,6 +1513,12 @@ public struct FileMatch: Codable, Hashable, Identifiable, Sendable {
 public struct NativeSessionsResponse: Codable, Hashable, Sendable {
     public var dir: String?
     public var sessions: [NativeSessionSummary]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dir = c.lenient(String.self, forKey: .dir)
+        sessions = c.lossyArray(NativeSessionSummary.self, forKey: .sessions) ?? []
+    }
 }
 
 public struct NativeSessionSummary: Codable, Identifiable, Hashable, Sendable {
@@ -1294,6 +1542,24 @@ public struct NativeSessionSummary: Codable, Identifiable, Hashable, Sendable {
         case file, title, named, cwd, sessionUUID = "id", preview, model, thinking, updatedAt, createdAt, parent, parentTitle, managedId, size
     }
 
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        file = try c.decode(String.self, forKey: .file)
+        title = c.lenient(String.self, forKey: .title)
+        named = c.lenientFlag(forKey: .named)
+        cwd = c.lenient(String.self, forKey: .cwd)
+        sessionUUID = c.lenient(String.self, forKey: .sessionUUID)
+        preview = c.lenient(String.self, forKey: .preview)
+        model = c.lenient(String.self, forKey: .model)
+        thinking = c.lenient(String.self, forKey: .thinking)
+        updatedAt = c.lenient(String.self, forKey: .updatedAt) ?? ""
+        createdAt = c.lenient(String.self, forKey: .createdAt)
+        parent = c.lenient(String.self, forKey: .parent)
+        parentTitle = c.lenient(String.self, forKey: .parentTitle)
+        managedId = c.lenient(String.self, forKey: .managedId)
+        size = c.lenient(Int.self, forKey: .size)
+    }
+
     public var panelKey: String { "f:\(file)" }
 }
 
@@ -1309,6 +1575,21 @@ public struct NativeSessionPreview: Codable, Hashable, Sendable {
     public var thinking: String?
     public var contextTokens: Int?
     public var messages: [TranscriptMessage]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        file = c.lenient(String.self, forKey: .file) ?? ""
+        title = c.lenient(String.self, forKey: .title)
+        cwd = c.lenient(String.self, forKey: .cwd)
+        id = c.lenient(String.self, forKey: .id)
+        createdAt = c.lenient(String.self, forKey: .createdAt)
+        updatedAt = c.lenient(String.self, forKey: .updatedAt)
+        preview = c.lenient(String.self, forKey: .preview)
+        model = c.lenient(String.self, forKey: .model)
+        thinking = c.lenient(String.self, forKey: .thinking)
+        contextTokens = c.lenient(Int.self, forKey: .contextTokens)
+        messages = c.lossyArray(TranscriptMessage.self, forKey: .messages) ?? []
+    }
 }
 
 public struct SubagentInfo: Codable, Identifiable, Hashable, Sendable {
@@ -1360,6 +1641,25 @@ public struct SubagentInfo: Codable, Identifiable, Hashable, Sendable {
         self.thinkingLevel = thinkingLevel
         self.cost = cost
         self.result = result
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        agent = c.lenient(String.self, forKey: .agent)
+        description = c.lenient(String.self, forKey: .description)
+        status = c.lenient(String.self, forKey: .status) ?? ""
+        sessionFile = c.lenient(String.self, forKey: .sessionFile)
+        remote = c.lenientFlag(forKey: .remote)
+        parentToolCallId = c.lenient(String.self, forKey: .parentToolCallId)
+        lastUpdate = c.lenient(Double.self, forKey: .lastUpdate)
+        progress = c.lenient([String: JSONValue].self, forKey: .progress)
+        thinking = c.lenient(String.self, forKey: .thinking)
+        startedAt = c.lenient(String.self, forKey: .startedAt)
+        model = c.lenient(String.self, forKey: .model)
+        thinkingLevel = c.lenient(String.self, forKey: .thinkingLevel)
+        cost = c.lenient(Double.self, forKey: .cost)
+        result = c.lenient(String.self, forKey: .result)
     }
 
     public var isActive: Bool {
@@ -1433,6 +1733,30 @@ public struct BackgroundTask: Codable, Identifiable, Hashable, Sendable {
         self.cost = cost
         self.updatedAt = updatedAt
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        order = c.lenient(Int.self, forKey: .order)
+        type = c.lenient(String.self, forKey: .type)
+        agent = c.lenient(String.self, forKey: .agent)
+        title = c.lenient(String.self, forKey: .title)
+        task = c.lenient(String.self, forKey: .task)
+        intent = c.lenient(String.self, forKey: .intent)
+        toolCallId = c.lenient(String.self, forKey: .toolCallId)
+        command = c.lenient(String.self, forKey: .command)
+        startedAt = c.lenient(String.self, forKey: .startedAt)
+        finishedAt = c.lenient(String.self, forKey: .finishedAt)
+        durationMs = c.lenient(Int.self, forKey: .durationMs)
+        status = c.lenient(String.self, forKey: .status)
+        output = c.lenient(String.self, forKey: .output)
+        transcript = c.lenient(String.self, forKey: .transcript)
+        model = c.lenient(String.self, forKey: .model)
+        thinking = c.lenient(String.self, forKey: .thinking)
+        summary = c.lenient(String.self, forKey: .summary)
+        cost = c.lenient(Double.self, forKey: .cost)
+        updatedAt = c.lenient(String.self, forKey: .updatedAt)
+    }
 }
 
 public struct BackgroundSubagentItem: Codable, Identifiable, Hashable, Sendable {
@@ -1504,6 +1828,16 @@ public struct BackgroundViewResponse: Codable, Hashable, Sendable {
         self.agents = agents
         self.subagents = subagents
         self.jobs = jobs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dir = c.lenient(String.self, forKey: .dir)
+        live = c.lenientFlag(forKey: .live)
+        tasks = c.lossyArray(BackgroundTask.self, forKey: .tasks)
+        agents = c.lossyArray(SubagentInfo.self, forKey: .agents)
+        subagents = c.lossyArray(BackgroundSubagentItem.self, forKey: .subagents)
+        jobs = c.lossyArray(BackgroundLogFile.self, forKey: .jobs)
     }
 
     public func resolvedJobs(session: SessionSummary?) -> [BackgroundJob] {
@@ -1634,6 +1968,19 @@ public struct SubagentTranscriptResponse: Codable, Hashable, Sendable {
     public var active: Bool?
     public var updatedAt: String?
     public var messages: [TranscriptMessage]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = c.lenient(String.self, forKey: .title)
+        cwd = c.lenient(String.self, forKey: .cwd)
+        model = c.lenient(String.self, forKey: .model)
+        thinking = c.lenient(String.self, forKey: .thinking)
+        file = c.lenient(String.self, forKey: .file) ?? ""
+        result = c.lenient(String.self, forKey: .result)
+        active = c.lenientFlag(forKey: .active)
+        updatedAt = c.lenient(String.self, forKey: .updatedAt)
+        messages = c.lossyArray(TranscriptMessage.self, forKey: .messages) ?? []
+    }
 }
 
 public struct LogResponse: Codable, Hashable, Sendable {

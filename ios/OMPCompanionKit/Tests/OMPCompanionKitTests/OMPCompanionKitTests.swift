@@ -133,6 +133,122 @@ final class OMPCompanionKitTests: XCTestCase {
         XCTAssertEqual(autoShutdownStr.error?.message, "Power off blocked")
     }
 
+    /// The companion marks a session whose worktree was removed with the ISO time (`s.worktreeRemoved=now()` in
+    /// companion/workspaces.mjs); a strict `Bool?` failed the whole `/api/state` reply and emptied the dashboard.
+    func testStorePollDecodesWorktreeRemovedTimestampAndSkipsBrokenSessions() throws {
+        let json = """
+        {
+          "sx": {
+            "epoch": "e1", "rev": 7,
+            "top": { "projects": [], "archived": ["f:/a.jsonl"], "pinned": [], "autoShutdown": {"on": false, "since": null, "firing": false, "error": null} },
+            "order": ["s1", "s2", "s3"],
+            "changed": [
+              { "id": "s1", "title": "Done", "cwd": "/w", "status": "done", "updatedAt": "2026-11-19T10:00:00Z",
+                "isolated": true, "worktreeRemoved": "2026-11-19T10:28:17.045Z", "fileSeen": {"a": 1} },
+              { "title": "No id, skipped" },
+              { "id": "s3", "title": "Future", "cwd": "/w", "status": "hibernating", "tokens": 12.0,
+                "todos": [{ "name": "P", "tasks": [{ "content": "x", "status": "someday" }, { "status": "pending" }] }] }
+            ]
+          }
+        }
+        """
+        let poll = try JSONDecoder().decode(StatePollResponse.self, from: Data(json.utf8))
+        let changed = try XCTUnwrap(poll.sx?.changed)
+        XCTAssertEqual(changed.map(\.id), ["s1", "s3"])
+        XCTAssertEqual(changed[0].worktreeRemoved, true)
+        XCTAssertEqual(changed[1].status, .paused)
+        XCTAssertEqual(changed[1].tokens, 12)
+        XCTAssertEqual(changed[1].updatedAt, "")
+        XCTAssertEqual(changed[1].todos?.first?.tasks.map(\.status), [.pending])
+
+        let reducer = SyncDeltaReducer()
+        let result = reducer.apply(poll: poll, viewedSessionId: nil, currentSnapshot: StoreSnapshot())
+        XCTAssertEqual(result.snapshot.sessions.map(\.id), ["s1", "s3"])
+        XCTAssertEqual(result.snapshot.archived, ["f:/a.jsonl"])
+        XCTAssertEqual(reducer.storeToken, "e1.7")
+    }
+
+    func testDecodingFailureNamesEndpointAndField() {
+        let json = #"{"sx":{"epoch":"e1","rev":"seven"}}"#
+        do {
+            _ = try JSONDecoder().decode(StatePollResponse.self, from: Data(json.utf8))
+            XCTFail("rev must be a number")
+        } catch let error as DecodingError {
+            let apiError = TailscaleDiagnostic.decodingFailure(error, endpoint: "/api/state")
+            XCTAssertEqual(apiError.kind, .decodingFailed)
+            let message = apiError.localizedDescription
+            XCTAssertTrue(message.contains("/api/state → sx.rev: expected Int"), message)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+    }
+
+    func testNativeHistoryAndPreviewDecodeLeniently() throws {
+        let list = """
+        {"dir": "/s", "sessions": [
+          {"file": "/s/a.jsonl", "title": "A", "id": "u1", "updatedAt": "2026-11-19T10:00:00Z", "size": 1024.0},
+          {"title": "no file"},
+          {"file": "/s/b.jsonl", "named": "yes", "updatedAt": null}
+        ]}
+        """
+        let res = try JSONDecoder().decode(NativeSessionsResponse.self, from: Data(list.utf8))
+        XCTAssertEqual(res.sessions.map(\.file), ["/s/a.jsonl", "/s/b.jsonl"])
+        XCTAssertEqual(res.sessions[0].size, 1024)
+        XCTAssertEqual(res.sessions[1].named, true)
+
+        let preview = """
+        {"file": "/s/a.jsonl", "reasoning": "high", "contextTokens": 1200, "messages": [
+          {"id": "t1", "role": "tool", "text": "Done · bash  {}", "tool": {"name": "bash", "args": {"command": "ls"}, "status": "done", "ms": 812.4}},
+          {"role": "user", "text": "no id"}
+        ]}
+        """
+        let pv = try JSONDecoder().decode(NativeSessionPreview.self, from: Data(preview.utf8))
+        XCTAssertEqual(pv.messages.map(\.id), ["t1"])
+        XCTAssertEqual(pv.messages[0].tool?.ms, 812)
+        XCTAssertEqual(ToolCallSummary(tool: try XCTUnwrap(pv.messages[0].tool)).primary, "ls")
+    }
+
+    func testToolCallSummaryReadsCommandsPathsAndClippedArguments() {
+        let bash = ToolCallSummary(tool: ToolRecord(
+            name: "bash",
+            args: "{\n \"command\": \"cd ios && grep -rn \\\"decodingFailed\\\" .\",\n \"timeout\": 30\n}",
+            status: "done",
+            ms: 4200
+        ))
+        XCTAssertEqual(bash.kind, .command)
+        XCTAssertEqual(bash.primary, #"cd ios && grep -rn "decodingFailed" ."#)
+        XCTAssertEqual(bash.arguments.map(\.key), ["timeout"])
+        XCTAssertEqual(bash.durationLabel, "4.2 s")
+        XCTAssertEqual(bash.accessibilityLabel, #"bash command: cd ios && grep -rn "decodingFailed" ., Done, 4.2 s"#)
+
+        let read = ToolCallSummary(tool: ToolRecord(
+            name: "read",
+            args: #"{"path": "ios/OMPCompanionKit/Sources/OMPCompanionKit/Networking/CompanionClient.swift"}"#,
+            status: "running"
+        ))
+        XCTAssertEqual(read.kind, .path)
+        XCTAssertEqual(read.primaryShort, "…/OMPCompanionKit/Networking/CompanionClient.swift")
+        XCTAssertEqual(read.status, .running)
+
+        // Clipped at 6,000 chars by the companion: invalid JSON, the command is still recovered.
+        let clipped = ToolCallSummary(tool: ToolRecord(name: "bash", args: "{\n \"command\": \"echo \\\"hi\\\" && cat lo", status: "error"))
+        XCTAssertEqual(clipped.primary, #"echo "hi" && cat lo"#)
+        XCTAssertEqual(clipped.status, .error)
+    }
+
+    func testSyncReducerToleratesRepeatedSessionIDs() throws {
+        let json = """
+        {"sx": {"epoch": "e", "rev": 1, "order": ["s1", "s1", "s2"],
+          "changed": [{"id": "s1", "title": "a"}, {"id": "s1", "title": "b"}, {"id": "s2", "title": "c"}]}}
+        """
+        let poll = try JSONDecoder().decode(StatePollResponse.self, from: Data(json.utf8))
+        let reducer = SyncDeltaReducer()
+        let first = reducer.apply(poll: poll, viewedSessionId: nil, currentSnapshot: StoreSnapshot())
+        XCTAssertEqual(first.snapshot.sessions.map(\.title), ["b", "c"])
+        let second = reducer.apply(poll: poll, viewedSessionId: nil, currentSnapshot: first.snapshot)
+        XCTAssertEqual(second.snapshot.sessions.map(\.id), ["s1", "s2"])
+    }
+
     func testSyncDeltaOrderEditAndIncrementalSync() throws {
         let edited = SyncDeltaReducer.applyOrderEdit(
             currentOrder: ["m0", "m1", "m2", "m3"],

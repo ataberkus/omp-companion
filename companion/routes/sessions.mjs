@@ -20,6 +20,9 @@ export function sessionRoutes(ctx){
     const set=new Set(store[field]);if(on){set.add(key);store[other]=store[other].filter(k=>k!==key);}else set.delete(key);store[field]=[...set];await persist([]);json({archived:store.archived,pinned:store.pinned});return;
    };
  return {
+   // The activity log alone, for clients that show it without the whole store (polls leave it out, and /api/state
+   // without ?session also carries every transcript).
+   'GET /api/activity':async({json})=>{json({activity:store.activity||[]});return;},
    'GET /api/state':async({req,res,url,send,json})=>{
     markOverlaps();refreshBranches();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.

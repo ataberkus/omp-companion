@@ -39,6 +39,11 @@ public final class SyncDeltaReducer: @unchecked Sendable {
         return base
     }
 
+    /// Elements by id; a repeated id keeps the later element instead of trapping like `uniqueKeysWithValues`.
+    static func keyedByID<T: Identifiable>(_ items: [T]) -> [T.ID: T] {
+        Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { _, later in later })
+    }
+
     public func apply(
         poll: StatePollResponse,
         viewedSessionId: String?,
@@ -63,7 +68,7 @@ public final class SyncDeltaReducer: @unchecked Sendable {
                 next.autoShutdown = top.autoShutdown
             }
 
-            var byId = Dictionary(uniqueKeysWithValues: next.sessions.map { ($0.id, $0) })
+            var byId = Self.keyedByID(next.sessions)
             for incoming in sx.changed ?? [] {
                 var merged = incoming
                 if merged.messages == nil, let existing = byId[incoming.id] {
@@ -76,7 +81,8 @@ public final class SyncDeltaReducer: @unchecked Sendable {
             }
 
             if let order = sx.order {
-                next.sessions = order.compactMap { byId[$0] }
+                var seen = Set<String>()
+                next.sessions = order.compactMap { id in seen.insert(id).inserted ? byId[id] : nil }
             } else {
                 var updated: [SessionSummary] = []
                 var seen = Set<String>()
@@ -95,7 +101,7 @@ public final class SyncDeltaReducer: @unchecked Sendable {
 
             storeToken = "\(sx.epoch).\(sx.rev)"
         } else if let fullSessions = poll.sessions {
-            let oldById = Dictionary(uniqueKeysWithValues: next.sessions.map { ($0.id, $0) })
+            let oldById = Self.keyedByID(next.sessions)
             if let projects = poll.projects { next.projects = projects }
             if let archived = poll.archived { next.archived = archived }
             if let pinned = poll.pinned { next.pinned = pinned }
@@ -134,9 +140,7 @@ public final class SyncDeltaReducer: @unchecked Sendable {
                 }
             } else {
                 let prior = transcriptCursors[sid]
-                var msgMap = Dictionary(
-                    uniqueKeysWithValues: (prior?.messages ?? next.sessions.first(where: { $0.id == sid })?.messages ?? []).map { ($0.id, $0) }
-                )
+                var msgMap = Self.keyedByID(prior?.messages ?? next.sessions.first(where: { $0.id == sid })?.messages ?? [])
                 for msg in tx.changed ?? [] {
                     msgMap[msg.id] = msg
                 }

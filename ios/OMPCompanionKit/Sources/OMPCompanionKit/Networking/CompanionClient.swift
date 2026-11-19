@@ -133,13 +133,20 @@ public struct CompanionClient: Sendable {
         }
     }
 
-    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], timeout: TimeInterval = 30) async throws -> T {
-        let (data, _) = try await sendRaw(method: "GET", path: path, query: query, timeout: timeout)
+    /// Decodes a reply, naming the endpoint and failing field when the JSON does not match the wire model.
+    private func decode<T: Decodable>(_ type: T.Type, from data: Data, path: String) throws -> T {
         do {
-            return try decoder.decode(T.self, from: data)
+            return try decoder.decode(type, from: data)
+        } catch let error as DecodingError {
+            throw TailscaleDiagnostic.decodingFailure(error, endpoint: path)
         } catch {
             throw TailscaleDiagnostic.classifyTransport(error, host: host)
         }
+    }
+
+    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], timeout: TimeInterval = 30) async throws -> T {
+        let (data, _) = try await sendRaw(method: "GET", path: path, query: query, timeout: timeout)
+        return try decode(T.self, from: data, path: path)
     }
 
     private func getTagged<T: Decodable & Sendable>(
@@ -153,22 +160,13 @@ public struct CompanionClient: Sendable {
             return .notModified
         }
         let nextEtag = http.value(forHTTPHeaderField: "ETag")
-        do {
-            let decoded = try decoder.decode(T.self, from: data)
-            return .updated(decoded, etag: nextEtag)
-        } catch {
-            throw TailscaleDiagnostic.classifyTransport(error, host: host)
-        }
+        return .updated(try decode(T.self, from: data, path: path), etag: nextEtag)
     }
 
     private func post<T: Decodable>(_ path: String, jsonObject: [String: Any], query: [URLQueryItem] = [], timeout: TimeInterval = 45) async throws -> T {
         let bodyData = try JSONSerialization.data(withJSONObject: jsonObject, options: [])
         let (data, _) = try await sendRaw(method: "POST", path: path, query: query, bodyData: bodyData, timeout: timeout)
-        do {
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw TailscaleDiagnostic.classifyTransport(error, host: host)
-        }
+        return try decode(T.self, from: data, path: path)
     }
 
     private func postRaw(_ path: String, jsonObject: [String: Any], query: [URLQueryItem] = [], timeout: TimeInterval = 45) async throws -> Data {
@@ -179,8 +177,9 @@ public struct CompanionClient: Sendable {
 
     // MARK: - State, Polling & Tailscale Diagnostics
 
-    public func fetchFullState() async throws -> StoreSnapshot {
-        try await get("/api/state")
+    /// The host's activity log alone (`GET /api/state` without `?session` would also send every transcript).
+    public func fetchActivity() async throws -> ActivityResponse {
+        try await get("/api/activity", timeout: 20)
     }
 
     public func fetchState(
