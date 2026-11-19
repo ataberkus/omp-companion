@@ -427,11 +427,11 @@ pub fn check_now(app: &AppHandle) {
     }
 }
 
-/// Check for updates and update without asking: the tray's update entry, and the dashboard's ⋯ menu (also from a phone,
-/// through the companion). A prepared update installs at once; a newer release found by the background check downloads
-/// and installs as soon as its signature is verified; otherwise the check runs now. Sessions are paused and saved by the
-/// install, and the new version resumes the ones that were working. Returns what the caller can show, since the app
-/// restarts before it could ask anything else.
+/// Check for updates and update without asking: the dashboard's ⋯ menu (also from a phone, through the companion). A
+/// prepared update installs at once; a newer release found by the background check downloads and installs as soon as its
+/// signature is verified; otherwise the check runs now. Sessions are paused and saved by the install, and the new version
+/// resumes the ones that were working. Returns what the caller can show, since the app restarts before it could ask
+/// anything else.
 pub fn auto(app: &AppHandle) -> Value {
     let current = current(app);
     if cfg!(debug_assertions) {
@@ -450,7 +450,7 @@ pub fn auto(app: &AppHandle) -> Value {
     if let Some(version) = ready {
         log(app, format!("update: installing prepared {version} without asking"));
         // The caller's answer (a phone asking through the companion) goes out before the companion stops: the install
-        // starts a moment later. The tray's own click has no answer to wait for, so it just installs.
+        // starts a moment later.
         let app = app.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(500));
