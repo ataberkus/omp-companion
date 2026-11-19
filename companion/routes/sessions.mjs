@@ -7,7 +7,7 @@ import { chatImages } from '../images.mjs';
 import { readSessionHead, lastContext, importMessages, cleanTitle } from '../transcript.mjs';
 import { launchOptions } from '../launch.mjs';
 export function sessionRoutes(ctx){
- const {command,start,lock,notice,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
+ const {command,start,lock,notice,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,canAppUpdate,appVersion,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
  const archiveOrPin=async({url,body,json})=>{
     const field=url.pathname==='/api/pin'?'pinned':'archived',other=field==='pinned'?'archived':'pinned',on=body[field]!==false;
     const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
@@ -24,13 +24,13 @@ export function sessionRoutes(ctx){
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
     // Without ?session: the whole store, every transcript included (read for this reply only when nothing has read it yet).
-    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),sessions:store.sessions.map(s=>unread(s)?{...s,messages:readTranscript(s)}:s)});return;}
+    if(!url.searchParams.has('session')){json({...store,drafts,instance,canRestart,canAppUpdate,appVersion,autoShutdown:autoShutdownView(),sessions:store.sessions.map(s=>unread(s)?{...s,messages:readTranscript(s)}:s)});return;}
     // ?session=<id> (the dashboard's polls): messages and /btw answers only for that session, no activity log; ETag so unchanged polls send nothing.
     // A viewed session with no OMP process running gets what a terminal OMP added to its file since (syncFromFile), and its
     // prompts' entry IDs from the session file (live ones from refresh).
     {const s=store.sessions.find(x=>x.id===url.searchParams.get('session'));if(s?.sessionFile&&!runners.get(s.id)?.alive)void(async()=>{const moved=await fileMoved(s);if(!moved&&!needsBackfill(s))return;await lock(s.id,async()=>{if(runners.get(s.id)?.alive)return;if(moved)await syncFromFile(s);if(needsBackfill(s))await backfillEntries(s,()=>fileEntries(s.sessionFile));});})().catch(()=>{});}
     const id=url.searchParams.get('session'),since=url.searchParams.get('since'),od=url.searchParams.get('od')==='1',viewed=store.sessions.find(s=>s.id===id);
-    const top={...store,drafts,instance,canRestart,autoShutdown:autoShutdownView(),activity:undefined};
+    const top={...store,drafts,instance,canRestart,canAppUpdate,appVersion,autoShutdown:autoShutdownView(),activity:undefined};
     // store=<epoch>.<rev>, or empty while it holds none: the session list and the rest of the store as changes (storeDelta),
     // the viewed transcript as changes after since=<epoch>.<rev> (transcriptDelta; with od=1, a changed order as an edit of
     // the one held) or whole in tx.messages, its /btw answers in btw.

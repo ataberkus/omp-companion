@@ -313,3 +313,38 @@ test('a tailnet listen() that never calls back does not stop later checks, the L
   assert.equal(await exited, 0);
   assert.equal(await portBusy(port), false);
 });
+
+// The dashboard's ⋯ menu, also from a phone: the companion asks the shell for an app update and returns what it found,
+// so the page can say "up to date" before the app restarts. The state names the app version, so after an update the
+// page can tell the version changed.
+test('the dashboard asks the shell for an app update and returns its answer', async t => {
+  const { port, next, child, request } = await startHost(t, null, { OMP_WEB_APP_VERSION: '9.9.9' });
+  const { token } = await next();
+  const auth = { Authorization: `Bearer ${token}` };
+  const state = await (await fetch(`http://127.0.0.1:${port}/api/state?session=`, { headers: auth })).json();
+  assert.equal(state.canAppUpdate, true);
+  assert.equal(state.appVersion, '9.9.9');
+  const asked = next();
+  const reply = fetch(`http://127.0.0.1:${port}/api/app-update`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: '{}' });
+  const ask = await asked;
+  assert.equal(ask.what, 'app-update');
+  child.stdin.write(JSON.stringify({ res: ask.req, ok: true, state: 'downloading', version: '9.9.10', current: '9.9.9' }) + '\n');
+  const res = await reply;
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { res: ask.req, ok: true, state: 'downloading', version: '9.9.10', current: '9.9.9' });
+  assert.deepEqual(await request({ cmd: 'quit' }), { id: 1, ok: true });
+});
+
+test('an app update the shell refuses reaches the dashboard as an error', async t => {
+  const { port, next, child, request } = await startHost(t);
+  const { token } = await next();
+  const auth = { Authorization: `Bearer ${token}` };
+  const asked = next();
+  const reply = fetch(`http://127.0.0.1:${port}/api/app-update`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: '{}' });
+  const ask = await asked;
+  child.stdin.write(JSON.stringify({ res: ask.req, ok: false, error: 'The update check failed.' }) + '\n');
+  const res = await reply;
+  assert.equal(res.status, 500);
+  assert.deepEqual(await res.json(), { error: 'The update check failed.' });
+  assert.deepEqual(await request({ cmd: 'quit' }), { id: 1, ok: true });
+});

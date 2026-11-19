@@ -176,7 +176,25 @@ fn on_exit(app: AppHandle) -> impl FnOnce(String) + Send + 'static {
 
 fn spawn_host(app: &AppHandle, restart_token: Option<&str>) -> Result<(Host, Ready), String> {
     let (bun, script) = paths(app)?;
-    host::spawn(&bun, &script, restart_token, on_event(app.clone()), on_exit(app.clone()))
+    host::spawn(&bun, &script, &app.package_info().version.to_string(), restart_token, on_event(app.clone()), on_request(app.clone()), on_exit(app.clone()))
+}
+
+// A request from the companion that only the shell can answer: the dashboard's ⋯ menu asks for an app update (also from a
+// phone), and the shell checks, downloads, installs and restarts without asking. Off this thread: the check can take a
+// while, and the host's reader must stay free for quit replies.
+fn on_request(app: AppHandle) -> impl Fn(Value, host::Reply) + Send + 'static {
+    move |msg: Value, reply: host::Reply| {
+        let app = app.clone();
+        thread::spawn(move || {
+            let id = msg["req"].clone();
+            let mut res = match msg["what"].as_str() {
+                Some("app-update") => update::auto(&app),
+                other => json!({ "ok": false, "error": format!("Unknown request: {}", other.unwrap_or_default()) }),
+            };
+            res["res"] = id;
+            reply(res);
+        });
+    }
 }
 
 fn main_url(shell: &Shell) -> Url {
@@ -188,7 +206,11 @@ fn boot(app: AppHandle) {
     if update::startup(&app) == update::Boot::Exit {
         return;
     }
-    let (host, ready) = match spawn_host(&app, None) {
+    // An app update started by the previous version hands over its token (update::install_ready), so the window and
+    // copied phone links reconnect to the new version instead of asking for a token that changed. Normal launches have
+    // none. Like a companion restart, the launch skips the `omp update` check: the app update just ran.
+    let carried = std::env::var("OMP_WEB_DESKTOP_TOKEN").ok().filter(|token| !token.is_empty());
+    let (host, ready) = match spawn_host(&app, carried.as_deref()) {
         Ok(started) => started,
         Err(e) => {
             // A version swapped in moments ago whose companion does not start: the previous one comes back instead.
@@ -425,20 +447,8 @@ fn offer_update(app: &AppHandle, update: Update) {
     update::offer(app, update);
 }
 
-// Check for updates in the tray: the update window shows checking, up to date, available (Install now / Later) or the error.
-fn check_now(app: &AppHandle) {
-    update::check_now(app);
-}
-
 fn busy_sessions(shell: &Shell) -> u64 {
     shell.host().request(json!({ "cmd": "busy" }), Duration::from_secs(10)).ok().and_then(|r| r["busy"].as_u64()).unwrap_or(0)
-}
-
-// The tray's Install update / Restart to update: the update window asks (version, notes, working sessions, Install
-// now / Later) instead of a native dialog. Install now saves the sessions with the update note (the new version resumes
-// the ones that were working), swaps the new version in and starts it; see src/update.rs.
-fn install_update(app: &AppHandle) {
-    update::show_prompt(app);
 }
 
 fn same_origin(url: &Url, port: u16) -> bool {
@@ -702,13 +712,13 @@ fn build_menu(app: &AppHandle, lan: bool, screen: bool, viewer: Option<&str>, li
     let separator = PredefinedMenuItem::separator(app)?;
     let update_item = match update {
         UpdateItem::Hidden => None,
-        UpdateItem::Update(update::TrayItem::Check) => Some(MenuItem::with_id(app, "check_update", "Check for updates", true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Check) => Some(MenuItem::with_id(app, "check_update", "Check for updates and update", true, None::<&str>)?),
         UpdateItem::Update(update::TrayItem::Downloading(percent)) => {
             let label = percent.map_or("Preparing update…".to_owned(), |p| format!("Downloading update {p} %…"));
             Some(MenuItem::with_id(app, "update_window", label, true, None::<&str>)?)
         }
-        UpdateItem::Update(update::TrayItem::Install(version)) => Some(MenuItem::with_id(app, "update", format!("Install update {version}…"), true, None::<&str>)?),
-        UpdateItem::Update(update::TrayItem::Ready(version)) => Some(MenuItem::with_id(app, "update", format!("Restart to update {version}…"), true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Install(version)) => Some(MenuItem::with_id(app, "update", format!("Install update {version} and restart"), true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Ready(version)) => Some(MenuItem::with_id(app, "update", format!("Restart to update {version}"), true, None::<&str>)?),
         UpdateItem::Update(update::TrayItem::Installing) => Some(MenuItem::with_id(app, "update_window", "Installing update…", true, None::<&str>)?),
     };
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -796,8 +806,11 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         "lan" => toggle_lan(&app),
         "screen" => toggle_screen(&app),
         "quit" => quit(&app, false),
-        "update" => install_update(&app),
-        "check_update" => check_now(&app),
+        // Check for updates and update, and Install update / Restart to update: one click checks, downloads, installs and
+        // restarts, with no prompt (src/update.rs). A check that finds nothing says so with a notification.
+        "update" | "check_update" => {
+            update::auto(&app);
+        }
         "update_window" => update::focus(&app),
         _ => {
             let Some(i) = id.strip_prefix("link:").and_then(|i| i.parse::<usize>().ok()) else { return };

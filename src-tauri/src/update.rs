@@ -405,7 +405,7 @@ pub fn check(app: &AppHandle) -> Result<Option<Update>, Failure> {
     tauri::async_runtime::block_on(updater.check()).map_err(|e| Failure::network(chain(&e)))
 }
 
-/// Check for updates in the tray: the window says what it found.
+/// Check for updates with the update window: it says what it found (the window's Retry, and the check action).
 pub fn check_now(app: &AppHandle) {
     set_ui(app, json!({ "state": "checking", "current": current(app) }));
     show(app, true);
@@ -424,6 +424,74 @@ pub fn check_now(app: &AppHandle) {
             FLOW.lock().retry = Retry::Check;
             set_ui(app, error_state(app, &e, true));
         }
+    }
+}
+
+/// Check for updates and update without asking: the tray's update entry, and the dashboard's ⋯ menu (also from a phone,
+/// through the companion). A prepared update installs at once; a newer release found by the background check downloads
+/// and installs as soon as its signature is verified; otherwise the check runs now. Sessions are paused and saved by the
+/// install, and the new version resumes the ones that were working. Returns what the caller can show, since the app
+/// restarts before it could ask anything else.
+pub fn auto(app: &AppHandle) -> Value {
+    let current = current(app);
+    if cfg!(debug_assertions) {
+        return json!({ "ok": false, "state": "unsupported", "current": current, "error": "Development builds do not update themselves." });
+    }
+    let ready = {
+        let mut flow = FLOW.lock();
+        if flow.applying {
+            let version = flow.ready.as_ref().map(|r| r.version.clone());
+            return json!({ "ok": true, "state": "installing", "version": version, "current": current });
+        }
+        flow.install = true;
+        flow.ready.as_ref().map(|r| r.version.clone())
+    };
+    store(app, |s| s.later = None);
+    if let Some(version) = ready {
+        log(app, format!("update: installing prepared {version} without asking"));
+        // The caller's answer (a phone asking through the companion) goes out before the companion stops: the install
+        // starts a moment later. The tray's own click has no answer to wait for, so it just installs.
+        let app = app.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            apply_flow(&app);
+        });
+        return json!({ "ok": true, "state": "installing", "version": version, "current": current });
+    }
+    // A release the background check found is already downloading (or about to): the job installs it when it finishes.
+    if let Some(version) = app.state::<Shell>().update.lock().as_ref().map(|u| u.version.clone()) {
+        start_job(app);
+        log(app, format!("update: installing {version} without asking once it is ready"));
+        return json!({ "ok": true, "state": "downloading", "version": version, "current": current });
+    }
+    match check(app) {
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            log(app, format!("update: found {version}; installing without asking"));
+            offer(app, update);
+            json!({ "ok": true, "state": "downloading", "version": version, "current": current })
+        }
+        Ok(None) => {
+            cancel_auto();
+            log(app, "update: up to date");
+            let _ = app.notification().builder().title(TITLE).body(format!("{TITLE} {current} is the newest version.")).show();
+            json!({ "ok": true, "state": "up-to-date", "current": current })
+        }
+        Err(e) => {
+            cancel_auto();
+            log(app, format!("update check failed: {e:?}"));
+            let _ = app.notification().builder().title(TITLE).body(format!("The update check failed. {}. {}", e.title(), e.advice())).show();
+            json!({ "ok": true, "state": "error", "current": current, "error": { "kind": e.kind(), "title": e.title(), "advice": e.advice(), "detail": e.detail() } })
+        }
+    }
+}
+
+/// A check that found nothing drops the install flag an auto update set, unless a job started meanwhile (the background
+/// check finding a release at the same moment): that job installs when it is ready.
+fn cancel_auto() {
+    let mut flow = FLOW.lock();
+    if flow.job.is_none() && flow.ready.is_none() {
+        flow.install = false;
     }
 }
 
@@ -957,10 +1025,17 @@ fn job(app: AppHandle) {
             }
             set_ui(&app, error_state(&app, &e, true));
             if !shown {
-                // Found in the background and not downloadable right now: the tray still offers it.
                 let version = shell.update.lock().as_ref().map(|u| u.version.clone()).unwrap_or_default();
-                if load(&app).later.as_deref() != Some(&version) {
-                    let body = format!("OMP Control Room {version} is available. Choose Install update in {TRAY} menu.");
+                // A chosen update that could not be prepared says why: no window is open to show it.
+                let body = if install {
+                    format!("OMP Control Room {version} could not be installed. {}. {}", e.title(), e.advice())
+                } else if load(&app).later.as_deref() != Some(&version) {
+                    // Found in the background and not downloadable right now: the tray still offers it.
+                    format!("OMP Control Room {version} is available. Choose Install update in {TRAY} menu.")
+                } else {
+                    String::new()
+                };
+                if !body.is_empty() {
                     let _ = app.notification().builder().title(TITLE).body(body).show();
                 }
             }
@@ -1272,7 +1347,15 @@ fn install_ready(app: &AppHandle, ready: &Ready, relaunch: bool) -> Result<(), F
             }
             patch_ui(app, json!({ "phase": "restart", "progress": Value::Null, "detail": "" }));
             let pid = std::process::id();
-            let spawned = std::process::Command::new(install.join(&exe)).args(["--omp-updated".to_owned(), format!("--omp-wait-pid={pid}")]).current_dir(&install).spawn();
+            // The token goes along: the dashboard window and copied phone links reconnect to the new version instead of
+            // asking for a token that changed (boot reads it back). None at startup, where no window or phone was open.
+            let token = app.try_state::<Shell>().map(|shell| shell.token.clone());
+            let mut command = std::process::Command::new(install.join(&exe));
+            command.args(["--omp-updated".to_owned(), format!("--omp-wait-pid={pid}")]).current_dir(&install);
+            if let Some(token) = token {
+                command.env("OMP_WEB_DESKTOP_TOKEN", token);
+            }
+            let spawned = command.spawn();
             if let Err(e) = spawned {
                 // Never leave a version installed that cannot be started from here: put the old one back.
                 let _ = fast::rollback(&install, &swap, &e.to_string());
@@ -1288,10 +1371,18 @@ fn install_ready(app: &AppHandle, ready: &Ready, relaunch: bool) -> Result<(), F
             #[cfg(windows)]
             {
                 // The installer runs silently (installMode "quiet"), then starts the app when relaunch is set; on
-                // success install() exits this process.
+                // success install() exits this process. The app it starts inherits the token below.
                 let update = update.restart_after_install(relaunch);
                 log(app, format!("installing {} with the installer", ready.version));
-                update.install(bytes).map_err(|e| install_error(e.to_string()))?;
+                let token = if relaunch { app.try_state::<Shell>().map(|shell| shell.token.clone()) } else { None };
+                if let Some(token) = &token {
+                    std::env::set_var("OMP_WEB_DESKTOP_TOKEN", token);
+                }
+                let installed = update.install(bytes).map_err(|e| install_error(e.to_string()));
+                if installed.is_err() && token.is_some() {
+                    std::env::remove_var("OMP_WEB_DESKTOP_TOKEN");
+                }
+                installed?;
                 Ok(())
             }
             #[cfg(not(windows))]
@@ -1301,6 +1392,10 @@ fn install_ready(app: &AppHandle, ready: &Ready, relaunch: bool) -> Result<(), F
                 let _ = fs::remove_file(file);
                 if relaunch {
                     patch_ui(app, json!({ "phase": "restart", "progress": Value::Null, "detail": "" }));
+                    // app.restart() runs the new binary with this process's environment: the token comes along.
+                    if let Some(shell) = app.try_state::<Shell>() {
+                        std::env::set_var("OMP_WEB_DESKTOP_TOKEN", shell.token.clone());
+                    }
                     app.restart();
                 }
                 Ok(())
