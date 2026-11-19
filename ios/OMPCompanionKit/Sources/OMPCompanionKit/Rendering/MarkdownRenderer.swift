@@ -1033,6 +1033,7 @@ public struct MarkdownView: View {
         case .thematicBreak:
             Divider().overlay(palette.borderStrong)
         }
+    }
 
     private func headingFont(_ level: Int) -> Font {
         switch level {
