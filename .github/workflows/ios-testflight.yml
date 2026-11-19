@@ -1,0 +1,140 @@
+# Builds OMP Control, the iOS/iPadOS app in ios/, on a macOS runner and uploads it to TestFlight.
+# The Apple material (team, distribution certificate, App Store Connect API key) lives in the "testflight" environment,
+# whose deployment branch policy admits main only: a workflow on another branch or a fork pull request cannot read it.
+# ios/scripts/testflight.mjs registers the App ID dev.omp.companion, keeps the App Store profile "OMP Control App Store"
+# and picks the build number (one above App Store Connect's highest for the project's MARKETING_VERSION).
+# Logs are public: nothing prints the team's names.
+#   gh workflow run ios-testflight.yml --ref main
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time: the build number is read from App Store Connect before the upload.
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    runs-on: macos-26
+    timeout-minutes: 45
+    environment: testflight
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Source
+        working-directory: ios
+        # The Xcode project is generated from ios/project.yml.
+        run: |
+          git log -1 --format='%h %s'
+          xcodegen generate --quiet
+          version=$(sed -n 's/^[[:space:]]*MARKETING_VERSION = \(.*\);$/\1/p' OMPCompanion.xcodeproj/project.pbxproj | tr -d '"' | sort -u)
+          [ "$(printf '%s\n' "$version" | wc -l)" -eq 1 ] || { echo "::error::Debug and Release disagree on MARKETING_VERSION: $version"; exit 1; }
+          echo "OMP Control $version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          xcodebuild -version
+      - name: Simulator build
+        # Compiles the app unsigned first: a source error shows here, before App Store Connect is touched.
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build -quiet -project OMPCompanion.xcodeproj -scheme OMPCompanion -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/sim" \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Signing
+        env:
+          IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          p12="$RUNNER_TEMP/dist.p12"
+          key="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          trap 'rm -f "$p12"' EXIT
+          printf '%s' "$IOS_DIST_CERT_P12" | base64 --decode > "$p12"
+          security import "$p12" -k "$keychain" -P "$IOS_DIST_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          serial=$(openssl pkcs12 -in "$p12" -nokeys -clcerts -passin env:IOS_DIST_CERT_PASSWORD | openssl x509 -noout -serial)
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$ASC_KEY_P8" > "$key"
+          echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
+          # App ID, App Store Connect app, provisioning profile and build number (ios/scripts/testflight.mjs).
+          profile="$RUNNER_TEMP/omp.mobileprovision"
+          CERT_SERIAL="$serial" PROFILE_OUT="$profile" node ios/scripts/testflight.mjs > "$RUNNER_TEMP/asc.env"
+          cat "$RUNNER_TEMP/asc.env"
+          cat "$RUNNER_TEMP/asc.env" >> "$GITHUB_ENV"
+          uuid=$(sed -n 's/^PROFILE_UUID=//p' "$RUNNER_TEMP/asc.env")
+          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$dir"
+            cp "$profile" "$dir/$uuid.mobileprovision"
+          done
+      - name: Archive
+        working-directory: ios
+        # Manual signing for the app target only: build settings on the command line would reach the local Swift
+        # package (OMPCompanionKit) too, which takes no profile.
+        run: |
+          set -o pipefail
+          perl -0pi -e 's/CODE_SIGN_STYLE = Automatic;\n//g;
+            s/(PRODUCT_BUNDLE_IDENTIFIER = dev\.omp\.companion;)/$1\n\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\tDEVELOPMENT_TEAM = $ENV{APPLE_TEAM_ID};\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "$ENV{PROFILE_NAME}";\n\t\t\t\t"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "Apple Distribution";/g' \
+            OMPCompanion.xcodeproj/project.pbxproj
+          xcodebuild archive -quiet -project OMPCompanion.xcodeproj -scheme OMPCompanion -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/OMPCompanion.xcarchive" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN"
+          echo "Archived OMP Control $VERSION ($BUILD_NUMBER)"
+      - name: Upload to TestFlight
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>dev.omp.companion</key><string>$PROFILE_NAME</string>
+            </dict>
+            <key>testFlightInternalTestingOnly</key><true/>
+            <key>uploadSymbols</key><true/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/OMPCompanion.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export" \
+            -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          echo "OMP Control $VERSION ($BUILD_NUMBER) uploaded: it appears in App Store Connect → TestFlight once processed." >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/dist.p12
+          [ -z "$KEYCHAIN" ] || security delete-keychain "$KEYCHAIN" || true
