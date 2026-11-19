@@ -154,6 +154,7 @@ public struct DashboardView: View {
     @State private var dropTargetGroupNormKey: String?
     @State private var isDropTargetBottom = false
     @State private var derivedCache = DashboardDerivedCache()
+    @State private var rowLimits: [String: Int] = [:]
 
     public init(store: AppStore) {
         self.store = store
@@ -789,6 +790,32 @@ public struct DashboardView: View {
         }
     }
 
+    /// Rows per section before "Show more": a 1,000-session workspace otherwise builds every row on each update.
+    private static let rowPageSize = 40
+
+    @ViewBuilder
+    private func cappedRows(_ items: [DashboardItem], key: String, showFolder: Bool, emphasizeAttention: Bool = false) -> some View {
+        let limit = rowLimits[key] ?? Self.rowPageSize
+        ForEach(items.count > limit ? Array(items.prefix(limit)) : items) { item in
+            sessionRow(item, showFolder: showFolder, emphasizeAttention: emphasizeAttention)
+        }
+        if items.count > limit {
+            Button {
+                rowLimits[key] = limit + Self.rowPageSize * 5
+            } label: {
+                HStack {
+                    Image(systemName: "chevron.down")
+                    Text("Show \(min(Self.rowPageSize * 5, items.count - limit)) more · \(items.count - limit) hidden")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(palette.accent)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderless)
+            .listRowBackground(palette.card)
+        }
+    }
+
     /// Status-grouped sections; `groups` is computed once per render by the caller.
     @ViewBuilder
     private func timeGroupedSections(_ groups: [TimeGroup]) -> some View {
@@ -799,9 +826,7 @@ public struct DashboardView: View {
                 let isCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(group.bucket.title)
                 Section {
                     if !isCollapsed {
-                        ForEach(group.items) { item in
-                            sessionRow(item, showFolder: true)
-                        }
+                        cappedRows(group.items, key: "time:\(group.bucket.id)", showFolder: true)
                     }
                 } header: {
                     timeSectionHeader(group.bucket, count: group.items.count, collapsed: isCollapsed)
@@ -821,9 +846,7 @@ public struct DashboardView: View {
                 let attnCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(SidebarLayoutHelper.attentionGroupKey)
                 Section {
                     if !attnCollapsed {
-                        ForEach(attention) { item in
-                            sessionRow(item, showFolder: true, emphasizeAttention: true)
-                        }
+                        cappedRows(attention, key: SidebarLayoutHelper.attentionGroupKey, showFolder: true, emphasizeAttention: true)
                     }
                 } header: {
                     attentionSectionHeader(count: attention.count, collapsed: attnCollapsed)
@@ -849,9 +872,7 @@ public struct DashboardView: View {
                             }
                             .listRowBackground(palette.card)
                         } else {
-                            ForEach(group.items) { item in
-                                sessionRow(item, showFolder: false)
-                            }
+                            cappedRows(group.items, key: "proj:\(group.normKey)", showFolder: false)
                         }
                     }
                 } header: {

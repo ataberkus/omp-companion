@@ -557,6 +557,8 @@ public struct ModelPickerSheet: View {
 
     public var title: String
     @State private var searchText = ""
+    /// Same key and format as the web companion's localStorage (`omp-fav-models`): a JSON array of selectors.
+    @AppStorage("omp-fav-models") private var favoriteModelsJSON: String = "[]"
     @State private var selectedModel: String
     @State private var selectedThinking: String
     public let onApply: (String, String) -> Void
@@ -575,14 +577,23 @@ public struct ModelPickerSheet: View {
         self.onApply = onApply
     }
 
+    private var favoriteSelectors: [String] {
+        guard let data = favoriteModelsJSON.data(using: .utf8),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return list
+    }
+
+    /// Search puts favorites first, as the web picker does.
     private var filteredModels: [ModelEntry] {
         let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return store.availableModels }
-        return store.availableModels.filter {
+        let favs = Set(favoriteSelectors)
+        let hits = store.availableModels.filter {
             $0.name.lowercased().contains(q)
                 || $0.selector.lowercased().contains(q)
                 || $0.provider.lowercased().contains(q)
         }
+        return hits.filter { favs.contains($0.selector) } + hits.filter { !favs.contains($0.selector) }
     }
 
     private var groupedProviders: [String] {
@@ -593,6 +604,80 @@ public struct ModelPickerSheet: View {
             out.append(m.provider)
         }
         return out
+    }
+
+    /// Favorites in the order saved (newest first), limited to models the host offers.
+    private var favoriteModels: [ModelEntry] {
+        let bySelector = Dictionary(store.availableModels.map { ($0.selector, $0) }, uniquingKeysWith: { first, _ in first })
+        return favoriteSelectors.compactMap { bySelector[$0] }
+    }
+
+    private func toggleFavorite(_ selector: String) {
+        var favs = favoriteSelectors
+        if let i = favs.firstIndex(of: selector) {
+            favs.remove(at: i)
+        } else {
+            favs.insert(selector, at: 0)
+        }
+        favoriteModelsJSON = (try? String(data: JSONEncoder().encode(favs), encoding: .utf8)) ?? "[]"
+        store.notificationManager.triggerHaptic(.selection)
+    }
+
+    @ViewBuilder
+    private func modelRow(_ model: ModelEntry) -> some View {
+        let isFavorite = favoriteSelectors.contains(model.selector)
+        HStack {
+            Button {
+                selectedModel = model.selector
+                onApply(model.selector, selectedThinking)
+                dismiss()
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(model.name)
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(palette.foreground)
+                            if model.fast == true {
+                                Text("FAST")
+                                    .font(.caption2.weight(.bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(palette.cyan.opacity(0.18), in: Capsule())
+                                    .foregroundStyle(palette.cyan)
+                            }
+                        }
+                        Text(model.selector)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(palette.muted)
+                    }
+                    Spacer()
+                    if let ctx = model.contextWindow, ctx > 0 {
+                        Text("\(CompanionFormatters.formatTokens(ctx)) ctx")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(palette.muted)
+                    }
+                    if selectedModel == model.selector {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(palette.accent)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                toggleFavorite(model.selector)
+            } label: {
+                Image(systemName: isFavorite ? "star.fill" : "star")
+                    .foregroundStyle(isFavorite ? palette.amber : palette.muted)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(isFavorite ? "Remove \(model.name) from favorites" : "Add \(model.name) to favorites")
+        }
+        .listRowBackground(palette.card)
     }
 
     private var thinkingOptions: [String] {
@@ -631,46 +716,17 @@ public struct ModelPickerSheet: View {
                         }
                     }
                 } else {
+                    if searchText.trimmingCharacters(in: .whitespaces).isEmpty, !favoriteModels.isEmpty {
+                        Section("★ FAVORITES") {
+                            ForEach(favoriteModels) { model in
+                                modelRow(model)
+                            }
+                        }
+                    }
                     ForEach(groupedProviders, id: \.self) { provider in
                         Section(provider.uppercased()) {
                             ForEach(filteredModels.filter { $0.provider == provider }) { model in
-                                Button {
-                                    selectedModel = model.selector
-                                    onApply(model.selector, selectedThinking)
-                                    dismiss()
-                                } label: {
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            HStack(spacing: 6) {
-                                                Text(model.name)
-                                                    .font(.subheadline.weight(.medium))
-                                                    .foregroundStyle(palette.foreground)
-                                                if model.fast == true {
-                                                    Text("FAST")
-                                                        .font(.caption2.weight(.bold))
-                                                        .padding(.horizontal, 5)
-                                                        .padding(.vertical, 1)
-                                                        .background(palette.cyan.opacity(0.18), in: Capsule())
-                                                        .foregroundStyle(palette.cyan)
-                                                }
-                                            }
-                                            Text(model.selector)
-                                                .font(.caption2.monospaced())
-                                                .foregroundStyle(palette.muted)
-                                        }
-                                        Spacer()
-                                        if let ctx = model.contextWindow, ctx > 0 {
-                                            Text("\(CompanionFormatters.formatTokens(ctx)) ctx")
-                                                .font(.caption2.monospacedDigit())
-                                                .foregroundStyle(palette.muted)
-                                        }
-                                        if selectedModel == model.selector {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundStyle(palette.accent)
-                                        }
-                                    }
-                                }
-                                .listRowBackground(palette.card)
+                                modelRow(model)
                             }
                         }
                     }
