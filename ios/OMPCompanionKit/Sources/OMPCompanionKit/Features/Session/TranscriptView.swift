@@ -84,6 +84,8 @@ public struct TranscriptView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                 }
+                // Start at the bottom: a scrollTo on a not-yet-measured LazyVStack lands on blank space until the user scrolls.
+                .defaultScrollAnchor(.bottom)
                 // Scrolling or tapping the transcript puts the keyboard away.
                 .scrollDismissesKeyboard(.interactively)
                 .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
@@ -100,11 +102,7 @@ public struct TranscriptView: View {
                     isPinnedToBottom = true
                     unreadCount = 0
                     lastObservedCount = messages.count
-                    DispatchQueue.main.async {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo("transcript-bottom", anchor: .bottom)
-                        }
-                    }
+                    settleAtBottom(proxy)
                 }
                 .onChange(of: streamTailSignature) { _, _ in
                     if messages.count > lastObservedCount && !isPinnedToBottom {
@@ -119,7 +117,7 @@ public struct TranscriptView: View {
                 }
                 .onAppear {
                     lastObservedCount = messages.count
-                    proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                    settleAtBottom(proxy)
                 }
 
                 if !isPinnedToBottom && !messages.isEmpty {
@@ -168,6 +166,20 @@ public struct TranscriptView: View {
                 editingSteerMessage = nil
             }
             Button("Cancel", role: .cancel) { editingSteerMessage = nil }
+        }
+    }
+
+    /// Jumps to the newest message, then again once rows (and math/web views) have reported their real heights: the
+    /// first jump uses estimated heights and can leave the viewport over blank space.
+    private func settleAtBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            proxy.scrollTo("transcript-bottom", anchor: .bottom)
+        }
+        // Unconditional: a first jump that lands on blank space also hides the bottom marker, clearing isPinnedToBottom.
+        for delay in [0.15, 0.45] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                proxy.scrollTo("transcript-bottom", anchor: .bottom)
+            }
         }
     }
 
