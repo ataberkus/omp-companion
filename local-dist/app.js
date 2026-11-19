@@ -1470,10 +1470,15 @@
   }
   function setIfChanged(el, html) {
     if (el._html === html) return;
-    const open = el.querySelector('.menu.open');
+    const open = el.querySelector('.menu.open'), top = open?.querySelector('.menu-pop')?.scrollTop;
     swapHtml(el, html); el._html = html;
     const menu = open && el.querySelector('.menu');
-    if (menu) { menu.classList.add('open'); menu.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'true'); }
+    if (!menu) return;
+    menu.classList.add('open'); menu.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'true');
+    // Polls re-render the topbar while its ⋯ menu is open; swapHtml restored offsets while the new .menu-pop was still
+    // display:none (and by a child-index path that shifts when a topbar button comes or goes), so the scrolled menu jumped to its top.
+    const pop = menu.querySelector('.menu-pop');
+    if (pop && top) { pop.scrollTop = top; touched.add(pop); }
   }
   // A container rendered as [key, html] parts, one element each. Unchanged parts keep their element (polls must not
   // recreate rows: that drops hover, text selection and running animations, and re-parsing a long thread on every poll
