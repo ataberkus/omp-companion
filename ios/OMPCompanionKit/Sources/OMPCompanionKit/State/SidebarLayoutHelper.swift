@@ -180,14 +180,23 @@ public enum SidebarLayoutHelper {
         return order
     }
 
+    // Creating an ISO8601DateFormatter is expensive and the dashboard parses a date for every session on each render;
+    // building two per call froze launch with a large history. The formatter is thread-safe, so one shared instance each.
+    nonisolated(unsafe) private static let fractionalISOFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) private static let plainISOFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     public static func parseISODate(_ isoString: String?) -> Date? {
         guard let isoString, !isoString.isEmpty else { return nil }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = fractional.date(from: isoString) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: isoString)
+        if let d = fractionalISOFormatter.date(from: isoString) { return d }
+        return plainISOFormatter.date(from: isoString)
     }
 
     /// Matches `ago(iso)` in `local-dist/app.js`: `now`, `5m`, `2h`, `3d`, or `Oct 12`.

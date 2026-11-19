@@ -514,12 +514,17 @@ public struct DashboardView: View {
         return focusedWorkspaceNorm
     }
 
-    private var canReorderProjectsOnDashboard: Bool {
+    /// Everything but the group count, which callers that already hold `orderedProjectGroups` check themselves: rebuilding
+    /// the groups walks every session, and section headers ask once each.
+    private var canReorderBase: Bool {
         store.canPerformMutatingActions
             && groupBy == .project
             && focusedWorkspaceNorm.isEmpty
             && parsedSearch.isEmpty
-            && orderedProjectGroups.count > 1
+    }
+
+    private var canReorderProjectsOnDashboard: Bool {
+        canReorderBase && orderedProjectGroups.count > 1
     }
 
     public var body: some View {
@@ -570,107 +575,9 @@ public struct DashboardView: View {
                 // The error banner above explains why the list is empty.
                 EmptyView()
             } else if groupBy == .time {
-                if timeGroups.isEmpty {
-                    emptyStateSection
-                } else {
-                    ForEach(timeGroups) { group in
-                        let isCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(group.bucket.title)
-                        Section {
-                            if !isCollapsed {
-                                ForEach(group.items) { item in
-                                    sessionRow(item, showFolder: true)
-                                }
-                            }
-                        } header: {
-                            timeSectionHeader(group.bucket, count: group.items.count, collapsed: isCollapsed)
-                        }
-                    }
-                }
-            } else if orderedProjectGroups.isEmpty && attentionItems.isEmpty {
-                emptyStateSection
+                timeGroupedSections(timeGroups)
             } else {
-                if !attentionItems.isEmpty {
-                    let attnCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(SidebarLayoutHelper.attentionGroupKey)
-                    Section {
-                        if !attnCollapsed {
-                            ForEach(attentionItems) { item in
-                                sessionRow(item, showFolder: true, emphasizeAttention: true)
-                            }
-                        }
-                    } header: {
-                        attentionSectionHeader(count: attentionItems.count, collapsed: attnCollapsed)
-                    }
-                }
-
-                ForEach(orderedProjectGroups) { group in
-                    let isCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(group.key, legacyProjectID: group.project?.id)
-                    Section {
-                        if !isCollapsed {
-                            if group.items.isEmpty {
-                                HStack {
-                                    Text("No active sessions in \(group.label)")
-                                        .font(.caption)
-                                        .foregroundStyle(palette.muted)
-                                    Spacer()
-                                    Button("Start") {
-                                        store.presentQuickStart(projectPath: group.key)
-                                    }
-                                    .font(.caption.weight(.semibold))
-                                    .buttonStyle(.borderless)
-                                    .disabled(!store.canPerformMutatingActions)
-                                }
-                                .listRowBackground(palette.card)
-                            } else {
-                                ForEach(group.items) { item in
-                                    sessionRow(item, showFolder: false)
-                                }
-                            }
-                        }
-                    } header: {
-                        projectSectionHeader(group, collapsed: isCollapsed)
-                    }
-                }
-
-                if draggingGroupNormKey != nil && canReorderProjectsOnDashboard {
-                    Section {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.to.line")
-                                .font(.caption)
-                            Text("Drop here to move to bottom")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .foregroundStyle(isDropTargetBottom ? palette.accent : palette.muted)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(
-                                    isDropTargetBottom ? palette.accent : palette.border,
-                                    style: StrokeStyle(lineWidth: isDropTargetBottom ? 2 : 1, dash: [5, 4])
-                                )
-                        )
-                        .listRowBackground(Color.clear)
-                        .dropDestination(for: String.self) { items, _ in
-                            isDropTargetBottom = false
-                            let sourceKey = items.first ?? draggingGroupNormKey
-                            draggingGroupNormKey = nil
-                            dropTargetGroupNormKey = nil
-                            guard let sourceKey else { return false }
-                            store.notificationManager.triggerHaptic(.lightTap)
-                            Task {
-                                await store.moveGroup(key: sourceKey, beforeKey: nil, visibleKeys: visibleProjectOrderKeys)
-                            }
-                            return true
-                        } isTargeted: { targeted in
-                            isDropTargetBottom = targeted
-                        }
-                        .onTapGesture {
-                            draggingGroupNormKey = nil
-                            dropTargetGroupNormKey = nil
-                            isDropTargetBottom = false
-                        }
-                    }
-                }
+                projectGroupedSections(groups: orderedProjectGroups, attention: attentionItems)
             }
 
             navigationShortcutsSection
@@ -745,14 +652,14 @@ public struct DashboardView: View {
                     } label: {
                         Label("Collapse All", systemImage: "rectangle.compress.vertical")
                     }
-                    .disabled(!store.canPerformMutatingActions || allCollapsibleGroupKeys.isEmpty)
+                    .disabled(!store.canPerformMutatingActions)
 
                     Button {
                         Task { await store.setAllGroupsCollapsed(false, keys: allCollapsibleGroupKeys) }
                     } label: {
                         Label("Expand All", systemImage: "rectangle.expand.vertical")
                     }
-                    .disabled(!store.canPerformMutatingActions || allCollapsibleGroupKeys.isEmpty)
+                    .disabled(!store.canPerformMutatingActions)
 
                     Divider()
 
@@ -804,6 +711,119 @@ public struct DashboardView: View {
                 renamingSession = nil
             }
             Button("Cancel", role: .cancel) { renamingSession = nil }
+        }
+    }
+
+    /// Status-grouped sections; `groups` is computed once per render by the caller.
+    @ViewBuilder
+    private func timeGroupedSections(_ groups: [TimeGroup]) -> some View {
+        if groups.isEmpty {
+            emptyStateSection
+        } else {
+            ForEach(groups) { group in
+                let isCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(group.bucket.title)
+                Section {
+                    if !isCollapsed {
+                        ForEach(group.items) { item in
+                            sessionRow(item, showFolder: true)
+                        }
+                    }
+                } header: {
+                    timeSectionHeader(group.bucket, count: group.items.count, collapsed: isCollapsed)
+                }
+            }
+        }
+    }
+
+    /// Needs-attention and workspace sections. The caller builds `groups` and `attention` once per render and every header
+    /// reuses them: rebuilding walks every panel and history session, and doing that per header froze launch.
+    @ViewBuilder
+    private func projectGroupedSections(groups: [ProjectGroup], attention: [DashboardItem]) -> some View {
+        if groups.isEmpty && attention.isEmpty {
+            emptyStateSection
+        } else {
+            if !attention.isEmpty {
+                let attnCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(SidebarLayoutHelper.attentionGroupKey)
+                Section {
+                    if !attnCollapsed {
+                        ForEach(attention) { item in
+                            sessionRow(item, showFolder: true, emphasizeAttention: true)
+                        }
+                    }
+                } header: {
+                    attentionSectionHeader(count: attention.count, collapsed: attnCollapsed)
+                }
+            }
+
+            ForEach(groups) { group in
+                let isCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(group.key, legacyProjectID: group.project?.id)
+                Section {
+                    if !isCollapsed {
+                        if group.items.isEmpty {
+                            HStack {
+                                Text("No active sessions in \(group.label)")
+                                    .font(.caption)
+                                    .foregroundStyle(palette.muted)
+                                Spacer()
+                                Button("Start") {
+                                    store.presentQuickStart(projectPath: group.key)
+                                }
+                                .font(.caption.weight(.semibold))
+                                .buttonStyle(.borderless)
+                                .disabled(!store.canPerformMutatingActions)
+                            }
+                            .listRowBackground(palette.card)
+                        } else {
+                            ForEach(group.items) { item in
+                                sessionRow(item, showFolder: false)
+                            }
+                        }
+                    }
+                } header: {
+                    projectSectionHeader(group, collapsed: isCollapsed, groups: groups)
+                }
+            }
+
+            if draggingGroupNormKey != nil && canReorderBase && groups.count > 1 {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.caption)
+                        Text("Drop here to move to bottom")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(isDropTargetBottom ? palette.accent : palette.muted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(
+                                isDropTargetBottom ? palette.accent : palette.border,
+                                style: StrokeStyle(lineWidth: isDropTargetBottom ? 2 : 1, dash: [5, 4])
+                            )
+                    )
+                    .listRowBackground(Color.clear)
+                    .dropDestination(for: String.self) { items, _ in
+                        isDropTargetBottom = false
+                        let sourceKey = items.first ?? draggingGroupNormKey
+                        draggingGroupNormKey = nil
+                        dropTargetGroupNormKey = nil
+                        guard let sourceKey else { return false }
+                        store.notificationManager.triggerHaptic(.lightTap)
+                        Task {
+                            await store.moveGroup(key: sourceKey, beforeKey: nil, visibleKeys: groups.map(\.key))
+                        }
+                        return true
+                    } isTargeted: { targeted in
+                        isDropTargetBottom = targeted
+                    }
+                    .onTapGesture {
+                        draggingGroupNormKey = nil
+                        dropTargetGroupNormKey = nil
+                        isDropTargetBottom = false
+                    }
+                }
+            }
         }
     }
 
@@ -1034,14 +1054,15 @@ public struct DashboardView: View {
     }
 
     @ViewBuilder
-    private func projectSectionHeader(_ group: ProjectGroup, collapsed: Bool) -> some View {
+    private func projectSectionHeader(_ group: ProjectGroup, collapsed: Bool, groups: [ProjectGroup]) -> some View {
         let workingCount = group.items.filter { $0.isWorking && !$0.needsReview }.count
         let reviewCount = group.items.filter(\.isReviewish).count
         let unseenCount = group.items.filter(\.isUnseen).count
         let branchText = (group.project?.branch?.isEmpty == false && group.project?.branch != "workspace") ? group.project?.branch : nil
         let isFocused = focusedWorkspaceNorm == group.normKey
         let isDropTarget = dropTargetGroupNormKey == group.normKey && draggingGroupNormKey != group.normKey
-        let idx = orderedProjectGroups.firstIndex(where: { $0.normKey == group.normKey })
+        let idx = groups.firstIndex(where: { $0.normKey == group.normKey })
+        let canReorder = canReorderBase && groups.count > 1
 
         let headerRow = HStack(spacing: 8) {
             Button {
@@ -1156,41 +1177,41 @@ public struct DashboardView: View {
             }
             .disabled(!store.canPerformMutatingActions)
 
-            if canReorderProjectsOnDashboard {
+            if canReorder {
                 Divider()
                 if let idx, idx > 0 {
                     Button {
                         Task {
                             await store.moveGroup(
                                 key: group.key,
-                                beforeKey: orderedProjectGroups.first?.key,
-                                visibleKeys: visibleProjectOrderKeys
+                                beforeKey: groups.first?.key,
+                                visibleKeys: groups.map(\.key)
                             )
                         }
                     } label: {
                         Label("Move to top", systemImage: "arrow.up.to.line")
                     }
                     Button {
-                        let prev = orderedProjectGroups[idx - 1]
+                        let prev = groups[idx - 1]
                         Task {
-                            await store.moveGroup(key: group.key, beforeKey: prev.key, visibleKeys: visibleProjectOrderKeys)
+                            await store.moveGroup(key: group.key, beforeKey: prev.key, visibleKeys: groups.map(\.key))
                         }
                     } label: {
                         Label("Move up", systemImage: "arrow.up")
                     }
                 }
-                if let idx, idx < orderedProjectGroups.count - 1 {
+                if let idx, idx < groups.count - 1 {
                     Button {
-                        let nextAfter: String? = (idx + 2 < orderedProjectGroups.count) ? orderedProjectGroups[idx + 2].key : nil
+                        let nextAfter: String? = (idx + 2 < groups.count) ? groups[idx + 2].key : nil
                         Task {
-                            await store.moveGroup(key: group.key, beforeKey: nextAfter, visibleKeys: visibleProjectOrderKeys)
+                            await store.moveGroup(key: group.key, beforeKey: nextAfter, visibleKeys: groups.map(\.key))
                         }
                     } label: {
                         Label("Move down", systemImage: "arrow.down")
                     }
                     Button {
                         Task {
-                            await store.moveGroup(key: group.key, beforeKey: nil, visibleKeys: visibleProjectOrderKeys)
+                            await store.moveGroup(key: group.key, beforeKey: nil, visibleKeys: groups.map(\.key))
                         }
                     } label: {
                         Label("Move to bottom", systemImage: "arrow.down.to.line")
@@ -1214,24 +1235,24 @@ public struct DashboardView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: "Move to top") {
-            guard canReorderProjectsOnDashboard else { return }
-            Task { await store.moveGroup(key: group.key, beforeKey: orderedProjectGroups.first?.key, visibleKeys: visibleProjectOrderKeys) }
+            guard canReorder else { return }
+            Task { await store.moveGroup(key: group.key, beforeKey: groups.first?.key, visibleKeys: groups.map(\.key)) }
         }
         .accessibilityAction(named: "Move up") {
-            guard canReorderProjectsOnDashboard, let idx, idx > 0 else { return }
-            Task { await store.moveGroup(key: group.key, beforeKey: orderedProjectGroups[idx - 1].key, visibleKeys: visibleProjectOrderKeys) }
+            guard canReorder, let idx, idx > 0 else { return }
+            Task { await store.moveGroup(key: group.key, beforeKey: groups[idx - 1].key, visibleKeys: groups.map(\.key)) }
         }
         .accessibilityAction(named: "Move down") {
-            guard canReorderProjectsOnDashboard, let idx, idx < orderedProjectGroups.count - 1 else { return }
-            let nextAfter: String? = (idx + 2 < orderedProjectGroups.count) ? orderedProjectGroups[idx + 2].key : nil
-            Task { await store.moveGroup(key: group.key, beforeKey: nextAfter, visibleKeys: visibleProjectOrderKeys) }
+            guard canReorder, let idx, idx < groups.count - 1 else { return }
+            let nextAfter: String? = (idx + 2 < groups.count) ? groups[idx + 2].key : nil
+            Task { await store.moveGroup(key: group.key, beforeKey: nextAfter, visibleKeys: groups.map(\.key)) }
         }
         .accessibilityAction(named: "Move to bottom") {
-            guard canReorderProjectsOnDashboard else { return }
-            Task { await store.moveGroup(key: group.key, beforeKey: nil, visibleKeys: visibleProjectOrderKeys) }
+            guard canReorder else { return }
+            Task { await store.moveGroup(key: group.key, beforeKey: nil, visibleKeys: groups.map(\.key)) }
         }
 
-        if canReorderProjectsOnDashboard && !group.normKey.isEmpty {
+        if canReorder && !group.normKey.isEmpty {
             headerRow
                 .draggable(group.key) {
                     HStack(spacing: 6) {
@@ -1262,7 +1283,7 @@ public struct DashboardView: View {
                     }
                     store.notificationManager.triggerHaptic(.lightTap)
                     Task {
-                        await store.moveGroup(key: draggedKey, beforeKey: group.key, visibleKeys: visibleProjectOrderKeys)
+                        await store.moveGroup(key: draggedKey, beforeKey: group.key, visibleKeys: groups.map(\.key))
                     }
                     return true
                 } isTargeted: { targeted in
@@ -1688,9 +1709,10 @@ public struct DashboardView: View {
     private var filterChipStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                let scoped = scopedItems
                 ForEach(DashboardSessionFilter.allCases) { item in
                     let isSelected = filter == item
-                    let count = count(for: item)
+                    let count = applyFilter(item, to: scoped).count
                     Button {
                         filter = item
                     } label: {
@@ -1720,10 +1742,6 @@ public struct DashboardView: View {
             .padding(.horizontal, 2)
             .padding(.vertical, 2)
         }
-    }
-
-    private func count(for item: DashboardSessionFilter) -> Int {
-        applyFilter(item, to: scopedItems).count
     }
 
     private var navigationShortcutsSection: some View {
