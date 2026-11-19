@@ -208,11 +208,26 @@ public enum SidebarLayoutHelper {
         if seconds < 3600 { return "\(max(1, Int((seconds / 60).rounded())))m" }
         if seconds < 86400 { return "\(Int((seconds / 3600).rounded()))h" }
         if seconds < 86400 * 7 { return "\(Int((seconds / 86400).rounded()))d" }
-        let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "en_US_POSIX")
-        fmt.dateFormat = "MMM d"
-        return fmt.string(from: date)
+        return monthDayFormatter.string(from: date)
     }
+
+    nonisolated(unsafe) private static let monthDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d"
+        return f
+    }()
+    nonisolated(unsafe) private static let weekdayTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE HH:mm"
+        return f
+    }()
+    nonisolated(unsafe) private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
 
     /// Matches `fmtMs(ms)` in `local-dist/app.js`.
     public static func formatDurationMs(_ ms: Int) -> String {
@@ -313,18 +328,13 @@ public enum UsageFormatting {
             return hours > 0 ? "resets in \(hours)h \(mins)m" : "resets in \(mins)m"
         }
         let date = Date(timeIntervalSince1970: resetsAtMs / 1000.0)
-        let fmt = DateFormatter()
-        fmt.locale = Locale(identifier: "en_US_POSIX")
-        fmt.dateFormat = "EEE HH:mm"
-        return "Resets " + fmt.string(from: date)
+        return "Resets " + weekdayTimeFormatter.string(from: date)
     }
 
     public static func updatedClockLabel(isoString: String?, fallbackDate: Date? = nil) -> String? {
         let date = SidebarLayoutHelper.parseISODate(isoString) ?? fallbackDate
         guard let date else { return nil }
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm"
-        return "Updated " + fmt.string(from: date)
+        return "Updated " + clockFormatter.string(from: date)
     }
 
     public static func unavailableMessage(_ reason: String) -> String {

@@ -308,15 +308,16 @@ public struct CameraImagePicker: UIViewControllerRepresentable {
 #endif
 
 public enum CompanionFormatters {
+    // Formatters are expensive to create and this runs per row; the shared instances are thread-safe.
+    nonisolated(unsafe) private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
     public static func relativeDate(_ isoString: String?) -> String {
-        guard let isoString, !isoString.isEmpty else { return "" }
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = parser.date(from: isoString) ?? ISO8601DateFormatter().date(from: isoString)
-        guard let date else { return "" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        guard let date = SidebarLayoutHelper.parseISODate(isoString) else { return "" }
+        return relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 
     public static func formatTokens(_ n: Int?) -> String {
