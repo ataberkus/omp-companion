@@ -6,9 +6,10 @@ import { error, text, samePath, resolveDir } from '../util.mjs';
 import { openTerminal, EDITORS, EDITOR_CHOICES, editorUrl, openWithOs, detectEditor } from '../system.mjs';
 import { projectColor } from '../workspaces.mjs';
 export function workspaceRoutes(ctx){
- const {options,store,browse,uiKeys,persist,scheduleSave,ensureProject,refreshBranch}=ctx;
+ const {options,store,browse,searchFiles,uiKeys,persist,scheduleSave,ensureProject,refreshBranch}=ctx;
  return {
-   'GET /api/browse':async({url,json})=>{json(await browse(url.searchParams.get('path')||''));return;},
+   'GET /api/browse':async({url,json})=>{json(await browse(url.searchParams.get('path')||'',{includeFiles:url.searchParams.get('files')==='1'}));return;},
+   'GET /api/files':async({url,json})=>{json(await searchFiles(url.searchParams.get('path')||'',url.searchParams.get('q')||'',Number(url.searchParams.get('limit'))||200));return;},
    'POST /api/projects':async({body,json})=>{
     const dir=await resolveDir(body.path);if(store.projects.some(p=>samePath(p.path,dir)))throw error('This directory is already registered.');
     const p=await ensureProject(dir,typeof body.name==='string'?body.name:'');p.description=String(body.description||'');await persist([]);json(p,201);return;

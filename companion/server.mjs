@@ -80,7 +80,8 @@ export async function createCompanion(options={}){
  const instance=randomUUID(),canRestart=typeof options.restart==='function',canAppUpdate=typeof options.appUpdate==='function';
  // Only the current thought is live; completed messages remain in OMP's transcript.
  const subagentThoughts=new Map();
- Object.assign(ctx,{allowedOrigins,runners,launches,locks,instance,canRestart,canAppUpdate,appVersion:options.appVersion||'',subagentThoughts});
+ const tailscaleLookup=()=>((options.tailscale||tailscaleSelf)().catch(()=>null));
+ Object.assign(ctx,{allowedOrigins,runners,launches,locks,instance,canRestart,canAppUpdate,appVersion:options.appVersion||'',subagentThoughts,tailscaleLookup});
  use(createToolImages(ctx));
  use(createMessages(ctx));
  use(createSlashCommands(ctx));

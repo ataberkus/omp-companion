@@ -324,6 +324,15 @@ Close the companion's console, then start `start.bat` from Explorer or a **new**
 
 To go back, run `reg delete HKCU\Environment /v OMP_WEB_NO_TOKEN /f`, `reg delete HKCU\Environment /v OMP_WEB_HOST /f` and `setx OMP_WEB_PASSWORD "…"`, then restart the companion from a new console.
 
+### iPhone and iPad app
+
+`ios/` holds a native SwiftUI app (iOS/iPadOS 17+, no third-party dependencies) with the dashboard's controls: sessions and attention triage, live transcripts, composer with steers, queued messages, images, slash commands, `@` files and Enhance, questions and plan approval, goal/loop/vibe modes, custom-UI terminal panels and the Screen page, Changes diffs, todos, activity, and the settings, accounts, MCP, plugins, spend, tools and restart/shutdown pages. It talks to the same HTTP API over Tailscale as the browser does; the companion needs no extra setting.
+
+- **Build:** open `ios/OMPCompanion.xcodeproj` in Xcode 15.4 or later, pick your team under *Signing & Capabilities*, and run on a device. `ios/project.yml` regenerates the project with [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`cd ios && xcodegen generate`); the app's logic lives in the `ios/OMPCompanionKit` Swift package.
+- **Pair:** set up Tailscale on the PC and phone as above, then in the dashboard's settings choose **Pair iOS app → Show QR code** and scan it from the app's *Add host* screen (or copy the `omp://connect?…` link). Include the credential only on a screen nobody else can see; otherwise enter the password or token in the app. Manual entry takes a MagicDNS name, a `100.x.y.z` / `fd7a:115c:a1e0::` address with port, or a `tailscale serve` `https://` URL.
+- Tokens and passwords are stored in the iOS Keychain only. The app masks its contents in the app switcher and can require Face ID / Touch ID. Plain HTTP is allowed because tailnet traffic is already WireGuard-encrypted; use `tailscale serve` for HTTPS if you prefer.
+- Notifications are local: the app alerts while open and on iOS background refresh, not when it has been terminated (that would need Apple push and a relay).
+
 ## Development
 
 ```sh
