@@ -463,14 +463,20 @@
   // Work that holds "Shut down PC when all work is done" (the companion's workPending): a turn, or a compaction, handoff
   // or shell command in progress. Queued messages of a stopped session wait for the user's next message, so they don't.
   const isWorking = s => s.status === 'running' || s.status === 'queued' || !!s._task || !!s._bash;
-  const projectOf = s => S.store?.projects.find(p => p.id === s.projectId);
-  const projectAt = cwd => S.store?.projects.find(p => norm(p.path) === norm(cwd));
+  // Sidebar renders look up a project for every row (~1,400 with OMP's history): index each projects array once instead of
+  // scanning it per row. Arrays are replaced, never edited in place (mergeStore keeps an unchanged one across polls).
+  const index = (arr, key) => { const m = new Map(); for (const x of arr) { const k = key(x); if (!m.has(k)) m.set(k, x); } return m; };
+  const projIdx = new WeakMap();
+  const projects = () => { const arr = S.store?.projects; if (!arr) return null; let i = projIdx.get(arr); if (!i) projIdx.set(arr, i = { id: index(arr, p => p.id), path: index(arr, p => norm(p.path)) }); return i; };
+  const projectOf = s => projects()?.id.get(s.projectId);
+  const projectAt = cwd => projects()?.path.get(norm(cwd));
   // The companion's palette (server.mjs `colors`), offered in the workspace menu.
   const WS_COLORS = ['oklch(.74 .14 50)', 'oklch(.72 .13 265)', 'oklch(.74 .12 165)', 'oklch(.7 .15 310)', 'oklch(.78 .13 95)', 'oklch(.7 .14 20)', 'oklch(.74 .11 215)', 'oklch(.72 .15 135)', 'oklch(.7 .14 345)', 'oklch(.74 .1 240)'];
   // A folder known only from OMP's history has no project record: a stable colour from its path.
   const pathColor = p => { let h = 0; for (const c of norm(p)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `oklch(.72 .12 ${h % 360})`; };
   const sessionModel = s => s.modelSelector || (s.provider && s.model && s.model !== 'OMP default' ? s.provider + '/' + s.model : '');
-  const modelInfo = sel => S.models?.models.find(m => m.selector === sel);
+  const modelIdx = new WeakMap(); // models array → selector → model, for the same reason (~750 models)
+  const modelInfo = sel => { const arr = S.models?.models; if (!arr) return undefined; let m = modelIdx.get(arr); if (!m) modelIdx.set(arr, m = index(arr, x => x.selector)); return m.get(sel); };
   const modelName = sel => { if (!sel) return ''; const m = modelInfo(sel); return m ? m.name : sel.slice(sel.indexOf('/') + 1); };
   const modelLabel = (sel, thinking) => sel ? modelName(sel) + (thinking && thinking !== 'off' ? ' · ' + thinking : '') : '';
   const archivedKeys = () => new Set(S.store?.archived || []);

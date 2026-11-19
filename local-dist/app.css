@@ -106,7 +106,9 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .filters button{flex:1;padding:5px 0;border:0;border-radius:6px;background:none;color:var(--muted);font-size:12.5px;font-weight:600;cursor:pointer}
 .filters button:hover{color:var(--fg)}
 .filters button.on{color:var(--fg);background:var(--active)}
-.session-list{flex:1;min-height:0;overflow-y:auto;margin:0 -6px;padding:0 6px}
+/* Size + layout containment: the list's box comes from the sidebar, never its rows, so a row that changes (running timers,
+   "ago" labels, every poll) lays out only the list instead of the whole page with the thread (~25 ms with ~1,000 rows). */
+.session-list{flex:1;min-height:0;overflow-y:auto;margin:0 -6px;padding:0 6px;contain:size layout}
 .group-head{display:flex;align-items:center;gap:4px;padding:12px 8px 0}
 .group-head.dragging{opacity:.4}
 .group-head.drop-before{box-shadow:inset 0 2px 0 var(--accent)}
@@ -630,7 +632,7 @@ button.pdf-chip:focus-visible{outline:2px solid var(--accent);outline-offset:1px
   .composer-wrap .composer-bar:has(#buttons>:nth-child(2)) .bar-tools{flex:1 1 auto}
   /* The drawer is taller than the screen: it scrolls as a whole, so the session list never shrinks to nothing. */
   .sidebar{overflow-y:auto;overscroll-behavior:contain}
-  .sidebar .session-list{flex:none;overflow:visible}
+  .sidebar .session-list{flex:none;overflow:visible;contain:none}
 }
 /* touch: iOS zooms into inputs under 16px; keyboard hints are noise without a keyboard */
 @media (pointer:coarse){input,textarea,select,.composer #ghost{font-size:16px!important}}
