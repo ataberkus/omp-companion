@@ -104,6 +104,37 @@ private struct TimeGroup: Identifiable {
     var id: String { bucket.id }
 }
 
+/// Memoizes the dashboard's derived lists. Building them walks every panel and history session (the history can hold
+/// thousands) and the body, headers, toolbar and filter chips read them several times per render, on every poll; rebuilding
+/// each time made the app stutter and freeze. Keys compare the inputs (unchanged arrays compare by storage, so cheaply).
+private final class DashboardDerivedCache {
+    struct ItemsKey: Equatable {
+        let snapshot: StoreSnapshot
+        let native: [NativeSessionSummary]
+        let models: [ModelEntry]
+        let unseen: Set<String>
+        let selected: String?
+        /// Work durations and relative times move with the clock.
+        let tick: Int
+    }
+
+    struct ViewKey: Equatable {
+        let itemsGeneration: Int
+        let filter: DashboardSessionFilter
+        let search: String
+        let focus: String
+        let groupOrder: [String]
+    }
+
+    var itemsKey: ItemsKey?
+    var items: [DashboardItem] = []
+    var itemsGeneration = 0
+    var filteredKey: ViewKey?
+    var filtered: [DashboardItem] = []
+    var groupsKey: ViewKey?
+    var groups: [ProjectGroup] = []
+}
+
 public struct DashboardView: View {
     @Environment(\.ompPalette) private var palette
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -122,6 +153,7 @@ public struct DashboardView: View {
     @State private var draggingGroupNormKey: String?
     @State private var dropTargetGroupNormKey: String?
     @State private var isDropTargetBottom = false
+    @State private var derivedCache = DashboardDerivedCache()
 
     public init(store: AppStore) {
         self.store = store
@@ -136,6 +168,23 @@ public struct DashboardView: View {
     }
 
     private var allUnifiedItems: [DashboardItem] {
+        let key = DashboardDerivedCache.ItemsKey(
+            snapshot: store.snapshot,
+            native: store.nativeSessions,
+            models: store.availableModels,
+            unseen: store.unseenSessionIDs,
+            selected: store.selectedSessionID,
+            tick: Int(Date().timeIntervalSince1970 / 30)
+        )
+        if derivedCache.itemsKey != key {
+            derivedCache.items = buildUnifiedItems()
+            derivedCache.itemsKey = key
+            derivedCache.itemsGeneration &+= 1
+        }
+        return derivedCache.items
+    }
+
+    private func buildUnifiedItems() -> [DashboardItem] {
         let projectsByID = Dictionary(store.snapshot.projects.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let projectsByNormPath = Dictionary(
             store.snapshot.projects.map { (SidebarLayoutHelper.normalizePathKey($0.path), $0) },
@@ -328,7 +377,24 @@ public struct DashboardView: View {
     }
 
     private var filteredItems: [DashboardItem] {
-        applyFilter(filter, to: scopedItems)
+        let key = viewCacheKey()
+        if derivedCache.filteredKey != key {
+            derivedCache.filtered = applyFilter(filter, to: scopedItems)
+            derivedCache.filteredKey = key
+        }
+        return derivedCache.filtered
+    }
+
+    /// Refreshes the item cache first, so its generation in the key is current.
+    private func viewCacheKey() -> DashboardDerivedCache.ViewKey {
+        _ = allUnifiedItems
+        return DashboardDerivedCache.ViewKey(
+            itemsGeneration: derivedCache.itemsGeneration,
+            filter: filter,
+            search: searchText,
+            focus: focusedWorkspaceNorm,
+            groupOrder: store.effectiveGroupOrder
+        )
     }
 
     private var attentionItems: [DashboardItem] {
@@ -339,6 +405,15 @@ public struct DashboardView: View {
     }
 
     private var orderedProjectGroups: [ProjectGroup] {
+        let key = viewCacheKey()
+        if derivedCache.groupsKey != key {
+            derivedCache.groups = buildOrderedProjectGroups()
+            derivedCache.groupsKey = key
+        }
+        return derivedCache.groups
+    }
+
+    private func buildOrderedProjectGroups() -> [ProjectGroup] {
         let items = filteredItems
         var groupedByNorm: [String: [DashboardItem]] = [:]
         var metaByNorm: [String: (key: String, label: String, color: String, project: WorkspaceProject?)] = [:]
