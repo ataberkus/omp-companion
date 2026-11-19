@@ -39,5 +39,5 @@ schemes:
     test:
       config: Debug
       targets:
-        - name: OMPCompanionKitTests
+        - package: OMPCompanionKit/OMPCompanionKitTests
           parallelizable: true
