@@ -167,6 +167,11 @@ public struct OMPPalette: Sendable {
     }
 }
 
+public enum OMPTypography {
+    /// Code blocks and diffs: the caption size the rest of the app uses for monospaced text.
+    public static let monoSmall: Font = .caption.monospaced()
+}
+
 private struct OMPPaletteKey: EnvironmentKey {
     static let defaultValue: OMPPalette = .dark
 }
