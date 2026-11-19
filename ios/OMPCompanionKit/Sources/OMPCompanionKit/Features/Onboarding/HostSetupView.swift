@@ -21,7 +21,7 @@ public struct HostSetupView: View {
     @State private var testStatus: TestResultBanner?
     @State private var showScanner = false
 
-    private enum TestResultBanner: Equatable {
+    private enum TestResultBanner {
         case success(latencyMs: Int, hostName: String?, urls: [String])
         case failure(CompanionAPIError)
     }
