@@ -387,8 +387,9 @@ test('crafted markdown renders fast and deep nesting does not overflow the stack
       ms = Math.min(ms, performance.now() - t0);
       assert.match(html, /data-key="msg:m1"/);
     }
-    // A superlinear path on these sizes takes seconds; 150 ms leaves headroom for a slow runner (the `\[` case is ~35 ms locally).
-    assert.ok(ms < 150, `${JSON.stringify(text.slice(0, 12))}… took ${ms.toFixed(1)} ms`);
+    // A superlinear path on these sizes takes seconds; 500 ms leaves headroom for the slow Intel macOS runner (the `\[`
+    // case is ~35 ms locally and took 169 ms best-of-3 there).
+    assert.ok(ms < 500, `${JSON.stringify(text.slice(0, 12))}… took ${ms.toFixed(1)} ms`);
   }
 });
 
