@@ -76,7 +76,7 @@
         add('script', { src: KATEX + 'contrib/copy-tex.min.js' }).catch(() => {});
         // Markup rendered while KaTeX was missing shows source: drop every cache holding it and render the view again.
         mathCache.clear(); mdCache.clear(); mdNew.length = 0; bodyCache.clear(); partSets.clear();
-        S.lastSig = ''; update();
+        S.lastSig = ''; update(); showMathPreview();
       }, () => {
         // A failed load (offline phone, missing file) is tried again a minute later, up to 5 times, not on every render.
         els.forEach(el => el.remove?.());
@@ -1276,7 +1276,7 @@
     const busy = S.planBusy.has(s.id) || ['running', 'queued'].includes(s.status) || s._task || s._bash;
     const on = supported && !!mode.enabled;
     return (plan ? `<button class="phone-only" data-plan-toggle="${esc(s.id)}" aria-pressed="${on}" title="Toggle native plan mode (Alt+Shift+P)" ${busy ? 'disabled' : ''}><span class="check" aria-hidden="true">${on ? '✓' : ''}</span>Plan mode (read-only planning)</button>` : '')
-      + `<button class="phone-only" data-act="compactPref" aria-pressed="${S.compactComposer}"><span class="check" aria-hidden="true">${S.compactComposer ? '✓' : ''}</span>Shrink the composer while OMP works</button><div class="menu-sep phone-only"></div>`;
+      + `<button class="phone-only" data-act="compactPref" aria-pressed="${S.compactComposer}"><span class="check" aria-hidden="true">${S.compactComposer ? '✓' : ''}</span>Shrink the composer while OMP works</button><button class="phone-only" data-act="mathSize" aria-haspopup="dialog" aria-controls="mathSize">Formula size…</button><div class="menu-sep phone-only"></div>`;
   }
   function renderTopbarSession(s) {
     const p = projectOf(s);
@@ -5304,7 +5304,10 @@
   window.addEventListener('pagehide', () => void flushDrafts({ keepalive: true }));
 
   // ---------- events ----------
-  const closeMenu = m => { if (!m) return; m.classList.remove('open'); m.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'false'); };
+  const closeMenu = m => {
+    if (!m) return; m.classList.remove('open'); m.querySelector('[data-act="menu"]')?.setAttribute('aria-expanded', 'false');
+    if (m.id === 'mathSize') document.querySelectorAll('[data-act="mathSize"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+  };
   const closeMenus = () => document.querySelectorAll('.menu.open').forEach(closeMenu);
   const overlayOpen = () => !!(S.picker || $('#modal') || $('#lightbox'));
   const keyIs = (e, k) => keyChar(e) === k;
@@ -5583,6 +5586,17 @@
     if (!a) return;
     const act = a.dataset.act, c = current();
     if (act === 'nav') setNav(!$('#app').classList.contains('nav-open'), true);
+    // Formula size sheet (sidebar Σ, or ⋯ › Formula size… on phones): the drawer closes so the thread's formulas show
+    // behind it and grow with the slider.
+    else if (act === 'mathSize') {
+      const m = $('#mathSize'), open = !m.classList.contains('open'); closeMenus();
+      if (open) {
+        m.classList.add('open'); document.querySelectorAll('[data-act="mathSize"]').forEach(b => b.setAttribute('aria-expanded', 'true'));
+        if ($('#app').classList.contains('nav-open')) setNav(false);
+        showMathPreview(); $('#mathScale')?.focus({ preventScroll: true });
+      }
+    }
+    else if (act === 'mathSizeClose') { closeMenus(); }
     else if (act === 'menu') {
       const m = a.closest('.menu'), open = !m.classList.contains('open'); closeMenus();
       if (open) { m.classList.add('open'); a.setAttribute('aria-expanded', 'true'); }
@@ -5828,6 +5842,22 @@
   let theme = 'system'; try { theme = localStorage.getItem('omp-theme') || 'system'; } catch {}
   theme = applyTheme(theme);
   $('#themeBtn')?.addEventListener('click', () => { const order = Object.keys(THEMES); theme = applyTheme(order[(order.indexOf(theme) + 1) % order.length]); try { localStorage.setItem('omp-theme', theme); } catch {} toast(THEMES[theme][0]); });
+  // Formula size: a slider in the sidebar footer (beside the theme toggle on phones) scales every rendered formula through
+  // --math-scale, so nothing re-renders. Saved in this browser; the popover previews a formula at the chosen size.
+  const MATH_PREVIEW = String.raw`f(t)=\dfrac{e^{t}-e^{-2t}}{t}`;
+  function showMathPreview() { const p = $('#mathPreview'); if (p && $('#mathSize')?.classList.contains('open')) p.innerHTML = mathInline(MATH_PREVIEW, '$' + MATH_PREVIEW + '$'); }
+  function setMathScale(pct, save) {
+    pct = Math.round(Math.max(80, Math.min(200, Number(pct) || 100)) / 5) * 5;
+    document.documentElement?.style?.setProperty('--math-scale', String(pct / 100));
+    const r = $('#mathScale'), o = $('#mathScaleOut');
+    if (r) { r.value = String(pct); r.setAttribute('aria-valuetext', pct + '%'); }
+    if (o) o.textContent = pct + '%';
+    if (save) try { localStorage.setItem('omp-math-scale', String(pct)); } catch {}
+  }
+  let mathScale = 100; try { mathScale = localStorage.getItem('omp-math-scale') || 100; } catch {}
+  setMathScale(mathScale);
+  $('#mathScale')?.addEventListener('input', e => setMathScale(e.target.value, true));
+  $('#mathScaleReset')?.addEventListener('click', () => setMathScale(100, true));
   // Sidebar width: drag the right edge (or focus it and press ←/→); double-click resets. Saved in this browser.
   const SIDE_MIN = 220, SIDE_MAX = 520, SIDE_DEFAULT = 300;
   function setSideWidth(w, save) {

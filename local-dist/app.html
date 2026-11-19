@@ -40,6 +40,7 @@
       <a href="#/tools" title="OMP command-line tools: commit, worktrees, stats, sharing, skills, plugins…"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/></svg> Tools</a>
       <a href="#/spend" title="Dollar spend per model: today, this month, all time"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.6-1.5-3-1.5-1.7 0-3 .8-3 2s1.3 1.7 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.5M12 6.5v11"/></svg> Spend</a>
       <a href="#/screen" title="See and control this PC's screen from another device"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg> Screen</a>
+      <span class="menu math-size-trigger"><button type="button" class="link math-size-btn" data-act="mathSize" title="Formula size" aria-label="Formula size" aria-haspopup="dialog" aria-controls="mathSize" aria-expanded="false"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 5H7l6 7-6 7h10"/></svg></button></span>
       <button type="button" class="link theme-btn" id="themeBtn" title="Theme" aria-label="Theme"></button>
       <button class="link" id="disconnect">Disconnect</button>
     </div>
@@ -47,6 +48,14 @@
   </aside>
   <div class="scrim" id="scrim" aria-hidden="true"></div>
   <main class="main" id="main"></main>
+</div>
+<div class="menu math-size" id="mathSize">
+  <div class="menu-pop math-size-pop" role="dialog" aria-labelledby="mathScaleLabel">
+    <div class="math-size-head"><label id="mathScaleLabel" for="mathScale">Formula size</label><output id="mathScaleOut" for="mathScale">100%</output></div>
+    <div class="math-size-preview md" id="mathPreview" aria-hidden="true"></div>
+    <div class="math-size-row"><span class="math-size-a sm" aria-hidden="true">A</span><input type="range" id="mathScale" min="80" max="200" step="5" value="100"/><span class="math-size-a lg" aria-hidden="true">A</span></div>
+    <div class="math-size-foot"><button type="button" id="mathScaleReset">Reset</button><button type="button" class="done" data-act="mathSizeClose">Done</button></div>
+  </div>
 </div>
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 <script src="/app.js"></script>
