@@ -1093,8 +1093,10 @@ public struct UsagePopoverSheet: View {
 
     @State private var usage: ProviderUsageResponse?
     @State private var isLoading = true
+    @State private var isRefreshing = false
+    @State private var activeUsageFetches = 0
+    @State private var lastFetchedAt: Date?
     @State private var errorMessage: String?
-
     public init(store: AppStore, session: SessionSummary) {
         self.store = store
         self.session = session
@@ -1111,10 +1113,30 @@ public struct UsagePopoverSheet: View {
                 if isLoading && usage == nil {
                     SkeletonListPlaceholder(count: 4)
                 } else if let usage {
+                    Section {
+                        HStack(spacing: 8) {
+                            let headerModel = [usage.provider, usage.model].filter { !$0.isEmpty }.joined(separator: "/")
+                            Text(headerModel.isEmpty ? "Usage" : "Usage · \(headerModel)")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(palette.foreground)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            if isRefreshing {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
+                        .listRowBackground(palette.card)
+                    }
+
                     ForEach(usage.providers) { group in
                         Section(group.provider) {
                             if let unavail = group.unavailable, !unavail.isEmpty {
-                                Text(unavail).font(.caption).foregroundStyle(palette.muted)
+                                Text(UsageFormatting.unavailableMessage(unavail))
+                                    .font(.caption)
+                                    .foregroundStyle(palette.muted)
+                                    .listRowBackground(palette.card)
                             }
                             ForEach(group.accounts) { account in
                                 VStack(alignment: .leading, spacing: 8) {
@@ -1122,35 +1144,20 @@ public struct UsagePopoverSheet: View {
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(palette.foreground)
 
-                                    if let accUnavail = account.unavailable, !accUnavail.isEmpty {
-                                        Text(accUnavail).font(.caption).foregroundStyle(palette.muted)
-                                    }
-
-                                    ForEach(account.limits) { limit in
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            HStack {
-                                                Text(limit.label)
-                                                    .font(.caption.weight(.medium))
-                                                    .foregroundStyle(palette.foreground)
-                                                if let detail = limit.detail, !detail.isEmpty {
-                                                    Text(detail)
-                                                        .font(.caption2)
-                                                        .foregroundStyle(palette.muted)
-                                                }
-                                                Spacer()
-                                                Text(limit.resetLabel ?? limit.summary)
-                                                    .font(.caption2.monospacedDigit())
-                                                    .foregroundStyle(palette.muted)
-                                            }
-                                            if let frac = limit.fraction {
-                                                ProgressView(value: min(1.0, max(0.0, frac)))
-                                                    .tint(frac >= 0.9 ? palette.red : palette.accent)
-                                            }
-                                        }
-                                    }
-
                                     ForEach(account.notes, id: \.self) { note in
-                                        Text(note).font(.caption2).foregroundStyle(palette.muted)
+                                        Text(note)
+                                            .font(.caption2)
+                                            .foregroundStyle(palette.muted)
+                                    }
+
+                                    if let accUnavail = account.unavailable, !accUnavail.isEmpty {
+                                        Text(UsageFormatting.unavailableMessage(accUnavail))
+                                            .font(.caption)
+                                            .foregroundStyle(palette.muted)
+                                    } else {
+                                        ForEach(account.limits) { limit in
+                                            usageLimitRow(limit)
+                                        }
                                     }
                                 }
                                 .padding(.vertical, 4)
@@ -1158,11 +1165,31 @@ public struct UsagePopoverSheet: View {
                             }
                         }
                     }
+
+                    Section {
+                        HStack(spacing: 8) {
+                            if isRefreshing {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                Text("Refreshing…")
+                                    .font(.caption2)
+                                    .foregroundStyle(palette.muted)
+                            } else if let updated = UsageFormatting.updatedClockLabel(isoString: usage.updatedAt, fallbackDate: lastFetchedAt) {
+                                Text("\(updated) · every 2 min")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(palette.muted)
+                            }
+                        }
+                        .listRowBackground(Color.clear)
+                    }
                 }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
             .background(palette.background)
+            .refreshable {
+                await loadUsage()
+            }
             .navigationTitle("Provider Quotas")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1182,16 +1209,109 @@ public struct UsagePopoverSheet: View {
                     .disabled(!store.canPerformMutatingActions)
                 }
             }
-            .task {
-                guard let client = store.activeClient else { return }
-                isLoading = true
-                defer { isLoading = false }
-                do {
-                    usage = try await client.fetchUsage(sessionId: session.id)
-                } catch {
-                    errorMessage = error.localizedDescription
+            .task(id: session.id) {
+                await loadUsage()
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 120_000_000_000)
+                    guard !Task.isCancelled else { break }
+                    await loadUsage()
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func usageLimitRow(_ limit: UsageLimit) -> some View {
+        let pct = UsageFormatting.percentage(fraction: limit.fraction)
+        let resetText = UsageFormatting.resetLabel(resetsAtMs: limit.resetsAt, fallback: limit.resetLabel)
+        let progressValue = pct.map { min(1.0, max(0.0, Double($0) / 100.0)) } ?? 0.0
+        let isHot = (pct ?? 0) >= 90
+
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(limit.label)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(palette.foreground)
+                if let detail = limit.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(palette.muted)
+                }
+                Spacer(minLength: 4)
+                HStack(spacing: 4) {
+                    if let resetText, !resetText.isEmpty {
+                        Text(resetText)
+                            .font(.caption2)
+                            .foregroundStyle(palette.muted)
+                    }
+                    if let pct {
+                        Text("\(pct)%")
+                            .font(.caption.monospacedDigit().weight(.bold))
+                            .foregroundStyle(isHot ? palette.red : palette.foreground)
+                            .accessibilityLabel("\(pct) percent used")
+                    } else {
+                        Text(limit.summary)
+                            .font(.caption2.monospacedDigit().weight(.bold))
+                            .foregroundStyle(palette.foreground)
+                    }
+                }
+            }
+
+            if limit.fraction != nil {
+                ProgressView(value: progressValue)
+                    .tint(isHot ? palette.red : palette.accent)
+            }
+
+            if !limit.notes.isEmpty {
+                ForEach(limit.notes, id: \.self) { note in
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(palette.muted)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(usageRowAccessibilityLabel(limit: limit, resetText: resetText, pct: pct))
+    }
+
+    private func usageRowAccessibilityLabel(limit: UsageLimit, resetText: String?, pct: Int?) -> String {
+        var parts = [limit.label]
+        if let detail = limit.detail, !detail.isEmpty { parts.append(detail) }
+        if let resetText, !resetText.isEmpty { parts.append(resetText) }
+        if let pct {
+            parts.append("\(pct) percent used")
+        } else if !limit.summary.isEmpty {
+            parts.append(limit.summary)
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func loadUsage() async {
+        guard let client = store.activeClient else {
+            isLoading = false
+            return
+        }
+        activeUsageFetches += 1
+        if usage == nil {
+            isLoading = true
+        } else {
+            isRefreshing = true
+        }
+        defer {
+            activeUsageFetches = max(0, activeUsageFetches - 1)
+            if activeUsageFetches == 0 {
+                isLoading = false
+                isRefreshing = false
+            }
+        }
+        do {
+            let next = try await client.fetchUsage(sessionId: session.id)
+            usage = next
+            lastFetchedAt = Date()
+            errorMessage = nil
+        } catch {
+            if let apiError = error as? CompanionAPIError, apiError.kind == .cancelled { return }
+            errorMessage = error.localizedDescription
         }
     }
 }

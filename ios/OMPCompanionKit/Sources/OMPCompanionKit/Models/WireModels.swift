@@ -695,7 +695,7 @@ public struct SessionSummary: Codable, Identifiable, Hashable, Sendable {
     }
 
     public var isWorking: Bool {
-        status == .running || status == .queued
+        status == .running || status == .queued || !(_task?.isEmpty ?? true) || !(_bash?.isEmpty ?? true)
     }
 
     public var isVibeActive: Bool {

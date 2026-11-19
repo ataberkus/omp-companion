@@ -68,7 +68,7 @@ public struct QuickStartSheet: View {
                     if !store.visibleProjects.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
-                                ForEach(store.visibleProjects) { project in
+                                ForEach(store.orderedProjects()) { project in
                                     Button {
                                         folderPath = project.path
                                     } label: {

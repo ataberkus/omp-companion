@@ -51,6 +51,7 @@ public enum MarkdownParser {
 
         var i = 0
         var paraBuffer: [String] = []
+        var unclosedDisplayDelimiters: Set<String> = []
 
         func flushParagraph() {
             guard !paraBuffer.isEmpty else { return }
@@ -65,59 +66,39 @@ public enum MarkdownParser {
             let line = lines[i]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            // 1. Fenced code block ``` or ~~~
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+            // 1. Fenced code block ``` or ~~~ (and math / latex / tex formula fences)
+            if let openFence = parseFenceOpen(trimmed) {
                 flushParagraph()
-                let fence = trimmed.hasPrefix("~~~") ? "~~~" : "```"
-                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 var codeLines: [String] = []
+                var closed = false
                 i += 1
                 while i < lines.count {
-                    if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix(fence) {
+                    if isFenceClose(lines[i].trimmingCharacters(in: .whitespaces), char: openFence.char, minCount: openFence.count) {
+                        closed = true
                         i += 1
                         break
                     }
                     codeLines.append(lines[i])
                     i += 1
                 }
-                blocks.append(.codeBlock(id: makeId(), language: lang, code: codeLines.joined(separator: "\n")))
+                let code = codeLines.joined(separator: "\n")
+                if closed && KaTeXValidator.isFormula(code: code, language: openFence.language) {
+                    blocks.append(.mathBlock(id: makeId(), tex: code.trimmingCharacters(in: .whitespacesAndNewlines)))
+                } else {
+                    blocks.append(.codeBlock(id: makeId(), language: openFence.language, code: code))
+                }
                 continue
             }
 
             // 2. Display math block $$...$$ or \[...\]
             if trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[") {
-                flushParagraph()
-                let isDollar = trimmed.hasPrefix("$$")
-                let closeMarker = isDollar ? "$$" : "\\]"
-                let afterOpen = String(trimmed.dropFirst(2))
-                if afterOpen.hasSuffix(closeMarker) && afterOpen.count >= 2 {
-                    let body = String(afterOpen.dropLast(2)).trimmingCharacters(in: .whitespaces)
-                    blocks.append(.mathBlock(id: makeId(), tex: body))
-                    i += 1
+                if let parsedMath = parseDisplayMathBlock(lines: lines, startIndex: i, trimmedLine: trimmed, unclosed: &unclosedDisplayDelimiters) {
+                    flushParagraph()
+                    blocks.append(.mathBlock(id: makeId(), tex: parsedMath.tex))
+                    i = parsedMath.nextIndex
                     continue
                 }
-                var mathLines: [String] = []
-                if !afterOpen.trimmingCharacters(in: .whitespaces).isEmpty {
-                    mathLines.append(afterOpen)
-                }
-                i += 1
-                while i < lines.count {
-                    let cur = lines[i]
-                    if let endRange = cur.range(of: closeMarker) {
-                        let prefix = String(cur[..<endRange.lowerBound])
-                        if !prefix.trimmingCharacters(in: .whitespaces).isEmpty {
-                            mathLines.append(prefix)
-                        }
-                        i += 1
-                        break
-                    }
-                    mathLines.append(cur)
-                    i += 1
-                }
-                blocks.append(.mathBlock(id: makeId(), tex: mathLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)))
-                continue
             }
-
             // 3. Blank line
             if trimmed.isEmpty {
                 flushParagraph()
@@ -213,6 +194,61 @@ public enum MarkdownParser {
         return blocks
     }
 
+    private static func parseFenceOpen(_ trimmed: String) -> (char: Character, count: Int, language: String)? {
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+        var count = 0
+        for ch in trimmed {
+            if ch == first { count += 1 } else { break }
+        }
+        guard count >= 3 else { return nil }
+        let rest = String(trimmed.dropFirst(count)).trimmingCharacters(in: .whitespaces)
+        // Info string of backtick fence cannot contain backticks (CommonMark)
+        if first == "`" && rest.contains("`") { return nil }
+        let language = rest.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        return (first, count, language)
+    }
+
+    private static func isFenceClose(_ trimmed: String, char: Character, minCount: Int) -> Bool {
+        var count = 0
+        for ch in trimmed {
+            if ch == char { count += 1 } else { break }
+        }
+        guard count >= minCount else { return false }
+        return trimmed.dropFirst(count).allSatisfy(\.isWhitespace)
+    }
+
+    private static func parseDisplayMathBlock(
+        lines: [String],
+        startIndex: Int,
+        trimmedLine: String,
+        unclosed: inout Set<String>
+    ) -> (tex: String, nextIndex: Int)? {
+        let closeMarker = trimmedLine.hasPrefix("$$") ? "$$" : "\\]"
+        if unclosed.contains(closeMarker) { return nil }
+
+        var bodyLines: [String] = []
+        var rest = String(trimmedLine.dropFirst(2))
+        var j = startIndex
+        while true {
+            if let endRange = rest.range(of: closeMarker) {
+                let afterClose = rest[endRange.upperBound...]
+                if !afterClose.trimmingCharacters(in: .whitespaces).isEmpty {
+                    return nil
+                }
+                bodyLines.append(String(rest[..<endRange.lowerBound]))
+                let tex = bodyLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                return tex.isEmpty ? nil : (tex, j + 1)
+            }
+            bodyLines.append(rest)
+            j += 1
+            if j >= lines.count {
+                unclosed.insert(closeMarker)
+                return nil
+            }
+            rest = lines[j]
+        }
+    }
+
     private static func parseHeading(_ line: String) -> (level: Int, text: String)? {
         var count = 0
         for ch in line {
@@ -234,12 +270,75 @@ public enum MarkdownParser {
     private static func splitTableRow(_ line: String) -> [String] {
         var t = line.trimmingCharacters(in: .whitespaces)
         if t.hasPrefix("|") { t.removeFirst() }
-        if t.hasSuffix("|") { t.removeLast() }
-        return t.split(separator: "|", omittingEmptySubsequences: false).map {
-            $0.trimmingCharacters(in: .whitespaces)
-        }
-    }
+        if t.hasSuffix("|") && !t.hasSuffix("\\|") { t.removeLast() }
 
+        let chars = Array(t)
+        var cells: [String] = []
+        var current = ""
+        var i = 0
+        var backtickRun = 0
+
+        while i < chars.count {
+            let c = chars[i]
+            if c == "`" {
+                var run = 0
+                while i + run < chars.count && chars[i + run] == "`" { run += 1 }
+                if backtickRun == 0 {
+                    backtickRun = run
+                } else if backtickRun == run {
+                    backtickRun = 0
+                }
+                current.append(contentsOf: chars[i..<(i + run)])
+                i += run
+                continue
+            }
+            if backtickRun == 0 {
+                if c == "\\" && i + 1 < chars.count {
+                    let next = chars[i + 1]
+                    if next == "|" {
+                        current.append("|")
+                        i += 2
+                        continue
+                    }
+                    if next == "(" {
+                        if let end = findClosingDelimiter(chars, from: i + 2, closeA: "\\", closeB: ")") {
+                            current.append(contentsOf: chars[i..<(end + 2)])
+                            i = end + 2
+                            continue
+                        }
+                    }
+                    current.append(c)
+                    current.append(next)
+                    i += 2
+                    continue
+                }
+                if c == "$" {
+                    if i + 1 < chars.count && chars[i + 1] == "$" {
+                        if let end = findClosingDelimiter(chars, from: i + 2, closeA: "$", closeB: "$"), end > i + 2 {
+                            current.append(contentsOf: chars[i..<(end + 2)])
+                            i = end + 2
+                            continue
+                        }
+                    } else if i + 1 < chars.count && !chars[i + 1].isWhitespace,
+                              let end = findClosingDollar(chars, from: i + 1) {
+                        current.append(contentsOf: chars[i..<(end + 1)])
+                        i = end + 1
+                        continue
+                    }
+                }
+                if c == "|" {
+                    cells.append(current.trimmingCharacters(in: .whitespaces))
+                    current.removeAll(keepingCapacity: true)
+                    i += 1
+                    continue
+                }
+            }
+            current.append(c)
+            i += 1
+        }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
+    }
     private static func parseListItem(_ line: String) -> MarkdownListItem? {
         let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
         // Unordered `- `, `* `, `+ `
@@ -297,47 +396,86 @@ public enum MarkdownParser {
 
     private static func mathPlaceholder(_ index: Int) -> String { "\u{E000}\(index)\u{E001}" }
 
-    /// Replaces `$…$`, `$$…$$` and `\(…\)` outside code spans with placeholders;
+    public struct InlineMathToken: Equatable, Sendable {
+        public let tex: String
+        public let isDisplay: Bool
+    }
+
+    public static func containsMath(_ input: String) -> Bool {
+        guard input.contains("$") || input.contains("\\(") || input.contains("\\[") else { return false }
+        return !extractInlineMathTokens(in: input).tokens.isEmpty
+    }
+
+    /// Replaces `$…$`, `$$…$$`, `\(…\)`, and `\[…\]` outside code spans with placeholders;
     /// returns the rewritten text and the Unicode rendering of each formula.
     public static func extractInlineMath(in input: String) -> (text: String, math: [String]) {
-        guard input.contains("$") || input.contains("\\(") else { return (input, []) }
+        let (text, tokens) = extractInlineMathTokens(in: input)
+        return (text, tokens.map { TeXUnicode.convert($0.tex) })
+    }
+
+    public static func extractInlineMathTokens(in input: String) -> (text: String, tokens: [InlineMathToken]) {
+        guard input.contains("$") || input.contains("\\(") || input.contains("\\[") else { return (input, []) }
         var out = ""
         out.reserveCapacity(input.count)
-        var math: [String] = []
+        var tokens: [InlineMathToken] = []
         let chars = Array(input)
         var i = 0
-        var inBacktick = false
+        var backtickRun = 0
 
-        func emit(_ tex: String) {
-            out.append(mathPlaceholder(math.count))
-            math.append(TeXUnicode.convert(tex))
+        func emit(_ rawTex: String, isDisplay: Bool) -> Bool {
+            let trimmed = rawTex.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+            out.append(mathPlaceholder(tokens.count))
+            tokens.append(InlineMathToken(tex: isDisplay ? trimmed : rawTex, isDisplay: isDisplay))
+            return true
         }
 
         while i < chars.count {
             let c = chars[i]
             if c == "`" {
-                inBacktick.toggle()
-                out.append(c)
-                i += 1
+                var run = 0
+                while i + run < chars.count && chars[i + run] == "`" { run += 1 }
+                if backtickRun == 0 {
+                    backtickRun = run
+                } else if backtickRun == run {
+                    backtickRun = 0
+                }
+                out.append(contentsOf: chars[i..<(i + run)])
+                i += run
                 continue
             }
-            if !inBacktick && c == "\\" && i + 1 < chars.count && chars[i + 1] == "(" {
-                if let end = findClosingDelimiter(chars, from: i + 2, closeA: "\\", closeB: ")") {
-                    emit(String(chars[(i + 2)..<end]))
-                    i = end + 2
+            if backtickRun == 0 && c == "\\" && i + 1 < chars.count {
+                let next = chars[i + 1]
+                if next == "(" {
+                    if let end = findClosingDelimiter(chars, from: i + 2, closeA: "\\", closeB: ")"),
+                       emit(String(chars[(i + 2)..<end]), isDisplay: false) {
+                        i = end + 2
+                        continue
+                    }
+                } else if next == "[" {
+                    if let end = findClosingDelimiter(chars, from: i + 2, closeA: "\\", closeB: "]"),
+                       emit(String(chars[(i + 2)..<end]), isDisplay: true) {
+                        i = end + 2
+                        continue
+                    }
+                } else if next == "\\" || next == "$" {
+                    out.append(c)
+                    out.append(next)
+                    i += 2
                     continue
                 }
             }
-            if !inBacktick && c == "$" && (i == 0 || chars[i - 1] != "\\") {
+            if backtickRun == 0 && c == "$" {
                 if i + 1 < chars.count && chars[i + 1] == "$" {
-                    if let end = findClosingDelimiter(chars, from: i + 2, closeA: "$", closeB: "$"), end > i + 2 {
-                        emit(String(chars[(i + 2)..<end]))
+                    if let end = findClosingDelimiter(chars, from: i + 2, closeA: "$", closeB: "$"),
+                       end > i + 2,
+                       emit(String(chars[(i + 2)..<end]), isDisplay: true) {
                         i = end + 2
                         continue
                     }
                 } else if i + 1 < chars.count && !chars[i + 1].isWhitespace,
-                          let end = findClosingDollar(chars, from: i + 1) {
-                    emit(String(chars[(i + 1)..<end]))
+                          let end = findClosingDollar(chars, from: i + 1),
+                          emit(String(chars[(i + 1)..<end]), isDisplay: false) {
                     i = end + 1
                     continue
                 }
@@ -345,7 +483,230 @@ public enum MarkdownParser {
             out.append(c)
             i += 1
         }
-        return (out, math)
+        return (out, tokens)
+    }
+
+    /// Converts inline markdown + math into HTML with `<span class="omp-math">` slots for KaTeX.
+    public static func renderInlineHTML(_ input: String, hardBreaks: Bool = false) -> String {
+        let cleaned = input.replacingOccurrences(of: "\u{0000}", with: "")
+        var slots: [String] = []
+        func hold(_ html: String) -> String {
+            let idx = slots.count
+            slots.append(html)
+            return "\u{0000}\(idx)\u{0000}"
+        }
+        func unhold(_ s: String) -> String {
+            guard s.contains("\u{0000}") else { return s }
+            var out = ""
+            out.reserveCapacity(s.count)
+            let scalars = Array(s)
+            var idx = 0
+            while idx < scalars.count {
+                if scalars[idx] == "\u{0000}" {
+                    var j = idx + 1
+                    while j < scalars.count && scalars[j] != "\u{0000}" { j += 1 }
+                    if j < scalars.count, let slotIdx = Int(String(scalars[(idx + 1)..<j])), slotIdx < slots.count {
+                        out.append(slots[slotIdx])
+                        idx = j + 1
+                        continue
+                    }
+                }
+                out.append(scalars[idx])
+                idx += 1
+            }
+            return out
+        }
+
+        // 1. Hold backtick code spans
+        var afterCode = ""
+        afterCode.reserveCapacity(cleaned.count)
+        let chars = Array(cleaned)
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "`" {
+                var run = 0
+                while i + run < chars.count && chars[i + run] == "`" { run += 1 }
+                var j = i + run
+                var foundClose: Int?
+                while j < chars.count {
+                    if chars[j] == "`" {
+                        var closeRun = 0
+                        while j + closeRun < chars.count && chars[j + closeRun] == "`" { closeRun += 1 }
+                        if closeRun == run {
+                            foundClose = j
+                            break
+                        }
+                        j += closeRun
+                        continue
+                    }
+                    j += 1
+                }
+                if let closeIdx = foundClose, closeIdx > i + run {
+                    var codeBody = String(chars[(i + run)..<closeIdx])
+                    if codeBody.count >= 2 && codeBody.hasPrefix(" ") && codeBody.hasSuffix(" ") && !codeBody.allSatisfy({ $0 == " " }) {
+                        codeBody = String(codeBody.dropFirst().dropLast())
+                    }
+                    afterCode.append(hold("<code class=\"omp-code\">\(escapeHTML(codeBody))</code>"))
+                    i = closeIdx + run
+                    continue
+                }
+                afterCode.append(contentsOf: chars[i..<(i + run)])
+                i += run
+                continue
+            }
+            afterCode.append(chars[i])
+            i += 1
+        }
+
+        // 2. Hold \$ and math spans ($...$, $$...$$, \(...\), \[...\])
+        var afterMath = ""
+        afterMath.reserveCapacity(afterCode.count)
+        let mChars = Array(afterCode)
+        i = 0
+        while i < mChars.count {
+            let c = mChars[i]
+            if c == "\\" && i + 1 < mChars.count {
+                let next = mChars[i + 1]
+                if next == "$" {
+                    afterMath.append(hold("$"))
+                    i += 2
+                    continue
+                } else if next == "(" {
+                    if let end = findClosingDelimiter(mChars, from: i + 2, closeA: "\\", closeB: ")") {
+                        let tex = String(mChars[(i + 2)..<end])
+                        if !tex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !tex.contains("\u{0000}") {
+                            afterMath.append(hold("<span class=\"omp-math\" data-display=\"0\" data-tex=\"\(escapeHTML(tex))\"></span>"))
+                            i = end + 2
+                            continue
+                        }
+                    }
+                } else if next == "[" {
+                    if let end = findClosingDelimiter(mChars, from: i + 2, closeA: "\\", closeB: "]") {
+                        let tex = String(mChars[(i + 2)..<end])
+                        let trimmed = tex.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && !tex.contains("\u{0000}") {
+                            afterMath.append(hold("<span class=\"omp-math\" data-display=\"1\" data-tex=\"\(escapeHTML(trimmed))\"></span>"))
+                            i = end + 2
+                            continue
+                        }
+                    }
+                } else if next == "\\" {
+                    afterMath.append("\\")
+                    afterMath.append("\\")
+                    i += 2
+                    continue
+                }
+            }
+            if c == "$" {
+                if i + 1 < mChars.count && mChars[i + 1] == "$" {
+                    if let end = findClosingDelimiter(mChars, from: i + 2, closeA: "$", closeB: "$"), end > i + 2 {
+                        let tex = String(mChars[(i + 2)..<end])
+                        let trimmed = tex.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty && !tex.contains("\u{0000}") {
+                            afterMath.append(hold("<span class=\"omp-math\" data-display=\"1\" data-tex=\"\(escapeHTML(trimmed))\"></span>"))
+                            i = end + 2
+                            continue
+                        }
+                    }
+                } else if i + 1 < mChars.count && !mChars[i + 1].isWhitespace,
+                          let end = findClosingDollar(mChars, from: i + 1) {
+                    let tex = String(mChars[(i + 1)..<end])
+                    if !tex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !tex.contains("\u{0000}") {
+                        afterMath.append(hold("<span class=\"omp-math\" data-display=\"0\" data-tex=\"\(escapeHTML(tex))\"></span>"))
+                        i = end + 1
+                        continue
+                    }
+                }
+            }
+            afterMath.append(c)
+            i += 1
+        }
+
+        // 3. Links
+        var s = afterMath
+        s = replaceRegex(Self.autoLinkRegex, in: s) { src, match in
+            let u = substring(src, range: match.range(at: 1))
+            return hold("<a href=\"\(escapeHTML(u))\">\(escapeHTML(u))</a>")
+        }
+        s = replaceRegex(Self.mdLinkRegex, in: s) { src, match in
+            let label = substring(src, range: match.range(at: 1))
+            let url = substring(src, range: match.range(at: 2))
+            return hold("<a href=\"\(escapeHTML(url))\">\(unhold(escapeHTML(label)))</a>")
+        }
+        s = replaceRegex(Self.bareLinkRegex, in: s) { src, match in
+            let pre = substring(src, range: match.range(at: 1))
+            let url = substring(src, range: match.range(at: 2))
+            return pre + hold("<a href=\"\(escapeHTML(url))\">\(escapeHTML(url))</a>")
+        }
+
+        // 4. Escape prose and apply emphasis
+        s = escapeHTML(s)
+        s = replaceRegex(Self.boldStarRegex, in: s) { src, m in "<strong>\(substring(src, range: m.range(at: 1)))</strong>" }
+        s = replaceRegex(Self.boldUnderRegex, in: s) { src, m in "<strong>\(substring(src, range: m.range(at: 1)))</strong>" }
+        s = replaceRegex(Self.italicStarRegex, in: s) { src, m in "\(substring(src, range: m.range(at: 1)))<em>\(substring(src, range: m.range(at: 2)))</em>" }
+        s = replaceRegex(Self.italicUnderRegex, in: s) { src, m in "\(substring(src, range: m.range(at: 1)))<em>\(substring(src, range: m.range(at: 2)))</em>" }
+        s = replaceRegex(Self.strikeRegex, in: s) { src, m in "<del>\(substring(src, range: m.range(at: 1)))</del>" }
+
+        // 5. Line breaks
+        if hardBreaks {
+            s = s.replacingOccurrences(of: "\n", with: "<br>")
+        } else {
+            s = replaceRegex(Self.hardBreakRegex, in: s) { _, _ in "<br>" }
+            s = s.replacingOccurrences(of: "\n", with: " ")
+        }
+
+        return unhold(s)
+    }
+
+    private static func escapeHTML(_ text: String) -> String {
+        var out = ""
+        out.reserveCapacity(text.count)
+        for ch in text {
+            switch ch {
+            case "&": out.append("&amp;")
+            case "<": out.append("&lt;")
+            case ">": out.append("&gt;")
+            case "\"": out.append("&quot;")
+            case "'": out.append("&#39;")
+            default: out.append(ch)
+            }
+        }
+        return out
+    }
+
+    private static let autoLinkRegex = try! NSRegularExpression(pattern: #"<((?:https?:\/\/|mailto:)[^\s<>\u0000]+)>"#)
+    private static let mdLinkRegex = try! NSRegularExpression(pattern: #"\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)(?:[^\s()\u0000]|\([^\s()\u0000]*\))+)(?:\s+"[^"]*")?\)"#)
+    private static let bareLinkRegex = try! NSRegularExpression(pattern: #"(^|[\s(])(https?:\/\/(?:[^\s<>()\u0000]|\([^\s<>()\u0000]*\))*(?:[^\s<>().,;:!?'"\u0000]|\([^\s<>()\u0000]*\)))"#)
+    private static let boldStarRegex = try! NSRegularExpression(pattern: #"\*\*(?=\S)((?:[^*]|\*(?!\*))*?\S)\*\*"#)
+    private static let boldUnderRegex = try! NSRegularExpression(pattern: #"__(?=\S)((?:[^_]|_(?!_))*?\S)__(?!\w)"#)
+    private static let italicStarRegex = try! NSRegularExpression(pattern: #"(^|[^*\w])\*(?=\S)([^*\n]*?\S)\*(?!\*)"#)
+    private static let italicUnderRegex = try! NSRegularExpression(pattern: #"(^|[^_\w])_(?=\S)([^_\n]*?\S)_(?!\w)"#)
+    private static let strikeRegex = try! NSRegularExpression(pattern: #"~~(?=\S)((?:[^~]|~(?!~))*?\S)~~"#)
+    private static let hardBreakRegex = try! NSRegularExpression(pattern: #"(?<! ) {2,}\n"#)
+
+    private static func substring(_ string: String, range: NSRange) -> String {
+        guard range.location != NSNotFound, let r = Range(range, in: string) else { return "" }
+        return String(string[r])
+    }
+
+    private static func replaceRegex(
+        _ regex: NSRegularExpression,
+        in string: String,
+        transform: (String, NSTextCheckingResult) -> String
+    ) -> String {
+        let nsRange = NSRange(string.startIndex..<string.endIndex, in: string)
+        let matches = regex.matches(in: string, options: [], range: nsRange)
+        guard !matches.isEmpty else { return string }
+        var out = ""
+        var cursor = string.startIndex
+        for m in matches {
+            guard let fullRange = Range(m.range, in: string) else { continue }
+            out.append(contentsOf: string[cursor..<fullRange.lowerBound])
+            out.append(transform(string, m))
+            cursor = fullRange.upperBound
+        }
+        out.append(contentsOf: string[cursor...])
+        return out
     }
 
     private static func findClosingDelimiter(_ chars: [Character], from start: Int, closeA: Character, closeB: Character) -> Int? {
@@ -354,25 +715,28 @@ public enum MarkdownParser {
             if chars[i] == closeA && chars[i + 1] == closeB {
                 return i
             }
-            if chars[i] == "\n" { return nil }
             i += 1
         }
         return nil
     }
 
-    /// Closing `$` of inline math: same line, not escaped, not preceded by a space
+    /// Closing `$` of inline math: not escaped, not preceded by a space
     /// and not followed by a digit (so "$5 and $10" stays prose).
     private static func findClosingDollar(_ chars: [Character], from start: Int) -> Int? {
         var i = start
         while i < chars.count {
-            if chars[i] == "\n" || chars[i] == "`" { return nil }
+            if chars[i] == "`" { return nil }
+            if chars[i] == "\n" && i + 1 < chars.count && chars[i + 1] == "\n" { return nil }
             if chars[i] == "$" && i + 1 < chars.count && chars[i + 1] == "$" {
                 // `$$` opens or closes display math, never closes inline math.
                 i += 2
                 continue
             }
             if chars[i] == "$" && chars[i - 1] != "\\" && !chars[i - 1].isWhitespace {
-                if i + 1 < chars.count && chars[i + 1].isNumber { return nil }
+                if i + 1 < chars.count && chars[i + 1].isNumber {
+                    i += 1
+                    continue
+                }
                 return i
             }
             i += 1
@@ -529,49 +893,59 @@ public struct MarkdownView: View {
     private func blockView(_ block: MarkdownBlock) -> some View {
         switch block {
         case .heading(_, let level, let content):
-            Text(MarkdownParser.renderInline(content, palette: palette))
-                .font(headingFont(level))
-                .fontWeight(.semibold)
-                .foregroundStyle(palette.foreground)
+            if MarkdownParser.containsMath(content) {
+                KaTeXInlineView(
+                    rawMarkdown: content,
+                    htmlBody: MarkdownParser.renderInlineHTML(content),
+                    typography: .heading(level: level, palette: palette)
+                )
                 .padding(.top, level <= 2 ? 4 : 2)
+            } else {
+                Text(MarkdownParser.renderInline(content, palette: palette))
+                    .font(headingFont(level))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(palette.foreground)
+                    .padding(.top, level <= 2 ? 4 : 2)
+            }
 
         case .paragraph(_, let content):
-            Text(MarkdownParser.renderInline(content, palette: palette))
-                .font(.body)
-                .foregroundStyle(palette.foreground)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+            if MarkdownParser.containsMath(content) {
+                KaTeXInlineView(
+                    rawMarkdown: content,
+                    htmlBody: MarkdownParser.renderInlineHTML(content),
+                    typography: .paragraph(palette: palette)
+                )
+            } else {
+                Text(MarkdownParser.renderInline(content, palette: palette))
+                    .font(.body)
+                    .foregroundStyle(palette.foreground)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
 
         case .codeBlock(_, let language, let code):
             CodeBlockCard(language: language, code: code)
 
         case .mathBlock(_, let tex):
-            let boxed = tex.contains("\\boxed")
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(TeXUnicode.convert(tex))
-                    .font(.system(.body, design: .serif))
-                    .foregroundStyle(palette.foreground)
-                    .fixedSize(horizontal: true, vertical: true)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(palette.codeBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(boxed ? palette.accent : palette.border, lineWidth: boxed ? 1.5 : 1)
-            )
+            KaTeXBlockMathView(tex: tex)
 
         case .blockquote(_, let content):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(palette.accentLine)
                     .frame(width: 3)
-                Text(MarkdownParser.renderInline(content, palette: palette))
-                    .font(.body)
-                    .foregroundStyle(palette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                if MarkdownParser.containsMath(content) {
+                    KaTeXInlineView(
+                        rawMarkdown: content,
+                        htmlBody: MarkdownParser.renderInlineHTML(content),
+                        typography: .blockquote(palette: palette)
+                    )
+                } else {
+                    Text(MarkdownParser.renderInline(content, palette: palette))
+                        .font(.body)
+                        .foregroundStyle(palette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(.vertical, 2)
 
@@ -594,11 +968,19 @@ public struct MarkdownView: View {
                                 .foregroundStyle(palette.accent)
                                 .bold()
                         }
-                        Text(MarkdownParser.renderInline(item.text, palette: palette))
-                            .font(.body)
-                            .foregroundStyle(palette.foreground)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
+                        if MarkdownParser.containsMath(item.text) {
+                            KaTeXInlineView(
+                                rawMarkdown: item.text,
+                                htmlBody: MarkdownParser.renderInlineHTML(item.text),
+                                typography: .paragraph(palette: palette)
+                            )
+                        } else {
+                            Text(MarkdownParser.renderInline(item.text, palette: palette))
+                                .font(.body)
+                                .foregroundStyle(palette.foreground)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
             }
@@ -608,9 +990,18 @@ public struct MarkdownView: View {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
                     GridRow {
                         ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                            Text(MarkdownParser.renderInline(h, palette: palette))
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(palette.foreground)
+                            if MarkdownParser.containsMath(h) {
+                                KaTeXInlineView(
+                                    rawMarkdown: h,
+                                    htmlBody: MarkdownParser.renderInlineHTML(h),
+                                    typography: .tableCell(isHeader: true, palette: palette),
+                                    intrinsicWidth: true
+                                )
+                            } else {
+                                Text(MarkdownParser.renderInline(h, palette: palette))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(palette.foreground)
+                            }
                         }
                     }
                     Divider()
@@ -618,9 +1009,18 @@ public struct MarkdownView: View {
                         GridRow {
                             ForEach(Array(0..<max(headers.count, row.count)), id: \.self) { cIdx in
                                 let cell = cIdx < row.count ? row[cIdx] : ""
-                                Text(MarkdownParser.renderInline(cell, palette: palette))
-                                    .font(.caption)
-                                    .foregroundStyle(palette.foreground)
+                                if MarkdownParser.containsMath(cell) {
+                                    KaTeXInlineView(
+                                        rawMarkdown: cell,
+                                        htmlBody: MarkdownParser.renderInlineHTML(cell),
+                                        typography: .tableCell(isHeader: false, palette: palette),
+                                        intrinsicWidth: true
+                                    )
+                                } else {
+                                    Text(MarkdownParser.renderInline(cell, palette: palette))
+                                        .font(.caption)
+                                        .foregroundStyle(palette.foreground)
+                                }
                             }
                         }
                     }
@@ -633,7 +1033,6 @@ public struct MarkdownView: View {
         case .thematicBreak:
             Divider().overlay(palette.borderStrong)
         }
-    }
 
     private func headingFont(_ level: Int) -> Font {
         switch level {

@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .target(
             name: "OMPCompanionKit",
-            path: "Sources/OMPCompanionKit"
+            path: "Sources/OMPCompanionKit",
+            resources: [
+                .copy("Resources/KaTeX")
+            ]
         ),
         .testTarget(
             name: "OMPCompanionKitTests",

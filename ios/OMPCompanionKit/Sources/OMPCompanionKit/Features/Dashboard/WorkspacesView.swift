@@ -7,19 +7,34 @@ import UIKit
 public struct WorkspacesView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ompPalette) private var palette
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.editMode) private var editMode
     @Bindable var store: AppStore
 
     @State private var showAddFolderPicker = false
     @State private var showHiddenProjects = false
     @State private var editingProject: WorkspaceProject?
     @State private var browsingProject: WorkspaceProject?
+    @State private var draggingProjectNormKey: String?
+    @State private var dropTargetProjectNormKey: String?
 
     public init(store: AppStore) {
         self.store = store
     }
 
     private var displayedProjects: [WorkspaceProject] {
-        showHiddenProjects ? store.snapshot.projects : store.visibleProjects
+        store.orderedProjects(includeHidden: showHiddenProjects)
+    }
+
+    private var displayedProjectPaths: [String] {
+        displayedProjects.map(\.path)
+    }
+
+    private var allowsDirectPadDrag: Bool {
+        horizontalSizeClass == .regular
+            && editMode?.wrappedValue.isEditing != true
+            && store.canPerformMutatingActions
+            && displayedProjects.count > 1
     }
 
     public var body: some View {
@@ -43,6 +58,7 @@ public struct WorkspacesView: View {
                             projectRow(project)
                         }
                         .onMove(perform: moveProjects)
+                        .moveDisabled(!store.canPerformMutatingActions || displayedProjects.count < 2)
                     } header: {
                         HStack {
                             Text("Workspaces (\(displayedProjects.count))")
@@ -55,7 +71,11 @@ public struct WorkspacesView: View {
                             }
                         }
                     } footer: {
-                        Text("Tap a workspace to browse files or start a new session. Swipe or tap ⋯ to rename, recolor, hide, or open in editor.")
+                        if horizontalSizeClass == .regular {
+                            Text("Drag a workspace to reorder, or tap Edit. Tap a workspace to browse files or start a new session.")
+                        } else {
+                            Text("Tap Edit to drag workspaces into order. Tap a workspace to browse files or start a new session.")
+                        }
                     }
                 }
             }
@@ -65,10 +85,11 @@ public struct WorkspacesView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Close") { dismiss() }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     EditButton()
+                        .disabled(!store.canPerformMutatingActions || displayedProjects.count < 2)
                     Button {
                         showAddFolderPicker = true
                     } label: {
@@ -91,13 +112,30 @@ public struct WorkspacesView: View {
                     dismiss()
                 }
             }
+            .task(id: "\(draggingProjectNormKey ?? "")|\(dropTargetProjectNormKey ?? "")") {
+                guard draggingProjectNormKey != nil, dropTargetProjectNormKey == nil else { return }
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled else { return }
+                draggingProjectNormKey = nil
+                dropTargetProjectNormKey = nil
+            }
+            .onChange(of: allowsDirectPadDrag) { _, allowed in
+                if !allowed {
+                    draggingProjectNormKey = nil
+                    dropTargetProjectNormKey = nil
+                }
+            }
         }
     }
 
     @ViewBuilder
     private func projectRow(_ project: WorkspaceProject) -> some View {
         let count = store.visibleSessions.filter { $0.projectId == project.id }.count
-        HStack(spacing: 12) {
+        let normPath = SidebarLayoutHelper.normalizePathKey(project.path)
+        let isDropTarget = dropTargetProjectNormKey == normPath && draggingProjectNormKey != normPath
+        let idx = displayedProjects.firstIndex(where: { $0.id == project.id })
+
+        let rowContent = HStack(spacing: 12) {
             Circle()
                 .fill(Color.fromCSS(project.color))
                 .frame(width: 12, height: 12)
@@ -107,6 +145,8 @@ public struct WorkspacesView: View {
                     Text(project.name)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(palette.foreground)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     if project.hidden == true {
                         Text("HIDDEN")
                             .font(.caption2.weight(.bold))
@@ -120,11 +160,14 @@ public struct WorkspacesView: View {
                     .font(.caption2.monospaced())
                     .foregroundStyle(palette.muted)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                 HStack(spacing: 8) {
-                    if let branch = project.branch, !branch.isEmpty {
+                    if let branch = project.branch, !branch.isEmpty, branch != "workspace" {
                         Label(branch, systemImage: "arrow.triangle.branch")
                             .font(.caption2.monospaced())
                             .foregroundStyle(palette.accent)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     Text("\(count) session\(count == 1 ? "" : "s")")
                         .font(.caption2)
@@ -181,9 +224,86 @@ public struct WorkspacesView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
+            guard editMode?.wrappedValue.isEditing != true else { return }
             browsingProject = project
         }
-        .listRowBackground(palette.card)
+        .overlay(alignment: .top) {
+            if isDropTarget {
+                Capsule()
+                    .fill(palette.accent)
+                    .frame(height: 3)
+            }
+        }
+        .listRowBackground(isDropTarget ? palette.accentSoft : palette.card)
+        .accessibilityAction(named: "Move up") {
+            guard store.canPerformMutatingActions, let idx, idx > 0 else { return }
+            Task {
+                await store.moveGroup(key: project.path, beforeKey: displayedProjects[idx - 1].path, visibleKeys: displayedProjectPaths)
+            }
+        }
+        .accessibilityAction(named: "Move down") {
+            guard store.canPerformMutatingActions, let idx, idx < displayedProjects.count - 1 else { return }
+            let nextAfter: String? = (idx + 2 < displayedProjects.count) ? displayedProjects[idx + 2].path : nil
+            Task {
+                await store.moveGroup(key: project.path, beforeKey: nextAfter, visibleKeys: displayedProjectPaths)
+            }
+        }
+        .accessibilityAction(named: "Move to top") {
+            guard store.canPerformMutatingActions else { return }
+            Task {
+                await store.moveGroup(key: project.path, beforeKey: displayedProjects.first?.path, visibleKeys: displayedProjectPaths)
+            }
+        }
+        .accessibilityAction(named: "Move to bottom") {
+            guard store.canPerformMutatingActions else { return }
+            Task {
+                await store.moveGroup(key: project.path, beforeKey: nil, visibleKeys: displayedProjectPaths)
+            }
+        }
+
+        if allowsDirectPadDrag {
+            rowContent
+                .draggable(project.path) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(Color.fromCSS(project.color))
+                            .frame(width: 10, height: 10)
+                        Text(project.name)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(palette.foreground)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(palette.raised, in: Capsule())
+                    .overlay(Capsule().stroke(palette.accent, lineWidth: 1))
+                    .onAppear {
+                        draggingProjectNormKey = normPath
+                        store.notificationManager.triggerHaptic(.lightTap)
+                    }
+                }
+                .dropDestination(for: String.self) { items, _ in
+                    let draggedPath = items.first ?? draggingProjectNormKey
+                    draggingProjectNormKey = nil
+                    dropTargetProjectNormKey = nil
+                    guard let draggedPath,
+                          SidebarLayoutHelper.normalizePathKey(draggedPath) != normPath else {
+                        return false
+                    }
+                    store.notificationManager.triggerHaptic(.lightTap)
+                    Task {
+                        await store.moveGroup(key: draggedPath, beforeKey: project.path, visibleKeys: displayedProjectPaths)
+                    }
+                    return true
+                } isTargeted: { targeted in
+                    if targeted {
+                        dropTargetProjectNormKey = normPath
+                    } else if dropTargetProjectNormKey == normPath {
+                        dropTargetProjectNormKey = nil
+                    }
+                }
+        } else {
+            rowContent
+        }
     }
 
     private func addWorkspace(path: String) async {
@@ -208,9 +328,15 @@ public struct WorkspacesView: View {
     }
 
     private func moveProjects(from offsets: IndexSet, to destination: Int) {
-        var ids = displayedProjects.map(\.id)
-        ids.move(fromOffsets: offsets, toOffset: destination)
-        Task { await store.updateProjectsOrder(ids) }
+        var reordered = displayedProjects.map(\.path)
+        reordered.move(fromOffsets: offsets, toOffset: destination)
+        let displayedNorms = Set(reordered.map(SidebarLayoutHelper.normalizePathKey))
+        let existingExtras = store.effectiveGroupOrder.filter {
+            !displayedNorms.contains(SidebarLayoutHelper.normalizePathKey($0))
+        }
+        let merged = reordered + existingExtras
+        store.notificationManager.triggerHaptic(.lightTap)
+        Task { await store.updateProjectsOrder(merged) }
     }
 }
 

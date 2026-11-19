@@ -20,9 +20,9 @@ public struct SessionDetailView: View {
     @State private var showTreeSheet = false
     @State private var showStatsSheet = false
     @State private var showUsageSheet = false
+    @State private var showFormulaSizeSheet = false
     @State private var showRenameAlert = false
     @State private var renameDraft = ""
-
     public init(store: AppStore, session: SessionSummary) {
         self.store = store
         self.session = session
@@ -150,6 +150,11 @@ public struct SessionDetailView: View {
                         Label("Provider Quotas", systemImage: "gauge.with.needle")
                     }
 
+                    Button {
+                        showFormulaSizeSheet = true
+                    } label: {
+                        Label("Formula Size…", systemImage: "x.squareroot")
+                    }
                     Divider()
 
                     Button {
@@ -234,6 +239,9 @@ public struct SessionDetailView: View {
         }
         .sheet(isPresented: $showUsageSheet) {
             UsagePopoverSheet(store: store, session: liveSession)
+        }
+        .sheet(isPresented: $showFormulaSizeSheet) {
+            FormulaSizeSheet()
         }
         .alert("Rename Session", isPresented: $showRenameAlert) {
             TextField("Title", text: $renameDraft)

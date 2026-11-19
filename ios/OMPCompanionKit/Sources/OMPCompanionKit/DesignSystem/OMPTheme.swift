@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public enum ThemePreference: String, CaseIterable, Codable, Identifiable, Sendable {
     case dark
@@ -172,6 +175,27 @@ public enum OMPTypography {
     public static let monoSmall: Font = .caption.monospaced()
 }
 
+public enum KaTeXMathScale {
+    public static let defaultsKey = "omp.mathScale"
+    public static let minPercent = 80
+    public static let maxPercent = 200
+    public static let stepPercent = 5
+    public static let defaultPercent = 100
+
+    public static func clampAndRound(_ value: Double) -> Int {
+        let clamped = min(Double(maxPercent), max(Double(minPercent), value.isFinite ? value : Double(defaultPercent)))
+        return Int((clamped / Double(stepPercent)).rounded()) * stepPercent
+    }
+
+    public static func clampAndRound(_ value: Int) -> Int {
+        clampAndRound(Double(value))
+    }
+
+    public static func factor(percent: Int) -> Double {
+        Double(clampAndRound(percent)) / 100.0
+    }
+}
+
 private struct OMPPaletteKey: EnvironmentKey {
     static let defaultValue: OMPPalette = .dark
 }
@@ -243,6 +267,27 @@ public extension Color {
             return 1.055 * pow(clamped, 1.0 / 2.4) - 0.055
         }
         return Color(.sRGB, red: gamma(rLin), green: gamma(gLin), blue: gamma(bLin), opacity: 1.0)
+    }
+
+    var cssRGBAString: String {
+        #if canImport(UIKit)
+        var r: CGFloat = 0
+        var g: CGFloat = 0
+        var b: CGFloat = 0
+        var a: CGFloat = 1
+        let ui = UIColor(self).resolvedColor(with: UITraitCollection.current)
+        if ui.getRed(&r, green: &g, blue: &b, alpha: &a) {
+            return String(
+                format: "rgba(%d,%d,%d,%.3f)",
+                locale: Locale(identifier: "en_US_POSIX"),
+                Int((r * 255).rounded()),
+                Int((g * 255).rounded()),
+                Int((b * 255).rounded()),
+                Double(a)
+            )
+        }
+        #endif
+        return "rgba(244,244,246,1.000)"
     }
 }
 

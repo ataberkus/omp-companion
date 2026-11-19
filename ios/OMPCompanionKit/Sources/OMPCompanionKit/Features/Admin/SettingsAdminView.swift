@@ -49,6 +49,10 @@ public struct SettingsAdminView: View {
                     }
                     .listRowBackground(palette.card)
 
+                    FormulaSizeControlsView()
+                        .padding(.vertical, 4)
+                        .listRowBackground(palette.card)
+
                     Toggle(isOn: Binding(
                         get: { store.biometricLock.isEnabled },
                         set: { next in

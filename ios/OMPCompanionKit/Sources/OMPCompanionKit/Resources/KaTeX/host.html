@@ -1,0 +1,233 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<link rel="stylesheet" href="katex.min.css"/>
+<script src="katex.min.js"></script>
+<script src="contrib/copy-tex.min.js"></script>
+<style>
+  :root {
+    --fg: #F4F4F6;
+    --muted: rgba(244, 244, 246, 0.60);
+    --accent: #A0A0FF;
+    --code-bg: #0D0D12;
+    --red: #F87171;
+    --math-scale: 1;
+    --font-size: 17px;
+    --font-weight: 400;
+    --line-height: 1.48;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-size: var(--font-size);
+    font-weight: var(--font-weight);
+    line-height: var(--line-height);
+    -webkit-text-size-adjust: 100%;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden;
+  }
+  #root {
+    width: 100%;
+    overflow: visible;
+    color: var(--fg);
+    overflow-wrap: anywhere;
+  }
+  #root.intrinsic-width {
+    display: inline-block;
+    width: max-content;
+    max-width: 340px;
+  }
+  .katex {
+    font-size: calc(1.21em * var(--math-scale, 1));
+    color: inherit;
+  }
+  .katex .msupsub .katex-sizing.reset-size6.size3 { font-size: .8em; }
+  .katex .msupsub .katex-sizing.reset-size3.size1 { font-size: .72em; }
+  .math-inline { overflow-wrap: normal; }
+  .math-block {
+    position: relative;
+    display: block;
+    margin: 0;
+  }
+  #root > .math-block:not(:only-child) {
+    margin: .4em 0;
+  }
+  .math-scroll {
+    display: block;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
+    padding: 6px 2px;
+    overflow-wrap: normal;
+  }
+  .math-block .katex-display {
+    margin: .3em 0;
+  }
+  @media (max-width: 820px) {
+    .math-scroll .katex-display > .katex > .katex-html > .katex-tag {
+      position: static;
+      margin-left: 1em;
+    }
+  }
+  .katex-error {
+    font: .88em ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--red) !important;
+    text-decoration: underline dashed;
+    text-underline-offset: 3px;
+    overflow-wrap: anywhere;
+  }
+  .omp-code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: .86em;
+    color: var(--accent);
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  a {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  strong { font-weight: 650; }
+  del { opacity: 0.72; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+(function() {
+  const KATEX_OPTS = {
+    throwOnError: false,
+    trust: false,
+    strict: 'ignore',
+    output: 'htmlAndMathml',
+    maxSize: 50,
+    maxExpand: 1000
+  };
+  const MATH_MAX = 20000;
+  const root = document.getElementById('root');
+  let rafId = 0;
+  let lastH = -1;
+  let lastW = -1;
+
+  function postSize(force) {
+    const rect = root.getBoundingClientRect();
+    const h = Math.ceil(Math.max(rect.height, root.scrollHeight));
+    const w = Math.ceil(root.classList.contains('intrinsic-width') ? Math.max(rect.width, root.scrollWidth) : rect.width);
+    if (!force && h === lastH && w === lastW) return;
+    lastH = h;
+    lastW = w;
+    try {
+      window.webkit?.messageHandlers?.ompMath?.postMessage({ height: h, width: w });
+    } catch (_) {}
+  }
+
+  function scheduleMeasure(force) {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(function() {
+      rafId = 0;
+      postSize(force);
+    });
+  }
+
+  function renderTexInto(el, tex, displayMode) {
+    if (typeof katex === 'undefined') {
+      el.textContent = tex;
+      return;
+    }
+    if (tex.length > MATH_MAX) {
+      const err = document.createElement('span');
+      err.className = 'katex-error';
+      err.textContent = tex;
+      el.replaceChildren(err);
+      return;
+    }
+    try {
+      katex.render(tex, el, Object.assign({}, KATEX_OPTS, { displayMode: !!displayMode }));
+    } catch (e) {
+      const err = document.createElement('span');
+      err.className = 'katex-error';
+      err.title = String((e && e.message) || e);
+      err.textContent = tex;
+      el.replaceChildren(err);
+    }
+  }
+
+  window.__ompSetTheme = function(vars) {
+    if (!vars) return;
+    const style = document.documentElement.style;
+    if (vars.fg) style.setProperty('--fg', vars.fg);
+    if (vars.muted) style.setProperty('--muted', vars.muted);
+    if (vars.accent) style.setProperty('--accent', vars.accent);
+    if (vars.codeBg) style.setProperty('--code-bg', vars.codeBg);
+    if (vars.red) style.setProperty('--red', vars.red);
+    if (vars.mathScale !== undefined) style.setProperty('--math-scale', String(vars.mathScale));
+    if (vars.fontSize !== undefined) style.setProperty('--font-size', vars.fontSize + 'px');
+    if (vars.fontWeight !== undefined) style.setProperty('--font-weight', String(vars.fontWeight));
+    if (vars.lineHeight !== undefined) style.setProperty('--line-height', String(vars.lineHeight));
+    scheduleMeasure(false);
+  };
+
+  window.__ompRender = function(payload) {
+    if (!payload) return;
+    window.__ompSetTheme(payload.vars);
+    root.classList.toggle('intrinsic-width', !!payload.intrinsicWidth);
+
+    if (payload.mode === 'block') {
+      const wrap = document.createElement('div');
+      wrap.className = 'math-block';
+      const scroller = document.createElement('div');
+      scroller.className = 'math-scroll';
+      renderTexInto(scroller, payload.tex || '', true);
+      wrap.appendChild(scroller);
+      root.replaceChildren(wrap);
+    } else {
+      root.innerHTML = payload.html || '';
+      const spans = root.querySelectorAll('.omp-math');
+      for (let i = 0; i < spans.length; i++) {
+        const el = spans[i];
+        const tex = el.getAttribute('data-tex') || '';
+        const isDisplay = el.getAttribute('data-display') === '1';
+        if (isDisplay) {
+          const wrap = document.createElement('span');
+          wrap.className = 'math-block';
+          const scroller = document.createElement('span');
+          scroller.className = 'math-scroll';
+          renderTexInto(scroller, tex, true);
+          wrap.appendChild(scroller);
+          el.replaceWith(wrap);
+        } else {
+          const inlineSpan = document.createElement('span');
+          inlineSpan.className = 'math-inline';
+          renderTexInto(inlineSpan, tex, false);
+          el.replaceWith(inlineSpan);
+        }
+      }
+    }
+
+    lastH = -1;
+    lastW = -1;
+    postSize(true);
+    scheduleMeasure(true);
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(function() { scheduleMeasure(false); });
+    }
+  };
+
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(function() { scheduleMeasure(false); });
+    ro.observe(root);
+  }
+  window.addEventListener('resize', function() { scheduleMeasure(false); });
+})();
+</script>
+</body>
+</html>

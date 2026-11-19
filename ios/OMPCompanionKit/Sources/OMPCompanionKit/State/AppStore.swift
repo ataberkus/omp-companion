@@ -44,6 +44,17 @@ private struct NativePreviewCacheEntry {
     let storedAt: Date
 }
 
+private struct UILocalOverride: Equatable {
+    var value: [String]
+    var updatedAt: Date
+    var seq: UInt64
+}
+
+private struct PriorSessionAttention {
+    var status: SessionStatus
+    var uiRequestCount: Int
+    var workFinishedAt: String?
+}
 @Observable
 @MainActor
 public final class AppStore {
@@ -81,6 +92,7 @@ public final class AppStore {
     /// Why the last history refresh failed; nil once one succeeds.
     public private(set) var nativeSessionsError: String?
     public private(set) var advisorConfig: AdvisorConfigResponse?
+    public private(set) var unseenSessionIDs: Set<String> = []
 
     // MARK: - Navigation & Sheet State
     public var selectedSessionID: String?
@@ -116,10 +128,14 @@ public final class AppStore {
     /// Incremented by every poll and every local change to the store; a poll reply is applied only if it is still the newest.
     private var pollGeneration: UInt64 = 0
     private var nativeSessionsGeneration: UInt64 = 0
-    private var hasLoadedNativeSessions = false
+    public private(set) var hasLoadedNativeSessions = false
     private var nativePreviewCache: [String: NativePreviewCacheEntry] = [:]
     private var lastCacheSaveAt: Date = .distantPast
-    private var hasReceivedLiveSnapshotForHost = false
+    public private(set) var hasReceivedLiveSnapshotForHost = false
+    private var localGroupOrderOverride: UILocalOverride?
+    private var localCollapsedOverride: UILocalOverride?
+    private var uiMutationSeq: UInt64 = 0
+    private var priorSessionAttention: [String: PriorSessionAttention] = [:]
     private var lastActivityFetchAt: Date = .distantPast
     private var lastNativeSessionsFetchAt: Date = .distantPast
     private var priorDroppedSteerIds: Set<String> = []
@@ -199,9 +215,11 @@ public final class AppStore {
     }
 
     public var attentionSessions: [SessionSummary] {
-        let archivedSet = Set(snapshot.archived.compactMap { $0.hasPrefix("s:") ? String($0.dropFirst(2)) : nil })
+        let projectsByID = Dictionary(snapshot.projects.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return snapshot.sessions.filter { s in
-            s.hidden != true && !archivedSet.contains(s.id) && s.needsAttention
+            guard s.hidden != true else { return false }
+            let proj = s.projectId.flatMap { projectsByID[$0] }
+            return needsYou(s, project: proj)
         }
     }
 
@@ -237,6 +255,36 @@ public final class AppStore {
         snapshot.projects.filter { $0.hidden == true }
     }
 
+    public var effectiveGroupOrder: [String] {
+        localGroupOrderOverride?.value ?? snapshot.ui?.groupOrder ?? []
+    }
+
+    public var effectiveCollapsed: [String] {
+        localCollapsedOverride?.value ?? snapshot.ui?.collapsed ?? []
+    }
+
+    public func isGroupCollapsed(_ key: String, legacyProjectID: String? = nil) -> Bool {
+        effectiveCollapsed.contains {
+            SidebarLayoutHelper.isCollapsedMatch($0, groupKey: key, legacyProjectID: legacyProjectID)
+        }
+    }
+
+    public func orderedProjects(includeHidden: Bool = false) -> [WorkspaceProject] {
+        let base = includeHidden ? snapshot.projects : visibleProjects
+        return SidebarLayoutHelper.orderedProjects(projects: base, groupOrder: effectiveGroupOrder)
+    }
+
+    public func isSessionUnseen(_ session: SessionSummary) -> Bool {
+        session.id != selectedSessionID && unseenSessionIDs.contains(session.id)
+    }
+
+    public func needsYou(_ session: SessionSummary, project: WorkspaceProject? = nil) -> Bool {
+        let resolvedProject = project ?? self.project(for: session)
+        let isArchivedOrHidden = isArchived(session) || (resolvedProject?.hidden == true)
+        let hasQuestions = !(session.uiRequests?.isEmpty ?? true)
+        let reviewish = hasQuestions || session.hasPlanReviewPending || session.status == .review || session.status == .error
+        return (reviewish || isSessionUnseen(session)) && (!isArchivedOrHidden || hasQuestions)
+    }
     // MARK: - Lifecycle & Scene Handling
 
     public func bootstrap() async {
@@ -515,6 +563,11 @@ public final class AppStore {
         commandsBySession = [:]
         commandsByPath = [:]
         priorDroppedSteerIds = []
+        localGroupOrderOverride = nil
+        localCollapsedOverride = nil
+        uiMutationSeq = 0
+        unseenSessionIDs = []
+        priorSessionAttention = [:]
         lastTailscaleInfo = nil
     }
 
@@ -555,6 +608,9 @@ public final class AppStore {
 
     public func selectSession(_ sessionID: String?, tab: SessionInspectorTab? = nil, openDetail: Bool = true) async {
         selectedSessionID = sessionID
+        if let sessionID {
+            unseenSessionIDs.remove(sessionID)
+        }
         if let tab {
             selectedSessionTab = tab
         }
@@ -623,6 +679,7 @@ public final class AppStore {
                 let wasInitial = !hasReceivedLiveSnapshotForHost
                 hasReceivedLiveSnapshotForHost = true
                 snapshot = nextSnapshot
+                reconcileLocalUIOverrides()
                 connectionStatus = .connected
                 reachabilityByHost[host.id] = .reachable(latencyMs: host.lastLatencyMs ?? 15)
 
@@ -643,6 +700,7 @@ public final class AppStore {
                     isAppActive: scenePhase == .active,
                     isInitialSnapshot: wasInitial
                 )
+                updateUnseenSessions(sessions: snapshot.sessions, isInitialSnapshot: wasInitial)
 
                 detectDroppedSteers(in: selectedSession)
 
@@ -968,12 +1026,201 @@ public final class AppStore {
     }
 
     public func updateProjectsOrder(_ order: [String], collapsed: [String]? = nil) async {
-        guard let client = activeClient else { return }
+        let projectsByID = Dictionary(snapshot.projects.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let normalizedOrder = order.map { projectsByID[$0]?.path ?? $0 }
+        await saveUILayout(groupOrder: normalizedOrder, collapsed: collapsed, revertOnFailure: true)
+    }
+
+    public func toggleGroupCollapsed(_ key: String, legacyProjectID: String? = nil) async {
+        var next = effectiveCollapsed
+        let wasCollapsed = isGroupCollapsed(key, legacyProjectID: legacyProjectID)
+        next.removeAll {
+            SidebarLayoutHelper.isCollapsedMatch($0, groupKey: key, legacyProjectID: legacyProjectID)
+        }
+        if !wasCollapsed {
+            next.append(key)
+        }
+        notificationManager.triggerHaptic(.selection)
+        await saveUILayout(collapsed: next, revertOnFailure: true)
+    }
+
+    public func setAllGroupsCollapsed(_ collapsed: Bool, keys: [String]) async {
+        guard !keys.isEmpty else { return }
+        let projectsByPathNorm = Dictionary(
+            snapshot.projects.map { (SidebarLayoutHelper.normalizePathKey($0.path), $0.id) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var next = effectiveCollapsed
+        for key in keys {
+            let legacyID = projectsByPathNorm[SidebarLayoutHelper.normalizePathKey(key)]
+            next.removeAll {
+                SidebarLayoutHelper.isCollapsedMatch($0, groupKey: key, legacyProjectID: legacyID)
+            }
+            if collapsed {
+                next.append(key)
+            }
+        }
+        notificationManager.triggerHaptic(.selection)
+        await saveUILayout(collapsed: next, revertOnFailure: true)
+    }
+
+    public func moveGroup(key: String, beforeKey: String?, visibleKeys: [String]) async {
+        let nextOrder = SidebarLayoutHelper.moveGroup(
+            key: key,
+            beforeKey: beforeKey,
+            currentOrder: effectiveGroupOrder,
+            visibleKeys: visibleKeys
+        )
+        await saveUILayout(groupOrder: nextOrder, revertOnFailure: true)
+    }
+
+    public func reconcileGroupOrderIfNeeded(visibleKeys: [String], presentNormalizedKeys: Set<String>) async {
+        guard hasReceivedLiveSnapshotForHost, canPerformMutatingActions else { return }
+        let result = SidebarLayoutHelper.reconcileGroupOrder(
+            saved: effectiveGroupOrder,
+            visibleKeys: visibleKeys,
+            presentNormalizedKeys: presentNormalizedKeys,
+            projects: snapshot.projects,
+            allowPrune: hasLoadedNativeSessions
+        )
+        guard result.didChange, result.order != effectiveGroupOrder else { return }
+        await saveUILayout(groupOrder: result.order, revertOnFailure: false)
+    }
+
+    public func saveUILayout(groupOrder: [String]? = nil, collapsed: [String]? = nil, revertOnFailure: Bool = true) async {
+        guard let client = activeClient else {
+            if revertOnFailure {
+                showToast("Not connected to companion host.", isError: true)
+            }
+            return
+        }
+        let hostID = activeHostID
+        let prevUI = snapshot.ui
+        let prevOrderOverride = localGroupOrderOverride
+        let prevCollapsedOverride = localCollapsedOverride
+
+        uiMutationSeq &+= 1
+        let mySeq = uiMutationSeq
+        let now = Date()
+
+        var nextUI = snapshot.ui ?? SidebarUI()
+        if let groupOrder {
+            localGroupOrderOverride = UILocalOverride(value: groupOrder, updatedAt: now, seq: mySeq)
+            nextUI.groupOrder = groupOrder
+        }
+        if let collapsed {
+            localCollapsedOverride = UILocalOverride(value: collapsed, updatedAt: now, seq: mySeq)
+            nextUI.collapsed = collapsed
+        }
+        snapshot.ui = nextUI
+
         do {
-            let ui = try await client.saveUI(groupOrder: order, collapsed: collapsed)
-            snapshot.ui = ui
+            let saved = try await client.saveUI(groupOrder: groupOrder, collapsed: collapsed)
+            guard hostID == activeHostID else { return }
+            var merged = snapshot.ui ?? saved
+            if groupOrder != nil {
+                if localGroupOrderOverride?.seq == mySeq {
+                    merged.groupOrder = saved.groupOrder
+                    localGroupOrderOverride = UILocalOverride(value: saved.groupOrder ?? groupOrder ?? [], updatedAt: Date(), seq: mySeq)
+                }
+            } else {
+                merged.groupOrder = saved.groupOrder ?? merged.groupOrder
+            }
+            if collapsed != nil {
+                if localCollapsedOverride?.seq == mySeq {
+                    merged.collapsed = saved.collapsed
+                    localCollapsedOverride = UILocalOverride(value: saved.collapsed ?? collapsed ?? [], updatedAt: Date(), seq: mySeq)
+                }
+            } else {
+                merged.collapsed = saved.collapsed ?? merged.collapsed
+            }
+            snapshot.ui = merged
+            reconcileLocalUIOverrides()
         } catch {
+            guard hostID == activeHostID else { return }
+            if revertOnFailure {
+                var revertedUI = snapshot.ui ?? prevUI ?? SidebarUI()
+                if groupOrder != nil && localGroupOrderOverride?.seq == mySeq {
+                    localGroupOrderOverride = prevOrderOverride
+                    revertedUI.groupOrder = prevOrderOverride?.value ?? prevUI?.groupOrder
+                }
+                if collapsed != nil && localCollapsedOverride?.seq == mySeq {
+                    localCollapsedOverride = prevCollapsedOverride
+                    revertedUI.collapsed = prevCollapsedOverride?.value ?? prevUI?.collapsed
+                }
+                snapshot.ui = revertedUI
+            }
             showToast(error.localizedDescription, isError: true)
+        }
+    }
+
+    private func reconcileLocalUIOverrides() {
+        let now = Date()
+        if let orderOverride = localGroupOrderOverride {
+            let serverOrder = snapshot.ui?.groupOrder ?? []
+            let matches = serverOrder.map(SidebarLayoutHelper.normalizePathKey) == orderOverride.value.map(SidebarLayoutHelper.normalizePathKey)
+            if matches || now.timeIntervalSince(orderOverride.updatedAt) > 15 {
+                localGroupOrderOverride = nil
+            }
+        }
+        if let collapsedOverride = localCollapsedOverride {
+            let serverCollapsed = snapshot.ui?.collapsed ?? []
+            let matches = Set(serverCollapsed.map(SidebarLayoutHelper.normalizePathKey)) == Set(collapsedOverride.value.map(SidebarLayoutHelper.normalizePathKey))
+            if matches || now.timeIntervalSince(collapsedOverride.updatedAt) > 15 {
+                localCollapsedOverride = nil
+            }
+        }
+        if let orderOverride = localGroupOrderOverride {
+            var ui = snapshot.ui ?? SidebarUI()
+            ui.groupOrder = orderOverride.value
+            snapshot.ui = ui
+        }
+        if let collapsedOverride = localCollapsedOverride {
+            var ui = snapshot.ui ?? SidebarUI()
+            ui.collapsed = collapsedOverride.value
+            snapshot.ui = ui
+        }
+    }
+
+    private func updateUnseenSessions(sessions: [SessionSummary], isInitialSnapshot: Bool) {
+        let visible = sessions.filter { $0.hidden != true }
+        let viewingID = (scenePhase == .active) ? selectedSessionID : nil
+
+        if !isInitialSnapshot && !priorSessionAttention.isEmpty {
+            for s in visible {
+                guard let prev = priorSessionAttention[s.id] else { continue }
+                let reqCount = s.uiRequests?.count ?? 0
+                let ended = prev.status == .running || prev.status == .queued || (s.workFinishedAt != nil && s.workFinishedAt != prev.workFinishedAt)
+                let triggered: Bool
+                if reqCount > prev.uiRequestCount {
+                    triggered = true
+                } else if s.status == .error && (prev.status != .error || ended) {
+                    triggered = true
+                } else if s.status == .review && ended {
+                    triggered = true
+                } else {
+                    triggered = false
+                }
+                if triggered && s.id != viewingID {
+                    unseenSessionIDs.insert(s.id)
+                }
+            }
+        }
+
+        priorSessionAttention = Dictionary(
+            visible.map { ($0.id, PriorSessionAttention(status: $0.status, uiRequestCount: $0.uiRequests?.count ?? 0, workFinishedAt: $0.workFinishedAt)) },
+            uniquingKeysWith: { _, later in later }
+        )
+
+        let byID = Dictionary(visible.map { ($0.id, $0) }, uniquingKeysWith: { _, later in later })
+        for id in Array(unseenSessionIDs) {
+            guard let s = byID[id] else {
+                unseenSessionIDs.remove(id)
+                continue
+            }
+            if id == viewingID || s.status == .done || (s.status == .running && (s.uiRequests?.isEmpty ?? true)) {
+                unseenSessionIDs.remove(id)
+            }
         }
     }
 

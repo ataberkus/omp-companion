@@ -412,4 +412,230 @@ final class OMPCompanionKitTests: XCTestCase {
         try store.deleteSecret(for: id)
         XCTAssertNil(try store.loadSecret(for: id))
     }
+    // MARK: - Sidebar Layout, Search Scope, Usage Formatting & Session Attention
+
+    func testSidebarPathNormalizationAndCollapsedMatching() {
+        XCTAssertEqual(
+            SidebarLayoutHelper.normalizePathKey("C:/Users/Valo/Repo"),
+            "c:\\users\\valo\\repo"
+        )
+        XCTAssertTrue(SidebarLayoutHelper.isCollapsedMatch("@attention", groupKey: "@attention"))
+        XCTAssertFalse(SidebarLayoutHelper.isCollapsedMatch("@attention", groupKey: "/repo"))
+        XCTAssertTrue(SidebarLayoutHelper.isCollapsedMatch("c:\\Users\\Valo\\Repo", groupKey: "C:/users/valo/repo"))
+        XCTAssertTrue(SidebarLayoutHelper.isCollapsedMatch("proj-uuid-1", groupKey: "C:\\Repo", legacyProjectID: "proj-uuid-1"))
+    }
+
+    func testSidebarReconcileGroupOrderAndMoveGroup() {
+        let p1 = WorkspaceProject(id: "id-1", name: "Alpha", path: "C:\\Work\\Alpha")
+        let p2 = WorkspaceProject(id: "id-2", name: "Beta", path: "C:\\Work\\Beta")
+        let p3 = WorkspaceProject(id: "id-3", name: "Gamma", path: "C:\\Work\\Gamma")
+
+        let reconciled = SidebarLayoutHelper.reconcileGroupOrder(
+            saved: ["id-2", "C:\\Work\\Dead"],
+            visibleKeys: [p1.path, p2.path, p3.path],
+            presentNormalizedKeys: [
+                SidebarLayoutHelper.normalizePathKey(p1.path),
+                SidebarLayoutHelper.normalizePathKey(p2.path),
+                SidebarLayoutHelper.normalizePathKey(p3.path)
+            ],
+            projects: [p1, p2, p3],
+            allowPrune: true
+        )
+        XCTAssertTrue(reconciled.didChange)
+        XCTAssertEqual(reconciled.order, [p1.path, p3.path, p2.path])
+
+        let ordered = SidebarLayoutHelper.orderedProjects(projects: [p1, p2, p3], groupOrder: reconciled.order)
+        XCTAssertEqual(ordered.map(\.id), ["id-1", "id-3", "id-2"])
+
+        let movedBottom = SidebarLayoutHelper.moveGroup(
+            key: p1.path,
+            beforeKey: nil,
+            currentOrder: reconciled.order,
+            visibleKeys: [p1.path, p2.path, p3.path]
+        )
+        XCTAssertEqual(movedBottom, [p3.path, p2.path, p1.path])
+
+        let movedBefore = SidebarLayoutHelper.moveGroup(
+            key: p1.path,
+            beforeKey: p2.path,
+            currentOrder: movedBottom,
+            visibleKeys: [p1.path, p2.path, p3.path]
+        )
+        XCTAssertEqual(movedBefore, [p3.path, p1.path, p2.path])
+    }
+
+    func testParsedSidebarSearchWithInScope() {
+        let parsed = ParsedSidebarSearch(query: "in:companion usage")
+        XCTAssertEqual(parsed.scopes, ["companion"])
+        XCTAssertEqual(parsed.terms, ["usage"])
+        XCTAssertTrue(parsed.matches(title: "Add usage %", cwd: "C:\\src\\omp-companion", folderName: "omp-companion"))
+        XCTAssertFalse(parsed.matches(title: "Add usage %", cwd: "C:\\src\\other", folderName: "other"))
+    }
+
+    func testUsageFormattingMatchesWebRules() {
+        XCTAssertEqual(UsageFormatting.percentage(fraction: 0.424), 42)
+        XCTAssertEqual(UsageFormatting.percentage(fraction: -0.15), 0)
+        XCTAssertEqual(UsageFormatting.percentage(fraction: 1.05), 105)
+        XCTAssertNil(UsageFormatting.percentage(fraction: nil))
+
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(UsageFormatting.resetLabel(resetsAtMs: (now.timeIntervalSince1970 - 5) * 1000, fallback: nil, now: now), "resetting")
+        XCTAssertEqual(UsageFormatting.resetLabel(resetsAtMs: (now.timeIntervalSince1970 + 192 * 60) * 1000, fallback: nil, now: now), "resets in 3h 12m")
+        XCTAssertEqual(UsageFormatting.resetLabel(resetsAtMs: (now.timeIntervalSince1970 + 15 * 60) * 1000, fallback: nil, now: now), "resets in 15m")
+        let futureDay = UsageFormatting.resetLabel(resetsAtMs: (now.timeIntervalSince1970 + 36 * 3600) * 1000, fallback: nil, now: now)
+        XCTAssertTrue(futureDay?.hasPrefix("Resets ") == true)
+        XCTAssertEqual(UsageFormatting.unavailableMessage("Quota fetch timed out"), "Remaining quota unavailable: Quota fetch timed out.")
+    }
+
+    func testSessionSummaryTaskAndAttentionFlags() throws {
+        let json = """
+        {
+          "id": "s_task",
+          "title": "Compact",
+          "cwd": "/w",
+          "status": "paused",
+          "updatedAt": "2026-11-19T10:00:00Z",
+          "_task": "Compacting context…"
+        }
+        """
+        let s = try JSONDecoder().decode(SessionSummary.self, from: Data(json.utf8))
+        XCTAssertTrue(s.isWorking)
+        XCTAssertFalse(s.needsAttention)
+
+        let reviewJson = """
+        {
+          "id": "s_rev",
+          "title": "Ready",
+          "cwd": "/w",
+          "status": "review",
+          "updatedAt": "2026-11-19T10:00:00Z"
+        }
+        """
+        let rev = try JSONDecoder().decode(SessionSummary.self, from: Data(reviewJson.utf8))
+        XCTAssertFalse(rev.isWorking)
+        XCTAssertTrue(rev.needsAttention)
+    }
+
+    // MARK: - KaTeX Math Rendering, Formula Fences, Edge Cases & Math Scale
+
+    func testMarkdownParserMathFencesAndStreamingGuards() {
+        let md = """
+        ```math
+        \\int_0^\\infty e^{-st} dt = \\frac{1}{s}
+        ```
+
+        ```latex
+        \\documentclass{article}
+        \\begin{document}
+        Hello
+        \\end{document}
+        ```
+
+        ```latex
+        \\boxed{y(t) = 1 - \\cos t}
+        ```
+
+        $$   $$
+
+        $$
+        unclosed while streaming
+        """
+        let blocks = MarkdownParser.parse(md)
+        XCTAssertTrue(blocks.contains(where: {
+            if case .mathBlock(_, let tex) = $0 { return tex.contains("\\int_0^\\infty") }
+            return false
+        }))
+        XCTAssertTrue(blocks.contains(where: {
+            if case .codeBlock(_, "latex", let code) = $0 { return code.contains("\\documentclass") }
+            return false
+        }))
+        XCTAssertTrue(blocks.contains(where: {
+            if case .mathBlock(_, let tex) = $0 { return tex == "\\boxed{y(t) = 1 - \\cos t}" }
+            return false
+        }))
+        // Empty `$$   $$` must not emit a mathBlock, and unclosed `$$` must remain a paragraph while streaming
+        XCTAssertFalse(blocks.contains(where: {
+            if case .mathBlock(_, let tex) = $0 { return tex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            return false
+        }))
+        XCTAssertTrue(blocks.contains(where: {
+            if case .paragraph(_, let text) = $0 { return text.contains("unclosed while streaming") }
+            return false
+        }))
+    }
+
+    func testMarkdownParserUnclosedFenceStaysCodeBlock() {
+        let streaming = """
+        ```math
+        f(t) = t^2
+        """
+        let blocks = MarkdownParser.parse(streaming)
+        XCTAssertEqual(blocks.count, 1)
+        if case .codeBlock(_, "math", let code) = blocks[0] {
+            XCTAssertEqual(code, "f(t) = t^2")
+        } else {
+            XCTFail("Expected unclosed math fence to remain a codeBlock during streaming")
+        }
+    }
+
+    func testMarkdownTablePreservesPipesInsideInlineMath() {
+        let table = """
+        | Expr | Value |
+        | --- | --- |
+        | $|x| + \\alpha | \\beta$ | $1$ |
+        """
+        let blocks = MarkdownParser.parse(table)
+        guard case .table(_, let headers, let rows) = blocks.first else {
+            return XCTFail("Expected table block")
+        }
+        XCTAssertEqual(headers, ["Expr", "Value"])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].count, 2)
+        XCTAssertEqual(rows[0][0], "$|x| + \\alpha | \\beta$")
+        XCTAssertEqual(rows[0][1], "$1$")
+    }
+
+    func testContainsMathAndRenderInlineHTMLEdgeCases() {
+        XCTAssertFalse(MarkdownParser.containsMath("This costs $5 and $10 today"))
+        XCTAssertFalse(MarkdownParser.containsMath("Escaped \\$5 stays prose"))
+        XCTAssertFalse(MarkdownParser.containsMath("Code span `$x^2$` stays code"))
+        XCTAssertFalse(MarkdownParser.containsMath("Empty $$ $$ is ignored"))
+        XCTAssertTrue(MarkdownParser.containsMath("Let $u = s + 1$ and \\(G = \\frac{1}{s}\\)"))
+
+        let html = MarkdownParser.renderInlineHTML("Let $u = s + 1$ with **bold** and `$code$` and \\$5 & <tag>")
+        XCTAssertTrue(html.contains("<span class=\"omp-math\" data-display=\"0\" data-tex=\"u = s + 1\"></span>"))
+        XCTAssertTrue(html.contains("<strong>bold</strong>"))
+        XCTAssertTrue(html.contains("<code class=\"omp-code\">$code$</code>"))
+        XCTAssertTrue(html.contains("$5 &amp; &lt;tag&gt;"))
+    }
+
+    func testKaTeXMathScaleClampingAndRounding() {
+        XCTAssertEqual(KaTeXMathScale.clampAndRound(50), 80)
+        XCTAssertEqual(KaTeXMathScale.clampAndRound(250), 200)
+        XCTAssertEqual(KaTeXMathScale.clampAndRound(112.4), 110)
+        XCTAssertEqual(KaTeXMathScale.clampAndRound(113.0), 115)
+        XCTAssertEqual(KaTeXMathScale.factor(percent: 150), 1.5, accuracy: 0.0001)
+    }
+
+    func testKaTeXValidatorFormulaFencesAndLimits() {
+        XCTAssertTrue(KaTeXValidator.isFormula(code: #"\frac{1}{s}"#, language: "math"))
+        XCTAssertTrue(KaTeXValidator.isFormula(code: #"y = x^2"#, language: "TeX"))
+        XCTAssertFalse(KaTeXValidator.isFormula(code: #"\documentclass{article}"#, language: "latex"))
+        XCTAssertFalse(KaTeXValidator.isFormula(code: #"\usepackage{amsmath}"#, language: "tex"))
+        XCTAssertFalse(KaTeXValidator.isFormula(code: #"\begin{document}hi\end{document}"#, language: "latex"))
+        XCTAssertFalse(KaTeXValidator.isFormula(code: "   \n  ", language: "math"))
+        XCTAssertFalse(KaTeXValidator.isFormula(code: "let x = 1", language: "swift"))
+        XCTAssertFalse(KaTeXValidator.isFormula(code: String(repeating: "x", count: 20_001), language: "latex"))
+    }
+
+    func testRenderInlineHTMLDisplayMathLinksAndColors() {
+        let html = MarkdownParser.renderInlineHTML(#"See [proof $x^2$](https://example.com) and \[\frac{a}{b}\] and $$c+d$$"#)
+        XCTAssertTrue(html.contains("<a href=\"https://example.com\">proof <span class=\"omp-math\" data-display=\"0\" data-tex=\"x^2\"></span></a>"))
+        XCTAssertTrue(html.contains("<span class=\"omp-math\" data-display=\"1\" data-tex=\"\\frac{a}{b}\"></span>"))
+        XCTAssertTrue(html.contains("<span class=\"omp-math\" data-display=\"1\" data-tex=\"c+d\"></span>"))
+
+        let rgba = Color.white.opacity(0.6).cssRGBAString
+        XCTAssertFalse(rgba.contains("0,6"))
+        XCTAssertTrue(rgba.hasPrefix("rgba("))
+    }
 }
