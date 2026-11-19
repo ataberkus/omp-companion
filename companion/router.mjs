@@ -26,8 +26,12 @@ export function createRouter(ctx){
    if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
    const url=new URL(req.url,`http://127.0.0.1:${port}`);
    if(!url.pathname.startsWith('/api/')){await serveStatic({req,res,url,host});return;}
-   const provided=Buffer.from(req.headers.authorization||'');const expected=Buffer.from('Bearer '+token);
-   if(provided.length!==expected.length||!timingSafeEqual(provided,expected))throw error(password?'Wrong password.':'Invalid connection token.',401);
+   // A PDF attachment opens in a new tab, which sends no Authorization header: the dashboard sets the token as a
+   // SameSite=Strict cookie scoped to that one path first, and only that GET accepts it.
+   const cookie=req.method==='GET'&&url.pathname==='/api/attachment'&&/(?:^|;\s*)omp_attach=([^;]*)/.exec(req.headers.cookie||'')?.[1];
+   const expected=Buffer.from('Bearer '+token),matches=v=>{const provided=Buffer.from(v);return provided.length===expected.length&&timingSafeEqual(provided,expected);};
+   let fromCookie=false;if(cookie)try{fromCookie=matches('Bearer '+decodeURIComponent(cookie));}catch{}
+   if(!fromCookie&&!matches(req.headers.authorization||''))throw error(password?'Wrong password.':'Invalid connection token.',401);
    if(req.method==='GET'&&routes['GET '+url.pathname]){await routes['GET '+url.pathname]({req,res,url,send,json});return;}
    if(req.method!=='POST')throw error('Route not found.',404);
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);

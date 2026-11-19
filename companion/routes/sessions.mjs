@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { exists, now, error, text, samePath, resolveDir } from '../util.mjs';
 import { chatImages } from '../images.mjs';
+import { chatPdfs } from '../pdfs.mjs';
 import { readSessionHead, lastContext, importMessages, cleanTitle } from '../transcript.mjs';
 import { launchOptions } from '../launch.mjs';
 export function sessionRoutes(ctx){
@@ -66,7 +67,7 @@ export function sessionRoutes(ctx){
    'POST /api/draft':async({body,json})=>{json(await saveDraft(body));return;},
    // One step: pick a folder, optionally type a prompt, go. The project is registered automatically.
    'POST /api/quick-start':async({body,json})=>{
-    const dir=await resolveDir(body.path);const images=chatImages(body);const raw=typeof body.prompt==='string'?body.prompt.trim().slice(0,200000):'';const p=await ensureProject(dir);
+    const dir=await resolveDir(body.path);const images=chatImages(body);chatPdfs(body);const raw=typeof body.prompt==='string'?body.prompt.trim().slice(0,200000):'';const p=await ensureProject(dir);
     const title=(typeof body.title==='string'&&body.title.trim().slice(0,120))||raw.split('\n')[0].slice(0,70)||`New session · ${p.name}`;
     const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);
     if(body.autoApprove!==undefined&&typeof body.autoApprove!=='boolean')throw error('Auto-approve must be true or false.');
@@ -81,16 +82,16 @@ export function sessionRoutes(ctx){
     // Before the first prompt, so approval prompts from the first turn are already answered.
     if(body.autoApprove===true)await lock(s.id,()=>command(s,{type:'auto_approve',enabled:true}));
     await persist(s);
-    json(images.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,preview:body.preview},images)):s,201);return;
+    json(images.length||body.pdfs?.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,pdfs:body.pdfs,preview:body.preview},images)):s,201);return;
    },
    'POST /api/omp-sessions/resume':async({body,json})=>{
-    const file=sessionFileParam(body.file);const images=chatImages(body);const message=typeof body.message==='string'?body.message.trim().slice(0,200000):'';
-    const submitted=!!message||body.images!==undefined;
+    const file=sessionFileParam(body.file);const images=chatImages(body);chatPdfs(body);const message=typeof body.message==='string'?body.message.trim().slice(0,200000):'';
+    const submitted=!!message||body.images!==undefined||body.pdfs!==undefined;
     // The panel's visible session on that file first; a hidden one (removed from the panel) is brought back otherwise.
     const onFile=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file)),existing=onFile.find(s=>!s.hidden)||onFile[0];
     const gone=k=>k!=='f:'+file&&k!=='f:'+body.file;store.archived=store.archived.filter(gone);store.pinned=store.pinned.filter(gone);
    // Turns a terminal OMP added to the file since the panel imported or last ran it are read first (syncFromFile).
-   if(existing){existing.hidden=false;await lock(existing.id,()=>syncFromFile(existing)).catch(()=>{});if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean'){const choice=body.advisor?'on':'off';existing.advisor={...existing.advisor,enabled:body.advisor};if(runners.get(existing.id)?.alive)await lock(existing.id,()=>command(existing,{type:'advisor',action:choice}));else{existing.advisorChoice=choice;await persist(existing);}}json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):existing);return;}
+   if(existing){existing.hidden=false;await lock(existing.id,()=>syncFromFile(existing)).catch(()=>{});if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean'){const choice=body.advisor?'on':'off';existing.advisor={...existing.advisor,enabled:body.advisor};if(runners.get(existing.id)?.alive)await lock(existing.id,()=>command(existing,{type:'advisor',action:choice}));else{existing.advisorChoice=choice;await persist(existing);}}json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,pdfs:body.pdfs,preview:body.preview},images)):existing);return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||cleanTitle(head.preview)||'Resumed session').slice(0,120);
@@ -104,7 +105,7 @@ export function sessionRoutes(ctx){
     // Applied by the session's first OMP start (runner.mjs), before its first prompt: a resume with no message starts no
     // model work, and the advisor option alone must not start OMP either.
     if(typeof body.advisor==='boolean'){s.advisorChoice=body.advisor?'on':'off';s.advisor={...s.advisor,enabled:body.advisor};await persist(s);}
-    json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,preview:body.preview},images)):s,201);return;
+    json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,pdfs:body.pdfs,preview:body.preview},images)):s,201);return;
    },
    'POST /api/archive':archiveOrPin,'POST /api/pin':archiveOrPin,
    'POST /api/sessions/:id/command':async({url,body,json})=>{

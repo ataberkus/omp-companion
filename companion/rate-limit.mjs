@@ -1,5 +1,6 @@
 // Automatic resume: a session stopped by a provider limit, or by a connection that dropped before the provider answered,
 // continues by itself.
+import { withPdfRefs } from './pdfs.mjs';
 
 // Waits before each automatic resend after a lost connection; their count is the most it resends in a row.
 const CONNECTION_DELAYS=[5000,15000,45000];
@@ -65,7 +66,8 @@ export function createRateLimit(ctx){
    append(s,'system',connection?`Resending automatically (attempt ${attempt} of ${CONNECTION_DELAYS.length}).`:'Rate limit wait is over; resuming automatically.');
    // The resend keeps the count of resends in a row (command resets it for any other message).
    if(connection)s._connectionAttempt=attempt;
-   try{await command(s,{type:'prompt',message:last.text,...(connection?{resume:true}:{})});}catch(e){notice(s,'error',`Automatic resume failed: ${e.message}`);}
+   // Its PDFs go again as the lines that name their stored files.
+   try{await command(s,{type:'prompt',message:withPdfRefs(last.pdfs?.length&&last.text==='PDF attached'?'':last.text,last.pdfs),...(connection?{resume:true}:{})});}catch(e){notice(s,'error',`Automatic resume failed: ${e.message}`);}
   });
  }
  return {rateLimitHint,connectionHint,scheduleResume,armResume,cancelResume};

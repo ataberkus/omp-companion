@@ -53,6 +53,9 @@ async function boot({ hash = '#/s/a', sessions = [], models = { models: [], role
     // Timers are recorded, never run on their own: a test runs the ones it means to (see saveDrafts).
     setTimeout: (fn, ms) => timers.push({ fn, ms }), clearTimeout: id => { if (timers[id - 1]) timers[id - 1].cleared = true; },
     requestAnimationFrame: fn => fn(), ResizeObserver: class { observe() {} disconnect() {} }, confirm: () => true,
+    // What attachPdf reads a file with: its bytes, their SHA-256, a data URL.
+    crypto: globalThis.crypto, TextDecoder,
+    FileReader: class { readAsDataURL(blob) { blob.arrayBuffer().then(b => { this.result = 'data:application/pdf;base64,' + Buffer.from(b).toString('base64'); this.onload(); }, () => this.onerror()); } },
     fetch: async (url, opts) => {
       const body = opts?.body ? JSON.parse(opts.body) : undefined;
       calls.push({ url, body, ...(opts?.keepalive ? { keepalive: true } : {}) });
@@ -623,4 +626,30 @@ test('a long draft grows the composer to a third of the screen on touch, 40% of 
     await d.fire('input', { target: input });
     assert.equal(input.style.height, cap + 'px', opts.coarse ? 'touch' : 'desktop');
   }
+});
+
+test('a dropped PDF shows as a "Reading…" chip that holds Send, then goes out with the message and shows in the transcript', async () => {
+  const pdf = Buffer.from('%PDF-1.4\n2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>\nendobj\n', 'latin1');
+  const id = 'a'.repeat(64);
+  const sessions = [idle('a', { messages: [{ id: 'm1', role: 'user', text: 'PDF attached', pdfs: [{ id, name: 'old.pdf', pages: 1, path: '/data/attachments/' + id + '.pdf' }], at: new Date().toISOString() }] })];
+  const d = await boot({ sessions }), preview = d.elements.get('imagePreview'), input = d.elements.get('input');
+  assert.match(d.elements.get('thread').innerHTML, new RegExp(`data-pdf-open="${id}"[^>]*>.*old\\.pdf.*1 page<`), 'a sent PDF is a chip that opens the stored file');
+  assert.doesNotMatch(d.elements.get('thread').innerHTML, /<p>PDF attached<\/p>/, 'the fallback text is not shown beside the chip');
+
+  const gate = deferred();
+  const file = (name, bytes) => ({ name, type: 'application/pdf', size: bytes.length, arrayBuffer: async () => { await gate.promise; return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length); } });
+  const composer = d.node('', { closest: s => s === '.composer' ? composer : null });
+  await d.fire('drop', { target: composer, dataTransfer: { types: ['Files'], files: [file('report.pdf', pdf), file('fake.pdf', Buffer.from('not a pdf at all'))] } });
+  assert.match(preview.innerHTML, /report\.pdf.*Reading….*fake\.pdf.*Reading…/s);
+  input.value = 'Summarize';
+  await d.key('Enter');
+  assert.equal(d.commands().length, 0, 'Send waits until every PDF is read');
+  gate.resolve(); await flush();
+  assert.match(preview.innerHTML, /data-pdfchip="report\.pdf"[^>]*>.*3 pages/s);
+  assert.doesNotMatch(preview.innerHTML, /fake\.pdf/, 'a file that is not a PDF is dropped, the other stays');
+
+  await d.key('Enter');
+  const sent = d.commands().filter(c => c.type === 'prompt');
+  assert.deepEqual(sent.map(({ message, pdfs, images }) => ({ message, pdfs, images })), [{ message: 'Summarize', pdfs: [{ data: pdf.toString('base64'), name: 'report.pdf' }], images: undefined }]);
+  assert.equal(preview.hidden, true);
 });

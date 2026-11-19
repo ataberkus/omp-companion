@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { now, contentText, clip } from './util.mjs';
 import { toolImages } from './images.mjs';
+import { splitPdfRefs, attachedText } from './pdfs.mjs';
 export function advisorMessage(m,id,at){
  if(m.customType!=='advisor'||m.display!==true||!Array.isArray(m.details?.notes))return null;
  const notes=m.details.notes.slice(0,32).filter(n=>typeof n?.note==='string'&&n.note.trim()).map(n=>({note:n.note.slice(0,10000),severity:['nit','concern','blocker'].includes(n.severity)?n.severity:'nit',...(typeof n.advisor==='string'?{advisor:n.advisor.slice(0,80)}:{})}));
@@ -22,7 +23,7 @@ export function biliMessage(m,id,at){
  return text?{id,role:'system',text:text.slice(-100000),at}:null;
 }
 // A collab guest's prompt as OMP stores it on the host (a `collab-prompt` custom message): a user message with its author.
-export const collabPrompt=(m,id,at)=>{if(m?.customType!=='collab-prompt')return null;const text=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');return text||hasImage?{id,role:'user',text:text.slice(-100000)||'Image attached',hasImage,at,from:String(m.details?.from||'Guest').slice(0,80)}:null;};
+export const collabPrompt=(m,id,at)=>{if(m?.customType!=='collab-prompt')return null;const own=splitPdfRefs(contentText(m.content).trim()),text=own.text.trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');return text||hasImage||own.pdfs.length?{id,role:'user',text:attachedText(text.slice(-100000),hasImage,own.pdfs),hasImage,...(own.pdfs.length?{pdfs:own.pdfs}:{}),at,from:String(m.details?.from||'Guest').slice(0,80)}:null;};
 // Transcripts keep only their newest messages; a long autonomous run can push the user's prompt out of that window.
 // capMessages returns a new array of the newest `limit` (callers such as backfillEntries detect a transcript change by
 // identity) and records a dropped message of the user's on `into` (promptTrimmed: a session, or an import's info
@@ -188,7 +189,8 @@ export function entryMessages(frames,limit=400,stash,info={}){
   // OMP's /clear: the model's context starts after the latest boundary, and so does the transcript (as in OMP's TUI).
   if(f?.type==='reset_boundary'){out.length=0;tools.clear();shots.clear();out.push({id:f.id||randomUUID(),role:'system',text:'Context reset (/clear): earlier messages are no longer in the model’s context; the session file keeps them.',at:f.timestamp||now()});continue;}
   if(f?.type!=='message'&&f?.type!=='custom_message')continue;const m=f.type==='custom_message'?f:f.message||{};const at=f.timestamp||now();
-  if(m.role==='user'){const v=contentText(m.content).trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image'),agent=m.synthetic&&m.attribution==='agent';if(v||hasImage)out.push({id:f.id||randomUUID(),role:agent?'advisor-update':'user',text:v.slice(-100000)||'Image attached',hasImage,at,...(f.type==='message'&&f.id&&!agent?{entryId:String(f.id)}:{})});}
+  // A prompt's PDFs are its trailing "Attached PDF:" lines (pdfs.mjs): shown as chips, not as text.
+  if(m.role==='user'){const agent=m.synthetic&&m.attribution==='agent',raw=contentText(m.content).trim(),own=agent?{text:raw,pdfs:[]}:splitPdfRefs(raw),v=own.text.trim(),hasImage=Array.isArray(m.content)&&m.content.some(c=>c?.type==='image');if(v||hasImage||own.pdfs.length)out.push({id:f.id||randomUUID(),role:agent?'advisor-update':'user',text:attachedText(v.slice(-100000),hasImage,own.pdfs),hasImage,...(own.pdfs.length?{pdfs:own.pdfs}:{}),at,...(f.type==='message'&&f.id&&!agent?{entryId:String(f.id)}:{})});}
   else if(m.role==='assistant'){
    const th=thinkingText(m.content).trim();if(th)out.push({id:(f.id||randomUUID())+'-think',role:'thinking',text:th.slice(-40000),at,sourceTimestamp:m.timestamp});
    const v=contentText(m.content).trim();if(v)out.push({id:f.id||randomUUID(),role:'assistant',text:v.slice(-100000),at,model:m.provider&&m.model?`${m.provider}/${m.model}`:undefined});
@@ -208,7 +210,7 @@ export function treeView(r){
  const leaf=r?.leafId||null,parents=new Map(),nodes=[];const stack=(Array.isArray(r?.tree)?r.tree:[]).map(n=>[n,0]).reverse();
  while(stack.length&&nodes.length<3000){const [n,depth]=stack.pop();const e=n?.entry||{};parents.set(e.id,e.parentId);const kids=Array.isArray(n?.children)?n.children:[];
   const m=e.type==='message'?e.message||{}:null;let kind='',textv='';
-  if(m?.role==='user'){kind='user';textv=contentText(m.content)||(Array.isArray(m.content)&&m.content.some(c=>c?.type==='image')?'Image attached':'');}
+  if(m?.role==='user'){kind='user';const own=splitPdfRefs(contentText(m.content));textv=attachedText(own.text,Array.isArray(m.content)&&m.content.some(c=>c?.type==='image'),own.pdfs);}
   else if(m?.role==='assistant'){kind='assistant';textv=contentText(m.content).trim()||(Array.isArray(m.content)?'Tools: '+m.content.filter(c=>c?.type==='toolCall').map(c=>c.name).join(', '):'');}
   else if(e.type==='compaction'){kind='compaction';textv='Context compacted';}
   else if(e.type==='branch_summary'){kind='branch';textv=String(e.summary||'Branch summary');}

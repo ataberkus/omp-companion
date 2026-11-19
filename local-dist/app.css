@@ -453,6 +453,27 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .attach-item{position:relative;max-width:100%}
 .attach-item img{display:block;max-width:100%;max-height:200px;border:1px solid var(--border);border-radius:6px}
 .attach-item [data-act=removeImage]{position:absolute;top:4px;right:4px;background:var(--media-btn)}
+/* PDF attachments: a chip with an icon, the middle-truncated name and size · pages; the ✕ sits inline, not over a picture. */
+.attach-pdf{display:flex;align-items:center;gap:8px;max-width:min(320px,100%);padding:6px 6px 6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--raised);color:var(--fg)}
+.attach-pdf:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.attach-pdf [data-act=removeImage]{position:static;flex-shrink:0;background:none}
+.attach-pdf.loading{color:var(--muted)}
+.attach-pdf .spinner{flex-shrink:0}
+.pdf-icon{flex-shrink:0;color:var(--red)}
+.pdf-chip-text{display:flex;flex-direction:column;min-width:0;line-height:1.3}
+.pdf-chip-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
+.pdf-chip-meta{white-space:nowrap;color:var(--muted);font-size:12px}
+/* Many PDFs wrap into rows; the strip scrolls rather than pushing the prompt off screen. */
+.attach-preview.has-pdf{max-height:min(30vh,216px);overflow-y:auto}
+.pdf-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.pdf-chip{display:inline-flex;align-items:center;gap:8px;max-width:min(320px,100%);padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--raised);color:var(--fg);font:inherit;text-align:left}
+button.pdf-chip{cursor:pointer;transition:border-color .12s,background .12s}
+button.pdf-chip:hover{border-color:var(--accent-line);background:var(--hover)}
+button.pdf-chip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* Files dragged over the window: the composer shows it takes them. */
+.composer.drop-ready{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.composer.drop-ready::after{content:"Drop images or PDFs to attach";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;border-radius:inherit;background:color-mix(in oklab,var(--card) 88%,transparent);color:var(--fg);font-weight:600;pointer-events:none;z-index:var(--z-float)}
+@media (prefers-reduced-motion:reduce){button.pdf-chip{transition:none}}
 .row-body .tool-images{margin:0;padding:0;border-top:0}
 .composer-bar .hint:has(.check){display:flex;flex-wrap:wrap;gap:2px 14px;white-space:normal;flex-basis:100%;order:1;padding-top:4px}
 .composer-bar:has(.hint .check) [data-act=start]{margin-left:auto}

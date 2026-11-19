@@ -4,9 +4,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { error, text, samePath } from '../util.mjs';
 import { IMAGE_EXT } from '../images.mjs';
+import { attachmentDir, pdfName } from '../pdfs.mjs';
 import { readSessionHead, lastContext, importMessages } from '../transcript.mjs';
 export function historyRoutes(ctx){
- const {background,store,runners,subagentThoughts,toolImageDir,imageWrites,stashImages,ompBlob,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions,digest}=ctx;
+ const {background,store,runners,subagentThoughts,toolImageDir,imageWrites,stashImages,ompBlob,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions,digest,dataDir}=ctx;
  // Replies the dashboard polls with its last ETag (the session list every 20 s, a live session's background every 3 s, a
  // subagent's transcript every 4 s): one that has not changed is a 304 without a body.
  const tagged=({req,res,send},value)=>{const body=JSON.stringify(value),tag=`"${digest(body)}"`;
@@ -22,6 +23,15 @@ export function historyRoutes(ctx){
     await imageWrites.get(id);let data;try{data=await fs.readFile(path.join(toolImageDir,id));}catch{data=await ompBlob(m[1],type).catch(()=>null);}
     if(!data)throw error('This image is no longer stored.',404);
     res.writeHead(200,{'Content-Type':type,'Content-Length':data.length,'Cache-Control':'private, max-age=31536000, immutable','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'"});res.end(data);return;},
+   // A PDF sent from the dashboard (attachments/<id>.pdf, see pdfs.mjs) by its content ID, shown inline by the browser's
+   // own viewer, named for a save as ?name=. The router also lets this route through on the dashboard's cookie, set just
+   // before it opens the file in a new tab, which carries no Authorization header. No CSP: Chromium's viewer refuses
+   // to render under one.
+   'GET /api/attachment':async({res,url})=>{const id=url.searchParams.get('id')||'';if(!/^[0-9a-f]{64}$/.test(id))throw error('Invalid attachment ID.');
+    // Opened as a page, so a missing file answers in words rather than JSON.
+    let data;try{data=await fs.readFile(path.join(attachmentDir(dataDir),id+'.pdf'));}catch{res.writeHead(404,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end('This PDF is no longer stored: it was cleared from Tools › Disk space.');return;}
+    const name=pdfName(url.searchParams.get('name')||'').slice(0,300)||'attachment.pdf';
+    res.writeHead(200,{'Content-Type':'application/pdf','Content-Length':data.length,'Content-Disposition':`inline; filename="${name.replace(/[^\x20-\x7e]|"/g,'_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,'Cache-Control':'private, max-age=31536000, immutable','X-Content-Type-Options':'nosniff'});res.end(data);return;},
    // Also a session's current file outside OMP's sessions folder: a collab guest's replica of the host's transcript.
    'GET /api/background':async r=>{const {url}=r;const asked=path.resolve(text(url.searchParams.get('file'),'File',4000));const file=store.sessions.some(s=>runners.has(s.id)&&s.sessionFile&&samePath(s.sessionFile,asked)&&asked.endsWith('.jsonl'))?asked:insideSessions(asked,['.jsonl']);const owned=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file));const runner=owned.map(s=>runners.get(s.id)).find(Boolean);const live=!!runner;
     const own=owned[0];const bg=await background(file,runner?runner.startedAt:owned.length?Infinity:undefined,(own?.subagentList||[]).map(a=>({...a,thinking:subagentThoughts.get(own.id+':'+a.id)?.text||''})));tagged(r,{...bg,live});return;},
