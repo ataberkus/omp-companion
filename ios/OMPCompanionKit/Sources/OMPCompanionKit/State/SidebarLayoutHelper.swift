@@ -217,17 +217,6 @@ public enum SidebarLayoutHelper {
         f.dateFormat = "MMM d"
         return f
     }()
-    nonisolated(unsafe) private static let weekdayTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "EEE HH:mm"
-        return f
-    }()
-    nonisolated(unsafe) private static let clockFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f
-    }()
 
     /// Matches `fmtMs(ms)` in `local-dist/app.js`.
     public static func formatDurationMs(_ ms: Int) -> String {
@@ -303,6 +292,17 @@ public struct ParsedSidebarSearch: Hashable, Sendable {
 }
 
 public enum UsageFormatting {
+    nonisolated(unsafe) private static let weekdayTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE HH:mm"
+        return f
+    }()
+    nonisolated(unsafe) private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
     public static func percentage(fraction: Double?) -> Int? {
         guard let fraction, fraction.isFinite else { return nil }
         let clamped = max(0.0, fraction * 100.0)
