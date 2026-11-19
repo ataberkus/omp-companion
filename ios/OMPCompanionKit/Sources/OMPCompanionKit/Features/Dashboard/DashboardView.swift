@@ -126,6 +126,16 @@ private final class DashboardDerivedCache {
         let groupOrder: [String]
     }
 
+    /// Inputs of the history-only rows; panel streaming leaves them unchanged.
+    struct NativeKey: Equatable {
+        let native: [NativeSessionSummary]
+        let projects: [WorkspaceProject]
+        let archived: [String]
+        let pinned: [String]
+        let models: [ModelEntry]
+        let matchedFiles: Set<String>
+    }
+
     var itemsKey: ItemsKey?
     var items: [DashboardItem] = []
     var itemsGeneration = 0
@@ -133,6 +143,8 @@ private final class DashboardDerivedCache {
     var filtered: [DashboardItem] = []
     var groupsKey: ViewKey?
     var groups: [ProjectGroup] = []
+    var nativeKey: NativeKey?
+    var nativeItems: [DashboardItem] = []
 }
 
 public struct DashboardView: View {
@@ -285,8 +297,57 @@ public struct DashboardView: View {
         }
 
         let matchedNativeFiles = Set(nativeByManagedID.values.map(\.file))
+        let nativeKey = DashboardDerivedCache.NativeKey(
+            native: store.nativeSessions,
+            projects: store.snapshot.projects,
+            archived: store.snapshot.archived,
+            pinned: store.snapshot.pinned,
+            models: store.availableModels,
+            matchedFiles: matchedNativeFiles
+        )
+        if derivedCache.nativeKey != nativeKey {
+            derivedCache.nativeItems = buildNativeItems(
+                excluding: matchedNativeFiles,
+                projectsByNormPath: projectsByNormPath,
+                modelLabel: formattedModelLabel,
+                forkTip: forkTip
+            )
+            derivedCache.nativeKey = nativeKey
+        }
+
+        // History rows rarely change while panel sessions stream, so they stay built and sorted; merge the two sorted lists.
+        let byRecency: (DashboardItem, DashboardItem) -> Bool = { lhs, rhs in
+            if lhs.sortTime != rhs.sortTime { return lhs.sortTime > rhs.sortTime }
+            return lhs.key < rhs.key
+        }
+        let panelSorted = items.sorted(by: byRecency)
+        let native = derivedCache.nativeItems
+        var merged: [DashboardItem] = []
+        merged.reserveCapacity(panelSorted.count + native.count)
+        var i = 0, j = 0
+        while i < panelSorted.count && j < native.count {
+            if byRecency(native[j], panelSorted[i]) {
+                merged.append(native[j]); j += 1
+            } else {
+                merged.append(panelSorted[i]); i += 1
+            }
+        }
+        merged.append(contentsOf: panelSorted[i...])
+        merged.append(contentsOf: native[j...])
+        return merged
+    }
+
+    /// History-only rows (OMP sessions not in the panel), sorted newest first.
+    private func buildNativeItems(
+        excluding matchedNativeFiles: Set<String>,
+        projectsByNormPath: [String: WorkspaceProject],
+        modelLabel formattedModelLabel: (String?, String?) -> String?,
+        forkTip: (NativeSessionSummary?) -> String?
+    ) -> [DashboardItem] {
         let archivedSet = Set(store.snapshot.archived)
         let pinnedSet = Set(store.snapshot.pinned)
+        var items: [DashboardItem] = []
+        items.reserveCapacity(store.nativeSessions.count)
 
         for n in store.nativeSessions where !matchedNativeFiles.contains(n.file) {
             let cwd = n.cwd ?? ""
@@ -319,10 +380,10 @@ public struct DashboardView: View {
                     sortTime: sortDate.timeIntervalSince1970,
                     status: nil,
                     taskText: nil,
-                    modelLabel: formattedModelLabel(n.model, thinking: n.thinking),
+                    modelLabel: formattedModelLabel(n.model, n.thinking),
                     branch: nil,
                     isolated: false,
-                    forkTip: forkTip(for: n),
+                    forkTip: forkTip(n),
                     overlaps: [],
                     workDuration: nil,
                     preview: n.preview,

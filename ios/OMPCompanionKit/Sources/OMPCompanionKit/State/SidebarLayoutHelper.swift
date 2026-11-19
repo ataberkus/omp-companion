@@ -193,10 +193,25 @@ public enum SidebarLayoutHelper {
         return f
     }()
 
+    /// Parsed dates by their ISO string: rows and the session list reparse the same timestamps on every update, and each
+    /// ISO8601DateFormatter parse is tens of microseconds.
+    nonisolated(unsafe) private static var parsedDates: [String: Date] = [:]
+    private static let parsedDatesLock = NSLock()
+
     public static func parseISODate(_ isoString: String?) -> Date? {
         guard let isoString, !isoString.isEmpty else { return nil }
-        if let d = fractionalISOFormatter.date(from: isoString) { return d }
-        return plainISOFormatter.date(from: isoString)
+        parsedDatesLock.lock()
+        let cached = parsedDates[isoString]
+        parsedDatesLock.unlock()
+        if let cached { return cached }
+        guard let date = fractionalISOFormatter.date(from: isoString) ?? plainISOFormatter.date(from: isoString) else {
+            return nil
+        }
+        parsedDatesLock.lock()
+        if parsedDates.count >= 20_000 { parsedDates.removeAll(keepingCapacity: true) }
+        parsedDates[isoString] = date
+        parsedDatesLock.unlock()
+        return date
     }
 
     /// Matches `ago(iso)` in `local-dist/app.js`: `now`, `5m`, `2h`, `3d`, or `Oct 12`.
