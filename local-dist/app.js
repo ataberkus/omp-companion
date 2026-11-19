@@ -4790,7 +4790,7 @@
   const EDITOR_LABELS = [['auto', 'Automatic (first found: VS Code, Cursor, Windsurf)'], ['vscode', 'VS Code'], ['vscode-insiders', 'VS Code Insiders'], ['cursor', 'Cursor'], ['windsurf', 'Windsurf'], ['reveal', 'Show in folder']];
   function dashboardSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (q.length && !q.every(w => 'notifications desktop alerts title badge open in editor vscode cursor windsurf folder'.includes(w))) return '';
+    if (q.length && !q.every(w => 'notifications desktop alerts title badge open in editor vscode cursor windsurf folder pair ios mobile app qr tailscale'.includes(w))) return '';
     const ed = S.store?.editor || 'auto';
     if (S.set.changed && ed === 'auto') return '';
     const perm = isDesktop ? 'desktop' : typeof Notification === 'undefined' ? 'unsupported' : Notification.permission;
@@ -4799,7 +4799,130 @@
       <div class="set-row"><div class="set-info"><div class="set-name" id="dash-notify-name">Notifications</div><div class="set-desc">${esc(state)} The tab title always counts sessions waiting for you, e.g. <code>(2) OMP Control Room</code>.</div></div>
         <div class="set-ctl">${perm === 'default' ? '<button class="btn sm" data-act="notifyEnable" aria-describedby="dash-notify-name">Allow notifications</button>' : `<span class="muted">${perm === 'granted' ? 'On' : perm === 'desktop' ? 'Desktop app' : perm === 'denied' ? 'Blocked' : 'Unavailable'}</span>`}</div></div>
       <div class="set-row ${ed !== 'auto' ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="dash-editor-name">Open in editor${ed !== 'auto' ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Where file links in diffs and tool calls open, on the computer running the companion. Editors open through their <code>vscode://</code>-style links; Show in folder selects the file in the file manager.</div>${ed !== 'auto' ? '<div class="set-def">Default: <code>Automatic</code></div>' : ''}</div>
-        <div class="set-ctl"><select data-editor aria-labelledby="dash-editor-name">${EDITOR_LABELS.map(([v, t]) => `<option value="${v}" ${v === ed ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div></section>`;
+        <div class="set-ctl"><select data-editor aria-labelledby="dash-editor-name">${EDITOR_LABELS.map(([v, t]) => `<option value="${v}" ${v === ed ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div>
+      <div class="set-row"><div class="set-info"><div class="set-name" id="dash-pair-ios-name">Pair iOS app</div><div class="set-desc">Show a QR code and <code>omp://connect</code> pairing link for the native OMP Companion iOS app over Tailscale.</div></div>
+        <div class="set-ctl"><button type="button" class="btn sm" data-act="pairIos" aria-describedby="dash-pair-ios-name">Show QR code</button></div></div></section>`;
+  }
+  function qrSvg(text) {
+    const bytes = new TextEncoder().encode(text);
+    const V = [null,[21,16,10,1,16,0,0],[25,28,16,1,28,0,0],[29,44,26,1,44,0,0],[33,64,18,2,32,0,0],[37,86,24,2,43,0,0],[41,108,16,4,27,0,0],[45,124,18,4,31,0,0],[49,154,22,2,38,2,39],[53,182,22,3,36,2,37],[57,216,26,4,43,1,44],[61,254,30,1,50,4,51],[65,290,22,6,36,2,37],[69,334,22,8,37,1,38],[73,365,24,4,40,5,41]];
+    let ver = 1;
+    while (ver < V.length && bytes.length > V[ver][1] - (ver < 10 ? 2 : 3)) ver++;
+    if (ver >= V.length) return '';
+    const [n, cap, ecLen, b1, d1, b2, d2] = V[ver], bits = [], push = (v, len) => { for (let i = len - 1; i >= 0; i--) bits.push((v >> i) & 1); };
+    push(4, 4); push(bytes.length, ver < 10 ? 8 : 16); for (const b of bytes) push(b, 8);
+    push(0, Math.min(4, cap * 8 - bits.length)); while (bits.length % 8) bits.push(0);
+    for (let p = 0; bits.length < cap * 8; p++) push(p & 1 ? 0x11 : 0xec, 8);
+    const cw = new Uint8Array(cap);
+    for (let i = 0; i < cap; i++) { let v = 0; for (let b = 0; b < 8; b++) v = (v << 1) | bits[i * 8 + b]; cw[i] = v; }
+    const gfMul = (x, y) => { let r = 0; for (let i = 0; i < 8; i++) { if (y & 1) r ^= x; x = (x << 1) ^ (x & 0x80 ? 0x11d : 0); y >>= 1; } return r; };
+    let gen = [1];
+    for (let i = 0; i < ecLen; i++) {
+      let e = 1; for (let k = 0; k < i; k++) e = gfMul(e, 2);
+      const next = new Array(gen.length + 1).fill(0);
+      for (let j = 0; j < gen.length; j++) { next[j] ^= gen[j]; next[j + 1] ^= gfMul(gen[j], e); }
+      gen = next;
+    }
+    const rs = data => { const rem = new Uint8Array(ecLen); for (const b of data) { const f = b ^ rem[0]; rem.copyWithin(0, 1); rem[ecLen - 1] = 0; if (f) for (let i = 0; i < ecLen; i++) rem[i] ^= gfMul(gen[i + 1], f); } return rem; };
+    const blocks = [], ecs = []; let off = 0;
+    for (let i = 0; i < b1 + b2; i++) { const len = i < b1 ? d1 : d2, sl = cw.subarray(off, off + len); off += len; blocks.push(sl); ecs.push(rs(sl)); }
+    const sbits = [];
+    for (let i = 0; i < Math.max(d1, d2); i++) for (const bl of blocks) if (i < bl.length) for (let b = 7; b >= 0; b--) sbits.push((bl[i] >> b) & 1);
+    for (let i = 0; i < ecLen; i++) for (const e of ecs) for (let b = 7; b >= 0; b--) sbits.push((e[i] >> b) & 1);
+    const m = Array.from({ length: n }, () => new Int8Array(n).fill(-1)), fn = Array.from({ length: n }, () => new Uint8Array(n));
+    const setFn = (r, c, v) => { if (r >= 0 && r < n && c >= 0 && c < n) { m[r][c] = v ? 1 : 0; fn[r][c] = 1; } };
+    const finder = (tr, tc) => { for (let dr = -1; dr <= 7; dr++) for (let dc = -1; dc <= 7; dc++) setFn(tr + dr, tc + dc, dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6 && (dr === 0 || dr === 6 || dc === 0 || dc === 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4))); };
+    finder(0, 0); finder(0, n - 7); finder(n - 7, 0);
+    const AP = [[],[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66]][ver];
+    for (const r of AP) for (const c of AP) if (m[r][c] === -1) for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) setFn(r + dr, c + dc, Math.max(Math.abs(dr), Math.abs(dc)) !== 1);
+    for (let i = 8; i < n - 8; i++) { setFn(6, i, (i & 1) === 0); setFn(i, 6, (i & 1) === 0); }
+    setFn(n - 8, 8, 1);
+    for (let i = 0; i < 9; i++) { if (m[8][i] === -1) setFn(8, i, 0); if (m[i][8] === -1) setFn(i, 8, 0); }
+    for (let i = 0; i < 8; i++) { setFn(8, n - 1 - i, 0); if (i < 7) setFn(n - 1 - i, 8, 0); }
+    if (ver >= 7) {
+      let rem = ver; for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >> 11) * 0x1f25);
+      const vbits = (ver << 12) | rem;
+      for (let i = 0; i < 18; i++) { const v = (vbits >> i) & 1; setFn(Math.floor(i / 3), n - 11 + (i % 3), v); setFn(n - 11 + (i % 3), Math.floor(i / 3), v); }
+    }
+    let bi = 0;
+    for (let right = n - 1; right >= 1; right -= 2) { if (right === 6) right = 5; for (let vert = 0; vert < n; vert++) { const r = ((right + 1) & 2) === 0 ? n - 1 - vert : vert; for (const c of [right, right - 1]) if (!fn[r][c]) m[r][c] = bi < sbits.length ? sbits[bi++] : 0; } }
+    const maskBit = (k, r, c) => [(r+c)%2===0, r%2===0, c%3===0, (r+c)%3===0, (Math.floor(r/2)+Math.floor(c/3))%2===0, ((r*c)%2+(r*c)%3)===0, ((r*c)%2+(r*c)%3)%2===0, ((r+c)%2+(r*c)%3)%2===0][k];
+    const drawFormat = (grid, mask) => {
+      let rem = mask << 10; for (let i = 4; i >= 0; i--) if ((rem >> (i + 10)) & 1) rem ^= 0x537 << i;
+      const f = ((mask << 10) | rem) ^ 0x5412, bit = k => (f >> k) & 1;
+      for (let i = 0; i <= 5; i++) grid[8][i] = bit(14 - i);
+      grid[8][7] = bit(8); grid[8][8] = bit(7); grid[7][8] = bit(6);
+      for (let i = 0; i <= 5; i++) grid[5 - i][8] = bit(5 - i);
+      for (let i = 0; i < 7; i++) grid[n - 1 - i][8] = bit(14 - i);
+      for (let i = 0; i < 8; i++) grid[8][n - 8 + i] = bit(7 - i);
+    };
+    let best = null, bestScore = 1e9;
+    for (let k = 0; k < 8; k++) {
+      const g = m.map((row, r) => row.map((v, c) => fn[r][c] ? v : v ^ (maskBit(k, r, c) ? 1 : 0)));
+      drawFormat(g, k);
+      let pen = 0, dark = 0;
+      for (let r = 0; r < n; r++) {
+        let runR = 1, runC = 1;
+        for (let c = 0; c < n; c++) {
+          dark += g[r][c];
+          if (c > 0) { if (g[r][c] === g[r][c - 1]) runR++; else { if (runR >= 5) pen += runR - 2; runR = 1; } if (g[c][r] === g[c - 1][r]) runC++; else { if (runC >= 5) pen += runC - 2; runC = 1; } }
+          if (r < n - 1 && c < n - 1 && g[r][c] === g[r][c + 1] && g[r][c] === g[r + 1][c] && g[r][c] === g[r + 1][c + 1]) pen += 3;
+        }
+        if (runR >= 5) pen += runR - 2; if (runC >= 5) pen += runC - 2;
+      }
+      pen += Math.floor(Math.abs(dark * 100 / (n * n) - 50) / 5) * 10;
+      if (pen < bestScore) { bestScore = pen; best = g; }
+    }
+    const paths = [];
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (best[r][c]) paths.push(`M${c + 4},${r + 4}h1v1h-1z`);
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n + 8} ${n + 8}" width="220" height="220" shape-rendering="crispEdges" style="background:#fff;padding:4px;border-radius:12px;display:block"><path fill="#111" d="${paths.join('')}"/></svg>`;
+  }
+  async function openPairIos() {
+    modal('Pair iOS app', '<div class="working"><span class="spinner"></span> Checking Tailscale addresses…</div>');
+    const ts = await api('/tailscale').catch(() => null);
+    const dialog = $('#modal');
+    if (!dialog) return;
+    const cur = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(location.origin) ? '' : location.origin;
+    const candidates = [...new Set([...(ts?.tailnetUrls || []), ...(cur ? [cur] : []), ...(ts?.lanUrls || [])])];
+    const defUrl = candidates[0] || location.origin;
+    const defName = ts?.tailscale?.name ? ts.tailscale.name.split('.')[0] : (location.hostname && !/^(127\.0\.0\.1|localhost)$/i.test(location.hostname) ? location.hostname : 'OMP Companion');
+    dialog.querySelector('.modal-body').innerHTML = `<p class="muted">Scan this QR code in the <strong>OMP Companion</strong> iOS app while both devices are connected to Tailscale.</p>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <label style="display:grid;gap:4px;font-size:12px;color:var(--muted)"><span>Companion URL</span><input id="pairUrl" value="${esc(defUrl)}" placeholder="http://my-pc.tailnet.ts.net:4545" spellcheck="false" autocomplete="off"></label>
+        ${candidates.length > 1 ? `<div style="display:flex;flex-wrap:wrap;gap:6px">${candidates.map(u => `<button type="button" class="btn sm ghost" data-pair-pick="${esc(u)}">${esc(u.replace(/^https?:\/\//, ''))}</button>`).join('')}</div>` : ''}
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px"><input id="pairIncludeToken" type="checkbox" ${S.token ? 'checked' : 'disabled'}><span>Include credential in QR code and link</span></label>
+        <div id="pairQrBox" style="display:flex;justify-content:center;padding:8px 0"></div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
+          <button type="button" class="btn sm ghost" id="pairCopyJson">Copy JSON</button>
+          <button type="button" class="btn sm" id="pairCopyLink">Copy pairing link</button>
+        </div>
+      </div>`;
+    const buildLink = () => {
+      const u = ($('#pairUrl')?.value || '').trim().replace(/\/+$/, '');
+      const inc = Boolean($('#pairIncludeToken')?.checked && S.token);
+      const q = new URLSearchParams({ url: u, name: defName });
+      if (inc) q.set('token', S.token);
+      return 'omp://connect?' + q.toString();
+    };
+    const buildJson = () => {
+      const u = ($('#pairUrl')?.value || '').trim().replace(/\/+$/, '');
+      const inc = Boolean($('#pairIncludeToken')?.checked && S.token);
+      return JSON.stringify({ url: u, name: defName, ...(inc ? { token: S.token } : {}) });
+    };
+    const paint = () => {
+      const box = $('#pairQrBox'); if (!box) return;
+      const link = buildLink();
+      box.innerHTML = qrSvg(link) || '<span class="muted">Pairing payload too long for QR code; use Copy pairing link instead.</span>';
+    };
+    paint();
+    dialog.addEventListener('input', paint);
+    dialog.addEventListener('change', paint);
+    dialog.addEventListener('click', ev => {
+      const pick = ev.target.closest('[data-pair-pick]');
+      if (pick && $('#pairUrl')) { $('#pairUrl').value = pick.dataset.pairPick; paint(); return; }
+      if (ev.target.id === 'pairCopyLink') { navigator.clipboard?.writeText(buildLink()).then(() => toast('Pairing link copied'), () => toast('Could not copy link', 'err')); return; }
+      if (ev.target.id === 'pairCopyJson') { navigator.clipboard?.writeText(buildJson()).then(() => toast('Pairing JSON copied'), () => toast('Could not copy JSON', 'err')); }
+    });
   }
   async function saveEditor(editor) {
     try { await api('/editor', { editor }); if (S.store) S.store.editor = editor; toast('Saved editor'); }
@@ -5622,6 +5745,7 @@
     else if (act === 'usage') { $('#usagePanel') ? closeUsage() : openUsage(a); }
     else if (act === 'usageChat') { closeUsage(); toast('Checking usage…'); sessionAction({ type: 'prompt', message: '/usage' }, { timeout: 70000 }); }
     else if (act === 'notifyEnable') askNotify();
+    else if (act === 'pairIos') openPairIos();
     else if (act === 'requestChanges') requestChanges(c.parent);
     else if (act === 'wtReload' && c.kind === 'changes') loadWorktree(c.parent.slice(2), true);
     else if (act === 'glReload' && c.kind === 'changes') loadGitLog(c.parent.slice(2), true);

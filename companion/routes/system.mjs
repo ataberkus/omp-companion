@@ -1,9 +1,28 @@
 // HTTP routes for this PC: screen sharing status and tickets, shutdown, automatic shutdown and restart.
 import { randomBytes } from 'node:crypto';
+import * as os from 'node:os';
+import { tailnetAddress } from '../network.mjs';
 import { now, error } from '../util.mjs';
 export function systemRoutes(ctx){
  const {options,autoShutdown,autoShutdownView,checkAutoShutdown,screenSupported,screenTickets,screenOff,shutdownPc,pauseSessions}=ctx;
  return {
+   'GET /api/tailscale':async({req,json})=>{
+    const ts=ctx.tailscaleLookup?await ctx.tailscaleLookup():null;
+    const port=req.socket?.localPort||null;
+    const ifaces=(options.networkInterfaces||os.networkInterfaces)();
+    const ipv4s=[],ipv6s=[],lan=[];
+    for(const list of Object.values(ifaces))for(const n of list||[]){
+     if(!n||n.internal)continue;
+     if(tailnetAddress(n.address)){if(n.family==='IPv6'||n.family===6)ipv6s.push(n.address);else ipv4s.push(n.address);}
+     else if((n.family==='IPv4'||n.family===4)&&!lan.includes(n.address))lan.push(n.address);
+    }
+    for(const ip of ts?.ips||[]){if(ip.includes(':')){if(!ipv6s.includes(ip))ipv6s.push(ip);}else if(!ipv4s.includes(ip))ipv4s.push(ip);}
+    const tailnetUrls=[];
+    if(ts?.name&&port)tailnetUrls.push(`http://${ts.name}:${port}`);
+    for(const ip of ipv4s)if(port)tailnetUrls.push(`http://${ip}:${port}`);
+    for(const ip of ipv6s)if(port)tailnetUrls.push(`http://[${ip}]:${port}`);
+    json({port,host:req.headers.host||'',tailscale:ts,tailnetUrls,lanUrls:port?lan.map(ip=>`http://${ip}:${port}`):[]});return;
+   },
    'GET /api/screen':async({json})=>{json({supported:screenSupported,enabled:ctx.screenOn,desktop:Boolean(options.desktop),viewer:ctx.viewer&&{address:ctx.viewer.address,since:ctx.viewer.since}});return;},
    'POST /api/screen/ticket':async({req,json})=>{
     if(!screenSupported)throw error('Screen sharing works when the companion runs on Windows.',409);

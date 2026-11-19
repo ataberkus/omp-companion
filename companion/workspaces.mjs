@@ -171,7 +171,8 @@ export function createWorkspaces(ctx){
    (a.s._overlaps??=[]).push({id:b.s.id,title:b.s.title,files:shared.slice(0,20),count:shared.length});(b.s._overlaps??=[]).push({id:a.s.id,title:a.s.title,files:shared.slice(0,20),count:shared.length});
   }
  }
- async function browse(value){
+ const SKIP_DIRS=new Set(['.git','node_modules','.build','DerivedData','target','$RECYCLE.BIN','System Volume Information']);
+ async function browse(value,{includeFiles=false}={}){
   if(!value){
    const roots=[];const add=async(p,label)=>{if(p&&!roots.some(r=>samePath(r.path,p))&&await exists(p))roots.push({path:p,name:label||path.basename(p)||p});};
    await add(os.homedir(),'Home');for(const d of ['Documents/GitHub','Documents','Desktop','projects','code','src'])await add(path.join(os.homedir(),d));
@@ -190,8 +191,33 @@ export function createWorkspaces(ctx){
    return {path:'',parent:null,roots,recent,dirs:[]};
   }
   const dir=await resolveDir(value);const entries=await fs.readdir(dir,{withFileTypes:true}).catch(e=>{throw error(`Cannot read directory: ${e.message}`);});
-  const dirs=entries.filter(e=>e.isDirectory()&&!e.name.startsWith('.')&&!['node_modules','$RECYCLE.BIN','System Volume Information'].includes(e.name)).map(e=>({name:e.name,path:path.join(dir,e.name)})).sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'})).slice(0,1000);
-  const parent=path.dirname(dir);return {path:dir,parent:parent===dir?null:parent,isGit:await exists(path.join(dir,'.git')),project:store.projects.find(p=>samePath(p.path,dir))?.id,dirs};
+  const dirs=entries.filter(e=>e.isDirectory()&&!e.name.startsWith('.')&&!SKIP_DIRS.has(e.name)).map(e=>({name:e.name,path:path.join(dir,e.name)})).sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'})).slice(0,1000);
+  const parent=path.dirname(dir);const out={path:dir,parent:parent===dir?null:parent,isGit:await exists(path.join(dir,'.git')),project:store.projects.find(p=>samePath(p.path,dir))?.id,dirs};
+  if(includeFiles)out.files=entries.filter(e=>e.isFile()&&!e.name.startsWith('.')).map(e=>({name:e.name,path:path.join(dir,e.name)})).sort((a,b)=>a.name.localeCompare(b.name,undefined,{sensitivity:'base'})).slice(0,1000);
+  return out;
  }
- return {sent,browse,discardDraft,worktreeStatus,finishWorktree,deleteWorktree,creatingWorktrees,ensureProject,refreshBranch,refreshBranches,createSession,markOverlaps,get branchRun(){return branchRun;}};
+ async function searchFiles(value,query='',limit=200){
+  const dir=await resolveDir(value),q=String(query||'').trim().toLowerCase(),terms=q.split(/\s+/).filter(Boolean),allowDot=q.startsWith('.');
+  const cap=Math.min(500,Math.max(1,Number.isFinite(limit)?Math.round(limit):200));
+  const maxVisited=6000,maxDepth=8,files=[];let visited=0,truncated=false;
+  const queue=[{abs:dir,rel:'',depth:0}];
+  while(queue.length&&visited<maxVisited){
+   const cur=queue.shift();
+   const entries=await fs.readdir(cur.abs,{withFileTypes:true}).catch(()=>[]);
+   for(const e of entries){
+    if(++visited>maxVisited){truncated=true;break;}
+    if(!allowDot&&e.name.startsWith('.'))continue;
+    if(e.isDirectory()){if(!SKIP_DIRS.has(e.name)&&cur.depth<maxDepth)queue.push({abs:path.join(cur.abs,e.name),rel:cur.rel?`${cur.rel}/${e.name}`:e.name,depth:cur.depth+1});continue;}
+    if(!e.isFile())continue;
+    const rel=cur.rel?`${cur.rel}/${e.name}`:e.name,low=rel.toLowerCase();
+    if(!terms.length||terms.every(t=>low.includes(t)))files.push({name:e.name,rel,path:path.join(cur.abs,e.name)});
+   }
+  }
+  files.sort((a,b)=>{
+   if(q){const am=a.name.toLowerCase().startsWith(q)?0:a.rel.toLowerCase().includes(q)?1:2;const bm=b.name.toLowerCase().startsWith(q)?0:b.rel.toLowerCase().includes(q)?1:2;if(am!==bm)return am-bm;}
+   return a.rel.length-b.rel.length||a.rel.localeCompare(b.rel,undefined,{sensitivity:'base'});
+  });
+  return {path:dir,files:files.slice(0,cap),truncated:truncated||files.length>cap};
+ }
+ return {sent,browse,searchFiles,discardDraft,worktreeStatus,finishWorktree,deleteWorktree,creatingWorktrees,ensureProject,refreshBranch,refreshBranches,createSession,markOverlaps,get branchRun(){return branchRun;}};
 }
