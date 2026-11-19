@@ -20,9 +20,13 @@ const STDERR_TAIL: usize = 4000;
 
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>;
 
+/// The answer to a request from the companion (`{"req":N,"what":…}` on stdout): `{"res":N,…}` written to its stdin.
+/// A handler that does slow work moves this to another thread and replies there.
+pub type Reply = Box<dyn FnOnce(Value) + Send>;
+
 pub struct Host {
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    stdin: Arc<Mutex<ChildStdin>>,
     pending: Pending,
     next_id: AtomicU64,
     tree: Tree,
@@ -105,14 +109,18 @@ fn tail(buf: &Mutex<String>) -> String {
 }
 
 /// `restart_token` restarts a host after a crash: it keeps the window's token and skips the `omp update` check.
+/// `version` is the app's own version, so the dashboard can tell that an update changed it.
 pub fn spawn(
     bun: &Path,
     script: &Path,
+    version: &str,
     restart_token: Option<&str>,
     on_event: impl Fn(Value) + Send + 'static,
+    on_request: impl Fn(Value, Reply) + Send + 'static,
     on_exit: impl FnOnce(String) + Send + 'static,
 ) -> Result<(Host, Ready), String> {
     let mut cmd = Command::new(bun);
+    cmd.env("OMP_WEB_APP_VERSION", version);
     // `npm run desktop` (debug build) skips the token by default; release builds keep it unless the user opts out.
     if cfg!(debug_assertions) && std::env::var_os("OMP_WEB_NO_TOKEN").is_none() {
         cmd.env("OMP_WEB_NO_TOKEN", "1");
@@ -135,7 +143,7 @@ pub fn spawn(
             return Err(e);
         }
     };
-    let stdin = child.stdin.take().unwrap();
+    let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
 
@@ -166,6 +174,7 @@ pub fn spawn(
     {
         let pending = pending.clone();
         let stderr_tail = stderr_tail.clone();
+        let reply_stdin = stdin.clone();
         thread::spawn(move || {
             let mut ready_tx = Some(ready_tx);
             for line in BufReader::new(stdout).lines() {
@@ -194,6 +203,14 @@ pub fn spawn(
                     if let Some(tx) = pending.lock().remove(&id) {
                         let _ = tx.send(msg);
                     }
+                } else if msg["req"].is_u64() {
+                    // The companion asking the shell for what only it can do (an app update). The handler replies from
+                    // whatever thread it finishes on; a slow one must not hold this loop, which also reads quit replies.
+                    let stdin = reply_stdin.clone();
+                    on_request(msg, Box::new(move |reply: Value| {
+                        let mut out = stdin.lock();
+                        let _ = writeln!(&mut *out, "{reply}").and_then(|_| out.flush());
+                    }));
                 } else if msg["event"].is_string() {
                     // Unsolicited events after ready (e.g. "attention").
                     on_event(msg);
@@ -214,7 +231,7 @@ pub fn spawn(
         });
     }
 
-    let host = Host { child: Mutex::new(child), stdin: Mutex::new(stdin), pending, next_id: AtomicU64::new(1), tree };
+    let host = Host { child: Mutex::new(child), stdin, pending, next_id: AtomicU64::new(1), tree };
     match ready_rx.recv_timeout(Duration::from_secs(60)) {
         Ok(Ok(ready)) => Ok((host, ready)),
         Ok(Err(e)) => {
@@ -231,7 +248,7 @@ pub fn spawn(
 impl Host {
     fn write(&self, msg: &Value) -> Result<(), String> {
         let mut stdin = self.stdin.lock();
-        writeln!(stdin, "{msg}").and_then(|_| stdin.flush()).map_err(|_| "The companion is not running.".to_owned())
+        writeln!(&mut *stdin, "{msg}").and_then(|_| stdin.flush()).map_err(|_| "The companion is not running.".to_owned())
     }
 
     pub fn request(&self, mut msg: Value, timeout: Duration) -> Result<Value, String> {

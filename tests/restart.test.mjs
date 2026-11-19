@@ -166,3 +166,24 @@ test('after an OMP update the companion restarts by itself, but only once no ses
   await new Promise(r => setTimeout(r, 4500));
   assert.deepEqual(events, ['prepare', 'relaunch']);
 });
+
+// The dashboard's ⋯ menu offers the app update only where there is an app to update: the browser companion refuses it,
+// and the desktop host answers through its shell (the host test covers that path).
+test('an app update needs the desktop app; the companion refuses it and hides the menu entry', async t => {
+  const c = await start(t, () => ({}));
+  const [code, body] = await c.call('/app-update', {});
+  assert.equal(code, 409);
+  assert.match(body.error, /OMP Control Room app/);
+  const [, state] = await c.call('/state?session=');
+  assert.equal(state.canAppUpdate, false);
+  assert.equal(state.appVersion, '');
+});
+
+test('the app update callback answers the dashboard and the state names the app version', async t => {
+  const c = await start(t, () => ({ appUpdate: async () => ({ ok: true, state: 'up-to-date', current: '1.9.0' }), appVersion: '1.9.0' }));
+  const [, state] = await c.call('/state?session=');
+  assert.equal(state.canAppUpdate, true);
+  assert.equal(state.appVersion, '1.9.0');
+  assert.deepEqual(await c.call('/instance'), [200, { instance: state.instance, appVersion: '1.9.0' }]);
+  assert.deepEqual(await c.call('/app-update', {}), [200, { ok: true, state: 'up-to-date', current: '1.9.0' }]);
+});

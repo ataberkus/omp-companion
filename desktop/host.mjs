@@ -6,6 +6,8 @@
 // Requests: {"id","cmd":"busy"|"lan"|"screen"|"links"|"quit",...} → {"id","ok":true,...} | {"id","ok":false,"error"}.
 //   {"cmd":"quit","resume":true} (an app update) also leaves the resume note below before replying, so the new version
 //   resumes the sessions that were working; a plain quit does not.
+// Asks: {"req":N,"what":"app-update"} → {"res":N,"ok":true,"state":"up-to-date"|"downloading"|"installing"|"error",…}
+//   (the companion asking the shell for an app update; the shell installs and restarts without asking).
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -65,6 +67,25 @@ function listenOn(srv, host) {
 const send = (msg, cb) => process.stdout.write(JSON.stringify(msg) + '\n', cb);
 // Exit in the write callback: on Windows a pipe write can still be pending when exit() runs.
 const fatal = message => send({ event: 'fatal', message }, () => process.exit(1));
+
+// The companion asks the shell for what only it can do ({"req":N,"what":…} on stdout); the shell answers with
+// {"res":N,…} on stdin. The app update is the first: the dashboard says what it found, then the app restarts.
+let asked = 0;
+const answers = new Map();
+function askShell(what, timeout = 60000) {
+  const req = ++asked;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { answers.delete(req); reject(new Error('The app did not answer. Try again.')); }, timeout);
+    answers.set(req, {
+      resolve: msg => { clearTimeout(timer); resolve(msg); },
+      reject: error => { clearTimeout(timer); reject(error); },
+    });
+    send({ req, what });
+  });
+}
+// The app's own version, from the shell at launch: after an update it differs, and the dashboard says the update worked.
+const appVersion = process.env.OMP_WEB_APP_VERSION || '';
+delete process.env.OMP_WEB_APP_VERSION;
 
 // Rebind the same server instead of restarting the companion: close() would kill every running agent.
 // The Host/Origin allowlist is recomputed from server.address() per request, so it follows the new bind.
@@ -219,7 +240,19 @@ async function handle(line) {
 }
 
 function listen() {
-  readline.createInterface({ input: process.stdin }).on('line', line => { void handle(line); });
+  readline.createInterface({ input: process.stdin }).on('line', line => {
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+    // The shell's answer to askShell: settle the request instead of reading it as a command.
+    if (msg && msg.res !== undefined) {
+      const pending = answers.get(msg.res);
+      if (!pending) return;
+      answers.delete(msg.res);
+      if (msg.ok === false) pending.reject(new Error(msg.error || 'The app reported an error.')); else pending.resolve(msg);
+      return;
+    }
+    void handle(line);
+  });
   // The shell died or closed the pipe: save sessions as paused and stop every OMP process instead of leaving an orphan.
   process.stdin.once('close', async () => {
     try { await shutdown(); } finally { process.exit(0); }
@@ -256,7 +289,9 @@ async function main() {
       try { await shutdown(); } finally { process.exit(0); }
     };
   };
-  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, restart, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}), ...(resume.length ? { resume } : {}) }); }
+  // The dashboard's ⋯ menu, also from a phone: the shell checks, downloads, installs and restarts into a newer version.
+  const appUpdate = () => askShell('app-update');
+  try { companion = await createCompanion({ desktop: true, onAttention, screen: false, onScreen, restart, appUpdate, appVersion, ...(token && !process.env.OMP_WEB_PASSWORD ? { token } : {}), ...(resume.length ? { resume } : {}) }); }
   catch (e) { return fatal(`The companion could not start: ${e.message}`); }
   // An OMP SDK whose install outlived the startup limit loads only in a new process: restart once no session is working.
   update?.sdkLate?.then(r => r?.status === 'installed' && companion.restartWhenIdle()).catch(() => {});

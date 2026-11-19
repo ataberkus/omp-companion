@@ -802,3 +802,45 @@ test('phone: a running session gets the one-row composer, plugin pills and folde
   assert.doesNotMatch(desktop.els.get('extras').innerHTML, /ext-pill|extra-wdg/, 'desktop keeps its status lines and open widgets');
   assert.doesNotMatch(desktop.els.get('buttons').innerHTML, /composer-more/);
 });
+
+test('Check for updates and update sits above Restart companion, installs without asking, and reloads into the new version', async () => {
+  let instance = 'old';
+  const app = boot({ respond: url => {
+    if (url === '/api/app-update') return { body: { ok: true, state: 'downloading', version: '2.0.0', current: '1.9.0' } };
+    if (url === '/api/instance') return { body: { instance, appVersion: instance === 'old' ? '1.9.0' : '2.0.0' } };
+    if (url.startsWith('/api/state')) return { body: { ...store([session('s1', [])]), instance, canAppUpdate: true, canRestart: true, appVersion: instance === 'old' ? '1.9.0' : '2.0.0' } };
+  } });
+  await flush();
+  const html = app.els.get('topbar').innerHTML;
+  assert.ok(html.includes('Check for updates and update'), 'the entry is in the session menu');
+  assert.ok(html.indexOf('Check for updates and update') < html.indexOf('Restart companion…'), 'above Restart companion');
+  const act = { dataset: { act: 'appUpdate' }, closest: () => null };
+  app.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-act]' ? act : null } });
+  await flush();
+  assert.ok(app.calls.some(c => c.url === '/api/app-update'), 'the app update was asked for');
+  assert.ok(app.toasts.includes('Updating to 2.0.0. The app restarts when it is ready; this page follows.'), app.toasts.join('|'));
+  assert.equal(app.location.reloads, 0, 'the page waits for the app to come back');
+  instance = 'new';
+  await app.timers.filter(t => t.ms === 3000).at(-1).fn();
+  await flush();
+  assert.equal(app.location.reloads, 1, 'the new version answers as a new instance');
+  assert.deepEqual(JSON.parse(app.stored['omp-app-updated']), { version: '2.0.0' });
+
+  const reloaded = boot({ session: { 'omp-app-updated': JSON.stringify({ version: '2.0.0' }) }, respond: stateOf({ ...store([session('s1', [])]), instance: 'new', canAppUpdate: true, appVersion: '2.0.0' }) });
+  await flush();
+  assert.ok(reloaded.toasts.includes('OMP Control Room updated to 2.0.0.'), reloaded.toasts.join('|'));
+  assert.equal(reloaded.stored['omp-app-updated'], undefined, 'said once');
+});
+
+test('an app update that finds nothing says so and leaves the page where it is', async () => {
+  const app = boot({ respond: url => {
+    if (url === '/api/app-update') return { body: { ok: true, state: 'up-to-date', current: '1.9.0' } };
+    if (url.startsWith('/api/state')) return { body: { ...store([session('s1', [])]), instance: 'same', canAppUpdate: true, appVersion: '1.9.0' } };
+  } });
+  await flush();
+  const act = { dataset: { act: 'appUpdate' }, closest: () => null };
+  app.listeners.click[0]({ preventDefault() {}, target: { closest: sel => sel === '[data-act]' ? act : null } });
+  await flush();
+  assert.ok(app.toasts.includes('OMP Control Room 1.9.0 is up to date.'), app.toasts.join('|'));
+  assert.equal(app.location.reloads, 0);
+});

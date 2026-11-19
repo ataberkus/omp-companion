@@ -2,8 +2,11 @@
 import { randomBytes } from 'node:crypto';
 import { now, error } from '../util.mjs';
 export function systemRoutes(ctx){
- const {options,autoShutdown,autoShutdownView,checkAutoShutdown,screenSupported,screenTickets,screenOff,shutdownPc,pauseSessions}=ctx;
+ const {options,autoShutdown,autoShutdownView,checkAutoShutdown,screenSupported,screenTickets,screenOff,shutdownPc,pauseSessions,instance,appVersion}=ctx;
  return {
+   // A dashboard waiting out a restart or an app update polls this instead of the whole state: the instance id changes
+   // with a new companion, and appVersion says whether an update changed the version.
+   'GET /api/instance':async({json})=>{json({instance,appVersion});return;},
    'GET /api/screen':async({json})=>{json({supported:screenSupported,enabled:ctx.screenOn,desktop:Boolean(options.desktop),viewer:ctx.viewer&&{address:ctx.viewer.address,since:ctx.viewer.since}});return;},
    'POST /api/screen/ticket':async({req,json})=>{
     if(!screenSupported)throw error('Screen sharing works when the companion runs on Windows.',409);
@@ -21,6 +24,13 @@ export function systemRoutes(ctx){
     if(autoShutdown.firing&&!body.on)throw error('The PC is already shutting down.',409);
     if(body.on&&!autoShutdown.on)Object.assign(autoShutdown,{on:true,since:now(),error:null});else if(!body.on)Object.assign(autoShutdown,{on:false,since:null});
     checkAutoShutdown();json(autoShutdownView());return;
+   },
+   // The dashboard's ⋯ menu (also on a phone): the desktop app checks for a newer release and, when there is one,
+   // downloads, installs and restarts into it without asking. options.appUpdate is the shell's channel; the companion
+   // started by start.bat has none. The reply says what the shell found, before the app restarts.
+   'POST /api/app-update':async({json})=>{
+    if(!options.appUpdate)throw error('App updates install from the OMP Control Room app, which restarts into the new version. Open the dashboard in the app, or install a newer version by hand.',409);
+    json(await options.appUpdate());return;
    },
    // options.restart (start.bat's loop, see the entry point below, or the desktop app's host) prepares the relaunch and returns the step that stops
    // this process; it runs once the reply is sent. Sessions are paused and saved first, as on quit; the IDs of those that

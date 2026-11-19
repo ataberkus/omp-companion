@@ -412,6 +412,36 @@
   }
   // Set just before the reload that follows Restart companion; the reloaded page says the restart worked.
   const RESTARTED = 'omp-restarted';
+  // Set just before the reload after an app update; the reloaded page says whether the version changed.
+  const UPDATED = 'omp-app-updated';
+  // Check for updates and update, from this page (a phone included): the app checks, downloads, installs and restarts
+  // into a newer version without asking. The page reconnects on the same port and token, then reloads with the new
+  // dashboard. Nothing found or a failure stays here as a toast; the app shows its own error window on the PC.
+  async function appUpdate() {
+    const instance = S.store?.instance, version = S.store?.appVersion || '';
+    toast('Checking for updates…');
+    let r;
+    try { r = await api('/app-update', {}, { timeout: 90000 }); } catch (e) { toast(e.message, 'err'); return; }
+    if (r.state === 'up-to-date') return toast(r.current ? `OMP Control Room ${r.current} is up to date.` : 'OMP Control Room is up to date.');
+    if (r.state === 'error') return toast(r.error?.title ? `${r.error.title}. ${r.error.advice || ''}`.trim() : 'The update check failed.', 'err');
+    if (r.state !== 'downloading' && r.state !== 'installing') return toast('The update check gave no answer. Try again.', 'err');
+    toast(`Updating to ${r.version}. The app restarts when it is ready; this page follows.`);
+    // The companion stops for the install and comes back on the same port and token: poll its instance id until a new
+    // companion answers, then reload so this page runs the new version's dashboard. Up to an hour: the runtime download
+    // can be large. /api/instance is tiny, unlike a state poll every 3 s.
+    for (const end = Date.now() + 60 * 60 * 1000; Date.now() < end;) {
+      await new Promise(done => setTimeout(done, 3000));
+      let st;
+      try { st = await api('/instance', undefined, { timeout: 5000 }); } catch (e) { if (e.auth) return; continue; }
+      if (st?.instance && st.instance !== instance) {
+        const next = st.appVersion || '';
+        try { sessionStorage.setItem(UPDATED, JSON.stringify({ version: next && next !== version ? next : '' })); } catch {}
+        location.reload();
+        return;
+      }
+    }
+    toast('The app did not come back within an hour. Check it on that computer.', 'err');
+  }
   function copy(text, label = 'Copied') {
     const done = ok => ok ? toast(label) : toast('Could not copy', 'err');
     if (navigator.clipboard) { navigator.clipboard.writeText(text).then(() => done(true), () => done(false)); return; }
@@ -1335,6 +1365,7 @@
           <div class="menu-sep"></div>
           <button data-act="login">Log in to a provider…</button>
           <button data-act="accounts">Choose provider accounts…</button>
+          ${S.store?.canAppUpdate ? '<button data-act="appUpdate">Check for updates and update</button>' : ''}
           ${S.store?.canRestart ? '<button data-act="restartCompanion">Restart companion…</button>' : ''}
           <button class="danger" data-act="shutdownPc">Shut down PC…</button>
           <button class="danger" data-act="autoShutdown" aria-pressed="${!!S.store?.autoShutdown?.on}"><span class="check" aria-hidden="true">${S.store?.autoShutdown?.on ? '✓' : ''}</span>Shut down PC when all work is done</button>
@@ -5679,6 +5710,7 @@
       if (!on || confirm('Shut down the computer running the companion when all work is done?\n\nThe companion waits until no session is running or queued and no compaction, handoff or shell command is in progress, then pauses and saves sessions and shuts down. Queued messages of a stopped session stay queued for later. If nothing is working now, it shuts down right away. Unsaved work in other programs on that computer may be lost.'))
         api('/shutdown/auto', { on }).then(r => { if (S.store) S.store.autoShutdown = r; S.stateTag = ''; renderAutoShutdown(); update(); toast(!on ? 'Automatic shutdown canceled.' : r.firing ? 'Nothing is working: shutting down the PC…' : 'The PC shuts down when all work is done.'); }, e => toast(e.message, 'err'));
     }
+    else if (act === 'appUpdate') { closeMenu(a.closest('.menu')); void appUpdate(); }
     else if (act === 'restartCompanion') { closeMenu(a.closest('.menu')); if (confirm('Restart the companion?\n\nRunning sessions are paused and saved first; continue them once it is back. The PC keeps running.')) restartCompanion(); }
     else if (act === 'ompUpdate') updateOmp();
     else if (act === 'setReload') { a.disabled = true; loadSettings().finally(() => { a.disabled = false; }); }
@@ -6208,6 +6240,16 @@
   };
 
   try { if (sessionStorage.getItem(RESTARTED) === '1') { sessionStorage.removeItem(RESTARTED); toast('The companion restarted. Paused sessions continue when you send a message.'); } } catch {}
+  // The reload after an app update (appUpdate): its JSON says the version when it changed, so a failed update does not
+  // claim success. Anything else (an older page's storage) is ignored.
+  try {
+    const raw = sessionStorage.getItem(UPDATED);
+    if (raw !== null) {
+      sessionStorage.removeItem(UPDATED);
+      const done = JSON.parse(raw);
+      toast(done?.version ? `OMP Control Room updated to ${done.version}.` : 'OMP Control Room restarted.');
+    }
+  } catch {}
   route();
   loop();
 })();

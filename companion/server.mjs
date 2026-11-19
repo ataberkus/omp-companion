@@ -77,10 +77,10 @@ export async function createCompanion(options={}){
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  const runners=new Map();const launches=new Map();const locks=new Map();ctx.closing=false;ctx.pausing=0;
  // A new id per process: a dashboard that asked for a restart knows the new companion answers once this changes.
- const instance=randomUUID(),canRestart=typeof options.restart==='function';
+ const instance=randomUUID(),canRestart=typeof options.restart==='function',canAppUpdate=typeof options.appUpdate==='function';
  // Only the current thought is live; completed messages remain in OMP's transcript.
  const subagentThoughts=new Map();
- Object.assign(ctx,{allowedOrigins,runners,launches,locks,instance,canRestart,subagentThoughts});
+ Object.assign(ctx,{allowedOrigins,runners,launches,locks,instance,canRestart,canAppUpdate,appVersion:options.appVersion||'',subagentThoughts});
  use(createToolImages(ctx));
  use(createMessages(ctx));
  use(createSlashCommands(ctx));
