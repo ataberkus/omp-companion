@@ -258,13 +258,27 @@ export function createRunner(ctx){
   runner.answer(id,approval.reply);
   append(s,'system',`Auto-approved: ${approval.text.slice(0,4000)}`);scheduleSave(s);
  }
- async function start(s){
+ // Whether OMP can resume the session file: it exists and holds at least the header OMP writes first. A new session's
+// file is materialized only by its first stored turn, so an absent (or 0-byte) file means OMP has nothing to resume.
+// Any other stat failure (permissions, a lock) is OMP's to report: the path is kept so the file is never abandoned here.
+const resumableFile=file=>fs.stat(file).then(st=>st.isFile()&&st.size>0,e=>e.code!=='ENOENT'&&e.code!=='ENOTDIR');
+// What the session shows: turns the panel imported or the user sent. A draft has none.
+const hasConversation=s=>(s.messages||[]).some(m=>m.role==='user'||m.role==='assistant');
+async function start(s){
   if(runners.get(s.id)?.alive)return runners.get(s.id);
   if(launches.has(s.id))return launches.get(s.id);
   const promise=(async()=>{
    for(const [key,thought] of subagentThoughts)if(thought.parentId===s.id)subagentThoughts.delete(key);
-   // Turns, title and model a terminal OMP added to the file since the companion last ran it come first; OMP resumes it.
-   await syncFromFile(s).catch(()=>{});
+   // OMP materializes a new session's file only when it first writes to it (its first stored turn): until then the path
+   // state reports is allocated but leads nowhere. Resuming it fails with OMP's `Session "<file>" not found.`, which a
+   // draft session could not recover from: every later send retried the same missing file. A runner restarted in that
+   // window (an idle model, launch or advisor switch, a crash, a reopened session) starts a fresh OMP session instead, and
+   // refresh() records the path OMP actually writes. A session whose file is gone carries on in a new OMP session with a
+   // note rather than failing forever: the missing file holds nothing to resume, and the panel keeps its transcript.
+   if(s.sessionFile&&!await resumableFile(s.sessionFile)){
+    if(hasConversation(s))notice(s,'warning','OMP no longer has this session on disk; it continues in a new one. Its earlier turns stay in this panel.');
+    delete s.sessionFile;delete s.fileSeen;
+   }
    const fileTitle=s.sessionFile?(await readSessionHead(s.sessionFile).catch(()=>null))?.title||'':'';
    const sessionDir=path.join(dataDir,'sessions',s.id);if(!s.native)await fs.mkdir(sessionDir,{recursive:true,mode:0o700});
    // Native sessions live in OMP's own session store, so they also appear in `omp --resume` and in the recent list.
@@ -294,7 +308,12 @@ export function createRunner(ctx){
     if(s.advisorChoice){s._silentAdvisorUntil=Date.now()+5000;await runner.prompt({message:`/advisor ${s.advisorChoice}`}).then(()=>{delete s.advisorChoice;}).catch(e=>notice(s,'warning',`Advisor: ${e.message}`));}
     // Per-session toggles live in the OMP session, so a restarted runner gets them back.
     for(const [key,value] of Object.entries(s.prefs||{}))await runner.setPref(key,value).catch(e=>notice(s,'warning',e.message));
-    await refresh(s,runner);return runner;}catch(e){runners.delete(s.id);runner.kill();throw e;}
+    await refresh(s,runner);return runner;}catch(e){runners.delete(s.id);runner.kill();
+    // OMP could not open the session at all. With nothing to keep there is nothing to resume: the path is dropped so the
+    // user's next send starts a fresh session instead of failing on the same one forever. A session with turns keeps it,
+    // and its error, rather than silently continuing on a new thread.
+    if(!hasConversation(s)){delete s.sessionFile;delete s.fileSeen;}
+    throw e;}
   })();launches.set(s.id,promise);try{return await promise;}finally{launches.delete(s.id);}
  }
  // The status reply can arrive after the prompt resolves, so stay silent until it shows up (or a few seconds pass).
