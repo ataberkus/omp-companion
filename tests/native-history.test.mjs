@@ -60,7 +60,9 @@ async function companion(t, sessions = []) {
 test('the history lists every session file, skips one OMP is still creating, and links forks to their parent', async t => {
   const c = await companion(t);
   for (let i = 0; i < 260; i++) await writeFile(join(c.bucket, `s${String(i).padStart(3, '0')}.jsonl`), slot(`Session ${i}`, '2026-11-15T12:00:00.000Z') + header('id' + i, c.proj) + user('u', 'prompt ' + i));
-  await writeFile(join(c.bucket, 'fork.jsonl'), slot('Session 5', '2026-11-15T12:00:00.000Z') + header('fork', c.proj, { parentSession: join(c.bucket, 's005.jsonl').toUpperCase() }) + user('u', 'p'));
+  // OMP may record the parent path in another case on Windows, where paths are case-insensitive; elsewhere the case is exact.
+  const parentPath = join(c.bucket, 's005.jsonl');
+  await writeFile(join(c.bucket, 'fork.jsonl'), slot('Session 5', '2026-11-15T12:00:00.000Z') + header('fork', c.proj, { parentSession: process.platform === 'win32' ? parentPath.toUpperCase() : parentPath }) + user('u', 'p'));
   await writeFile(join(c.bucket, 'partial.jsonl'), '{"type":"title","v":1,"title":"');
   await c.start();
   const [, first] = await c.get('/omp-sessions');
@@ -68,7 +70,7 @@ test('the history lists every session file, skips one OMP is still creating, and
   const fork = first.sessions.find(s => s.id === 'fork');
   assert.equal(fork.title, 'Session 5');
   assert.equal(fork.parentTitle, 'Session 5');
-  if (process.platform === 'win32') assert.equal(fork.parent, join(c.bucket, 's005.jsonl'), 'the parent matched case-insensitively on Windows');
+  assert.equal(fork.parent, parentPath, 'the parent matched case-insensitively on Windows');
   await writeFile(join(c.bucket, 'partial.jsonl'), slot('Now written', '2026-11-15T12:00:00.000Z') + header('late', c.proj));
   const [, second] = await c.get('/omp-sessions');
   assert.ok(second.sessions.some(s => s.id === 'late' && s.title === 'Now written'), 'listed once OMP wrote its header');
