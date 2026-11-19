@@ -316,7 +316,11 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .tok-c{color:var(--faint);font-style:italic}.tok-s{color:var(--tok-s)}.tok-k{color:var(--tok-k)}.tok-n{color:var(--cyan)}
 /* math (KaTeX, loaded on first use): formulas take the text color and size around them; display math scrolls sideways
    instead of widening the column. The Copy LaTeX label is CSS content so a copied selection holds only the formula's TeX. */
-.md .katex{font-size:calc(1.1em * var(--math-scale,1));color:inherit}
+.md .katex{font-size:calc(1.21em * var(--math-scale,1));color:inherit}
+/* Exponents and subscripts (e^{-\pi s}, s^0) at KaTeX's 70%/50% made an italic s read as an 8 at chat sizes: they render
+   at 80%/72% instead. Only .msupsub: script-size fraction parts touched the bar when enlarged. */
+.md .katex .msupsub .katex-sizing.reset-size6.size3{font-size:.8em}
+.md .katex .msupsub .katex-sizing.reset-size3.size1{font-size:.72em}
 .md .math-inline{overflow-wrap:normal}
 .md .math-block{position:relative;display:block;margin:0 0 .9em}
 .md p>.math-block,.md li>.math-block{margin:.4em 0}
