@@ -35,7 +35,7 @@ export function createRunner(ctx){
     if(restored?.turn)return;
     // command() reports a failed send as the session's error instead of throwing.
     const ids=Array.isArray(restored?.subagents)?restored.subagents:[];
-    const r=await command(s,{type:'prompt',message:ids.length?restoredPrompt(ids):RESTART_PROMPT});
+    const r=await command(s,{type:'prompt',message:ids.length?restoredPrompt(ids):RESTART_PROMPT,resume:true});
     if(r?.status==='error')throw new Error(r.error||'OMP did not accept the prompt.');
    }catch(e){if(ctx.closing)return;finishWork(s);s.status='error';s.error=`Automatic resume failed: ${e.message}`;notice(s,'error',s.error);await persist(s);}
   });
@@ -117,9 +117,8 @@ export function createRunner(ctx){
    // as its session entry; bindEntries turns the timestamp into the entry ID that branching from this message needs.
    else if(s._promptMsg&&!(f.message.synthetic&&f.message.attribution==='agent')){const m=s.messages.find(m=>m.id===s._promptMsg);if(m&&typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;delete s._promptMsg;}
   }
-  // Once the prompt is in OMP's history (first assistant message of a run), ask OMP to title the session; at most once per run.
-  // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own.
-  if(f.type==='message_start'&&f.message?.role==='assistant'&&!f.mirrored&&s.autoTitle&&!(s._titling>Date.now())&&s._titleRun!==s._run){s._titling=Date.now()+60000;s._titleRun=s._run;const runner=runners.get(s.id);if(runner)void runner.prompt({message:'/rename'}).catch(()=>{delete s._titling;});}
+  // Titles are asked for by the prompt dispatch (titleSession), never from an assistant message here: a message_start can
+  // belong to an imported/restored turn, a collab mirror or a helper, and no model request may follow one without the user.
   if(f.type==='message_end'){
    const m=f.message||{};if(m.role==='assistant'){const ct=usageTokens(m.usage);if(ct)s.contextTokens=ct;s._rateLimit=m.stopReason==='error'?rateLimitHint(m.errorMessage):undefined;s._connectionLost=m.stopReason==='error'?connectionHint(m.errorMessage):undefined;
     // The provider answered: automatic resends after lost connections count from zero again.
@@ -147,8 +146,10 @@ export function createRunner(ctx){
    msg.tool.status=f.isError?'error':'done';msg.tool.result=clip(contentText(f.result?.content),8000);const images=toolImages(f.result?.content);if(images.length)msg.tool.images=stashImages(images);const files=editFiles(f.result?.details);if(files)msg.tool.files=files;msg.tool.ms=msg.startedAt?Date.now()-new Date(msg.startedAt).getTime():undefined;msg.text=toolSummary(msg.tool);}
   if(f.type==='command_output'){const text=typeof f.text==='string'?f.text:contentText(f.content);
    if(s._capture){s._capture.push(text);return;}
-   // Our own background /rename reports back in chat text; keep it out of the transcript.
-   if(s._titling>Date.now()&&/^(Session renamed to |Session name not changed|Could not generate a session title|Rename failed:)/.test(text)){delete s._titling;return;}
+   // Our own background /rename reports back in chat text (titleSession set _titleChat): success also arrives as
+   // session_info_update, so keep the chatter out of the transcript, and report a failure as a notice that names the work
+   // instead of letting the title model's error read as a reply the session wrote.
+   if(s._titleChat>Date.now()&&/^(Session renamed to |Session name not changed|Could not generate a session title|Rename failed:)/.test(text)){delete s._titleChat;delete s._titling;if(/^(Could not generate a session title|Rename failed:)/.test(text))notice(s,'warning',`Automatic title: ${text.replace(/^Rename failed:\s*/,'')}`);return;}
    const adv=parseAdvisorStatus(text);if(adv)s.advisor={enabled:adv.enabled??s.advisor?.enabled??adv.state==='running',...adv,at:now()};if(!(adv&&s._silentAdvisorUntil>Date.now()))append(s,adv?'system':'assistant',text);}
   if(f.type==='session_info_update'&&typeof f.title==='string'&&f.title.trim()){s.title=f.title.trim().slice(0,120);delete s.autoTitle;}
   // Correlated by command id: an aborted run's result can land after the next prompt started, and must not pause it.
@@ -271,7 +272,11 @@ export function createRunner(ctx){
    // switch elsewhere keeps it in step (session-command set_model), since OMP fixes prompt and tools when it starts.
    const sel=s.modelSelector||(s.provider&&s.model&&s.model!=='OMP default'?`${s.provider}/${s.model}`:'');
    const agy=agySessionArgs(sel,s.launch);s._agy=agy.length>0;
-   const pick=[...(s.modelSelector?['--model',s.modelSelector]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!hasPrompt(s)),...agy];
+   // The session's own model goes on the command line, not only through setModel after ready: OMP would otherwise open on its
+   // default (modelRoles.default, Claude in many setups), and a helper request in that window would go there. A native
+   // session resumed without a selector keeps the model its file recorded.
+   const model=sel&&(s.modelSelector||!s.native)?sel:'';
+   const pick=[...(model?['--model',model]:[]),...(s.thinkingChoice?['--thinking',s.thinkingChoice]:[]),...launchArgs(s.launch,!hasPrompt(s)),...agy];
    const args=s.native?[...(s.sessionFile?['--resume',s.sessionFile]:[]),...pick]:['--session-dir',sessionDir,'--continue',...pick];
    const runner=omp.start({cwd:s.cwd,args,onEvent:f=>{if(!ctx.closing&&runners.get(s.id)===runner)event(s,f);},onExit:(e,stopping)=>{if(runners.get(s.id)!==runner)return;runners.delete(s.id);commands.delete(s.id);for(const k of ['_streamId','_thinkId','_interrupt','_compacting','_retry','_openUrl','_status','_widgets','_commandRuns','_editorText','_task','_bash','_planReview','_planSupported','_goalSupported','_goalAvailable','_unhosted','_thinkingLevels','_slow','_cacheWarming','_btw','_loop','uiRequests'])delete s[k];dropSteers(s);
     // What this OMP wrote is in the panel already: only a later change to the file (a terminal) is read again.
@@ -283,7 +288,10 @@ export function createRunner(ctx){
    runners.set(s.id,runner);
    // The panel's title is given to OMP only when the file has none or the user renamed the session in the panel: a title
    // OMP gave it, or one renamed in a terminal, is the session's own (it was sent back as a user rename on every start).
-   try{await runner.ready;if(!s.autoTitle&&s.title&&s.title!==fileTitle&&(s.renamed||!fileTitle))await runner.setSessionName(s.title);if(!s.modelSelector&&!s.native&&s.provider&&s.model!=='OMP default')await runner.setModel(s.provider,s.model);
+   try{await runner.ready;if(!s.autoTitle&&s.title&&s.title!==fileTitle&&(s.renamed||!fileTitle))await runner.setSessionName(s.title);
+    // The advisor the user chose while no OMP ran (a quick-start or resume option): applied before the first prompt, so its
+    // first review is on the model it should use. A local command: it asks no model.
+    if(s.advisorChoice){s._silentAdvisorUntil=Date.now()+5000;await runner.prompt({message:`/advisor ${s.advisorChoice}`}).then(()=>{delete s.advisorChoice;}).catch(e=>notice(s,'warning',`Advisor: ${e.message}`));}
     // Per-session toggles live in the OMP session, so a restarted runner gets them back.
     for(const [key,value] of Object.entries(s.prefs||{}))await runner.setPref(key,value).catch(e=>notice(s,'warning',e.message));
     await refresh(s,runner);return runner;}catch(e){runners.delete(s.id);runner.kill();throw e;}
@@ -291,6 +299,17 @@ export function createRunner(ctx){
  }
  // The status reply can arrive after the prompt resolves, so stay silent until it shows up (or a few seconds pass).
  async function advisorStatus(s,runner){s._silentAdvisorUntil=Date.now()+5000;try{await runner.prompt({message:'/advisor status'});}catch{s._silentAdvisorUntil=0;}}
+ // The session's automatic title: OMP's RPC mode never titles a session, so the companion asks with /rename once the user's
+ // own prompt is admitted. Its title model is OMP's tiny/smol role (the session's model when neither is configured). It is
+ // never asked of an assistant message that arrived on its own (an imported or terminal turn, a collab mirror, a helper),
+ // and never before the user has sent anything: opening a session runs no model request.
+ function titleSession(s,runner){
+  if(!s.autoTitle||!runner?.alive||s._titling>Date.now())return;
+  // _titling is a deadline: a /rename cancelled by Stop prints nothing, so the flag must lapse on its own. _titleChat covers
+  // the command text too, which can land after that deadline (see event()).
+  s._titling=Date.now()+60000;s._titleChat=Date.now()+120000;
+  runner.prompt({message:'/rename'}).catch(e=>{delete s._titling;notice(s,'warning',`Automatic title: ${e.message}`);});
+ }
  async function refresh(s,runner){const promptId=s._promptId,run=s._run;try{const state=await runner.state();
   if(state){s.tps=typeof state.tokensPerSecond==='number'?state.tokensPerSecond:undefined;s.fast={enabled:!!state.fastModeEnabled,active:!!state.fastModeActive};if(typeof state.autoCompactionEnabled==='boolean')s.autoCompaction=state.autoCompactionEnabled;s.modes={steering:state.steeringMode,...(state.followUpMode?{followUp:state.followUpMode}:{}),interrupt:state.interruptMode};}
   if(state){s._planSupported=typeof state.planMode?.enabled==='boolean';if(s._planSupported)s.planMode=state.planMode;else delete s.planMode;if(state.planReview)s._planReview=state.planReview;else delete s._planReview;}
@@ -386,5 +405,5 @@ async function syncFromFile(s){
   if(info.promptTrimmed)s.promptTrimmed=true;else delete s.promptTrimmed;
   delete s._streamId;delete s._thinkId;delete s._promptMsg;delete s._entryCursor;}
  const lock=async(id,fn)=>{const previous=locks.get(id)||Promise.resolve();const next=previous.catch(()=>{}).then(fn);locks.set(id,next);try{return await next;}finally{if(locks.get(id)===next)locks.delete(id);}};
- return {start,lock,refresh,autoApprove,reload,advisorStatus,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart,syncFromFile,fileMoved,retriesStopped};
+ return {start,lock,refresh,autoApprove,reload,advisorStatus,titleSession,needsBackfill,backfillEntries,fileEntries,resumeAfterRestart,syncFromFile,fileMoved,retriesStopped};
 }

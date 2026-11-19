@@ -11,7 +11,7 @@ import { THINKING, toolSummary, shellRecord, readSessionHead, treeView, userProm
 import { worktreeChanges, gitLog, gitCommit } from './git.mjs';
 import { launchOptions, agySessionArgs } from './launch.mjs';
 export function createSessionCommand(ctx){
- const {start,append,notice,store,refresh,dataDir,execOmp,activity,persist,scheduleSave,runners,accountsChanged,autoApprove,cancelResume,dropSteers,reload,advisorStatus,retriesStopped}=ctx;
+ const {start,append,notice,store,refresh,dataDir,execOmp,activity,persist,scheduleSave,runners,accountsChanged,autoApprove,cancelResume,dropSteers,reload,advisorStatus,titleSession,retriesStopped}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
  const sent=(...args)=>ctx.sent(...args);
  const discardDraft=(...args)=>ctx.discardDraft(...args);
@@ -58,6 +58,8 @@ export function createSessionCommand(ctx){
   if(body.type==='predict_word'||body.type==='predict_word_feedback'){
    const runner=runners.get(s.id),draft=body.text,cursor=body.cursor;
    if(typeof draft!=='string'||draft.length>200000||!Number.isInteger(cursor)||cursor<0||cursor>draft.length)throw error('Invalid draft.');
+   // An empty draft (a focused, untouched composer) has nothing to complete: no engine work, and OMP is never started for it.
+   if(!draft.trim())return {suffix:null};
    if(!runner?.alive)return {suffix:null};
    if(body.type==='predict_word_feedback'){if(typeof body.suggestion!=='string'||!body.suggestion||body.suggestion.length>200)throw error('Invalid suggestion.');void runner.predictFeedback(draft,cursor,body.suggestion,body.accepted===true).catch(()=>{});return {};}
    // The first request can wait minutes while OMP's prediction daemon loads its engine.
@@ -394,6 +396,9 @@ export function createSessionCommand(ctx){
    // Local commands must not replace the active turn's result correlation.
    if(slashCommand&&(result?.agentInvoked===true||(!wasRunning&&result?.agentInvoked!==false)))s._promptId=id;
    if(kind==='prompt'&&result?.agentInvoked===false&&!slashCommand){s.status='review';delete s._promptMsg;}
+   // The user's own message (never a slash command, an automatic resend or an imported turn) is what starts the session's
+   // automatic title; OMP's RPC mode never titles one, so the companion asks with /rename here.
+   if((kind==='prompt'||interrupt)&&!slashCommand&&!body.resume&&result?.agentInvoked!==false)titleSession(s,runner);
    if(slashCommand){
     if(result?.agentInvoked===true)s.status='running';
     // The command replaced the transcript (/fork, /clear): show the session as OMP now has it.
