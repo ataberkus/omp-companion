@@ -72,10 +72,9 @@ async function boot({ hash = '#/s/a', sessions = [], routes = {}, home } = {}) {
   // Runs only the 500 ms enhance polls (ghost-text predictions use other delays).
   const runPolls = async () => { for (let i = 0; i < 20; i++) { const due = timers.filter(t => t.ms === 500); if (!due.length) return; timers.splice(0, timers.length, ...timers.filter(t => t.ms !== 500)); for (const t of due) t.fn(); await flush(); } };
   const toasts = () => created.filter(n => /\btoast\b/.test(n.className || ''));
-  const toastAction = label => { const b = created.find(n => n.className === 'toast-act' && n.textContent === label); assert.ok(b, `toast action "${label}"`); b.onclick(); };
   const posts = path => calls.filter(c => c.url.split('?')[0] === '/api' + path && c.body).map(c => c.body);
   const paste = file => fire('paste', { target: input, clipboardData: { getData: () => '', items: [{ type: file.type, getAsFile: () => file }] } });
-  return { elements, calls, fire, act, key, go, type, paste, input, runPolls, timers, toasts, toastAction, posts, location, target, node };
+  return { elements, calls, fire, act, key, go, type, paste, input, runPolls, timers, toasts, posts, location, target, node };
 }
 const idle = (id, extra = {}) => ({ id, title: id, cwd: '/p', status: 'paused', messages: [], queuedMessages: [], updatedAt: new Date().toISOString(), ...extra });
 
@@ -94,9 +93,12 @@ test('Enhance replaces the draft, Undo restores it, Send is blocked meanwhile', 
   await d.runPolls();
   assert.equal(d.input.value, 'Better');
   assert.equal(d.input.readOnly, false);
-  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Enhance prompt"[^>]*>✨</);
-  d.toastAction('Undo');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Enhance prompt"[^>]*>✨/);
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Restore original prompt \(Ctrl\+Z\)"[^>]*>Undo</);
+  assert.equal(d.toasts().length, 0, 'the result is a composer control, not a toast');
+  await d.fire('click', { target: d.act('enhanceUndo') });
   assert.equal(d.input.value, 'fix it');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Reapply enhanced prompt"[^>]*>Redo</);
 });
 
 test('the composer mode picker switches the mode at once; a failed save puts the previous mode back', async () => {
@@ -118,7 +120,7 @@ test('the composer mode picker switches the mode at once; a failed save puts the
   assert.doesNotMatch(d.elements.get('enhanceSlot').innerHTML, /data-enhmode/, 'no picker while it runs');
 });
 
-test('an edited draft is not overwritten; the offer toast applies it', async () => {
+test('an edited draft is not overwritten; the composer offer applies it', async () => {
   const polls = seq([{ status: 'running', step: '' }, { status: 'done', text: 'Better' }]);
   const d = await boot({ sessions: [idle('a')], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m' } : polls() } });
   await d.type('fix it');
@@ -126,8 +128,71 @@ test('an edited draft is not overwritten; the offer toast applies it', async () 
   d.input.value = 'fix it now';
   await d.runPolls();
   assert.equal(d.input.value, 'fix it now');
-  d.toastAction('Use enhanced prompt');
+  assert.equal(d.toasts().length, 0, 'no transient offer toast');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Apply enhanced prompt"[^>]*>Use enhanced</);
+  await d.fire('click', { target: d.act('enhanceUndo') });
   assert.equal(d.input.value, 'Better');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Restore original prompt \(Ctrl\+Z\)"[^>]*>Undo</);
+  await d.fire('click', { target: d.act('enhanceUndo') });
+  assert.equal(d.input.value, 'fix it now', 'Undo returns to the draft the user had while enhancing');
+});
+
+test('the Undo control survives a view switch and toggles Redo until dismissed', async () => {
+  const polls = seq([{ status: 'running', step: '' }, { status: 'done', text: 'Better' }]);
+  const d = await boot({ sessions: [idle('a'), idle('b')], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m' } : polls() } });
+  await d.type('fix it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.runPolls();
+  await d.go('#/s/b');
+  assert.doesNotMatch(d.elements.get('enhanceSlot').innerHTML, /enhance-undo/, 'another view has its own composer');
+  await d.go('#/s/a');
+  assert.equal(d.input.value, 'Better');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Restore original prompt \(Ctrl\+Z\)"[^>]*>Undo</);
+  await d.fire('click', { target: d.act('enhanceUndo') });
+  assert.equal(d.input.value, 'fix it');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Reapply enhanced prompt"[^>]*>Redo</);
+  await d.fire('click', { target: d.act('enhanceUndo') });
+  assert.equal(d.input.value, 'Better');
+  await d.fire('click', { target: d.act('enhanceUndoDismiss') });
+  assert.doesNotMatch(d.elements.get('enhanceSlot').innerHTML, /enhance-undo/);
+  assert.equal(d.input.value, 'Better', 'dismissing keeps the result in the draft');
+});
+
+test('an image-only enhance remembers an empty original and restores it', async () => {
+  const polls = seq([{ status: 'running', step: '' }, { status: 'done', text: 'Make a landing page' }]);
+  const d = await boot({ sessions: [idle('a')], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m' } : polls() } });
+  await d.paste({ type: 'image/png', size: 3, name: 'shot.png' });
+  await d.fire('click', { target: d.act('enhance') });
+  await d.runPolls();
+  assert.equal(d.input.value, 'Make a landing page');
+  await d.fire('click', { target: d.act('enhanceUndo') });
+  assert.equal(d.input.value, '', 'the empty draft is restored, not skipped as falsy');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Reapply enhanced prompt"[^>]*>Redo</);
+});
+
+test('a failed enhance keeps the previous Undo; editing after Undo drops Redo', async () => {
+  let status = { status: 'done', text: 'Better' };
+  const d = await boot({ sessions: [idle('a', { draft: true })], routes: { '/enhance': body => body ? { id: 'j', model: 'p/m' } : status } });
+  await d.type('fix it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.runPolls();
+  assert.equal(d.input.value, 'Better');
+  await d.fire('click', { target: d.act('enhanceUndo') });
+  assert.equal(d.input.value, 'fix it');
+  await d.type('fix it!');
+  assert.doesNotMatch(d.elements.get('enhanceSlot').innerHTML, /enhance-undo/, 'a hand edit makes Redo stale');
+  await d.type('fix it');
+  await d.fire('click', { target: d.act('enhance') });
+  await d.runPolls();
+  assert.equal(d.input.value, 'Better');
+  status = { status: 'error', error: 'model down' };
+  await d.fire('click', { target: d.act('enhance') });
+  await d.runPolls();
+  assert.equal(d.input.value, 'Better', 'a failed enhance leaves the result in place');
+  assert.match(d.elements.get('enhanceSlot').innerHTML, /aria-label="Restore original prompt \(Ctrl\+Z\)"[^>]*>Undo</);
+  assert.match(d.elements.get('statusLine').innerHTML, /Enhance failed: model down/);
+  await d.fire('click', { target: d.act('enhanceUndo') });
+  assert.equal(d.input.value, 'fix it');
 });
 
 test('Ctrl+Shift+E starts and cancels; slash and shell drafts are ignored', async () => {

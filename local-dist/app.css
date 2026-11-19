@@ -467,6 +467,18 @@ kbd{font:11px var(--mono);padding:1px 5px;border:1px solid var(--border);border-
 .composer-bar :is(.enhance-btn,[data-act=abort]){width:30px;padding:0}
 .composer-bar .enhance-mode,#homeEnhance .enhance-mode{height:30px;border-radius:8px;padding:0 6px;font-size:12.5px;margin-left:6px}
 @media (max-width:820px),(pointer:coarse){.composer-bar .enhance-mode,#homeEnhance .enhance-mode{height:44px}}
+/* Enhance's Undo/Redo/Use enhanced control: one bordered pair in the toolbar, outliving the toast it replaced. The label
+   keeps its own width (no wrap, no shrink) and the × joins it as a compact, separate dismissal target. */
+.enhance-undo{display:inline-flex;align-items:center;flex-shrink:0;white-space:nowrap;margin-left:2px}
+.composer-bar .enhance-undo>.btn{height:30px;border-radius:8px;font-size:12.5px;white-space:nowrap}
+.composer-bar .enhance-undo>.enhance-undo-btn{padding:0 10px;border-color:var(--accent-line);color:var(--fg);border-top-right-radius:0;border-bottom-right-radius:0}
+.composer-bar .enhance-undo>.enhance-undo-btn:hover:not(:disabled){border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.composer-bar .enhance-undo>.enhance-undo-dismiss{width:26px;padding:0;border-color:var(--border);border-left:0;border-top-left-radius:0;border-bottom-left-radius:0;color:var(--faint);font-size:15px}
+.composer-bar .enhance-undo>.enhance-undo-dismiss:hover:not(:disabled){border-color:var(--accent);color:var(--fg)}
+@media (max-width:820px),(pointer:coarse){.composer-bar .enhance-undo>.btn{height:44px}.composer-bar .enhance-undo>.enhance-undo-dismiss{width:44px}}
+/* The phone composer folds the tools row away only while it is compact (no draft, no focus), which an active enhance
+   result never is; should both meet, the control keeps its own row instead of disappearing. */
+.composer-wrap.compact .bar-tools:has(.enhance-undo){display:flex;grid-column:1/-1;overflow-x:auto;scrollbar-width:none}
 .composer-bar .model-chip>span[aria-hidden]{color:var(--faint);font-size:11px}
 /* Touch: the toolbar keeps one height, now the 44px of its buttons. */
 @media (max-width:820px),(pointer:coarse){.composer-bar .model-chip{height:44px}}
