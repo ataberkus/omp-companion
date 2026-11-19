@@ -11,12 +11,16 @@ const CACHE_MS=60000;
 const OMP_MS=30000;
 const HOUR=3600000,DAY=86400000,WEEK=7*DAY;
 const WINDOWS={weekly:{id:'weekly',label:'Weekly',durationMs:WEEK},'5h':{id:'5h',label:'5 Hour',durationMs:5*HOUR},daily:{id:'daily',label:'Daily',durationMs:DAY}};
+// The Summary endpoint lists quota groups by client version: a bare `antigravity` User-Agent only gets the Claude/GPT
+// group, while 2.33.0 (the desktop app's own version; 2.0.0 is too old, anything newer answers the same) also gets
+// the Gemini group, whose weekly limit is the one Antigravity shows.
+const USER_AGENT='antigravity/2.33.0';
 const clampFraction=v=>Number.isFinite(v)?Math.min(1,Math.max(0,v)):undefined;
 const statusFor=f=>f===undefined?'unknown':f<=0?'exhausted':f<=0.1?'warning':'ok';
 const percentAmount=f=>({unit:'percent',remainingFraction:f,usedFraction:1-f,remaining:f*100,used:(1-f)*100,limit:100});
 const resetAt=t=>{const n=Date.parse(t);return Number.isFinite(n)?n:undefined;};
 const cleanName=s=>String(s||'').replace(/\s+models?$/i,'').replace(/\s+and\s+/gi,' & ').trim();
-// One row per quota window. The Summary endpoint reports the shared Claude/GPT weekly and 5-hour limits.
+// One row per quota window. The Summary endpoint reports every group's shared weekly and 5-hour limits.
 function summaryRows(summary,covered){
  const rows=[];
  for(const group of Array.isArray(summary?.groups)?summary.groups:[]){
@@ -27,11 +31,12 @@ function summaryRows(summary,covered){
   const label=`${cleanName(groupName)||'Antigravity'} (shared)`;
   for(const b of Array.isArray(group?.buckets)?group.buckets:[]){
    if(b?.disabled===true)continue;
-   const f=clampFraction(b?.remainingFraction);if(f===undefined)continue;
+   const f=clampFraction(b?.remainingFraction);
    const win=WINDOWS[b?.window]||{id:String(b?.window||'current'),label:String(b?.displayName||'Window').replace(/\s*remaining$/i,'')};
    const at=resetAt(b?.resetTime);
+   // A window that reports no remaining fraction stays visible as unknown; it must neither read as 0 % used nor vanish.
    rows.push({id:`${PROVIDER}:${groupName||'shared'}:${win.id}`,label,scope:{provider:PROVIDER,windowId:win.id,shared:true},
-    window:{...win,...(at!==undefined?{resetsAt:at}:{})},amount:percentAmount(f),status:statusFor(f)});
+    window:{...win,...(at!==undefined?{resetsAt:at}:{})},...(f===undefined?{notes:['Antigravity reported no remaining quota for this window.']}:{amount:percentAmount(f)}),status:statusFor(f)});
   }
  }
  return rows;
@@ -55,7 +60,8 @@ function modelRows(quota,covered){
   const name=family==='gemini'?'Gemini models':family==='3p'?'Claude & GPT models':`${family[0]?.toUpperCase()||''}${family.slice(1)} models`;
   const label=e.models.length>1?`${name} (${e.models.length})`:name;
   rows.push({id:`${PROVIDER}:model:${family}`,label,scope:{provider:PROVIDER,windowId:'current',shared:true},
-   window:{id:'current',label:'Current quota',...(worst.at!==undefined?{resetsAt:worst.at}:{})},amount:percentAmount(worst.f),status:statusFor(worst.f)});
+   window:{id:'current',label:'Current quota',...(worst.at!==undefined?{resetsAt:worst.at}:{})},amount:percentAmount(worst.f),status:statusFor(worst.f),
+   notes:['Antigravity reported no weekly limit for these models; this is the current window only.']});
  }
  return rows;
 }
@@ -108,7 +114,7 @@ async function rpc(rpcPath,body,token,fetchImpl){
  let failure;
  for(const base of ENDPOINTS){
   let res;
-  try{res=await fetchImpl(base+rpcPath,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json','User-Agent':'antigravity'},body:JSON.stringify(body),signal:AbortSignal.timeout(REQUEST_MS)});}
+  try{res=await fetchImpl(base+rpcPath,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json','User-Agent':USER_AGENT},body:JSON.stringify(body),signal:AbortSignal.timeout(REQUEST_MS)});}
   catch(e){failure=e;continue;}
   if(res.ok)return await res.json();
   failure=new Error(`${rpcPath} returned HTTP ${res.status}`);

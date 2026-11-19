@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { antigravityLimitRows, addAntigravityCliUsage, parseAntigravityAccounts, antigravityCliToken } from '../companion/antigravity-usage.mjs';
+import { modelUsage } from '../companion/session-views.mjs';
 
 const WEEKLY = '2026-11-26T10:26:51Z', FIVE_HOURS = '2026-11-19T15:26:51Z', GEMINI = '2026-11-19T15:02:46Z';
 const summary = { groups: [{ displayName: 'Claude and GPT models', buckets: [
@@ -113,4 +114,55 @@ test('OMP without the account list still reports the one token it returns', asyn
   assert.equal(data.reports[0].metadata.projectId, 'default-cli-project');
   assert.equal(data.reports[0].metadata.email, undefined);
   assert.deepEqual(data.reports[0].limits.map(l => l.label), ['Claude & GPT (shared)', 'Claude & GPT (shared)', 'Gemini models (2)']);
+});
+
+// Cloud Code lists the Gemini group (and so its weekly limit) only for clients that identify a recent Antigravity
+// version; the values below are what the Antigravity app itself showed for the same account.
+const geminiSummary = { groups: [
+  { displayName: 'Gemini Models', buckets: [
+    { bucketId: 'gemini-weekly', displayName: 'Weekly Limit Remaining', window: 'weekly', remainingFraction: 0.36780986, resetTime: '2026-11-25T00:00:08Z' },
+    { bucketId: 'gemini-5h', displayName: 'Five Hour Limit Remaining', window: '5h', remainingFraction: 0.7115745, resetTime: GEMINI },
+  ] },
+  summary.groups[0],
+] };
+
+test('The Gemini weekly limit Antigravity shows reaches the usage panel', async () => {
+  const versionOf = ua => Number((String(ua).match(/^antigravity\/(\d+)\.(\d+)/) || []).slice(1).join('.') || 0);
+  const fetchImpl = async (url, init) => {
+    const recent = versionOf(init.headers['User-Agent']) >= 2.33;
+    if (url.endsWith('/v1internal:retrieveUserQuotaSummary')) return { ok: true, status: 200, json: async () => (recent ? geminiSummary : summary) };
+    return { ok: true, status: 200, json: async () => quota };
+  };
+  const data = { reports: [] };
+  await addAntigravityCliUsage(data, { execOmp: async () => ({ stdout: 'ya29.one\n' }), fetchImpl, now: Date.now() + 60 * 60_000 });
+  const view = modelUsage(data, 'antigravity-cli', 'claude-opus-5-5-high');
+  const limits = view.providers[0].accounts[0].limits;
+  const geminiWeekly = limits.find(l => l.label === 'Gemini (shared)' && l.detail.startsWith('Weekly'));
+  assert.ok(geminiWeekly, 'Gemini weekly row is present');
+  assert.ok(Math.abs(geminiWeekly.fraction - 0.63219014) < 1e-9, 'used fraction, not 0');
+  assert.equal(geminiWeekly.resetsAt, Date.parse('2026-11-25T00:00:08Z'));
+  const geminiFiveHour = limits.find(l => l.label === 'Gemini (shared)' && l.detail.startsWith('5 Hour'));
+  assert.ok(Math.abs(geminiFiveHour.fraction - 0.2884255) < 1e-9);
+  // The Gemini group replaces the per-model fallback row.
+  assert.ok(!limits.some(l => l.label.startsWith('Gemini models')));
+});
+
+test('A window without a remaining fraction is shown as unknown, never as 0 or dropped', () => {
+  const rows = antigravityLimitRows({ groups: [{ displayName: 'Gemini Models', buckets: [
+    { window: 'weekly', displayName: 'Weekly Limit Remaining', remainingAmount: 12, resetTime: WEEKLY },
+    { window: '5h', displayName: 'Five Hour Limit Remaining', remainingFraction: 0.5, resetTime: FIVE_HOURS },
+  ] }] }, undefined);
+  assert.deepEqual(rows.map(r => [r.window.id, r.status]), [['weekly', 'unknown'], ['5h', 'ok']]);
+  const data = { reports: [{ provider: 'antigravity-cli', limits: rows }] };
+  const [weekly, fiveHour] = modelUsage(data, 'antigravity-cli', 'm').providers[0].accounts[0].limits;
+  assert.equal(weekly.fraction, undefined);
+  assert.equal(weekly.summary, 'Remaining quota unavailable');
+  assert.equal(weekly.resetsAt, Date.parse(WEEKLY));
+  assert.equal(fiveHour.fraction, 0.5);
+});
+
+test('Models without a weekly limit from the Summary are labelled as the current window only', () => {
+  const [gemini] = antigravityLimitRows(undefined, quota);
+  assert.equal(gemini.window.id, 'current');
+  assert.match(gemini.notes[0], /no weekly limit/);
 });
