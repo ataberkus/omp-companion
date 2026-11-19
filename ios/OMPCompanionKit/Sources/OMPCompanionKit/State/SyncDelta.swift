@@ -59,7 +59,9 @@ public final class SyncDeltaReducer: @unchecked Sendable {
                 next.archived = top.archived
                 next.pinned = top.pinned
                 next.ui = top.ui
-                next.drafts = top.drafts
+                // The companion always sends the whole map; nil means it failed to decode, and keeping the last
+                // one stops ComposerView from reading every draft as deleted on another device.
+                if let drafts = top.drafts { next.drafts = drafts }
                 next.editor = top.editor
                 next.enhanceMode = top.enhanceMode
                 next.accountChoices = top.accountChoices

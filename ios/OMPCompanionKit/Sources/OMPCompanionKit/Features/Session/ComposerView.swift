@@ -523,7 +523,7 @@ public struct ComposerView: View {
             guard !hasLocalUnpushedEdits, !isSending else { return }
             if let newAt {
                 if newAt > lastAppliedDraftAt { Task { await pullDraftFromHost(force: false) } }
-            } else if oldAt != nil {
+            } else if oldAt != nil, store.snapshot.drafts != nil {
                 // The host dropped this draft: another device sent (or cleared) it.
                 lastSyncedText = ""
                 text = ""
