@@ -10,6 +10,7 @@ import { finishWork, askAnswers, btwView, modelUsage, modelUsageText, todoPhases
 import { THINKING, toolSummary, shellRecord, readSessionHead, treeView, userPrompt } from './transcript.mjs';
 import { worktreeChanges, gitLog, gitCommit } from './git.mjs';
 import { launchOptions, agySessionArgs } from './launch.mjs';
+import { addAntigravityCliUsage } from './antigravity-usage.mjs';
 export function createSessionCommand(ctx){
  const {start,append,notice,store,refresh,dataDir,execOmp,activity,persist,scheduleSave,runners,accountsChanged,autoApprove,cancelResume,dropSteers,reload,advisorStatus,titleSession,retriesStopped}=ctx;
  // Defined by modules created after this one: called through ctx once they exist.
@@ -39,7 +40,11 @@ export function createSessionCommand(ctx){
  // `omp usage` for every logged-in provider (session's first), parsed once for both the /usage chat snapshot and GET /api/usage.
  async function providerUsage(s){
   const {provider,model}=s;if(!provider||!model)throw error('Select a model before checking /usage.');
-  try{const {stdout}=await execOmp(['usage','--json'],{cwd:s.cwd,timeout:20000,maxBuffer:8*1024*1024,windowsHide:true});return modelUsage(JSON.parse(stdout),provider,model);}
+  try{const {stdout}=await execOmp(['usage','--json'],{cwd:s.cwd,timeout:20000,maxBuffer:8*1024*1024,windowsHide:true});const data=JSON.parse(stdout);
+   // OMP has no antigravity-cli usage provider; the Cloud Code Assist quota its CLI shows is fetched here instead,
+   // with the access token from OMP's own `token` command (so the companion keeps no OAuth client credentials).
+   if(provider==='antigravity-cli')await addAntigravityCliUsage(data,{execOmp});
+   return modelUsage(data,provider,model);}
   catch(e){throw error(`Could not read provider usage: ${String(e.stderr||e.message).trim()}`,502);}
  }
  async function command(s,body,checkedImages,queuedId){
