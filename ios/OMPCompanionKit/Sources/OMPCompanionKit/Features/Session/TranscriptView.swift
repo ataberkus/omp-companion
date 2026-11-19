@@ -84,6 +84,9 @@ public struct TranscriptView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                 }
+                // Scrolling or tapping the transcript puts the keyboard away.
+                .scrollDismissesKeyboard(.interactively)
+                .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 8)
                         .onChanged { value in
@@ -166,6 +169,12 @@ public struct TranscriptView: View {
             }
             Button("Cancel", role: .cancel) { editingSteerMessage = nil }
         }
+    }
+
+    private func dismissKeyboard() {
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
 
     @ViewBuilder

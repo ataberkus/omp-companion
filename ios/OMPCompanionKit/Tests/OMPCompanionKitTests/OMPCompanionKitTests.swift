@@ -240,9 +240,22 @@ final class OMPCompanionKitTests: XCTestCase {
             if case .codeBlock(_, "swift", let code) = $0 { return code.contains("let x = 42") }
             return false
         }))
-        let mathFormatted = MarkdownParser.replaceInlineMath(in: "Value $x^2 + \\alpha$")
-        XCTAssertTrue(mathFormatted.contains("α"))
-        XCTAssertTrue(mathFormatted.contains("²"))
+        let (text, math) = MarkdownParser.extractInlineMath(in: "Value $x^2 + \\alpha$ costs $5 and $10")
+        XCTAssertEqual(math, ["x² + α"])
+        XCTAssertTrue(text.hasSuffix("costs $5 and $10"))
+    }
+
+    func testTeXUnicodeDoesNotSplitCommandNames() {
+        // `\left` must not be read as `\le` + "ft" (the reported iOS bug).
+        XCTAssertEqual(
+            TeXUnicode.convert(#"\mathcal L^{-1}\left\{\dfrac{1}{s(s^2+4)}\right\}=\tfrac14-\tfrac14\cos 2t"#),
+            "ℒ⁻¹{1/(s(s²+4))} = ¼ − ¼ cos 2t"
+        )
+        XCTAssertEqual(TeXUnicode.convert(#"y(\pi^-)=1\ \text{and}\ t\ge\pi"#), "y(π⁻) = 1 and t ≥ π")
+        XCTAssertEqual(
+            TeXUnicode.convert(#"\begin{cases}1, & t<\pi\\ 0, & t\ge\pi\end{cases}"#),
+            "⎧ 1,\u{2003}t < π\n⎩ 0,\u{2003}t ≥ π"
+        )
     }
 
     func testImageTokenEstimationMatchesCompanionFormula() {

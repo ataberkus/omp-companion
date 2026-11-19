@@ -270,34 +270,48 @@ public enum MarkdownParser {
     // MARK: - Inline Formatting & Inline Math ($...$ / \(...\))
 
     public static func renderInline(_ input: String, palette: OMPPalette) -> AttributedString {
-        // Pre-format inline math `$...$` and `\(...\)` safely without regex backtracking
-        let mathNormalized = replaceInlineMath(in: input)
-        if var attr = try? AttributedString(
-            markdown: mathNormalized,
+        // Math is swapped for private-use placeholders so Markdown never sees TeX
+        // (`_`, `*`, `\`), then each placeholder is replaced by its Unicode rendering.
+        let (text, math) = extractInlineMath(in: input)
+        var attr = (try? AttributedString(
+            markdown: text,
             options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            for run in attr.runs {
-                if run.inlinePresentationIntent?.contains(.code) == true {
-                    attr[run.range].font = .system(.callout, design: .monospaced)
-                    attr[run.range].foregroundColor = palette.accent
-                    attr[run.range].backgroundColor = palette.codeBackground
-                } else if run.link != nil {
-                    attr[run.range].foregroundColor = palette.accent
-                    attr[run.range].underlineStyle = .single
-                }
+        )) ?? AttributedString(text)
+        for run in attr.runs {
+            if run.inlinePresentationIntent?.contains(.code) == true {
+                attr[run.range].font = .system(.callout, design: .monospaced)
+                attr[run.range].foregroundColor = palette.accent
+                attr[run.range].backgroundColor = palette.codeBackground
+            } else if run.link != nil {
+                attr[run.range].foregroundColor = palette.accent
+                attr[run.range].underlineStyle = .single
             }
-            return attr
         }
-        return AttributedString(mathNormalized)
+        for (index, rendered) in math.enumerated() {
+            guard let range = attr.range(of: mathPlaceholder(index)) else { continue }
+            let attributes = attr[range].runs.first?.attributes ?? AttributeContainer()
+            attr.replaceSubrange(range, with: AttributedString(rendered, attributes: attributes))
+        }
+        return attr
     }
 
-    public static func replaceInlineMath(in input: String) -> String {
-        guard input.contains("$") || input.contains("\\(") else { return input }
+    private static func mathPlaceholder(_ index: Int) -> String { "\u{E000}\(index)\u{E001}" }
+
+    /// Replaces `$…$`, `$$…$$` and `\(…\)` outside code spans with placeholders;
+    /// returns the rewritten text and the Unicode rendering of each formula.
+    public static func extractInlineMath(in input: String) -> (text: String, math: [String]) {
+        guard input.contains("$") || input.contains("\\(") else { return (input, []) }
         var out = ""
         out.reserveCapacity(input.count)
+        var math: [String] = []
         let chars = Array(input)
         var i = 0
         var inBacktick = false
+
+        func emit(_ tex: String) {
+            out.append(mathPlaceholder(math.count))
+            math.append(TeXUnicode.convert(tex))
+        }
 
         while i < chars.count {
             let c = chars[i]
@@ -309,28 +323,29 @@ public enum MarkdownParser {
             }
             if !inBacktick && c == "\\" && i + 1 < chars.count && chars[i + 1] == "(" {
                 if let end = findClosingDelimiter(chars, from: i + 2, closeA: "\\", closeB: ")") {
-                    let tex = String(chars[(i + 2)..<end])
-                    out.append("`\(formatMathUnicode(tex))`")
+                    emit(String(chars[(i + 2)..<end]))
                     i = end + 2
                     continue
                 }
             }
             if !inBacktick && c == "$" && (i == 0 || chars[i - 1] != "\\") {
-                if i + 1 < chars.count && chars[i + 1] != "$" && chars[i + 1] != " " {
-                    if let end = findClosingDollar(chars, from: i + 1) {
-                        let tex = String(chars[(i + 1)..<end])
-                        if !tex.isEmpty {
-                            out.append("`\(formatMathUnicode(tex))`")
-                            i = end + 1
-                            continue
-                        }
+                if i + 1 < chars.count && chars[i + 1] == "$" {
+                    if let end = findClosingDelimiter(chars, from: i + 2, closeA: "$", closeB: "$"), end > i + 2 {
+                        emit(String(chars[(i + 2)..<end]))
+                        i = end + 2
+                        continue
                     }
+                } else if i + 1 < chars.count && !chars[i + 1].isWhitespace,
+                          let end = findClosingDollar(chars, from: i + 1) {
+                    emit(String(chars[(i + 1)..<end]))
+                    i = end + 1
+                    continue
                 }
             }
             out.append(c)
             i += 1
         }
-        return out
+        return (out, math)
     }
 
     private static func findClosingDelimiter(_ chars: [Character], from start: Int, closeA: Character, closeB: Character) -> Int? {
@@ -345,78 +360,22 @@ public enum MarkdownParser {
         return nil
     }
 
+    /// Closing `$` of inline math: same line, not escaped, not preceded by a space
+    /// and not followed by a digit (so "$5 and $10" stays prose).
     private static func findClosingDollar(_ chars: [Character], from start: Int) -> Int? {
         var i = start
         while i < chars.count {
-            if chars[i] == "\n" { return nil }
-            if chars[i] == "$" && chars[i - 1] != "\\" {
+            if chars[i] == "\n" || chars[i] == "`" { return nil }
+            if chars[i] == "$" && i + 1 < chars.count && chars[i + 1] == "$" {
+                // `$$` opens or closes display math, never closes inline math.
+                i += 2
+                continue
+            }
+            if chars[i] == "$" && chars[i - 1] != "\\" && !chars[i - 1].isWhitespace {
+                if i + 1 < chars.count && chars[i + 1].isNumber { return nil }
                 return i
             }
             i += 1
-        }
-        return nil
-    }
-
-    public static func formatMathUnicode(_ tex: String) -> String {
-        var s = tex.trimmingCharacters(in: .whitespacesAndNewlines)
-        let replacements: [(String, String)] = [
-            ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\delta", "δ"),
-            ("\\epsilon", "ε"), ("\\theta", "θ"), ("\\lambda", "λ"), ("\\mu", "μ"),
-            ("\\pi", "π"), ("\\sigma", "σ"), ("\\tau", "τ"), ("\\phi", "φ"),
-            ("\\omega", "ω"), ("\\Delta", "Δ"), ("\\Sigma", "Σ"), ("\\Omega", "Ω"),
-            ("\\Pi", "Π"), ("\\sum", "∑"), ("\\prod", "∏"), ("\\int", "∫"),
-            ("\\infty", "∞"), ("\\partial", "∂"), ("\\nabla", "∇"),
-            ("\\sqrt", "√"), ("\\times", "×"), ("\\cdot", "·"), ("\\div", "÷"),
-            ("\\pm", "±"), ("\\mp", "∓"), ("\\neq", "≠"), ("\\ne", "≠"),
-            ("\\leq", "≤"), ("\\le", "≤"), ("\\geq", "≥"), ("\\ge", "≥"),
-            ("\\approx", "≈"), ("\\equiv", "≡"), ("\\in", "∈"), ("\\notin", "∉"),
-            ("\\subset", "⊂"), ("\\subseteq", "⊆"), ("\\cup", "∪"), ("\\cap", "∩"),
-            ("\\forall", "∀"), ("\\exists", "∃"), ("\\to", "→"), ("\\rightarrow", "→"),
-            ("\\leftarrow", "←"), ("\\Rightarrow", "⇒"), ("\\iff", "⇔"),
-            ("\\ldots", "…"), ("\\dots", "…"), ("\\left", ""), ("\\right", ""),
-        ]
-        for (cmd, uni) in replacements {
-            s = s.replacingOccurrences(of: cmd, with: uni)
-        }
-        // Simple \frac{a}{b} -> (a)/(b)
-        while let fracRange = s.range(of: "\\frac{") {
-            let after = fracRange.upperBound
-            if let numEnd = matchingBrace(in: s, openIndex: s.index(before: after)),
-               s.index(after: numEnd) < s.endIndex,
-               s[s.index(after: numEnd)] == "{",
-               let denEnd = matchingBrace(in: s, openIndex: s.index(after: numEnd)) {
-                let num = String(s[after..<numEnd])
-                let denStart = s.index(after: s.index(after: numEnd))
-                let den = String(s[denStart..<denEnd])
-                s.replaceSubrange(fracRange.lowerBound...denEnd, with: "(\(num))/(\(den))")
-            } else {
-                break
-            }
-        }
-        s = s.replacingOccurrences(of: "^0", with: "⁰")
-            .replacingOccurrences(of: "^1", with: "¹")
-            .replacingOccurrences(of: "^2", with: "²")
-            .replacingOccurrences(of: "^3", with: "³")
-            .replacingOccurrences(of: "^n", with: "ⁿ")
-            .replacingOccurrences(of: "_0", with: "₀")
-            .replacingOccurrences(of: "_1", with: "₁")
-            .replacingOccurrences(of: "_2", with: "₂")
-            .replacingOccurrences(of: "_i", with: "ᵢ")
-            .replacingOccurrences(of: "_n", with: "ₙ")
-        return s
-    }
-
-    private static func matchingBrace(in s: String, openIndex: String.Index) -> String.Index? {
-        var depth = 0
-        var idx = openIndex
-        while idx < s.endIndex {
-            let ch = s[idx]
-            if ch == "{" { depth += 1 }
-            else if ch == "}" {
-                depth -= 1
-                if depth == 0 { return idx }
-            }
-            idx = s.index(after: idx)
         }
         return nil
     }
@@ -587,16 +546,22 @@ public struct MarkdownView: View {
             CodeBlockCard(language: language, code: code)
 
         case .mathBlock(_, let tex):
+            let boxed = tex.contains("\\boxed")
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(MarkdownParser.formatMathUnicode(tex))
-                    .font(.system(.callout, design: .serif))
+                Text(TeXUnicode.convert(tex))
+                    .font(.system(.body, design: .serif))
                     .foregroundStyle(palette.foreground)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(palette.codeBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.border, lineWidth: 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(boxed ? palette.accent : palette.border, lineWidth: boxed ? 1.5 : 1)
+            )
 
         case .blockquote(_, let content):
             HStack(alignment: .top, spacing: 10) {

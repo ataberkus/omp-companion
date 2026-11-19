@@ -24,10 +24,13 @@ public struct ComposerView: View {
     @State private var showCamera = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
+    @State private var showUsageSheet = false
 
     // Draft sync tracking
     @State private var lastAppliedDraftAt: Double = 0
     @State private var hasLocalUnpushedEdits: Bool = false
+    /// Text last pulled from or saved to the host; a `text` change equal to it is sync, not a local edit.
+    @State private var lastSyncedText: String = ""
     @State private var draftSaveTask: Task<Void, Never>?
 
     // Autocomplete states
@@ -240,6 +243,23 @@ public struct ComposerView: View {
                         }
                         .buttonStyle(.plain)
 
+                        Button {
+                            showUsageSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "gauge.with.needle")
+                                Text("Usage")
+                            }
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(palette.raised, in: Capsule())
+                            .foregroundStyle(palette.foreground)
+                            .overlay(Capsule().stroke(palette.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Provider usage and quota for the selected model")
+
                         if let pct = session.contextPercent {
                             HStack(spacing: 4) {
                                 Image(systemName: "chart.pie")
@@ -271,8 +291,10 @@ public struct ComposerView: View {
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(isInputFocused ? palette.accentLine : palette.border, lineWidth: 1))
                     .disabled(!store.canPerformMutatingActions)
                     .onChange(of: text) { _, next in
-                        hasLocalUnpushedEdits = true
-                        scheduleDraftSave()
+                        if next != lastSyncedText {
+                            hasLocalUnpushedEdits = true
+                            scheduleDraftSave()
+                        }
                         handleMentionSearch(next)
                         scheduleWordPrediction(next)
                     }
@@ -454,6 +476,9 @@ public struct ComposerView: View {
                 scheduleDraftSave()
             }
         }
+        .sheet(isPresented: $showUsageSheet) {
+            UsagePopoverSheet(store: store, session: session)
+        }
         #if canImport(UIKit)
         .sheet(isPresented: $showCamera) {
             CameraImagePicker { img in
@@ -494,9 +519,16 @@ public struct ComposerView: View {
             await store.refreshCommandsIfNeeded(for: session.id)
             await applyEditorTextIfNeeded()
         }
-        .onChange(of: sessionDraftTimestamp) { _, newAt in
-            if newAt > lastAppliedDraftAt && !hasLocalUnpushedEdits {
-                Task { await pullDraftFromHost(force: false) }
+        .onChange(of: sessionDraftTimestamp) { oldAt, newAt in
+            guard !hasLocalUnpushedEdits, !isSending else { return }
+            if let newAt {
+                if newAt > lastAppliedDraftAt { Task { await pullDraftFromHost(force: false) } }
+            } else if oldAt != nil {
+                // The host dropped this draft: another device sent (or cleared) it.
+                lastSyncedText = ""
+                text = ""
+                attachments = []
+                lastAppliedDraftAt = 0
             }
         }
         .onChange(of: session._editorText?.id) { _, _ in
@@ -511,8 +543,8 @@ public struct ComposerView: View {
         return "Model"
     }
 
-    private var sessionDraftTimestamp: Double {
-        store.snapshot.drafts?[session.draftKey] ?? 0
+    private var sessionDraftTimestamp: Double? {
+        store.snapshot.drafts?[session.draftKey]
     }
 
     // MARK: - Queued Follow-ups Bar
@@ -758,8 +790,9 @@ public struct ComposerView: View {
             return
         }
         let remoteAt = resp.at ?? 0
-        guard force || (remoteAt > lastAppliedDraftAt && !hasLocalUnpushedEdits) else { return }
+        guard force || (remoteAt > lastAppliedDraftAt && !hasLocalUnpushedEdits && !isSending) else { return }
         lastAppliedDraftAt = remoteAt
+        lastSyncedText = resp.text
         text = resp.text
         var rebuilt: [PendingImageAttachment] = []
         for entry in resp.images {
@@ -780,9 +813,11 @@ public struct ComposerView: View {
             guard !Task.isCancelled, let client = store.activeClient else { return }
             let currentText = text
             let wireImages = attachments.map { $0.wireDraftImageEntry() }
-            if let saved = try? await client.saveDraft(key: session.draftKey, text: currentText, images: wireImages) {
+            if let saved = try? await client.saveDraft(key: session.draftKey, text: currentText, images: wireImages),
+               !Task.isCancelled {
                 lastAppliedDraftAt = saved.at ?? lastAppliedDraftAt
-                hasLocalUnpushedEdits = false
+                lastSyncedText = currentText
+                if text == currentText { hasLocalUnpushedEdits = false }
             }
         }
     }
@@ -879,12 +914,21 @@ public struct ComposerView: View {
         let wireImages = currentAttachments.map(\.wireImagePart)
 
         isSending = true
-        draftSaveTask?.cancel()
+        defer { isSending = false }
         predictedSuffix = nil
+        lastSyncedText = ""
         text = ""
         attachments = []
         hasLocalUnpushedEdits = false
-        defer { isSending = false }
+        isInputFocused = false
+
+        // Clear the host draft before sending. A debounced save already on the wire must land
+        // first, or it would re-create the draft and the next poll would pull the sent text back.
+        let pendingSave = draftSaveTask
+        draftSaveTask = nil
+        pendingSave?.cancel()
+        await pendingSave?.value
+        _ = try? await client.saveDraft(key: session.draftKey, text: "", images: [])
 
         do {
             let updated = try await client.sendSessionPrompt(
@@ -895,12 +939,12 @@ public struct ComposerView: View {
                 preview: previews.isEmpty ? nil : previews
             )
             store.integrateSession(updated)
-            _ = try? await client.saveDraft(key: session.draftKey, text: "", images: [])
             store.notificationManager.triggerHaptic(.lightTap)
         } catch {
             text = currentText
             attachments = currentAttachments
             hasLocalUnpushedEdits = true
+            scheduleDraftSave()
             store.showToast(error.localizedDescription, isError: true)
             store.notificationManager.triggerHaptic(.error)
         }
