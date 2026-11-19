@@ -89,7 +89,8 @@ test('quick-start with autoApprove answers approval prompts from the first turn'
   t.after(async () => { if (app) await app.close(); await rm(dir, { recursive: true, force: true }); });
   const omp = fakeOmp({
     answer(id, reply) { this.emit({ type: 'command_output', text: 'reply ' + JSON.stringify({ type: 'extension_ui_response', id, ...reply }) }); },
-    prompt() { this.emit({ type: 'extension_ui_request', id: 'tool', method: 'select', title: 'Allow tool: bash\nCommand: npm test', options: ['Approve', 'Deny'] }); return { agentInvoked: true }; },
+    // A real OMP runs /rename locally; the companion's automatic title (sent right after the first prompt) asks for no turn.
+    prompt(c) { if (c.message === '/rename') return { agentInvoked: false }; this.emit({ type: 'extension_ui_request', id: 'tool', method: 'select', title: 'Allow tool: bash\nCommand: npm test', options: ['Approve', 'Deny'] }); return { agentInvoked: true }; },
     state: () => ({ todoPhases: [], model: { provider: 'test', id: 'test' } }),
   });
   await writeFile(join(dir, 'workspace.json'), JSON.stringify({ projects: [], sessions: [], activity: [] }));

@@ -167,7 +167,7 @@ const message = e => e instanceof Error ? e.message : String(e);
 class OmpSession {
  alive = true; stopping = false; startedAt = Date.now();
  #onEvent; #onExit; #rt; #session; #opened = false; #opening; #closed; #closeDone; #dead; #exitError; #shutdown = false; #tail = Promise.resolve(); #tasks = new Set(); #disposing = false; #exited = false;
- #pending; #ui; #gate; #predictor; #btw; #goal; #results; #settle; #scheduled; #subagents; #plan; #tracker; #persistFailure;
+ #pending; #ui; #gate; #predictor; #btw; #goal; #results; #settle; #scheduled; #subagents; #plan; #tracker; #persistFailure; #settings; #helperRoles = {}; #ownRoles = {};
  // Hosted built-ins (command-hosts.mjs), the session's MCP manager and event buses, and the abort controllers of built-in
  // commands still running (OMP 18.12.6 RPC semantics: host abort and shutdown tear them down).
  #hosted = []; #unhosted = new Set(); #mcp; #buses; #builtinAborts = new Set(); #inputs = new Set();
@@ -225,10 +225,24 @@ class OmpSession {
   Object.assign(options, {
    cwd, settings, authStorage: rt.authStorage, modelRegistry: rt.modelRegistry, hasUI: true, allowSessionModelFallback: false, settingsApproval: false,
    tuiTranscript: false, autoTitle: false, eventBus, subagentEventBus, deferRetryFallbackValidation: true,
+   // OMP compresses skill descriptions with a background model request (its `smol` role) as soon as the session is built,
+   // which a companion session does on open, before the user has sent anything. Held instead until the first prompt
+   // (#input calls startSkillDescriptionCompression): no model request runs at session open.
+   deferSkillDescriptionCompression: true,
    agentId: `companion:${sessionManager.getSessionId()}`,
   });
   const { session, setToolUIContext, modelFallbackMessage, mcpManager } = await sdk.createAgentSession(options);
   this.#session = session; this.#mcp = mcpManager; this.#buses = { eventBus, subagentEventBus };
+  // Helper roles the user has not assigned (OMP's `tiny` titles and `smol` background work) fall back to this session's
+  // model instead of OMP's default role: a session on another provider never sends its helper requests to Claude just
+  // because modelRoles.default is one. A role the user configured is left exactly as configured; a model switch in the
+  // panel moves the roles this session owns with it (#applyHelperRoles).
+  this.#settings = settings;
+  {
+   const roles = settings.getModelRoles?.() ?? {};
+   for (const role of ['tiny', 'smol']) this.#helperRoles[role] = !roles[role] && !parsed[role];
+   this.#applyHelperRoles();
+  }
   // OMP 18.22's root (main.ts): sign-in and sign-out re-resolve the scoped model list through this refresher.
   if (typeof session.setScopedModelsRefresher === 'function' && typeof main.rebuildScopedModels === 'function') {
    session.setScopedModelsRefresher(async () => { await main.rebuildScopedModels(session, parsed, rt.modelRegistry, settings); });
@@ -474,6 +488,9 @@ class OmpSession {
    if (!text.trim() && !images?.length) return 'local';
    // A host that takes over the session's input (a collab guest forwards it to the room's host).
    for (const h of this.#hosted) if (h.intercept?.(text, images, kind)) return 'local';
+   // The session's skill descriptions are compressed by OMP's background model only from here on: the user's own input is
+   // what starts that work (#open holds it), so nothing is asked of a model when the session merely opens.
+   s.startSkillDescriptionCompression?.();
    if (kind !== 'steer' && kind !== 'follow_up') await this.#plan?.beforePrompt();
    if (!current()) return 'cancelled';
    if (kind === 'steer') { await s.steer(text, images); return 'admitted'; }
@@ -693,6 +710,20 @@ class OmpSession {
   });
  }
 
+ // Keeps the helper roles this session owns on its live model: the user configured neither role, so they follow the model
+ // the panel switched to. A role the user configured (before the session opened or since) is never overwritten.
+ #applyHelperRoles() {
+  const model = this.#session?.model; if (!model || !this.#settings) return;
+  const fallback = {};
+  for (const role of ['tiny', 'smol']) {
+   if (!this.#helperRoles[role]) continue;
+   const current = this.#settings.getModelRole(role);
+   if (current && current !== this.#ownRoles[role]) { delete this.#helperRoles[role]; delete this.#ownRoles[role]; continue; }
+   const value = `${model.provider}/${model.id}`;
+   this.#ownRoles[role] = value; fallback[role] = value;
+  }
+  if (Object.keys(fallback).length) this.#settings.overrideModelRoles(fallback);
+ }
  #planIdle() { if (this.#plan?.busy) throw new Error('Plan approval is being prepared'); }
  // Session operations a hosted command can refuse while it owns the session (a collab guest: the room's host runs them).
  // `detail`: for 'session', the host-supplied change function (undefined for the companion's and extensions' changes).
@@ -709,10 +740,11 @@ class OmpSession {
    const model = await this.#findModel(provider, modelId);
    if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
    await this.#session.setModel(model);
+   this.#applyHelperRoles();
    return plain(model);
   });
  }
- cycleModel() { return this.#serial('cycle_model', 30000, async () => { this.#guard('model'); this.#planIdle(); return plain(await this.#session.cycleModel()); }); }
+ cycleModel() { return this.#serial('cycle_model', 30000, async () => { this.#guard('model'); this.#planIdle(); const model = await this.#session.cycleModel(); this.#applyHelperRoles(); return plain(model); }); }
  availableModels() { return this.#serial('get_available_models', 60000, async () => { await this.#session.modelRegistry.awaitBackgroundRefresh(); return plain({ models: this.#session.getAvailableModels() }); }); }
  setThinking(level) { return this.#serial('set_thinking_level', 30000, async () => { this.#guard('thinking'); this.#planIdle(); this.#session.setThinkingLevel(level); }); }
  cycleThinking() { return this.#serial('cycle_thinking_level', 30000, async () => { this.#guard('thinking'); this.#planIdle(); const level = this.#session.cycleThinkingLevel(); return level ? { level } : null; }); }

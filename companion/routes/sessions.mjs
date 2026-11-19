@@ -7,7 +7,7 @@ import { chatImages } from '../images.mjs';
 import { readSessionHead, lastContext, importMessages, cleanTitle } from '../transcript.mjs';
 import { launchOptions } from '../launch.mjs';
 export function sessionRoutes(ctx){
- const {command,start,lock,notice,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,canAppUpdate,appVersion,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
+ const {command,start,lock,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,canAppUpdate,appVersion,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
  const archiveOrPin=async({url,body,json})=>{
     const field=url.pathname==='/api/pin'?'pinned':'archived',other=field==='pinned'?'archived':'pinned',on=body[field]!==false;
     const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
@@ -71,12 +71,16 @@ export function sessionRoutes(ctx){
     const {selector,thinking}=modelChoice(body);const launch=await launchOptions(body.launch);
     if(body.autoApprove!==undefined&&typeof body.autoApprove!=='boolean')throw error('Auto-approve must be true or false.');
     const s=await createSession(p,{title,prompt:'',isolate:body.isolate===true,native:true,selector,thinking,launch,draft:body.draft===true});
-    // A title cut from the prompt is a placeholder: OMP's RPC mode never auto-titles, so /rename asks it to (see event()).
+    // A title cut from the prompt is a placeholder: OMP's RPC mode never auto-titles, so the first prompt asks it to
+    // (session-command.mjs -> titleSession). Nothing is asked of a model before that prompt.
     if(!(typeof body.title==='string'&&body.title.trim())&&!launch?.noTitle)s.autoTitle=true;
-    if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
+    // Advisor and fast mode are applied by the session's first OMP start (runner.mjs), before its first prompt: opening a
+    // session runs no model work, so neither option may start OMP here.
+    if(typeof body.advisor==='boolean'){s.advisorChoice=body.advisor?'on':'off';s.advisor={...s.advisor,enabled:body.advisor};}
+    if(body.fast===true)(s.prefs??={}).fast=true;
     // Before the first prompt, so approval prompts from the first turn are already answered.
     if(body.autoApprove===true)await lock(s.id,()=>command(s,{type:'auto_approve',enabled:true}));
-    if(body.fast===true)await lock(s.id,()=>command(s,{type:'pref',key:'fast',value:true})).catch(e=>notice(s,'warning',e.message));
+    await persist(s);
     json(images.length||raw?await lock(s.id,()=>command(s,{type:'prompt',message:raw,images,preview:body.preview},images)):s,201);return;
    },
    'POST /api/omp-sessions/resume':async({body,json})=>{
@@ -86,7 +90,7 @@ export function sessionRoutes(ctx){
     const onFile=store.sessions.filter(s=>s.sessionFile&&samePath(s.sessionFile,file)),existing=onFile.find(s=>!s.hidden)||onFile[0];
     const gone=k=>k!=='f:'+file&&k!=='f:'+body.file;store.archived=store.archived.filter(gone);store.pinned=store.pinned.filter(gone);
    // Turns a terminal OMP added to the file since the panel imported or last ran it are read first (syncFromFile).
-   if(existing){existing.hidden=false;await lock(existing.id,()=>syncFromFile(existing)).catch(()=>{});if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean')await lock(existing.id,()=>command(existing,{type:'advisor',action:body.advisor?'on':'off'}));json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):(await persist(existing),existing));return;}
+   if(existing){existing.hidden=false;await lock(existing.id,()=>syncFromFile(existing)).catch(()=>{});if(body.model||body.thinking)await lock(existing.id,()=>command(existing,{type:'set_model',model:body.model,thinking:body.thinking}));if(typeof body.advisor==='boolean'){const choice=body.advisor?'on':'off';existing.advisor={...existing.advisor,enabled:body.advisor};if(runners.get(existing.id)?.alive)await lock(existing.id,()=>command(existing,{type:'advisor',action:choice}));else{existing.advisorChoice=choice;await persist(existing);}}json(submitted?await lock(existing.id,()=>command(existing,{type:existing.status==='running'?'follow_up':'prompt',message,images,preview:body.preview},images)):existing);return;}
     let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}
     if(!head.cwd||!await exists(head.cwd))throw error(`The session's working directory no longer exists: ${head.cwd||'unknown'}`);
     const p=await ensureProject(await resolveDir(head.cwd));const title=(head.title||cleanTitle(head.preview)||'Resumed session').slice(0,120);
@@ -97,7 +101,9 @@ export function sessionRoutes(ctx){
     if(!head.title&&!launch?.noTitle)s.autoTitle=true;
     // OMP resumes with the model saved in the transcript; show it until the runner reports its own state.
     if(!selector&&head.model?.includes('/')){const i=head.model.indexOf('/');s.provider=head.model.slice(0,i);s.model=head.model.slice(i+1);}if(!thinking&&head.thinking)s.thinking=head.thinking;
-    if(typeof body.advisor==='boolean')await lock(s.id,()=>command(s,{type:'advisor',action:body.advisor?'on':'off'}));
+    // Applied by the session's first OMP start (runner.mjs), before its first prompt: a resume with no message starts no
+    // model work, and the advisor option alone must not start OMP either.
+    if(typeof body.advisor==='boolean'){s.advisorChoice=body.advisor?'on':'off';s.advisor={...s.advisor,enabled:body.advisor};await persist(s);}
     json(submitted?await lock(s.id,()=>command(s,{type:'prompt',message,images,preview:body.preview},images)):s,201);return;
    },
    'POST /api/archive':archiveOrPin,'POST /api/pin':archiveOrPin,
