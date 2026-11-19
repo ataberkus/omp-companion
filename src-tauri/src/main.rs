@@ -447,8 +447,20 @@ fn offer_update(app: &AppHandle, update: Update) {
     update::offer(app, update);
 }
 
+// Check for updates in the tray: the update window shows checking, up to date, available (Install now / Later) or the error.
+fn check_now(app: &AppHandle) {
+    update::check_now(app);
+}
+
 fn busy_sessions(shell: &Shell) -> u64 {
     shell.host().request(json!({ "cmd": "busy" }), Duration::from_secs(10)).ok().and_then(|r| r["busy"].as_u64()).unwrap_or(0)
+}
+
+// The tray's Install update / Restart to update: the update window asks (version, notes, working sessions, Install
+// now / Later) instead of a native dialog. Install now saves the sessions with the update note (the new version resumes
+// the ones that were working), swaps the new version in and starts it; see src/update.rs.
+fn install_update(app: &AppHandle) {
+    update::show_prompt(app);
 }
 
 fn same_origin(url: &Url, port: u16) -> bool {
@@ -712,13 +724,13 @@ fn build_menu(app: &AppHandle, lan: bool, screen: bool, viewer: Option<&str>, li
     let separator = PredefinedMenuItem::separator(app)?;
     let update_item = match update {
         UpdateItem::Hidden => None,
-        UpdateItem::Update(update::TrayItem::Check) => Some(MenuItem::with_id(app, "check_update", "Check for updates and update", true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Check) => Some(MenuItem::with_id(app, "check_update", "Check for updates", true, None::<&str>)?),
         UpdateItem::Update(update::TrayItem::Downloading(percent)) => {
             let label = percent.map_or("Preparing update…".to_owned(), |p| format!("Downloading update {p} %…"));
             Some(MenuItem::with_id(app, "update_window", label, true, None::<&str>)?)
         }
-        UpdateItem::Update(update::TrayItem::Install(version)) => Some(MenuItem::with_id(app, "update", format!("Install update {version} and restart"), true, None::<&str>)?),
-        UpdateItem::Update(update::TrayItem::Ready(version)) => Some(MenuItem::with_id(app, "update", format!("Restart to update {version}"), true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Install(version)) => Some(MenuItem::with_id(app, "update", format!("Install update {version}…"), true, None::<&str>)?),
+        UpdateItem::Update(update::TrayItem::Ready(version)) => Some(MenuItem::with_id(app, "update", format!("Restart to update {version}…"), true, None::<&str>)?),
         UpdateItem::Update(update::TrayItem::Installing) => Some(MenuItem::with_id(app, "update_window", "Installing update…", true, None::<&str>)?),
     };
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -806,11 +818,8 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         "lan" => toggle_lan(&app),
         "screen" => toggle_screen(&app),
         "quit" => quit(&app, false),
-        // Check for updates and update, and Install update / Restart to update: one click checks, downloads, installs and
-        // restarts, with no prompt (src/update.rs). A check that finds nothing says so with a notification.
-        "update" | "check_update" => {
-            update::auto(&app);
-        }
+        "update" => install_update(&app),
+        "check_update" => check_now(&app),
         "update_window" => update::focus(&app),
         _ => {
             let Some(i) = id.strip_prefix("link:").and_then(|i| i.parse::<usize>().ok()) else { return };
