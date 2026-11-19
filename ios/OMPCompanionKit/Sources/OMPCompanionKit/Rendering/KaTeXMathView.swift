@@ -133,7 +133,7 @@ final class KaTeXHeightCache {
         storage[key] = size
     }
 
-    static func compactKey(prefix: String, content: String) -> String {
+    nonisolated static func compactKey(prefix: String, content: String) -> String {
         if content.count <= 180 {
             return prefix + ":" + content
         }
@@ -721,10 +721,10 @@ private struct KaTeXWebViewRepresentable: UIViewRepresentable {
         private var isPageLoaded = false
         private var lastContentKey: String?
         private var lastThemeSignature: String?
+        private var currentCacheKey: KaTeXHeightCache.Key?
         private var pendingMode: KaTeXRenderMode?
         private var pendingThemeVars: [String: Any]?
         private var pendingThemeSignature: String?
-
         init(
             measuredSize: Binding<CGSize>,
             hasRendered: Binding<Bool>,
