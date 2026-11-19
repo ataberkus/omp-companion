@@ -716,7 +716,7 @@ public final class AppStore {
     // MARK: - Shared Catalog & Metadata Refreshers
 
     public func refreshModelsAndActivity() async {
-        guard let client = activeClient else { return }
+        guard activeClient != nil else { return }
         async let modelsTask: Void = refreshModels()
         async let nativeTask: Void = refreshNativeSessions(force: true)
         async let advisorTask: Void = refreshAdvisorConfig()

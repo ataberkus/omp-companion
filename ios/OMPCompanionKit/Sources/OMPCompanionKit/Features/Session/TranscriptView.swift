@@ -702,7 +702,7 @@ public struct BtwSideSheet: View {
                 Divider().overlay(palette.border)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    if let activeRecordId {
+                    if activeRecordId != nil {
                         HStack {
                             Text("Replying to side thread")
                                 .font(.caption2.weight(.semibold))
