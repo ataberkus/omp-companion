@@ -790,22 +790,39 @@ public struct DashboardView: View {
         }
     }
 
-    /// Rows per section before "Show more": a 1,000-session workspace otherwise builds every row on each update.
-    private static let rowPageSize = 40
+    /// Rows shown up front per section, and across all sections together. With 1,000 sessions in "All" every row was built
+    /// on each update; sections past the shared budget show a few rows each and a "Show more" button.
+    private static let rowPageSize = 15
+    private static let minRowsPerSection = 5
+    private static let totalRowBudget = 120
+
+    /// Per-section row limits for this render, in display order. A section the user expanded keeps its own limit; the
+    /// others share `totalRowBudget`. Collapsed sections pass a count of 0 and use none of it.
+    private func sectionRowLimits(_ sections: [(key: String, count: Int)]) -> [String: Int] {
+        var remaining = Self.totalRowBudget
+        var out: [String: Int] = [:]
+        for section in sections {
+            let limit = rowLimits[section.key] ?? max(Self.minRowsPerSection, min(Self.rowPageSize, remaining))
+            out[section.key] = limit
+            remaining = max(0, remaining - min(limit, section.count))
+        }
+        return out
+    }
 
     @ViewBuilder
-    private func cappedRows(_ items: [DashboardItem], key: String, showFolder: Bool, emphasizeAttention: Bool = false) -> some View {
-        let limit = rowLimits[key] ?? Self.rowPageSize
+    private func cappedRows(_ items: [DashboardItem], key: String, limit: Int?, showFolder: Bool, emphasizeAttention: Bool = false) -> some View {
+        let limit = limit ?? Self.rowPageSize
+        let step = 100
         ForEach(items.count > limit ? Array(items.prefix(limit)) : items) { item in
             sessionRow(item, showFolder: showFolder, emphasizeAttention: emphasizeAttention)
         }
         if items.count > limit {
             Button {
-                rowLimits[key] = limit + Self.rowPageSize * 5
+                rowLimits[key] = limit + step
             } label: {
                 HStack {
                     Image(systemName: "chevron.down")
-                    Text("Show \(min(Self.rowPageSize * 5, items.count - limit)) more · \(items.count - limit) hidden")
+                    Text("Show \(min(step, items.count - limit)) more · \(items.count - limit) hidden")
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(palette.accent)
@@ -822,11 +839,16 @@ public struct DashboardView: View {
         if groups.isEmpty {
             emptyStateSection
         } else {
+            let timeCounts: [(key: String, count: Int)] = groups.map { g in
+                let collapsed = parsedSearch.isEmpty && store.isGroupCollapsed(g.bucket.title)
+                return (key: "time:\(g.bucket.id)", count: collapsed ? 0 : g.items.count)
+            }
+            let limits = sectionRowLimits(timeCounts)
             ForEach(groups) { group in
                 let isCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(group.bucket.title)
                 Section {
                     if !isCollapsed {
-                        cappedRows(group.items, key: "time:\(group.bucket.id)", showFolder: true)
+                        cappedRows(group.items, key: "time:\(group.bucket.id)", limit: limits["time:\(group.bucket.id)"], showFolder: true)
                     }
                 } header: {
                     timeSectionHeader(group.bucket, count: group.items.count, collapsed: isCollapsed)
@@ -842,11 +864,18 @@ public struct DashboardView: View {
         if groups.isEmpty && attention.isEmpty {
             emptyStateSection
         } else {
+            let attnKey = SidebarLayoutHelper.attentionGroupKey
+            let attnCount: Int = (parsedSearch.isEmpty && store.isGroupCollapsed(attnKey)) ? 0 : attention.count
+            let groupCounts: [(key: String, count: Int)] = groups.map { g in
+                let collapsed = parsedSearch.isEmpty && store.isGroupCollapsed(g.key, legacyProjectID: g.project?.id)
+                return (key: "proj:\(g.normKey)", count: collapsed ? 0 : g.items.count)
+            }
+            let limits = sectionRowLimits([(key: attnKey, count: attnCount)] + groupCounts)
             if !attention.isEmpty {
                 let attnCollapsed = parsedSearch.isEmpty && store.isGroupCollapsed(SidebarLayoutHelper.attentionGroupKey)
                 Section {
                     if !attnCollapsed {
-                        cappedRows(attention, key: SidebarLayoutHelper.attentionGroupKey, showFolder: true, emphasizeAttention: true)
+                        cappedRows(attention, key: SidebarLayoutHelper.attentionGroupKey, limit: limits[SidebarLayoutHelper.attentionGroupKey], showFolder: true, emphasizeAttention: true)
                     }
                 } header: {
                     attentionSectionHeader(count: attention.count, collapsed: attnCollapsed)
@@ -872,7 +901,7 @@ public struct DashboardView: View {
                             }
                             .listRowBackground(palette.card)
                         } else {
-                            cappedRows(group.items, key: "proj:\(group.normKey)", showFolder: false)
+                            cappedRows(group.items, key: "proj:\(group.normKey)", limit: limits["proj:\(group.normKey)"], showFolder: false)
                         }
                     }
                 } header: {
