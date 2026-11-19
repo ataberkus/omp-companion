@@ -52,11 +52,11 @@ export function createStorage(ctx){
  }
  // Every place the companion and OMP keep data. A location with parts is the sum of those paths ("Other": whatever in the
  // folder no other row covers), so nothing is counted twice. worktrees/ repeats the rows below as one total.
- const NAMED=[['worktrees','Session worktrees'],['transcripts','Transcripts'],['sessions','Panel session files'],['tool-images','Tool images'],['omp-sdk','SDK copies'],['drafts','Draft images'],['queued-images','Queued images'],['enhance','Enhance images'],['exports','HTML exports'],['workspace.json','Workspace file']];
+ const NAMED=[['worktrees','Session worktrees'],['transcripts','Transcripts'],['sessions','Panel session files'],['tool-images','Tool images'],['omp-sdk','SDK copies'],['drafts','Draft images'],['queued-images','Queued images'],['attachments','PDF attachments'],['enhance','Enhance images'],['exports','HTML exports'],['workspace.json','Workspace file']];
  async function locationList(){
   const agent=ctx.agentDir(),sessions=ctx.ompSessionsDir,blobs=path.join(agent,'blobs'),stats=path.join(os.homedir(),'.omp','stats.db');
   const rest=async(dir,skip)=>(await fs.readdir(dir).catch(()=>[])).map(n=>path.join(dir,n)).filter(p=>!skip.some(s=>samePath(s,p)));
-  const named=NAMED.map(([n,label])=>({key:'data:'+n,label,path:path.join(dataDir,n),group:'companion',...(n==='tool-images'?{cap:ctx.toolImageCap}:{})}));
+  const named=NAMED.map(([n,label])=>({key:'data:'+n,label,path:path.join(dataDir,n),group:'companion',...(n==='tool-images'?{cap:ctx.toolImageCap}:{}),...(n==='attachments'?{clearable:true}:{})}));
   return [...named,
    {key:'data:other',label:'Other companion files',path:dataDir,group:'companion',parts:await rest(dataDir,named.map(l=>l.path))},
    {key:'omp:sessions',label:'OMP session store',path:sessions,group:'omp'},
@@ -191,5 +191,20 @@ export function createStorage(ctx){
    }
   });
  }
- return {storageView:view,scanStorage:scan,removeWorktrees:remove,cleanWorktrees:clean,get storageRun(){return run;}};
+ // Deletes every PDF sent from the dashboard (attachments/, see pdfs.mjs) that no queued message still waits to send.
+ // Sent messages keep their chips, which then answer that the file is gone, and the agent can no longer open them.
+ // Drafts keep their own copies (drafts/).
+ async function clearAttachments(){
+  if(job)throw error(`Wait for the current ${job.kind==='scan'?'scan':'cleanup'} to finish.`,409);
+  const dir=path.join(dataDir,'attachments');let freed=0,count=0;
+  const queued=new Set(store.sessions.flatMap(s=>(s.queuedMessages||[]).flatMap(q=>(q.pdfs||[]).map(p=>p.id+'.pdf'))));
+  for(const name of await fs.readdir(dir).catch(()=>[])){
+   if(!/^[0-9a-f]{64}\.pdf$/.test(name)||queued.has(name))continue;
+   const file=path.join(dir,name),size=await fs.stat(file).then(st=>st.size,()=>0);
+   try{await fs.rm(file);freed+=size;count++;}catch(e){if(e.code!=='ENOENT')throw error(`Could not delete ${name}: ${e.message}`,500);}
+  }
+  const row=state.locations.find(l=>l.key==='data:attachments');if(row)Object.assign(row,await measurePath(dir));
+  return {...view(),cleared:{count,freed}};
+ }
+ return {storageView:view,scanStorage:scan,removeWorktrees:remove,cleanWorktrees:clean,clearAttachments,get storageRun(){return run;}};
 }

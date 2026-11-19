@@ -3,7 +3,7 @@ import { error } from '../util.mjs';
 import { ENHANCE_MODES } from '../enhance-prompts.mjs';
 import { cliCatalog } from '../cli-tools.mjs';
 export function toolRoutes(ctx){
- const {spend,enhanceJobs,stopEnhance,cliJobs,cliProcs,startEnhance,runCli,cliRev,bumpCliRev,storageView,scanStorage,removeWorktrees,cleanWorktrees,store,persist}=ctx;
+ const {spend,enhanceJobs,stopEnhance,cliJobs,cliProcs,startEnhance,runCli,cliRev,bumpCliRev,storageView,scanStorage,removeWorktrees,cleanWorktrees,clearAttachments,store,persist}=ctx;
  return {
    // revs=1: each job carries its revision, and one named in have=<id>.<rev>,… comes back as {id,rev,unchanged:true};
    // catalog=0 leaves out the tools, which only change with the companion. Without revs=1, the reply as before.
@@ -24,5 +24,6 @@ export function toolRoutes(ctx){
    'POST /api/storage/scan':async({json})=>{json(scanStorage(),202);return;},
    'POST /api/storage/remove':async({body,json})=>{json(removeWorktrees(body),202);return;},
    'POST /api/storage/clean':async({body,json})=>{json(cleanWorktrees(body),202);return;},
+   'POST /api/storage/clear-attachments':async({json})=>{json(await clearAttachments());return;},
  };
 }

@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { unhostedMessage } from './command-hosts.mjs';
 import { now, error, text, samePath } from './util.mjs';
 import { textTokens, imagesTokens, chatImages } from './images.mjs';
+import { chatPdfs, storePdfs, splitPdfRefs, withPdfRefs, pdfTokens, attachedText } from './pdfs.mjs';
 import { finishWork, askAnswers, btwView, modelUsage, modelUsageText, todoPhases } from './session-views.mjs';
 import { THINKING, toolSummary, shellRecord, readSessionHead, treeView, userPrompt } from './transcript.mjs';
 import { worktreeChanges, gitLog, gitCommit } from './git.mjs';
@@ -73,6 +74,7 @@ export function createSessionCommand(ctx){
   // /btw typed in the composer goes to OMP's side-question channel instead of the transcript, running or not.
   if(['prompt','steer','follow_up','interrupt'].includes(body.type)&&typeof body.message==='string'&&/^\/btw(\s|$)/.test(body.message.trimStart())){
    if(checkedImages?.length||body.images?.length)throw error('Side questions cannot carry images.');
+   if(body.pdfs?.length||splitPdfRefs(body.message).pdfs.length)throw error('Side questions cannot carry PDFs.');
    return command(s,{type:'btw',question:body.message.trimStart().slice(4)});
   }
   if(body.type==='btw'){
@@ -109,6 +111,9 @@ export function createSessionCommand(ctx){
   if(body.type==='worktree_finish')return finishWorktree(s,body.action,{commit:body.commit===true});
   const prompting=['prompt','steer','follow_up','interrupt'].includes(body.type);
   const images=prompting?(checkedImages??chatImages(body)):[];
+  // PDFs uploaded with this request; ones already stored ride in the message as its "Attached PDF:" lines (a queued
+  // message, a retry, Regenerate) and are folded in below, once the message is known to go out.
+  const pdfs=prompting?chatPdfs(body):[];
   if(prompting&&s._task)throw error(`Wait for OMP to finish first (${s._task.replace(/…$/,'').toLowerCase()}).`);
   if(body.type==='answer'){
    const runner=runners.get(s.id),id=text(body.id,'Question ID',200),q=s.uiRequests?.find(q=>q.id===id);
@@ -141,7 +146,7 @@ export function createSessionCommand(ctx){
    if(i<0)throw error('Queued message was already sent or removed.');
    const item=queue[i];const images=item.hasImage?chatImages({images:JSON.parse(await fs.readFile(queuedImageFile(item.id),'utf8'))}):[];
    const live=['running','queued'].includes(s.status);
-   const result=await command(s,{type:live?'steer':'prompt',message:item.text,preview:item.imagePreview},images,item.id);
+   const result=await command(s,{type:live?'steer':'prompt',message:withPdfRefs(item.text,item.pdfs),preview:item.imagePreview},images,item.id);
    if(result.status==='error')return result;
    s.queuedMessages=(s.queuedMessages||[]).filter(q=>q.id!==item.id);await persist(s);
    if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});
@@ -150,7 +155,7 @@ export function createSessionCommand(ctx){
   if(body.type==='edit_follow_up'||body.type==='cancel_follow_up'){
    const queue=s.queuedMessages||[];const i=queue.findIndex(q=>q.id===body.id);
    if(i<0)throw error('Queued message was already sent or removed.');
-   if(body.type==='edit_follow_up'){const value=body.message;queue[i].text=queue[i].hasImage&&typeof value==='string'&&!value.trim()?'':text(value,'Message',200000);}
+   if(body.type==='edit_follow_up'){const value=body.message;queue[i].text=(queue[i].hasImage||queue[i].pdfs?.length)&&typeof value==='string'&&!value.trim()?'':text(value,'Message',200000);}
    else{const [item]=queue.splice(i,1);await persist(s);if(item.hasImage)await fs.rm(queuedImageFile(item.id),{force:true}).catch(()=>{});return s;}
    await persist(s);return s;
   }
@@ -159,8 +164,11 @@ export function createSessionCommand(ctx){
    if(!m){if(body.type==='cancel_steer')return s;throw error('This steer is no longer available.');}
    if(m.steer==='dropped')throw error('This steer was not delivered.');
    if(body.type==='edit_steer'&&m.hasImage)throw error('Steers with images can only be cancelled.');
+   if(body.type==='edit_steer'&&m.pdfs?.length)throw error('Steers with PDFs can only be cancelled.');
    const runner=runners.get(s.id);
-   const r=m.steer==='pending'&&runner?.alive?await runner.removeQueued(m.hasImage&&m.text==='Image attached'?'':m.text,'steering'):null;
+   // OMP queued the text as sent: the user's own (none for an attachment-only steer) with its PDFs' lines.
+   const own=(m.hasImage&&m.text==='Image attached')||(m.pdfs?.length&&m.text==='PDF attached')?'':m.text;
+   const r=m.steer==='pending'&&runner?.alive?await runner.removeQueued(withPdfRefs(own,m.pdfs),'steering'):null;
    if(!r?.removed){
     if(m.steer==='pending'&&!runner?.alive)throw error('OMP is no longer running.');
     // Delivery can win the cancel request before its transcript echo arrives.
@@ -299,7 +307,7 @@ export function createSessionCommand(ctx){
    const r=await runner.exportHtml(path.join(dir,s.id+'.html'));
    return {name:(s.title.replace(/[^\w.-]+/g,'-').replace(/^-|-$/g,'').slice(0,60)||'omp-session')+'.html',html:await fs.readFile(r?.path||path.join(dir,s.id+'.html'),'utf8')};
   }
-  if(body.type==='branch_messages'){busy();const runner=await start(s);const r=await runner.branchMessages();return {messages:(Array.isArray(r?.messages)?r.messages:[]).map(m=>({entryId:String(m.entryId),text:String(m.text||'').slice(0,300)})).reverse()};}
+  if(body.type==='branch_messages'){busy();const runner=await start(s);const r=await runner.branchMessages();return {messages:(Array.isArray(r?.messages)?r.messages:[]).map(m=>{const own=splitPdfRefs(String(m.text||''));return {entryId:String(m.entryId),text:attachedText(own.text,false,own.pdfs).slice(0,300)};}).reverse()};}
   // OMP's host API has no in-place tree move (navigateTree is TUI and extension only): its `branch` copies the path up to just
   // before a user message into a new session file, keeping the old file intact. Edit last / Regenerate rewind with it too.
   if(body.type==='branch'||body.type==='edit_last'||body.type==='regenerate'){
@@ -328,9 +336,10 @@ export function createSessionCommand(ctx){
   if(['hide','complete'].includes(body.type)&&s.queuedMessages?.length)throw error('Send or remove queued messages before closing this session.');
   if(body.type==='hide'){if(s.status==='running')throw error('Stop the session before removing it from the panel.');runners.get(s.id)?.kill();s.hidden=true;await persist(s);return s;}
   if(body.type==='complete'){if(!['review','paused','done','error'].includes(s.status))throw error('Stop or finish the session before marking it complete.');s.status='done';cancelResume(s,'session marked complete');activity(s,`Completed ${s.title}`,'done');await persist(s);return s;}
-  if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=images.length&&!body.message.trim()?'':text(body.message,'Prompt',200000);const full=contextError(s,body.message,images);if(full)throw error(full);}
+  if(prompting){if(typeof body.message!=='string')throw error('Prompt is required.');body.message=(images.length||pdfs.length)&&!body.message.trim()?'':text(body.message,'Prompt',200000);const full=contextError(s,body.message,images,pdfs);if(full)throw error(full);}
   if(prompting&&/^\/usage(?:\s+show)?$/.test(body.message)){
    if(images.length)throw error('Remove image attachments before checking /usage.');
+   if(pdfs.length)throw error('Remove PDF attachments before checking /usage.');
    const runner=await start(s);await refresh(s,runner);
    const report=modelUsageText(await providerUsage(s));
    append(s,'user',body.message,queuedId||randomUUID());append(s,'assistant',report);s.updatedAt=now();
@@ -349,8 +358,16 @@ export function createSessionCommand(ctx){
   // OMP built-ins that only its terminal UI runs, and the companion does not host: rejected, never sent as text.
   const slashName=prompting?body.message.match(/^\/([^\s:]+)/)?.[1]:undefined;
   if(slashName&&!['goal','plan','plan-review'].includes(slashName)){await start(s);if(s._unhosted?.includes(slashName))throw error(unhostedMessage(slashName),409);}
+  // The message as it goes out: the user's own text, then a line per PDF naming its stored file, which the agent opens
+  // with its read tool. The transcript shows the own text and the PDFs as chips (msg.pdfs).
+  let shown=prompting?body.message:'',attachedPdfs=[];
+  if(prompting){
+   const own=splitPdfRefs(body.message),stored=await storePdfs(dataDir,pdfs),byId=new Map();
+   for(const p of [...own.pdfs,...stored])if(!byId.has(p.id))byId.set(p.id,p);
+   attachedPdfs=[...byId.values()];shown=own.text;body.message=withPdfRefs(shown,attachedPdfs);
+  }
   if(body.type==='follow_up'&&['running','queued'].includes(s.status)){
-   const item={id:randomUUID(),text:body.message,hasImage:!!images.length,imagePreview:images.length?body.preview:undefined,at:now()};
+   const item={id:randomUUID(),text:shown,hasImage:!!images.length,imagePreview:images.length?body.preview:undefined,...(attachedPdfs.length?{pdfs:attachedPdfs}:{}),at:now()};
    if(images.length){await fs.mkdir(path.dirname(queuedImageFile(item.id)),{recursive:true,mode:0o700});await fs.writeFile(queuedImageFile(item.id),JSON.stringify(images),{mode:0o600});}
    (s.queuedMessages??=[]).push(item);await persist(s);return s;
   }
@@ -392,7 +409,7 @@ export function createSessionCommand(ctx){
    const kind=slashCommand?'prompt':interrupt?'interrupt':body.type,wasRunning=['running','queued'].includes(s.status);
    // A message of the user's own supersedes a pending automatic resume; slash commands (say /usage) leave it armed. Only the
    // companion's own resend after a lost connection (rate-limit.mjs, body.resume) keeps counting resends in a row.
-   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(!body.resume)delete s._connectionAttempt;if(body.type==='prompt'||interrupt){delete s._streamId;delete s._thinkId;}s.status='running';s.error=undefined;}msg=append(s,'user',body.message||'Image attached',queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}}
+   let msg;if(prompting){if(!slashCommand){cancelResume(s);if(!body.resume)delete s._connectionAttempt;if(body.type==='prompt'||interrupt){delete s._streamId;delete s._thinkId;}s.status='running';s.error=undefined;}msg=append(s,'user',attachedText(shown,images.length>0,attachedPdfs),queuedId||randomUUID());if(body.type==='steer'&&!slashCommand)msg.steer='pending';if(images.length){msg.hasImage=true;if(body.preview)msg.imagePreview=body.preview;}if(attachedPdfs.length)msg.pdfs=attachedPdfs;}
    const id=randomUUID();
    if((kind==='prompt'||interrupt)&&!slashCommand){s._promptId=id;s._promptMsg=msg.id;}
    if(interrupt){s._interrupt=id;delete s._retry;}
@@ -420,10 +437,14 @@ export function createSessionCommand(ctx){
   const win=s.contextWindow||(sel&&ctx.modelCache?.data.models.find(m=>m.selector===sel)?.contextWindow);
   return win>0?{left:Math.max(0,win-(s.contextTokens||0)),win}:null;
  }
- function contextError(s,message,images){
-  const c=images.length?contextLeft(s):null;if(!c)return '';
-  const img=imagesTokens(images),txt=textTokens(message),n=v=>v.toLocaleString('en-US');
-  return img+txt>c.left?`Not enough context left for this message: it needs about ${n(img+txt)} tokens (${images.length} ${images.length===1?'image':'images'} ≈ ${n(img)}, text ≈ ${n(txt)}), but only ${n(c.left)} of ${n(c.win)} tokens remain. Remove some images, or run /compact or start a new session.`:'';
+ // Images and PDFs, new (pdfs: chatPdfs) or already in the message as its "Attached PDF:" lines, against the context left.
+ function contextError(s,message,images,pdfs=[]){
+  const own=splitPdfRefs(message),docs=[...pdfs.map(p=>({pages:p.pages,bytes:p.bytes.length})),...own.pdfs];
+  const c=images.length||docs.length?contextLeft(s):null;if(!c)return '';
+  const img=imagesTokens(images),doc=docs.reduce((t,p)=>t+pdfTokens(p,c.left),0),txt=textTokens(own.text),n=v=>v.toLocaleString('en-US');
+  if(img+doc+txt<=c.left)return '';
+  const parts=[images.length?`${images.length} ${images.length===1?'image':'images'} ≈ ${n(img)}`:'',docs.length?`${docs.length} ${docs.length===1?'PDF':'PDFs'} ≈ ${n(doc)}`:'',`text ≈ ${n(txt)}`].filter(Boolean).join(', ');
+  return `Not enough context left for this message: it needs about ${n(img+doc+txt)} tokens (${parts}), but only ${n(c.left)} of ${n(c.win)} tokens remain. Remove some ${images.length&&docs.length?'attachments':images.length?'images':'PDFs'}, or run /compact or start a new session.`;
  }
  async function sendQueued(s){
   while(s.queuedMessages?.length&&s.status==='running'){
@@ -431,9 +452,10 @@ export function createSessionCommand(ctx){
    // unless their combined text and images don't fit the context left; then they go one at a time.
    let batch=s.prefs?.followUpMode==='all'?s.queuedMessages.slice():[s.queuedMessages[0]];
    const load=async list=>{const out=[];for(const q of list)if(q.hasImage)out.push(...JSON.parse(await fs.readFile(queuedImageFile(q.id),'utf8')));return out;};
-   let raw=await load(batch);if(batch.length>1&&contextError(s,batch.map(q=>q.text).join('\n\n'),raw)){batch=[batch[0]];raw=await load(batch);}
+   const joined=list=>withPdfRefs(list.map(q=>q.text).filter(Boolean).join('\n\n'),list.flatMap(q=>q.pdfs??[]));
+   let raw=await load(batch);if(batch.length>1&&contextError(s,joined(batch),raw)){batch=[batch[0]];raw=await load(batch);}
    const item=batch[0],images=raw.length?chatImages({images:raw}):[];
-   const message=batch.length>1?batch.map(q=>q.text).filter(Boolean).join('\n\n'):item.text;
+   const message=batch.length>1?joined(batch):withPdfRefs(item.text,item.pdfs);
    const preview=batch.length>1?batch.flatMap(q=>[].concat(q.imagePreview??[])):item.imagePreview;
    s.status='review';
    // A message that alone no longer fits stays queued, holding back the ones behind it: the user can compact, edit or remove it.

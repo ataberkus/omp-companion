@@ -5,6 +5,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { now, error, contentText, samePath, clip, antigravityFailure } from './util.mjs';
 import { toolImages } from './images.mjs';
+import { splitPdfRefs, attachedText } from './pdfs.mjs';
 import { startWork, finishWork, askQuestion, parseAdvisorStatus, btwView, subagentView, goalView, loopView } from './session-views.mjs';
 import { advisorMessage, tanMessage, biliMessage, collabPrompt, thinkingText, toolRecord, editFiles, toolSummary, readTail, usageTokens, importMessages, entryMessages, entryPrompt, capMessages, hasPrompt, readSessionHead, lastContext } from './transcript.mjs';
 import { launchArgs, agySessionArgs } from './launch.mjs';
@@ -106,12 +107,13 @@ export function createRunner(ctx){
   if(f.type==='message_start'&&f.message?.role==='user'&&f.mirrored){
    // A collab host's own prompt, mirrored into a guest's session: shown as it arrives. Its timestamp binds it to the
    // replica's entry (bindEntries), as a local prompt's does.
-   const said=contentText(f.message.content).trim(),hasImage=Array.isArray(f.message.content)&&f.message.content.some(c=>c?.type==='image');
-   if((said||hasImage)&&!(f.message.synthetic&&f.message.attribution==='agent')){const msg=append(s,'user',said||'Image attached');if(msg){if(hasImage)msg.hasImage=true;if(typeof f.message.timestamp==='number')msg.ompAt=f.message.timestamp;}}
+   const own=splitPdfRefs(contentText(f.message.content).trim()),said=own.text.trim(),hasImage=Array.isArray(f.message.content)&&f.message.content.some(c=>c?.type==='image');
+   if((said||hasImage||own.pdfs.length)&&!(f.message.synthetic&&f.message.attribution==='agent')){const msg=append(s,'user',attachedText(said,hasImage,own.pdfs));if(msg){if(hasImage)msg.hasImage=true;if(own.pdfs.length)msg.pdfs=own.pdfs;if(typeof f.message.timestamp==='number')msg.ompAt=f.message.timestamp;}}
   }
   else if(f.type==='message_start'&&f.message?.role==='user'){
    // Steers wait for a tool/turn boundary; OMP echoes them when read, so place them where the agent actually saw them.
-   const said=contentText(f.message.content).trim(),i=s.messages.findIndex(m=>m.steer&&(m.text.trim()===said||(m.hasImage&&m.text==='Image attached'&&!said)));
+   // A steer's PDFs come back as its "Attached PDF:" lines; the transcript holds them apart (msg.pdfs).
+   const said=splitPdfRefs(contentText(f.message.content).trim()).text.trim(),i=s.messages.findIndex(m=>m.steer&&(m.text.trim()===said||(!said&&((m.hasImage&&m.text==='Image attached')||(m.pdfs?.length&&m.text==='PDF attached')))));
    if(i>=0){const [m]=s.messages.splice(i,1);delete m.steer;m.at=now();if(typeof f.message.timestamp==='number')m.ompAt=f.message.timestamp;place(s,m);}
    // Otherwise the first user message of a prompt's run is that prompt. OMP stores this exact message, timestamp included,
    // as its session entry; bindEntries turns the timestamp into the entry ID that branching from this message needs.
@@ -138,7 +140,7 @@ export function createRunner(ctx){
    const prompt=m.role==='custom'&&collabPrompt(m,randomUUID(),now());
    if(prompt){const own=f.mirrored&&[...s.messages].reverse().find(x=>x.role==='user'&&!x.from&&!x.entryId&&!x.ompAt&&x.text.trim()===prompt.text.trim());
     if(own){own.from=prompt.from;if(own.steer){s.messages.splice(s.messages.indexOf(own),1);delete own.steer;own.at=now();place(s,own);}}
-    else{const msg=append(s,'user',prompt.text,prompt.id);if(msg){msg.from=prompt.from;if(prompt.hasImage)msg.hasImage=true;}}}
+    else{const msg=append(s,'user',prompt.text,prompt.id);if(msg){msg.from=prompt.from;if(prompt.hasImage)msg.hasImage=true;if(prompt.pdfs)msg.pdfs=prompt.pdfs;}}}
    else if(m.role==='custom'){const card=advisorMessage(m,randomUUID(),now());if(card){const saved=append(s,'advisor',card.text,card.id);saved.notes=card.notes;}const tan=tanMessage(m,randomUUID(),now());if(tan)append(s,'system',tan.text,tan.id);const bili=biliMessage(m,randomUUID(),now());if(bili)append(s,'system',bili.text,bili.id);}
   }
   if(f.type==='tool_execution_start'){const tool=toolRecord(f.toolName,f.args,f.intent);const msg=append(s,'tool',toolSummary(tool),'tool-'+(f.toolCallId||randomUUID()));if(msg){msg.tool=tool;msg.startedAt=now();}}

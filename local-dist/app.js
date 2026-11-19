@@ -768,9 +768,9 @@
         <div class="composer">
           <div class="ghost" id="ghost" aria-hidden="true" hidden></div>
           <textarea id="input" rows="1" aria-label="Message OMP" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash"></textarea>
-          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
-          <div class="composer-bar"><button type="button" class="btn sm ghost composer-toggle" data-act="composerToggle" aria-expanded="true" aria-controls="composerTools" aria-label="Hide composer options" title="Hide composer options"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><span class="bar-tools" id="composerTools"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button><span id="enhanceSlot"></span><span id="commitSlot"></span></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
+          <div class="composer-bar"><button type="button" class="btn sm ghost composer-toggle" data-act="composerToggle" aria-expanded="true" aria-controls="composerTools" aria-label="Hide composer options" title="Hide composer options"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button><span class="bar-tools" id="composerTools"><span id="modelSlot"></span><button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach images or PDFs" title="Attach images or PDFs">＋ Attach</button><span id="enhanceSlot"></span><span id="commitSlot"></span></span><span class="bar-end"><span class="hint" id="hint"></span><span id="buttons"></span></span></div>
         </div>
       </div>`;
     const input = $('#input');
@@ -793,15 +793,16 @@
       if ($('#questions')?.hidden) input.focus();
     }, 0);
   }
-  // Composer drafts per view, text and attached images, saved to the companion (debounced) so they survive reloads and show
-  // up on other devices. draftSynced: view → { text, names, at } last agreed with the server, names being the attached
-  // images' names. A remote change replaces the composer only while it still shows that draft; an edit made here since
-  // then (text or images) is saved over the remote one instead.
+  // Composer drafts per view, text and attached images and PDFs, saved to the companion (debounced) so they survive reloads
+  // and show up on other devices. draftSynced: view → { text, names, at } last agreed with the server, names being the
+  // attachments' names (images, then PDFs). A remote change replaces the composer only while it still shows that draft;
+  // an edit made here since then (text or attachments) is saved over the remote one instead.
   // draftSaving: view → its save under way; draftRetry: views whose last save failed (offline, companion error).
   const draftSynced = new Map(), draftTimers = new Map(), draftSaving = new Map(), draftRetry = new Set();
   const draftKey = view => /^(session|native):./.test(view) ? view : '';
-  const viewImages = view => S.attachments.filter(a => a.view === view);
-  const imageNames = list => list.map(a => a.name).join('\n');
+  // A PDF still being read (attachPdf) is not part of the draft until it is ready.
+  const viewImages = view => S.attachments.filter(a => a.view === view && !a.loading);
+  const imageNames = list => [...list.filter(a => a.image), ...list.filter(a => a.pdf)].map(a => a.name).join('\n');
   function saveDraft(view) {
     if (!draftKey(view) || !S.token) return;
     clearTimeout(draftTimers.get(view));
@@ -815,11 +816,11 @@
     const text = Map.prototype.get.call(drafts, view) || '', list = viewImages(view), names = imageNames(list), known = draftSynced.get(view);
     const sameImages = (known?.names ?? '') === names;
     if ((known?.text ?? '') === text && sameImages) return;
-    // Images go only when the set changed: a text edit leaves the companion's copies as they are.
-    const images = sameImages ? {} : { images: list.map(({ image, preview, name, tokens }) => ({ image, preview, name, tokens })) };
+    // Attachments go only when the set changed: a text edit leaves the companion's copies as they are.
+    const images = sameImages ? {} : { images: list.filter(a => a.image).map(({ image, preview, name, tokens }) => ({ image, preview, name, tokens })), pdfs: list.filter(a => a.pdf).map(({ pdf, name, tokens }) => ({ pdf, name, tokens })) };
     const save = api('/draft', { key: view, text, ...images }, opts).then(r => {
       draftRetry.delete(view);
-      const synced = (r.images || []).join('\n');
+      const synced = [...(r.images || []), ...(r.pdfs || [])].join('\n');
       draftSynced.set(view, { text, names: synced, at: r.at });
       // The companion kept other images (another device changed them since the last pull): save this composer's over them.
       if (synced !== names) saveDraft(view);
@@ -853,15 +854,16 @@
     // A save made or answered meanwhile is newer than this answer: the next poll compares against it.
     if (S.view !== view || draftTimers.has(view) || draftSaving.has(view) || draftSynced.get(view) !== known || S.enhance.has(view)) return;
     const list = viewImages(view), local = Map.prototype.get.call(drafts, view) || '', localNames = imageNames(list);
-    const images = (remote.images || []).map(r => r.image ? { view, image: r.image, preview: r.preview, name: r.name, tokens: r.tokens } : list.find(a => a.name === r.name));
-    if (images.some(a => !a)) return; // an image sent by name is gone here: the next poll fetches the draft whole
+    const images = (remote.images || []).map(r => r.image ? { view, image: r.image, preview: r.preview, name: r.name, tokens: r.tokens } : list.find(a => a.image && a.name === r.name))
+      .concat((remote.pdfs || []).map(r => r.pdf ? { view, pdf: r.pdf, name: r.name, tokens: r.tokens, pages: r.pages ?? null, bytes: r.bytes, title: r.title || '' } : list.find(a => a.pdf && a.name === r.name)));
+    if (images.some(a => !a)) return; // an attachment sent by name is gone here: the next poll fetches the draft whole
     const remoteNames = imageNames(images);
     draftSynced.set(view, { text: remote.text, names: remoteNames, at: remote.at });
     if (local !== (known?.text ?? '') || localNames !== (known?.names ?? '')) { if (local !== remote.text || localNames !== remoteNames) saveDraft(view); return; }
     if (remote.text) Map.prototype.set.call(drafts, view, remote.text); else Map.prototype.delete.call(drafts, view);
     const input = $('#input');
     if (input && input.value !== remote.text) { input.value = remote.text; autosize(input); }
-    if (localNames !== remoteNames) S.attachments = S.attachments.filter(a => a.view !== view).concat(images);
+    if (localNames !== remoteNames) S.attachments = S.attachments.filter(a => a.view !== view || a.loading).concat(images);
     update(); renderAttachments();
   }
   class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
@@ -1140,7 +1142,7 @@
   // ✨ plus its mode picker; the picker saves the mode for every composer (same as Settings › Enhance › Mode) and hides while one runs.
   function enhanceButton(view, draft) {
     if (S.enhance.has(view)) return `<button class="btn sm ghost enhance-btn on" data-act="enhance" type="button" aria-label="Cancel enhance" title="Stop enhancing (Ctrl+Shift+E)">✕</button>`;
-    const images = S.attachments.some(a => a.view === view);
+    const images = S.attachments.some(a => a.view === view && a.image);
     const why = S.sending.has(view) ? 'Wait until the message is sent'
       : !enhanceBlocked(draft, images) ? '' : draft.trim() ? 'Slash and shell commands are not enhanced' : 'Type a draft or attach an image to enhance';
     const mode = S.store?.enhanceMode || 'full';
@@ -1239,7 +1241,7 @@
   const homeStartBody = l => ({ path: l.path, isolate: S.home.isolate && l.isGit, model: S.home.model, thinking: S.home.thinking, fast: !!S.home.fast && fastOk(S.home.model), autoApprove: !!S.home.autoApprove, ...(S.home.advisor === undefined ? {} : { advisor: S.home.advisor }), ...(S.home.launch ? { launch: S.home.launch } : {}) });
   async function enhanceFromHome() {
     const l = S.home.listing, home = S.view;
-    if (!l || S.sending.has(home) || enhanceBlocked(S.home.prompt, attached().length)) return;
+    if (!l || S.sending.has(home) || enhanceBlocked(S.home.prompt, attached().filter(a => a.image).length)) return;
     S.sending.set(home, {}); S.homeStarts++; renderHome();
     const end = () => { S.sending.delete(home); S.homeStarts--; flushDiscards(); if (current().kind === 'home') renderHome(); };
     let s;
@@ -1264,7 +1266,7 @@
     if (S.view === view) { const input = $('#input'); if (input) { input.value = draft; autosize(input); } update(); renderAttachments(); }
     else { location.hash = '#/s/' + s.id; route(); }
     end();
-    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved) }, draft, job);
+    startEnhance(view, { session: s.id, text: draft.trim(), ...imagePayload(moved.filter(a => a.image)) }, draft, job);
   }
   // A draft session left for New session, another session or history is discarded; its own sub-views and
   // Settings/Tools/Spend keep it. An enhance still running keeps it as is, checked first so no deferral below can queue it:
@@ -1316,8 +1318,9 @@
     if (running) { S.enhance.delete(view); if (running.id) api('/enhance/stop', { id: running.id }).catch(() => {}); refreshComposer(); return; }
     if (c.kind === 'home') return enhanceFromHome();
     const input = $('#input');
-    if (!input || enhanceBlocked(input.value, attached().length) || S.sending.has(view)) return;
-    const text = input.value.trim(), images = imagePayload(attached());
+    if (!input || enhanceBlocked(input.value, attached().filter(a => a.image).length) || S.sending.has(view)) return;
+    // Enhance reads images only: PDFs stay attached and go with the message the enhanced draft becomes.
+    const text = input.value.trim(), images = imagePayload(attached().filter(a => a.image));
     let body;
     if (c.kind === 'session') {
       body = { session: c.id, text, ...images };
@@ -1855,7 +1858,7 @@
       if (u && !u.steer && (u.entryId || u.ompAt)) { for (let i = lastUser + 1; i < messages.length; i++) if (messages[i].role === 'assistant') lastReply = i; }
       else lastUser = -1;
     }
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.tool?.status, tail?.id, tail?.text?.length, tail?.text?.slice(-64), runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.pdfs?.length, last?.tool?.status, tail?.id, tail?.text?.length, tail?.text?.slice(-64), runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, pending?.pdfs?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
     const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
@@ -1903,7 +1906,7 @@
       }
       const user = m.role === 'user';
       const editing = user && m.steer === 'pending' && S.editSteer?.id === m.id;
-      const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
+      const steer = user && m.steer === 'pending' ? `<span class="steer-state" title="OMP reads steers at the next tool or turn boundary">Steering · waiting for OMP</span>${editing ? '' : `${m.hasImage || m.pdfs?.length ? '' : `<button class="steer-btn" data-steeract="edit_steer" data-id="${esc(m.id)}">Edit</button>`}<button class="steer-btn" data-steeract="cancel_steer" data-id="${esc(m.id)}">Cancel</button>`}`
         : user && m.steer === 'received' ? '<span class="steer-state" title="OMP has taken this steer; it can no longer be edited or cancelled">Steering · delivery started</span>'
         : user && m.steer === 'dropped' ? '<span class="steer-state dropped" title="The turn ended before OMP read this steer">Not delivered</span>' : '';
       const history = !opts.history || m.steer ? ''
@@ -1914,14 +1917,17 @@
       const ctx = [steer, history, editing ? S.editSteer.text : '\u0002', opts.speaker || '', !user && m.model ? modelName(m.model) : ''].join('\u0001');
       add('msg:' + m.id, cachedPart(msgParts, [m], ctx, () => {
         const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
+        // PDFs as chips that open the stored file; one with no stored details (an older message) gets the label instead.
+        const docs = m.pdfs?.length ? pdfChips(m.pdfs, true) : user && m.text === 'PDF attached' ? '<span class="msg-image-label">PDF attached</span>' : '';
+        const own = (m.hasImage && m.text === 'Image attached') || (user && m.text === 'PDF attached') ? '' : md(m.text, user);
         const body = editing ? `<div class="bubble steer-edit"><textarea data-steerinput rows="3" aria-label="Edit steer">${esc(S.editSteer.text)}</textarea><div class="queued-edit-actions"><button class="btn sm ghost" data-steerclose>Discard</button><button class="btn sm primary" data-steersave="${esc(m.id)}">Save ↵</button></div></div>`
-          : `<div class="bubble md">${m.hasImage && m.text === 'Image attached' ? '' : md(m.text, user)}${image}</div>`;
+          : `<div class="bubble md">${own}${image}${docs}</div>`;
         return `<div class="msg ${user ? 'user' : 'assistant'}${m.steer ? ' steer-' + esc(m.steer) : ''}" data-key="msg:${esc(m.id)}"><div class="who">${user ? (m.from ? `<span title="Sent from a collab session">${esc(m.from)}</span>` : 'You') : esc(opts.speaker || 'OMP')}${!user && m.model ? `<span class="who-model">${esc(modelName(m.model))}</span>` : ''}${steer}${history}<time>${esc(clock(m.at))}</time></div>
         ${body}</div>`;
       }));
     }
     if (pending && !messages.some(m => m.role === 'user' && m.text === pending.text && new Date(m.at) >= pending.at - 5000)) {
-      add('pending', `<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}</div></div>`);
+      add('pending', `<div class="msg user"><div class="who">You<time>sending…</time></div><div class="bubble md">${pending.text ? md(pending.text, true) : ''}${images(pending.imagePreview)}${pdfChips(pending.pdfs, false)}</div></div>`);
     }
     if (opts.compacting || opts.task || opts.retry || (status === 'running' && ((tail?.role !== 'tool' && tail?.role !== 'thinking') || idle >= 20)) || status === 'queued' || (pending && status !== 'history')) {
       let label = opts.task ? esc(opts.task) : opts.compacting ? 'Compacting context…' : status === 'queued' || pending ? 'Starting OMP…' : 'OMP is working…';
@@ -3074,7 +3080,7 @@
     if (!open) {
       const q = items[0];
       el.classList.add('compact');
-      setIfChanged(el, `<div class="queued-row" title="${esc(when)}"><strong>${count}</strong><span class="queued-preview">${q.hasImage ? '<span class="queued-tag">[Image]</span> ' : ''}${esc(q.text)}</span>${queuedActions(q, waiting)}${toggle}</div>`);
+      setIfChanged(el, `<div class="queued-row" title="${esc(when)}"><strong>${count}</strong><span class="queued-preview">${q.hasImage ? '<span class="queued-tag">[Image]</span> ' : ''}${q.pdfs?.length ? '<span class="queued-tag">[PDF]</span> ' : ''}${esc(q.text)}</span>${queuedActions(q, waiting)}${toggle}</div>`);
       return;
     }
     el.classList.remove('compact');
@@ -3084,7 +3090,7 @@
         return `<div class="queued-item"><span class="queued-number">${i + 1}</span><div class="queued-content">
           ${editing ? `<textarea data-qinput="${esc(q.id)}" rows="3" aria-label="Edit queued message">${esc(q.text)}</textarea>
             <div class="queued-edit-actions"><button class="btn sm primary" data-qsave="${esc(q.id)}">Save</button><button class="btn sm ghost" data-qclose>Cancel</button></div>`
-          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<button type="button" class="btn-reset" data-lightbox aria-label="View queued image full size"><img src="${esc(src)}" alt="Queued image"></button>`).join('')}<span>Image attached</span></div>` : ''}`}</div>
+          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : q.pdfs?.length ? 'PDF attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<button type="button" class="btn-reset" data-lightbox aria-label="View queued image full size"><img src="${esc(src)}" alt="Queued image"></button>`).join('')}<span>Image attached</span></div>` : ''}${pdfChips(q.pdfs, true)}`}</div>
           ${queuedActions(q, waiting)}</div>`;
       }).join(''));
   }
@@ -3121,8 +3127,8 @@
     renderAttachments();
     let placeholder, hintText, btns, status = '';
     const has = !!input.value.trim() || !!attachment;
-    // While an enhance runs the draft is about to be replaced: nothing can be sent from it.
-    const enhancing = S.enhance.get(S.view), sending = S.sending.has(S.view), busy = sending || !!enhancing;
+    // While an enhance runs the draft is about to be replaced: nothing can be sent from it. A PDF still being read holds Send too.
+    const enhancing = S.enhance.get(S.view), sending = S.sending.has(S.view), busy = sending || !!enhancing || attachLoading(attached());
     const command = /^\/\S/.test(input.value.trim());
     const choice = !s && native ? S.nativeChoice.get(current().file) : null;
     const nAdv = !s && native ? S.nativeAdv.get(current().file) ?? S.advCfg?.enabled : undefined;
@@ -3652,7 +3658,148 @@
   const safeImg = src => /^(data:image\/|blob:|https?:|\/)/i.test(String(src || ''));
   const images = list => [].concat(list || []).filter(safeImg).map(src => `<button type="button" class="msg-image-btn" aria-label="View attached image full size"><img class="msg-image" src="${esc(src)}" alt="Attached image"></button>`).join('');
   const attached = () => S.attachments.filter(a => a.view === S.view);
-  const imagePayload = list => list.length ? { images: list.map(a => a.image), preview: list.map(a => a.preview) } : {};
+  // Images as images and previews, PDFs as {data,name}; a list without one kind sends none of its keys.
+  const imagePayload = list => {
+    const imgs = list.filter(a => a.image), docs = list.filter(a => a.pdf);
+    return { ...(imgs.length ? { images: imgs.map(a => a.image), preview: imgs.map(a => a.preview) } : {}), ...(docs.length ? { pdfs: docs.map(a => ({ data: a.pdf.data, name: a.name })) } : {}) };
+  };
+  // ---------- PDF attachments ----------
+  // A PDF goes up whole (base64) with the message; the companion stores it and adds a line naming its path, which OMP's
+  // read tool opens. Same limits and estimates as companion/pdfs.mjs: 20 MB a file, ~1,500 tokens a page.
+  const PDF_MAX = 20 * 1024 * 1024;
+  const isPdf = f => f?.type === 'application/pdf' || /\.pdf$/i.test(f?.name || '');
+  const attachFile = f => isPdf(f) ? attachPdf(f) : attachImage(f);
+  const attachBytes = a => a.image ? a.image.data.length + a.preview.length : a.pdf ? a.pdf.data.length : 0;
+  const attachLoading = list => list.some(a => a.loading);
+  const pdfName = n => String(n || '').replace(/[\\/\u0000-\u001f\u007f]+/g, '_').trim();
+  const pdfPages = n => n > 0 ? `${n} ${n === 1 ? 'page' : 'pages'}` : '';
+  const pdfEstimate = (pages, bytes) => pages > 0 ? pages * 1500 : Math.ceil(bytes / 16);
+  // Keeps both ends of a long name, the extension included: "Quarterly report for…ance 2024.pdf".
+  const midTrunc = (s, n = 36) => s.length <= n ? s : s.slice(0, Math.ceil((n - 1) * .6)) + '…' + s.slice(s.length - Math.floor((n - 1) * .4));
+  const PDF_ICON = '<svg class="pdf-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="currentColor" d="M6 2h8l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm7 1.5V8h4.5L13 3.5zM7.5 13v4h1v-1.3h.7a1.35 1.35 0 0 0 0-2.7H7.5zm1 1h.7a.35.35 0 0 1 0 .7h-.7V14zm3-1v4h1.2a2 2 0 0 0 0-4H11.5zm1 1h.2a1 1 0 0 1 0 2h-.2v-2zm3-1v4h1v-1.5h1.3v-1h-1.3V14h1.5v-1H15.5z"/></svg>';
+  const pdfMeta = p => [p.loading ? 'Reading…' : p.bytes ? fmtSize(p.bytes) : '', p.loading ? '' : pdfPages(p.pages)].filter(Boolean).join(' · ');
+  // The line the companion adds for each stored PDF (pdfRef in companion/pdfs.mjs): a retry rebuilds it from the
+  // message's stored details so the resend points at the same file.
+  const pdfRefLine = p => `Attached PDF: ${p.name} (${p.pages > 0 ? pdfPages(p.pages) : p.bytes >= 1048576 ? (p.bytes / 1048576).toFixed(p.bytes >= 10485760 ? 0 : 1) + ' MB' : Math.max(1, Math.round((p.bytes || 0) / 1024)) + ' KB'}) — ${p.path}`;
+  // Chips for a sent or queued message's PDFs; open: each one with a stored ID opens the file in a new tab.
+  const pdfChips = (list, open) => list?.length ? `<div class="pdf-chips">${list.map(p => {
+    const meta = pdfMeta(p), tip = p.title ? `${p.name}\n${p.title}` : p.name;
+    const inner = `${PDF_ICON}<span class="pdf-chip-text"><span class="pdf-chip-name">${esc(midTrunc(p.name))}</span>${meta ? `<span class="pdf-chip-meta">${esc(meta)}</span>` : ''}</span>`;
+    return open && /^[0-9a-f]{64}$/.test(p.id || '')
+      ? `<button type="button" class="pdf-chip" data-pdf-open="${esc(p.id)}" data-name="${esc(p.name)}" title="${esc(tip)}" aria-label="${esc(`Open ${p.name}${meta ? ', ' + meta : ''}`)}">${inner}</button>`
+      : `<span class="pdf-chip" title="${esc(tip)}">${inner}</span>`;
+  }).join('')}</div>` : '';
+  // A new tab sends no Authorization header, so the token goes as a cookie only /api/attachment accepts, set right before
+  // the tab opens: window.open must run in the click itself, or popup blockers stop it.
+  function openPdf(id, name) {
+    document.cookie = `omp_attach=${encodeURIComponent(S.token || '')}; path=/api/attachment; SameSite=Strict${location.protocol === 'https:' ? '; Secure' : ''}`;
+    if (!window.open(`/api/attachment?id=${id}&name=${encodeURIComponent(name || 'attachment.pdf')}`, '_blank')) toast('Allow pop-ups for this page to open PDFs.', 'err');
+  }
+  // Page count and title from the PDF's own bytes, without a PDF library: the page tree's root /Count (the largest
+  // one in a /Type /Pages object) and the trailer's /Info dictionary's /Title. Scans bytes in place, never decoding the
+  // whole file into a string; an unusual file (object streams, encryption) just shows no count or title.
+  function pdfInfo(b) {
+    const at = (i, s) => { for (let k = 0; k < s.length; k++) if (b[i + k] !== s.charCodeAt(k)) return false; return true; };
+    const find = (s, from) => { const c = s.charCodeAt(1); for (let i = b.indexOf(c, from + 1); i > 0; i = b.indexOf(c, i + 1)) if (at(i - 1, s)) return i - 1; return -1; };
+    const findLast = s => { const c = s.charCodeAt(1); for (let i = b.lastIndexOf(c); i > 0; i = b.lastIndexOf(c, i - 1)) if (at(i - 1, s)) return i - 1; return -1; };
+    const text = (a, z) => { a = Math.max(0, a); z = Math.min(b.length, z); let s = ''; for (let i = a; i < z; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, Math.min(z, i + 8192))); return s; };
+    let pages = null, title = '';
+    for (let i = find('/Pages', -1); i >= 0; i = find('/Pages', i + 1)) {
+      if (/[A-Za-z0-9]/.test(String.fromCharCode(b[i + 6] || 32)) || !/\/Type\s*$/.test(text(i - 16, i))) continue;
+      // The object holding this /Type /Pages: from its "obj" to its "endobj", within a few KB either way.
+      const before = text(i - 4096, i), start = before.lastIndexOf('obj'), after = text(i, i + 4096), end = after.indexOf('endobj');
+      const m = /\/Count\s+(\d+)/.exec((start >= 0 ? before.slice(start) : before) + (end >= 0 ? after.slice(0, end) : after));
+      if (m) { const n = Number(m[1]); if (n > 0 && n < 1e6 && n > (pages || 0)) pages = n; }
+    }
+    if (findLast('/Encrypt') < 0) {
+      const info = findLast('/Info'), ref = info >= 0 && /^\/Info\s+(\d+)\s+(\d+)\s+R/.exec(text(info, info + 40));
+      if (ref) {
+        const head = `${ref[1]} ${ref[2]} obj`;
+        let obj = -1;
+        for (let i = find(head, -1); i >= 0; i = find(head, i + 1)) if (i === 0 || !/[0-9]/.test(String.fromCharCode(b[i - 1]))) obj = i;
+        const dict = obj >= 0 ? text(obj, obj + 8192) : '', t = dict.indexOf('/Title');
+        if (t >= 0) title = pdfString(dict.slice(t + 6, (dict.indexOf('endobj') + 1 || dict.length + 1) - 1));
+      }
+    }
+    return { pages, title: title.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300) };
+  }
+  // One PDF string (literal "(…)" or hex "<…>") at the start of s, as text: UTF-16BE or UTF-8 with a byte-order mark,
+  // otherwise one character per byte.
+  function pdfString(s) {
+    s = s.trimStart();
+    let raw = '';
+    if (s[0] === '<' && s[1] !== '<') { const hex = s.slice(1, s.indexOf('>') >>> 0).replace(/[^0-9a-f]/gi, ''); for (let i = 0; i < hex.length; i += 2) raw += String.fromCharCode(parseInt(hex.slice(i, i + 2).padEnd(2, '0'), 16)); }
+    else if (s[0] === '(') {
+      const esc1 = { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' };
+      for (let i = 1, depth = 1; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '\\') { const n = s[++i]; if (n === undefined) break; if (esc1[n]) raw += esc1[n]; else if (/[0-7]/.test(n)) { const o = /^[0-7]{1,3}/.exec(s.slice(i))[0]; raw += String.fromCharCode(parseInt(o, 8) & 255); i += o.length - 1; } else if (n === '\r' || n === '\n') { if (n === '\r' && s[i + 1] === '\n') i++; } else raw += n; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')' && !--depth) break;
+        raw += ch;
+      }
+    } else return '';
+    const bytes = Uint8Array.from(raw, ch => ch.charCodeAt(0) & 255);
+    try {
+      if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+      if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return new TextDecoder('utf-8').decode(bytes.subarray(3));
+    } catch { return ''; }
+    return raw;
+  }
+  const readBase64 = blob => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('Could not read this file.'));
+    reader.readAsDataURL(blob);
+  });
+  // Context the attachments (and the draft) would take, against what the viewed chat has left: why another does not
+  // fit, or '' when it does (or the window is unknown).
+  function contextProblem(what, list, extra) {
+    const room = contextLeft();
+    if (!room) return '';
+    const draft = (current().kind === 'home' ? S.home.prompt : $('#input')?.value) || '';
+    const imgs = list.filter(a => a.image).concat(extra.image ? [extra] : []), docs = list.filter(a => a.pdf || a.loading).concat(extra.image ? [] : [extra]);
+    const img = imgs.reduce((n, a) => n + (a.tokens || 0), 0), doc = docs.reduce((n, a) => n + (a.tokens || 0), 0), txt = Math.ceil(draft.length / 4);
+    if (img + doc + txt <= room.left) return '';
+    const parts = [imgs.length ? `${imgs.length} ${imgs.length > 1 ? 'images' : 'image'} ≈ ${fmtTokens(img)}` : '', docs.length ? `${docs.length} ${docs.length > 1 ? 'PDFs' : 'PDF'} ≈ ${fmtTokens(doc)}` : '', `text ≈ ${fmtTokens(txt)}`].filter(Boolean).join(', ');
+    return `Not enough context left for another ${what}: this message would need about ${fmtTokens(img + doc + txt)} tokens (${parts}), but only ${fmtTokens(room.left)} of ${fmtTokens(room.win)} remain. Send what you have, or run /compact or start a new session.`;
+  }
+  async function attachPdf(file) {
+    if (!file) return;
+    const label = file.name || 'document.pdf', view = S.view;
+    const base = pdfName(label).slice(0, 200) || 'document.pdf';
+    if (file.size > PDF_MAX) return toast(`${label} is ${fmtSize(file.size)}; the limit is ${PDF_MAX / 1048576} MB.`, 'err');
+    if (S.attachments.some(a => a.view === view && (a.pdf || a.loading) && a.bytes === file.size && (a.name === base || a.orig === label))) return toast(`${label} is already attached.`);
+    // Distinct names within the composer: drafts and removal tell attachments apart by name.
+    const taken = new Set(S.attachments.filter(a => a.view === view).map(a => a.name)), dot = base.lastIndexOf('.');
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = dot > 0 ? `${base.slice(0, dot)} (${n})${base.slice(dot)}` : `${base} (${n})`;
+    // Shown at once as a "Reading…" chip; Send waits until it is ready.
+    const item = { view, loading: true, name, orig: label, bytes: file.size, pages: null, title: '', tokens: 0 };
+    S.attachments.push(item);
+    const drop = () => { S.attachments = S.attachments.filter(a => a !== item); };
+    update(); renderAttachments();
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      if (!(buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46 && buf[4] === 0x2d)) throw new Error(`${label} is not a valid PDF.`);
+      const info = pdfInfo(buf);
+      // crypto.subtle exists only in secure contexts (https, localhost); elsewhere the name and size guard alone apply.
+      const subtle = globalThis.crypto?.subtle, hash = subtle?.digest ? [...new Uint8Array(await subtle.digest('SHA-256', buf))].map(x => x.toString(16).padStart(2, '0')).join('') : '';
+      const data = await readBase64(file);
+      // Removed while it was read (its chip's ✕), or the view changed: nothing to attach it to here.
+      if (!S.attachments.includes(item)) return;
+      if (S.view !== view) { drop(); toast(`${label} was not attached: you left the chat while it was read.`); return; }
+      const others = attached().filter(a => a !== item);
+      if (hash && others.some(a => a.hash === hash)) { drop(); toast(`${label} is already attached.`); return; }
+      const room = contextLeft(), tokens = Math.min(pdfEstimate(info.pages, file.size), room ? room.left : Infinity);
+      const problem = contextProblem('PDF', others, { tokens });
+      if (problem) throw new Error(problem);
+      const bytes = others.reduce((n, a) => n + attachBytes(a), data.length);
+      if (bytes > UPLOAD_MAX) throw new Error(`Too many large attachments for one message: they add up to ${(bytes / 1048576).toFixed(0)} MB, over the ${UPLOAD_MAX / 1048576} MB upload limit. Send these first, then attach the rest.`);
+      Object.assign(item, { loading: false, pdf: { type: 'pdf', mimeType: 'application/pdf', data }, pages: info.pages, title: info.title, hash, tokens });
+      update(); renderAttachments(); saveDraft(view);
+    } catch (e) { drop(); update(); renderAttachments(); toast(e.message || `Could not read ${label}.`, 'err'); }
+  }
   // Same estimates as the companion's imageTokens/textTokens: ~4 characters per token; images (w×h)/750 after
   // Anthropic's 1568px / 1.15 MP downscale. The companion checks again on send.
   const imageTokens = (w, h) => { const k = Math.min(1, 1568 / Math.max(w, h), Math.sqrt(1.15e6 / (w * h))); return Math.ceil(w * h * k * k / 750); };
@@ -3707,14 +3854,10 @@
       if (S.view !== view) return;
       // Checked after the last await, so images read in parallel are each measured against everything already attached.
       const list = attached(), tokens = imageTokens(width, height);
-      const room = contextLeft();
-      if (room) {
-        const draft = (current().kind === 'home' ? S.home.prompt : $('#input')?.value) || '';
-        const img = list.reduce((n, a) => n + a.tokens, tokens), txt = Math.ceil(draft.length / 4);
-        if (img + txt > room.left) throw new Error(`Not enough context left for another image: this message would need about ${fmtTokens(img + txt)} tokens (${list.length + 1} ${list.length ? 'images' : 'image'} ≈ ${fmtTokens(img)}, text ≈ ${fmtTokens(txt)}), but only ${fmtTokens(room.left)} of ${fmtTokens(room.win)} remain. Send what you have, or run /compact or start a new session.`);
-      }
-      const bytes = list.reduce((n, a) => n + a.image.data.length + a.preview.length, data.length + preview.length);
-      if (bytes > UPLOAD_MAX) throw new Error(`Too many large images for one message: they add up to ${(bytes / 1048576).toFixed(0)} MB, over the ${UPLOAD_MAX / 1048576} MB upload limit. Send these first, then attach the rest.`);
+      const problem = contextProblem('image', list, { image: true, tokens });
+      if (problem) throw new Error(problem);
+      const bytes = list.reduce((n, a) => n + attachBytes(a), data.length + preview.length);
+      if (bytes > UPLOAD_MAX) throw new Error(`Too many large ${list.some(a => a.pdf) ? 'attachments' : 'images'} for one message: they add up to ${(bytes / 1048576).toFixed(0)} MB, over the ${UPLOAD_MAX / 1048576} MB upload limit. Send these first, then attach the rest.`);
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[mimeType];
       const stem = (file.name || 'pasted-image').replace(/\.[A-Za-z0-9]+$/, '') || 'pasted-image';
       const name = `${stem}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
@@ -3723,13 +3866,16 @@
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
   }
 
-  async function send(kind, retryText) {
+  // retryPdfs: the stored PDFs of the prompt a retry resends, whose reference lines go with it again.
+  async function send(kind, retryText, retryPdfs) {
     const c = current();
     const input = $('#input');
     // A retry resends an earlier prompt as-is: the composer draft and staged images stay for the next message.
     const retry = retryText != null, text = retry ? retryText : input?.value.trim();
     const attachment = retry ? [] : attached();
-    if ((!text && !attachment.length) || S.sending.has(S.view) || S.enhance.has(S.view)) return;
+    if ((!text && !attachment.length && !retryPdfs?.length) || S.sending.has(S.view) || S.enhance.has(S.view)) return;
+    if (attachLoading(attachment)) return toast('Wait until the PDFs finish reading.');
+    const message = retryPdfs?.length ? [text, retryPdfs.map(pdfRefLine).join('\n')].filter(Boolean).join('\n\n') : text;
     keepSpaceAccept();
     const sendView = S.view;
     S.enhanceFail.delete(sendView); S.enhanceUndo.delete(sendView);
@@ -3737,7 +3883,7 @@
     // "/btw question" opens the side-question panel instead of joining the conversation.
     if (!retry && /^\/btw(\s|$)/i.test(text)) {
       if (c.kind !== 'session') return toast('Continue this session first, then ask a side question.', 'err');
-      if (attachment.length) return toast('Side questions cannot include images.', 'err');
+      if (attachment.length) return toast(attachment.some(a => a.pdf) ? 'Side questions cannot include PDFs.' : 'Side questions cannot include images.', 'err');
       const q = text.slice(4).trim();
       input.value = ''; drafts.delete(S.view); autosize(input);
       if (!q) { Object.assign(btwState(c.id), { open: true, history: false, topic: '' }); update(); $('#btwForm input')?.focus(); return; }
@@ -3753,7 +3899,8 @@
       return;
     }
     // Everything below targets c / sendView as captured here: the user may switch views before the request settles.
-    const pending = { text, imagePreview: attachment.map(a => a.preview), queued: kind === 'follow_up', at: Date.now() };
+    const docs = attachment.filter(a => a.pdf).map(({ name, pages, bytes, title }) => ({ name, pages, bytes, title }));
+    const pending = { text, imagePreview: attachment.filter(a => a.image).map(a => a.preview), ...(docs.length || retryPdfs?.length ? { pdfs: docs.length ? docs : retryPdfs } : {}), queued: kind === 'follow_up', at: Date.now() };
     let pendingView = sendView;
     S.sending.set(pendingView, pending);
     if (!retry) { S.attachments = S.attachments.filter(a => a.view !== sendView); input.value = ''; drafts.delete(sendView); autosize(input); }
@@ -3763,7 +3910,7 @@
       if (c.kind === 'native') {
         const ch = S.nativeChoice.get(c.file);
         const adv = S.nativeAdv.get(c.file);
-        const s = await api('/omp-sessions/resume', { file: c.file, message: text, ...imagePayload(attachment), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}), ...(adv === undefined ? {} : { advisor: adv }) });
+        const s = await api('/omp-sessions/resume', { file: c.file, message, ...imagePayload(attachment), ...(ch ? { model: ch.model, thinking: ch.thinking } : {}), ...(adv === undefined ? {} : { advisor: adv }) });
         if (s.status === 'error') { retryView = 'session:' + s.id; await refresh(); if (S.view === sendView) location.hash = '#/s/' + s.id; throw new Error(s.error || 'OMP could not send this message.'); }
         await refresh();
         // The resumed session's view shows the message as sending until the store has it.
@@ -3773,7 +3920,7 @@
         const s = S.store?.sessions.find(x => x.id === c.id);
         if (!s) throw new Error('This session no longer exists.');
         const type = kind === 'follow_up' ? kind : /^\/\S/.test(text) ? 'prompt' : kind || (s.status === 'running' || s.status === 'queued' ? 'steer' : 'prompt');
-        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command?lean=1`, { type, message: text, ...imagePayload(attachment) });
+        const response = await api(`/sessions/${encodeURIComponent(c.id)}/command?lean=1`, { type, message, ...imagePayload(attachment) });
         if (response.status === 'error') throw new Error(response.error || 'OMP could not send this message.');
         if (type === 'follow_up') toast((response.queuedMessages?.length || 0) > (s.queuedMessages?.length || 0) ? 'Queued. Sends when OMP finishes' : 'OMP was already done, so this was sent now');
         await refresh();
@@ -4055,7 +4202,8 @@
           <td>${diskState(r)}</td><td class="num"${linkedTitle(r)}>${fmtSize(r.bytes)}</td><td class="num">${r.tracked == null ? '' : fmtSize(r.bytes - r.tracked)}</td>
           <td class="num"><button class="btn sm ghost" data-disk="clean" data-id="${esc(r.id)}"${off || (r.busy || !r.exists || r.error ? ' disabled' : '')} title="Delete only files .gitignore matches; keep the worktree and branch">Clean build output</button> <button class="btn sm danger" data-disk="remove" data-id="${esc(r.id)}"${off || (r.busy || r.error ? ' disabled' : '')}>Remove</button></td></tr>`;
     const locGroups = [['companion', 'Companion data'], ['omp', 'OMP']].map(([g, name]) => [g, name, locations.filter(l => l.group === g)]).filter(x => x[2].length);
-    const locRow = l => `<tr><td>${esc(l.label)}${l.cap ? `<div class="muted">capped at ${fmtSize(l.cap)}</div>` : ''}</td><td><code>${esc(l.path)}</code></td><td class="num"${linkedTitle(l)}>${l.missing ? '<span class="muted">not present</span>' : fmtSize(l.bytes)}</td></tr>`;
+    // A clearable location (PDF attachments) gets its own Clear button.
+    const locRow = l => `<tr><td>${esc(l.label)}${l.cap ? `<div class="muted">capped at ${fmtSize(l.cap)}</div>` : ''}${l.clearable && !l.missing && l.bytes ? ` <button class="btn sm ghost" data-disk="clearAttachments"${off} title="Delete every stored PDF; messages keep their chips, but the files can no longer be opened">Clear</button>` : ''}</td><td><code>${esc(l.path)}</code></td><td class="num"${linkedTitle(l)}>${l.missing ? '<span class="muted">not present</span>' : fmtSize(l.bytes)}</td></tr>`;
     const total = sum(locations, l => l.bytes);
     setIfChanged(el, `<section class="set-group tool-pane"><h2>Disk space</h2>
       <p class="set-desc">Each isolated session works in its own Git worktree: a full checkout of the project plus whatever was installed or built in it (node_modules, target/…). Archiving or finishing a session keeps that folder, so they pile up. Measure them here, then remove the ones you are done with, or delete only their ignored build output. Measuring also sizes everything else the companion and OMP keep on disk.</p>
@@ -4084,6 +4232,11 @@
   function diskAct(btn) {
     const d = S.disk.data, act = btn.dataset.disk, r = d?.worktrees.find(x => x.id === btn.dataset.id);
     if (act === 'scan') return diskStart('scan', {});
+    if (act === 'clearAttachments') {
+      const l = d?.locations?.find(x => x.key === 'data:attachments');
+      if (!confirm(`Delete every stored PDF attachment${l?.bytes ? ` (${fmtSize(l.bytes)})` : ''}?\n\nMessages keep their PDF chips, but the files can no longer be opened, and OMP can no longer read them when a message is retried. PDFs waiting in a queued message are kept.`)) return;
+      return api('/storage/clear-attachments', {}).then(r => { setDisk(r); toast(`Cleared ${r.cleared.count} ${r.cleared.count === 1 ? 'PDF' : 'PDFs'} · freed ${fmtSize(r.cleared.freed)}`); renderDisk(); renderToolNav(); }, e => toast(e.message, 'err'));
+    }
     if (act === 'removeSelected') {
       const sel = d.worktrees.filter(x => S.disk.sel.has(x.id));
       if (!sel.length || !confirm(`Remove ${sel.length === 1 ? '1 worktree' : `${sel.length} worktrees`} (${fmtSize(sel.reduce((n, x) => n + x.bytes, 0))}) and ${sel.length === 1 ? 'its omp-web/ branch' : 'their omp-web/ branches'}?\n\n${sel.length === 1 ? 'It has' : 'Each has'} nothing uncommitted and every commit is already in its project's branch. ${sel.length === 1 ? 'The session leaves the panel; its transcript stays' : 'The sessions leave the panel; their transcripts stay'} in OMP history.`)) return;
@@ -5119,16 +5272,16 @@
         <div class="picked" style="margin-bottom:8px"><span>Working in</span><b>${esc(base(l.path))}</b>${l.isGit ? '<span class="tag">git</span>' : ''}</div>
         <div class="composer home-composer">
           <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
-          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf" multiple hidden>
           <div class="attach-preview" id="imagePreview" hidden></div>
           <textarea id="homePrompt" rows="3" aria-label="Initial prompt" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash" placeholder="What should OMP do in ${esc(base(l.path))}? Type / for commands and skills (optional).">${esc(h.prompt)}</textarea>
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}${fastChip(h.model, h.fast)}
-            <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach image" title="Attach image">＋ Image</button>
+            <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach images or PDFs" title="Attach images or PDFs">＋ Attach</button>
             <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…"><span aria-hidden="true">⚙</span> Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label><label class="check" title="Auto-approve: answer OMP's tool-approval and computer-control prompts with Approve from the first turn. Questions and provider safety checks still ask you."><input type="checkbox" id="homeAutoApprove" ${h.autoApprove ? 'checked' : ''}> Auto-approve</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
             <span id="homeEnhance">${enhanceButton(S.view, h.prompt)}</span>
-            <button class="btn primary" data-act="start" ${S.sending.has(S.view) ? 'disabled' : ''}>${S.sending.has(S.view) ? 'Starting…' : 'Start session ↵'}</button>
+            <button class="btn primary" data-act="start" ${S.sending.has(S.view) || attachLoading(attached()) ? 'disabled' : ''}${attachLoading(attached()) ? ' title="Wait until the PDFs finish reading"' : ''}>${S.sending.has(S.view) ? 'Starting…' : 'Start session ↵'}</button>
           </div>
         </div>
       </div>` : ''}
@@ -5147,7 +5300,13 @@
     if (!preview) return;
     const list = attached();
     preview.hidden = !list.length;
-    setIfChanged(preview, list.map(a => `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View ${esc(a.name)} full size"><img src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"></button><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join(''));
+    preview.classList.toggle('has-pdf', list.some(a => a.pdf || a.loading));
+    setIfChanged(preview, list.map(a => a.image ? `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View ${esc(a.name)} full size"><img src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"></button><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`
+      // A PDF: focusable, so Delete or Backspace removes it from the keyboard (see the keydown handler below).
+      : `<div class="attach-item attach-pdf${a.loading ? ' loading' : ''}" tabindex="0" role="group" data-pdfchip="${esc(a.name)}" aria-label="${esc(`${a.name}, PDF, ${pdfMeta(a)}. Press Delete to remove.`)}" title="${esc(a.title ? `${a.name}\n${a.title}` : a.name)}"${a.loading ? ' aria-busy="true"' : ''}>${a.loading ? '<span class="spinner" aria-hidden="true"></span>' : PDF_ICON}<span class="pdf-chip-text"><span class="pdf-chip-name">${esc(midTrunc(a.name))}</span><span class="pdf-chip-meta">${esc(pdfMeta(a))}</span></span><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join(''));
+    // New session's Start waits for PDFs still being read (its button is not re-rendered by update()).
+    const start = current().kind === 'home' && $('[data-act="start"]');
+    if (start) { const reading = attachLoading(list); start.disabled = S.sending.has(S.view) || reading; if (reading) start.title = 'Wait until the PDFs finish reading'; else start.removeAttribute('title'); }
   }
   async function goFolder(dir) {
     if (!dir) return;
@@ -5164,6 +5323,7 @@
   async function startSession() {
     const l = S.home.listing, view = S.view;
     if (!l || S.sending.has(view)) return;
+    if (attachLoading(attached())) return toast('Wait until the PDFs finish reading.');
     S.enhanceUndo.delete(view);
     S.sending.set(view, {}); renderHome();
     const attachment = attached();
@@ -5445,6 +5605,9 @@
     const pluginOpen = t.closest('[data-plugin-open]');
     if (pluginOpen) { openPlugins(pluginOpen.dataset.pluginOpen, pluginOpen); return; }
     if (planReview) { openPlanReview(planReview.dataset.planReview); return; }
+    // A sent or queued message's PDF chip opens the stored file in a new tab, synchronously in the click (see openPdf).
+    const pdfOpen = t.closest('[data-pdf-open]');
+    if (pdfOpen) { e.preventDefault(); openPdf(pdfOpen.dataset.pdfOpen, pdfOpen.dataset.name); return; }
     const of = t.closest('[data-open-file]');
     if (of) { e.preventDefault(); e.stopPropagation(); openFile(of.dataset.openFile, +of.dataset.line || 0); return; }
     const sst = t.closest('[data-substop]'), sse = t.closest('[data-substeer]');
@@ -5783,6 +5946,11 @@
       const s = S.store.sessions.find(x => x.id === c.id);
       const lastUser = [...(s?.messages || [])].reverse().find(m => m.role === 'user'), input = $('#input');
       if (lastUser?.hasImage) { if (lastUser.text !== 'Image attached' && !input.value.trim()) { input.value = lastUser.text; drafts.set(S.view, input.value); autosize(input); } update(); toast(attached().length ? 'Image is still attached; press Send to retry.' : 'Reattach the image before retrying.', 'err'); }
+      else if (lastUser?.pdfs?.length) {
+        // Resent with the same reference lines, so OMP reads the stored files again; no draft or staged attachment moves.
+        if (lastUser.pdfs.every(p => p.path)) send('prompt', lastUser.text === 'PDF attached' ? '' : lastUser.text, lastUser.pdfs);
+        else toast('Reattach the PDF before retrying.', 'err');
+      }
       // Resend the old text; the draft and images staged for the next message stay put.
       else if (lastUser) send('prompt', lastUser.text);
     }
@@ -6071,7 +6239,7 @@
     if (e.target.matches?.('[data-advhidden]')) { S.advHidden = e.target.checked; try { localStorage.setItem('omp-adv-hidden', S.advHidden ? '1' : '0'); } catch {} e.target.closest('.adv-menu')?.querySelectorAll('[data-advreviews],[data-advimportant]').forEach(x => { x.disabled = S.advHidden; }); S.lastSig = ''; update(); return; }
     if (e.target.matches?.('[data-advreviews]')) { S.advReviews = e.target.checked; try { localStorage.setItem('omp-adv-reviews', S.advReviews ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
     if (e.target.matches?.('[data-advimportant]')) { S.advImportant = e.target.checked; try { localStorage.setItem('omp-adv-important', S.advImportant ? '1' : '0'); } catch {} S.lastSig = ''; update(); return; }
-    if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachImage); }
+    if (e.target.id === 'imageInput') { const files = [...(e.target.files || [])]; e.target.value = ''; files.forEach(attachFile); }
     else if (e.target.matches?.('.ask-q input[type=radio]')) e.target.closest('fieldset').querySelector('.ask-other').value = '';
     else if (e.target.dataset?.pluginToggle) savePlugin(e.target.checked ? 'enable' : 'disable', e.target.dataset.pluginToggle);
     else if (e.target.dataset?.mcpToggle) saveMcp(e.target.dataset.mcpToggle, e.target.checked);
@@ -6090,6 +6258,9 @@
   });
   document.addEventListener('paste', e => {
     if (e.target.id !== 'input' && e.target.id !== 'homePrompt') return;
+    // Copied PDF files (Explorer, Finder) attach even when the clipboard also holds their names as text.
+    const copied = [...(e.clipboardData?.files || [])];
+    if (copied.some(isPdf)) { e.preventDefault(); copied.filter(f => isPdf(f) || f.type.startsWith('image/')).forEach(attachFile); return; }
     // Office apps put a picture of the selection next to the text: paste the text.
     if (e.clipboardData?.getData('text/plain')) return;
     const files = [...(e.clipboardData?.items || [])].filter(item => item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
@@ -6137,13 +6308,28 @@
     S.groupDrag = null; S.groupDragEnd = Date.now();
     renderList(); // applies polls held back during the drag
   });
-  // Dropped images attach to the composer; no file drop may navigate away from the dashboard.
+  // Dropped images and PDFs attach to the composer; no file drop may navigate away from the dashboard. While files are
+  // dragged over the window, composers show where to drop them.
   const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
-  document.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  const dropReady = on => document.querySelectorAll('.composer').forEach(n => n.classList.toggle('drop-ready', on));
+  document.addEventListener('dragover', e => { if (hasFiles(e)) { e.preventDefault(); dropReady(true); } });
+  document.addEventListener('dragleave', e => { if (hasFiles(e) && !e.relatedTarget) dropReady(false); });
   document.addEventListener('drop', e => {
     if (!hasFiles(e)) return;
     e.preventDefault();
-    if (e.target.closest?.('.composer')) [...e.dataTransfer.files].forEach(attachImage);
+    dropReady(false);
+    if (e.target.closest?.('.composer')) [...e.dataTransfer.files].forEach(attachFile);
+  });
+  // Delete or Backspace on a focused PDF chip removes it; focus moves to the next chip, else back to the prompt.
+  document.addEventListener('keydown', e => {
+    const chip = (e.key === 'Delete' || e.key === 'Backspace') && e.target.closest?.('[data-pdfchip]');
+    if (!chip) return;
+    e.preventDefault();
+    const chips = [...document.querySelectorAll('#imagePreview [data-pdfchip]')], at = chips.indexOf(chip), name = chip.dataset.pdfchip;
+    S.attachments = S.attachments.filter(x => x.view !== S.view || x.name !== name);
+    update(); renderAttachments(); saveDraft(S.view);
+    const next = [...document.querySelectorAll('#imagePreview [data-pdfchip]')];
+    (next[Math.min(at, next.length - 1)] || $('#input') || $('#homePrompt'))?.focus();
   });
   document.addEventListener('submit', e => {
     e.preventDefault();
