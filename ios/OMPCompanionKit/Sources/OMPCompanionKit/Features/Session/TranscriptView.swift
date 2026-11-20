@@ -47,6 +47,15 @@ public struct TranscriptView: View {
         return "\(messages.count):\(last?.id ?? ""):\(last?.text.count ?? 0):\(last?.tool?.status ?? ""):\(last?.tool?.result?.count ?? 0)"
     }
 
+    /// The thread's last user message when it is OMP's last prompt (not a steer or companion-only command): only that one
+    /// can be edited in place (`edit_last`), as on the web; earlier prompts are edited by branching from them.
+    private var editableLastPromptID: String? {
+        guard let last = messages.last(where: { $0.role == .user }),
+              last.steer == nil,
+              (last.entryId?.isEmpty == false) || last.ompAt != nil else { return nil }
+        return last.id
+    }
+
     public var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
@@ -341,11 +350,18 @@ public struct TranscriptView: View {
                 Label("Copy Text", systemImage: "doc.on.doc")
             }
             #endif
+            if !session.isWorking && msg.id == editableLastPromptID {
+                Button {
+                    onEditLast?()
+                } label: {
+                    Label("Edit & Resend", systemImage: "pencil")
+                }
+            }
             if let entryId = msg.entryId, !entryId.isEmpty, !session.isWorking {
                 Button {
                     onBranchFromEntry?(entryId, msg.text)
                 } label: {
-                    Label("Branch / Fork From Here", systemImage: "arrow.triangle.branch")
+                    Label(msg.id == editableLastPromptID ? "Branch / Fork From Here" : "Edit & Resend (Branch From Here)", systemImage: "arrow.triangle.branch")
                 }
             }
         }
