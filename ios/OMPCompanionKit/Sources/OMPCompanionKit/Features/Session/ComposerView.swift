@@ -24,6 +24,7 @@ public struct ComposerView: View {
     @State private var showCamera = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
+    @State private var videoUploader = VideoUploader()
     @State private var showUsageSheet = false
 
     // Draft sync tracking
@@ -116,7 +117,7 @@ public struct ComposerView: View {
 
     private var canSend: Bool {
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return (hasText || !attachments.isEmpty) && !isSending && store.canPerformMutatingActions
+        return (hasText || !attachments.isEmpty) && !isSending && videoUploader.uploads.isEmpty && store.canPerformMutatingActions
     }
 
     private var totalAttachmentsBytes: Int {
@@ -167,6 +168,9 @@ public struct ComposerView: View {
             // Attachments strip
             if !attachments.isEmpty {
                 attachmentsStrip
+            }
+            if !videoUploader.uploads.isEmpty {
+                VideoUploadStrip(uploads: videoUploader.uploads) { videoUploader.cancel($0) }
             }
 
             // Main composer card
@@ -362,7 +366,7 @@ public struct ComposerView: View {
 
                 // Attachment & utility toolbar
                 HStack(spacing: 14) {
-                    PhotosPicker(selection: $photoItems, maxSelectionCount: 6, matching: .images) {
+                    PhotosPicker(selection: $photoItems, maxSelectionCount: 6, matching: .any(of: [.images, .videos])) {
                         Image(systemName: "photo.on.rectangle")
                             .font(.subheadline)
                             .foregroundStyle(palette.muted)
@@ -371,7 +375,7 @@ public struct ComposerView: View {
                     .onChange(of: photoItems) { _, items in
                         Task { await loadPickedPhotos(items) }
                     }
-                    .accessibilityLabel("Attach from Photos")
+                    .accessibilityLabel("Attach photos or videos")
 
                     Button {
                         showCamera = true
@@ -986,6 +990,10 @@ public struct ComposerView: View {
     private func loadPickedPhotos(_ items: [PhotosPickerItem]) async {
         defer { photoItems = [] }
         for item in items {
+            if VideoUploader.isVideo(item) {
+                await startVideoUpload(item)
+                continue
+            }
             if let data = try? await item.loadTransferable(type: Data.self) {
                 do {
                     let att = try ImageAttachmentProcessor.processRawImageData(data, suggestedName: "photo.jpg", existingBase64Bytes: totalAttachmentsBytes)
@@ -997,6 +1005,19 @@ public struct ComposerView: View {
             }
         }
         scheduleDraftSave()
+    }
+
+    /// Uploads a picked video to the host; once stored, its line ("Attached video: … — path") goes at the draft's end.
+    @MainActor
+    private func startVideoUpload(_ item: PhotosPickerItem) {
+        guard let client = store.activeClient else { return }
+        videoUploader.start(item, client: client, onRef: { ref in
+            text = appendingVideoRef(ref, to: text)
+            hasLocalUnpushedEdits = true
+            scheduleDraftSave()
+        }, onError: { message in
+            store.showToast(message, isError: true)
+        })
     }
 
     private func loadImageFiles(_ urls: [URL]) async {

@@ -29,6 +29,7 @@ public struct QuickStartSheet: View {
     @State private var showCamera = false
     @State private var showFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []
+    @State private var videoUploader = VideoUploader()
     @State private var isStarting = false
     @State private var errorMessage: String?
 
@@ -195,9 +196,12 @@ public struct QuickStartSheet: View {
                             }
                         }
                     }
+                    if !videoUploader.uploads.isEmpty {
+                        VideoUploadStrip(uploads: videoUploader.uploads) { videoUploader.cancel($0) }
+                    }
 
                     HStack(spacing: 14) {
-                        PhotosPicker(selection: $photoItems, maxSelectionCount: 6, matching: .images) {
+                        PhotosPicker(selection: $photoItems, maxSelectionCount: 6, matching: .any(of: [.images, .videos])) {
                             Label("Photos", systemImage: "photo.on.rectangle")
                                 .font(.caption.weight(.medium))
                         }
@@ -281,7 +285,7 @@ public struct QuickStartSheet: View {
                     } primaryAction: {
                         Task { await launchSession(asDraft: false) }
                     }
-                    .disabled(folderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStarting || !store.canPerformMutatingActions)
+                    .disabled(folderPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStarting || !videoUploader.uploads.isEmpty || !store.canPerformMutatingActions)
                 }
             }
             .onAppear {
@@ -346,6 +350,10 @@ public struct QuickStartSheet: View {
     private func loadPhotos(_ items: [PhotosPickerItem]) async {
         defer { photoItems = [] }
         for item in items {
+            if VideoUploader.isVideo(item) {
+                await startVideoUpload(item)
+                continue
+            }
             if let data = try? await item.loadTransferable(type: Data.self) {
                 let existingBytes = attachments.reduce(0) { $0 + $1.base64Data.utf8.count }
                 do {
@@ -360,6 +368,17 @@ public struct QuickStartSheet: View {
                 }
             }
         }
+    }
+
+    /// Uploads a picked video to the host; once stored, its line ("Attached video: … — path") goes at the prompt's end.
+    @MainActor
+    private func startVideoUpload(_ item: PhotosPickerItem) {
+        guard let client = store.activeClient else { return }
+        videoUploader.start(item, client: client, onRef: { ref in
+            prompt = appendingVideoRef(ref, to: prompt)
+        }, onError: { message in
+            errorMessage = message
+        })
     }
 
     private func importImageFiles(_ urls: [URL]) async {

@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { exists, now, error, samePath } from './util.mjs';
 import { git, gitRun, removeWorktreeFolder } from './git.mjs';
+import { VIDEO_FILE } from './videos.mjs';
 const CLEAN_TIMEOUT=10*60000;
 export function createStorage(ctx){
  const {store,dataDir}=ctx;
@@ -52,7 +53,7 @@ export function createStorage(ctx){
  }
  // Every place the companion and OMP keep data. A location with parts is the sum of those paths ("Other": whatever in the
  // folder no other row covers), so nothing is counted twice. worktrees/ repeats the rows below as one total.
- const NAMED=[['worktrees','Session worktrees'],['transcripts','Transcripts'],['sessions','Panel session files'],['tool-images','Tool images'],['omp-sdk','SDK copies'],['drafts','Draft images'],['queued-images','Queued images'],['attachments','PDF attachments'],['enhance','Enhance images'],['exports','HTML exports'],['workspace.json','Workspace file']];
+ const NAMED=[['worktrees','Session worktrees'],['transcripts','Transcripts'],['sessions','Panel session files'],['tool-images','Tool images'],['omp-sdk','SDK copies'],['drafts','Draft images'],['queued-images','Queued images'],['attachments','PDF and video attachments'],['enhance','Enhance images'],['exports','HTML exports'],['workspace.json','Workspace file']];
  async function locationList(){
   const agent=ctx.agentDir(),sessions=ctx.ompSessionsDir,blobs=path.join(agent,'blobs'),stats=path.join(os.homedir(),'.omp','stats.db');
   const rest=async(dir,skip)=>(await fs.readdir(dir).catch(()=>[])).map(n=>path.join(dir,n)).filter(p=>!skip.some(s=>samePath(s,p)));
@@ -191,15 +192,17 @@ export function createStorage(ctx){
    }
   });
  }
- // Deletes every PDF sent from the dashboard (attachments/, see pdfs.mjs) that no queued message still waits to send.
- // Sent messages keep their chips, which then answer that the file is gone, and the agent can no longer open them.
- // Drafts keep their own copies (drafts/).
+ // Deletes every PDF and video sent from the dashboard (attachments/, see pdfs.mjs and videos.mjs) that no queued message
+ // still waits to send. Sent messages keep their chips and lines, which then point at a file that is gone.
+ // Drafts keep their own copies of PDFs (drafts/); a draft naming a video loses it too.
  async function clearAttachments(){
   if(job)throw error(`Wait for the current ${job.kind==='scan'?'scan':'cleanup'} to finish.`,409);
   const dir=path.join(dataDir,'attachments');let freed=0,count=0;
-  const queued=new Set(store.sessions.flatMap(s=>(s.queuedMessages||[]).flatMap(q=>(q.pdfs||[]).map(p=>p.id+'.pdf'))));
+  const queuedMessages=store.sessions.flatMap(s=>s.queuedMessages||[]);
+  const queued=new Set(queuedMessages.flatMap(q=>(q.pdfs||[]).map(p=>p.id+'.pdf')));
+  const queuedText=queuedMessages.map(q=>q.text||'').join('\n');
   for(const name of await fs.readdir(dir).catch(()=>[])){
-   if(!/^[0-9a-f]{64}\.pdf$/.test(name)||queued.has(name))continue;
+   if(!(/^[0-9a-f]{64}\.pdf$/.test(name)||VIDEO_FILE.test(name))||queued.has(name)||queuedText.includes(name))continue;
    const file=path.join(dir,name),size=await fs.stat(file).then(st=>st.size,()=>0);
    try{await fs.rm(file);freed+=size;count++;}catch(e){if(e.code!=='ENOENT')throw error(`Could not delete ${name}: ${e.message}`,500);}
   }

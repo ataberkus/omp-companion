@@ -175,6 +175,40 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// Uploads a video file as raw bytes (`POST /api/video?name=`), streamed from disk with progress (0...1). The host
+    /// stores it under its data folder and answers the line that names it for the agent (`ref`), which the composer adds.
+    /// Own session: a large video over a slow link outlasts the shared session's 180 s resource timeout.
+    public func uploadVideo(
+        fileURL: URL,
+        name: String,
+        mimeType: String,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> VideoUploadResponse {
+        let path = "/api/video"
+        var req = try buildRequest(method: "POST", path: path, query: [URLQueryItem(name: "name", value: name)], timeout: 120)
+        req.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 3600
+        let uploader = URLSession(configuration: config)
+        defer { uploader.finishTasksAndInvalidate() }
+        do {
+            let (data, response) = try await uploader.upload(for: req, fromFile: fileURL, delegate: UploadProgressDelegate(progress))
+            guard let http = response as? HTTPURLResponse else {
+                throw CompanionAPIError(kind: .unknown, serverMessage: "Non-HTTP response.")
+            }
+            guard (200...299).contains(http.statusCode) else {
+                let errMsg = (try? decoder.decode(APIErrorBody.self, from: data).error)
+                    ?? String(data: data, encoding: .utf8)
+                throw TailscaleDiagnostic.classifyHTTP(status: http.statusCode, message: errMsg, url: req.url?.absoluteString)
+            }
+            return try decode(VideoUploadResponse.self, from: data, path: path)
+        } catch {
+            throw TailscaleDiagnostic.classifyTransport(error, host: host)
+        }
+    }
+
     // MARK: - State, Polling & Tailscale Diagnostics
 
     /// The host's activity log alone (`GET /api/state` without `?session` would also send every transcript).
@@ -940,5 +974,27 @@ public struct CompanionClient: Sendable {
 
     public func restartHost() async throws -> OkResponse {
         try await post("/api/restart", jsonObject: [:])
+    }
+}
+
+public struct VideoUploadResponse: Decodable, Sendable {
+    public let id: String
+    public let name: String
+    public let bytes: Int
+    public let path: String
+    public let ref: String
+}
+
+/// Reports an upload's sent fraction; URLSession calls it on its delegate queue.
+private final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let onProgress: @Sendable (Double) -> Void
+
+    init(_ onProgress: @escaping @Sendable (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        guard totalBytesExpectedToSend > 0 else { return }
+        onProgress(Double(totalBytesSent) / Double(totalBytesExpectedToSend))
     }
 }

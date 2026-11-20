@@ -8,6 +8,7 @@ import { workspaceRoutes } from './routes/workspace.mjs';
 import { settingsRoutes } from './routes/settings.mjs';
 import { toolRoutes } from './routes/tools.mjs';
 import { systemRoutes } from './routes/system.mjs';
+import { storeVideo } from './videos.mjs';
 export function createRouter(ctx){
  const {serveStatic,token,password,checkOrigin}=ctx;
  const routes={...sessionRoutes(ctx),...historyRoutes(ctx),...workspaceRoutes(ctx),...settingsRoutes(ctx),...toolRoutes(ctx),...systemRoutes(ctx)};
@@ -34,6 +35,8 @@ export function createRouter(ctx){
    if(!fromCookie&&!matches(req.headers.authorization||''))throw error(password?'Wrong password.':'Invalid connection token.',401);
    if(req.method==='GET'&&routes['GET '+url.pathname]){await routes['GET '+url.pathname]({req,res,url,send,json});return;}
    if(req.method!=='POST')throw error('Route not found.',404);
+   // A video goes up as its raw bytes (?name= its file name), streamed to disk: no JSON, no 48 MB cap (videos.mjs).
+   if(url.pathname==='/api/video'){json(await storeVideo(ctx.dataDir,req,url.searchParams.get('name')||''));return;}
    if(!String(req.headers['content-type']).startsWith('application/json'))throw error('JSON body required.',415);
    const cap=url.pathname==='/api/quick-start'||url.pathname==='/api/omp-sessions/resume'||url.pathname==='/api/enhance'||url.pathname==='/api/draft'||/^\/api\/sessions\/[^/]+\/command$/.test(url.pathname)?48*1024*1024:256*1024;
    const buffers=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>cap)throw error(cap>256*1024?'This message is too large to upload: text and images together must stay under 48 MB. Remove some images and try again.':'Request body too large.',413);buffers.push(chunk);}let body;try{body=JSON.parse(Buffer.concat(buffers).toString());}catch{throw error('Invalid JSON.');}
