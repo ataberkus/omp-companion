@@ -7,7 +7,6 @@ import UIKit
 public struct WorkspacesView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ompPalette) private var palette
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.editMode) private var editMode
     @Bindable var store: AppStore
 
@@ -30,9 +29,9 @@ public struct WorkspacesView: View {
         displayedProjects.map(\.path)
     }
 
-    private var allowsDirectPadDrag: Bool {
-        horizontalSizeClass == .regular
-            && editMode?.wrappedValue.isEditing != true
+    /// Hold-and-drag reordering outside Edit mode, on iPhone as on iPad (it used to be iPad only, so a held row did nothing).
+    private var allowsDirectDrag: Bool {
+        editMode?.wrappedValue.isEditing != true
             && store.canPerformMutatingActions
             && displayedProjects.count > 1
     }
@@ -71,11 +70,7 @@ public struct WorkspacesView: View {
                             }
                         }
                     } footer: {
-                        if horizontalSizeClass == .regular {
-                            Text("Drag a workspace to reorder, or tap Edit. Tap a workspace to browse files or start a new session.")
-                        } else {
-                            Text("Tap Edit to drag workspaces into order. Tap a workspace to browse files or start a new session.")
-                        }
+                        Text("Hold and drag a workspace to reorder, or tap Edit. Tap a workspace to browse files or start a new session.")
                     }
                 }
             }
@@ -119,7 +114,7 @@ public struct WorkspacesView: View {
                 draggingProjectNormKey = nil
                 dropTargetProjectNormKey = nil
             }
-            .onChange(of: allowsDirectPadDrag) { _, allowed in
+            .onChange(of: allowsDirectDrag) { _, allowed in
                 if !allowed {
                     draggingProjectNormKey = nil
                     dropTargetProjectNormKey = nil
@@ -261,7 +256,7 @@ public struct WorkspacesView: View {
             }
         }
 
-        if allowsDirectPadDrag {
+        if allowsDirectDrag {
             rowContent
                 .draggable(project.path) {
                     HStack(spacing: 8) {
