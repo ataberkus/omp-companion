@@ -794,8 +794,8 @@ public struct CompanionClient: Sendable {
     ) async throws -> EnhanceStartResponse {
         var body: [String: Any] = ["text": text]
         if let mode { body["mode"] = mode }
-        if let sessionId { body["session"] = sessionId }
-        if let path { body["path"] = path }
+        // The server takes exactly one: a session (its folder, model and thinking) or a folder for a new one.
+        if let sessionId { body["session"] = sessionId } else if let path { body["path"] = path }
         if let model { body["model"] = model }
         if let thinking { body["thinking"] = thinking }
         if !images.isEmpty { body["images"] = images }
