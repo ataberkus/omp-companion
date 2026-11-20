@@ -20,6 +20,9 @@ public struct TranscriptView: View {
     @State private var lastObservedCount = 0
     @State private var lightboxImage: LightboxImagePayload?
     @State private var editingSteerMessage: TranscriptMessage?
+    /// How many of the newest messages are rendered; "Show earlier messages" raises it by `tailPageSize`.
+    @State private var tailLimit = TranscriptView.tailPageSize
+    private static let tailPageSize = 40
     @State private var steerEditDraft: String = ""
 
     public init(
@@ -60,7 +63,9 @@ public struct TranscriptView: View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottomTrailing) {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    // Eager VStack over the newest messages, not a LazyVStack over all of them: the lazy stack guessed the
+                    // heights of unrendered rows, so the bottom anchor opened the chat over blank space until a later layout.
+                    VStack(alignment: .leading, spacing: 10) {
                         if messages.isEmpty {
                             OMPEmptyStateView(
                                 systemImage: "text.bubble",
@@ -69,7 +74,21 @@ public struct TranscriptView: View {
                             )
                             .padding(.top, 36)
                         } else {
-                            ForEach(messages) { msg in
+                            let hidden = max(0, messages.count - tailLimit)
+                            if hidden > 0 {
+                                Button {
+                                    isPinnedToBottom = false
+                                    tailLimit += Self.tailPageSize
+                                } label: {
+                                    Label("Show \(min(hidden, Self.tailPageSize)) earlier messages · \(hidden) hidden", systemImage: "arrow.up.circle")
+                                        .font(.footnote.weight(.semibold))
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(palette.accent)
+                            }
+                            ForEach(messages.suffix(tailLimit)) { msg in
                                 messageRow(msg)
                                     .id(msg.id)
                             }
@@ -114,6 +133,7 @@ public struct TranscriptView: View {
                     isPinnedToBottom = true
                     unreadCount = 0
                     lastObservedCount = messages.count
+                    tailLimit = Self.tailPageSize
                 }
                 .onChange(of: streamTailSignature) { _, _ in
                     if messages.count > lastObservedCount && !isPinnedToBottom {
