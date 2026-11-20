@@ -73,6 +73,10 @@ test('nothing is installed when omp is on PATH or in its install folder, OMP_BIN
   const optedOut = await start({ ...s.env, OMP_WEB_NO_INSTALL: '1' });
   assert.equal(optedOut.status, 'skipped');
   assert.match(optedOut.output, /OMP_WEB_NO_INSTALL=1.*https:\/\/omp\.sh\/install/);
+  // A restart skips the CLI step (the shell sets this) but not the SDK sync, and never fails on the CLI.
+  const restart = await start({ ...s.env, OMP_WEB_NO_CLI_UPDATE: '1' }, join(s.dir, 'nowhere', 'omp'));
+  assert.equal(restart.status, 'skipped');
+  assert.doesNotMatch(restart.output || '', /OMP_BIN is set to/);
   const missing = join(s.dir, 'nowhere', win ? 'omp.exe' : 'omp');
   const bad = await start({ ...s.env }, missing);
   assert.equal(bad.status, 'error');

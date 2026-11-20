@@ -262,8 +262,8 @@ fn boot(app: AppHandle) {
 
 // Restart companion (the dashboard's ⋯ menu, or the restart after an OMP SDK update): the host paused and saved the
 // sessions, wrote the working ones to its resume note and exited. The new host runs on the same port and token, resumes
-// them and skips the `omp update` check; the window reloads. Not a crash: no log, no limit. One that fails to come back
-// is handled as a crash by recover().
+// them and skips the `omp update` check while still syncing a newer OMP SDK; the window reloads. Not a crash: no log,
+// no limit. One that fails to come back is handled as a crash by recover().
 fn restart(app: &AppHandle) {
     let shell = app.state::<Shell>();
     // Whatever the old Bun left running would hold the port.

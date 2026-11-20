@@ -1,6 +1,6 @@
 {
   "name": "omp-control-room",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OMP Control Room desktop app",
   "private": true,
   "type": "module",

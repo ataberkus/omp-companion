@@ -3,7 +3,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { syncOmpSdk } from './omp-sdk.mjs';
+import { readCliVersion, sdkDrift, syncOmpSdk } from './omp-sdk.mjs';
 import { now, error, text } from './util.mjs';
 import { THINKING } from './transcript.mjs';
 import { modelRoles } from './enhance.mjs';
@@ -99,9 +99,21 @@ function fastCapable(m){if(m.provider==='openrouter')return /^(anthropic|google|
   if(!modelRun){const run=modelRun=readModels().finally(()=>{if(modelRun===run)modelRun=undefined;});}
   return modelRun;
  }
+ // `omp update` in a terminal, or a startup SDK install that timed out, leaves the CLI newer than the SDK sessions run:
+ // converge the way Settings' update does (install the matching SDK, restart once no session works). The model list is
+ // where the drift shows, since it is the CLI's list; a copy that fails to load is not retried (omp.mjs remembers it).
+ let drift;
+ function syncDrift(cliVersion){
+  if(ompSource||!sdkDrift(cliVersion,ctx.omp?.sdkVersion?.(),ctx.omp?.sdkSkippedVersion?.()))return;
+  drift??=syncOmpSdk({entry:ompEntry,dataDir}).then(r=>{if(r.status==='installed')restartWhenIdle();return r;}).catch(()=>{}).finally(()=>{drift=undefined;});
+ }
+ // `omp models --json` is the CLI's list; sessions run the SDK this process loaded, which can be older (a CLI updated since
+ // the companion started). Models that SDK does not know would fail with "Model not found", so the picker leaves them out.
  async function readModels(){
-  const {stdout}=await execOmp(['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true});
-  const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow,fast:fastCapable(m)}));
+  const [{stdout},known,cli]=await Promise.all([execOmp(['models','--json'],{timeout:60000,maxBuffer:64*1024*1024,windowsHide:true}),Promise.resolve(ctx.omp?.sdkModels?.()).catch(()=>null),ompSource?null:readCliVersion(ompEntry).catch(()=>null)]);
+  if(cli?.version)syncDrift(cli.version);
+  const sdk=Array.isArray(known)&&known.length?new Set(known):null;
+  const models=(JSON.parse(stdout).models||[]).filter(m=>!m.kind||m.kind==='chat').map(m=>({selector:m.selector||`${m.provider}/${m.id}`,provider:m.provider,id:m.id,name:m.name||m.id,reasoning:!!m.reasoning,thinking:Array.isArray(m.thinking)?m.thinking:[],contextWindow:m.contextWindow,fast:fastCapable(m)})).filter(m=>!sdk||sdk.has(`${m.provider}/${m.id}`));
   const {roles,defaultThinking}=await modelRoles();
   modelCache={at:Date.now(),data:{models,roles,defaultThinking,thinkingLevels:THINKING}};return modelCache.data;
  }

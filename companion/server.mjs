@@ -152,8 +152,8 @@ if(mainEntry&&process.versions.bun){
  const handoffFile=path.join(process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web'),'restart.json');
  let handoff=null;
  if(restartExit){handoff=restartHandoff(await fs.readFile(handoffFile,'utf8').catch(()=>''),Date.now());await fs.rm(handoffFile,{force:true});}
- // A restart skips the OMP update check (Settings has one-click omp update) and keeps the token, so open panels reconnect.
- const update=handoff?null:await startupUpdate();
+ // A restart skips the OMP update check (Settings has one-click omp update), while still syncing a newer SDK.
+ const update=await startupUpdate(handoff?{skipCli:true}:{});
  const app=await createCompanion({
   ...(handoff?.token&&!process.env.OMP_WEB_PASSWORD?{token:handoff.token}:{}),
   // Sessions that were working when the restart began; createCompanion resumes those it still has.
