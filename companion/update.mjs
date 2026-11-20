@@ -72,24 +72,27 @@ export function ompSetup(entry,{env=process.env,...setup}={}){
 }
 export const defaultDataDir=()=>process.env.OMP_WEB_DATA_DIR||path.join(os.homedir(),'.omp-web');
 // Opening the companion first brings OMP up to date, before any OMP process starts. A failed or timed-out update
-// starts with the installed build. OMP_WEB_NO_UPDATE=1 skips it; a source checkout is updated with git instead.
+// starts with the installed build. OMP_WEB_NO_UPDATE=1 skips both CLI and SDK sync; OMP_WEB_NO_CLI_UPDATE=1 skips the
+// CLI install/update check while still syncing a newer SDK; a source checkout is updated with git instead.
 // Without OMP (OMP_BIN unset, `omp` neither on PATH nor in its install folders) it installs OMP instead of updating,
 // unless OMP_WEB_NO_INSTALL=1; a failed install starts without the CLI.
 // Sessions run OMP's SDK in this process and `omp update` replaces only the CLI, so the SDK release matching the CLI is
 // installed next (syncOmpSdk). Whatever of the time budget the CLI step left goes to that install; one still
 // running when the budget ends finishes in the background and counts from the next start. So does an OMP install,
 // with its SDK install after it. setup: installOmp's and ompSetup's injectables (tests).
-export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10*60*1000,log=console.log,dataDir=defaultDataDir(),env=process.env,setup={}}={}){
+export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10*60*1000,log=console.log,dataDir=defaultDataDir(),env=process.env,setup={},skipCli=false}={}){
  if(env.OMP_WEB_NO_UPDATE==='1')return {status:'skipped'};
+ skipCli=skipCli||env.OMP_WEB_NO_CLI_UPDATE==='1';
  const deadline=Date.now()+timeout,platform=setup.platform||process.platform;
  const untilDeadline=promise=>{let timer;return Promise.race([promise,new Promise(resolve=>{timer=setTimeout(resolve,Math.max(0,deadline-Date.now()),null);})]).finally(()=>clearTimeout(timer));};
  const sdkSync=prune=>syncOmpSdk({entry,dataDir,prune,env});
  const state=ompSetup(entry,{env,...setup});
- if(state==='missing'){const output=`OMP_BIN is set to ${entry}, which does not exist. Point OMP_BIN at the omp executable or a checkout's cli.ts, or unset it to use (or install) omp from PATH.`;log(output);return {status:'error',output};}
- if(/\.ts$/i.test(entry)){log('OMP runs from a source checkout; skipping omp update.');return {status:'skipped'};}
- if(state==='opted-out'){const output=`omp was not found on PATH, and OMP_WEB_NO_INSTALL=1 turns off installing it. Updates, usage and the Tools page need it. ${manualInstall(platform)}`;log(output);return {status:'skipped',output};}
- let result;
+ if(state==='missing'){if(skipCli)return {status:'skipped'};const output=`OMP_BIN is set to ${entry}, which does not exist. Point OMP_BIN at the omp executable or a checkout's cli.ts, or unset it to use (or install) omp from PATH.`;log(output);return {status:'error',output};}
+ if(/\.ts$/i.test(entry)){if(skipCli)return {status:'skipped'};log('OMP runs from a source checkout; skipping omp update.');return {status:'skipped'};}
+ if(state==='opted-out'){if(skipCli)return {status:'skipped'};const output=`omp was not found on PATH, and OMP_WEB_NO_INSTALL=1 turns off installing it. Updates, usage and the Tools page need it. ${manualInstall(platform)}`;log(output);return {status:'skipped',output};}
+ let result={status:'skipped'};
  if(state==='install'){
+  if(skipCli)return {status:'skipped'};
   log('omp was not found on PATH; installing OMP (this happens once)…');
   const install=installOmp({env,...setup});
   const done=await untilDeadline(install);
@@ -105,7 +108,7 @@ export async function startupUpdate({entry=process.env.OMP_BIN||'omp',timeout=10
   }
   if(done.status!=='installed'){log(done.summary);return done;}
   log(done.output);result=done; // A fresh install is the latest release: no `omp update`.
- }else{
+ }else if(!skipCli){
   log('Checking for OMP updates…');
   result=await updateOmp(entry,{timeout,env,setup});
   log(result.status==='done'?result.output:`OMP update failed; starting with the installed version.\n${result.output}`);

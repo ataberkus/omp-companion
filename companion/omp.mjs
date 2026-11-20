@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 import { GoalController, goalSlashHost } from './goal-host.mjs';
 import { loadPlanMode } from './plan-host.mjs';
 import { loadCommandHosts, unhostedMessage } from './command-hosts.mjs';
-import { RUNTIME_FILES, ompSources } from './omp-sdk.mjs';
+import { RUNTIME_FILES, ompSources, versionAt } from './omp-sdk.mjs';
 import { loadCustomUI, customUI } from './custom-ui.mjs';
 import { loadMcpConfig } from './mcp-config.mjs';
 import { scopeIrc, treeRoot } from './irc-scope.mjs';
@@ -89,7 +89,7 @@ async function loadRuntime(src) {
  const mcpConfig = () => mcp ??= loadMcpConfig({ at, pkg, settings }).catch(e => { mcp = undefined; throw e; });
  const isSettled = m.settle.isRpcSessionSettled ?? sessionSettle?.isSessionSettled;
  if (!isSettled) throw new Error(`This OMP build has no session settle check (${src}). Update the companion.`);
- return { ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, isSettled, restore, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
+ return { src, ...m, oauth, tuiTheme, words, plan, ...goal, mcpReauth, isSettled, restore, commandHosts, custom, settings, authStorage, modelRegistry, mcpConfig };
 }
 
 // OMP starts a stdio MCP server without its own `cwd` in the process's project folder (getProjectDir), which in this one
@@ -138,11 +138,35 @@ async function companionGoal(at, pkg, goal) {
  */
 export function ompHost(entry, { dataDir } = {}) {
  // Chosen once per process, so sessions never mix two OMP copies (an SDK installed meanwhile counts from the next start).
- let loaded;
- const load = () => loaded ??= loadFirst(ompSources(entry, dataDir)).catch(e => { loaded = undefined; throw e; });
+ let loaded, pendingSrc, loadedSrc, skippedVersion;
+ const load = () => loaded ??= (async () => {
+  const sources = ompSources(entry, dataDir);
+  pendingSrc = sources[0];
+  const rt = await loadFirst(sources);
+  loadedSrc = rt.src;
+  // Remember an unimportable newer copy so drift checks don't restart in a loop.
+  if (sources[0] && rt.src !== sources[0]) skippedVersion = versionAt(sources[0]);
+  return rt;
+ })().catch(e => { loaded = undefined; pendingSrc = undefined; throw e; });
  return {
   // Loads OMP ahead of the first session so opening one does not pay for the import.
   warm() { if (process.versions.bun) load().catch(() => {}); },
+  /** The OMP SDK version this process uses (loaded, loading, or next to load). */
+  sdkVersion() {
+   if (loadedSrc || pendingSrc) return versionAt(loadedSrc ?? pendingSrc);
+   try { return versionAt(ompSources(entry, dataDir)[0]); } catch { return undefined; }
+  },
+  /** Version of a newer SDK copy that failed to load in this process, if any. */
+  sdkSkippedVersion() { return skippedVersion; },
+  /** Available chat model selectors in the loaded SDK (`provider/id`), or null when not loaded under Bun. */
+  async sdkModels() {
+   if (!process.versions.bun) return null;
+   try {
+    const rt = await load();
+    await rt.modelRegistry.awaitBackgroundRefresh();
+    return rt.modelRegistry.getAvailable('chat').map(m => `${m.provider}/${m.id}`);
+   } catch { return null; }
+  },
   /** Returns the session at once; `ready` settles when it can take commands. */
   start({ cwd, args, onEvent, onExit }) { return new OmpSession(load, cwd, args, onEvent, onExit); },
   /** Configured MCP servers (mcp-config.mjs `list`): scopes [{ cwd, project? }]. */
@@ -738,7 +762,8 @@ class OmpSession {
   return this.#serial('set_model', 30000, async () => {
    this.#guard('model'); this.#planIdle();
    const model = await this.#findModel(provider, modelId);
-   if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+   // The model picker lists the CLI's models; this session runs the SDK the companion loaded, which can be older.
+   if (!model) { const v = versionAt(this.#rt.src); throw new Error(`Model not found: ${provider}/${modelId}${v ? `. Sessions here run OMP SDK ${v}, which does not know it: update OMP in Settings (the matching SDK installs with it) and let the companion restart` : ''}`); }
    await this.#session.setModel(model);
    this.#applyHelperRoles();
    return plain(model);

@@ -108,7 +108,7 @@ fn tail(buf: &Mutex<String>) -> String {
     buf.lock().clone()
 }
 
-/// `restart_token` restarts a host after a crash: it keeps the window's token and skips the `omp update` check.
+/// `restart_token` restarts a host after a crash or restart: it keeps the window's token and skips the `omp update` check (while still syncing a newer OMP SDK).
 /// `version` is the app's own version, so the dashboard can tell that an update changed it.
 pub fn spawn(
     bun: &Path,
@@ -126,7 +126,7 @@ pub fn spawn(
         cmd.env("OMP_WEB_NO_TOKEN", "1");
     }
     if let Some(token) = restart_token {
-        cmd.env("OMP_WEB_DESKTOP_TOKEN", token).env("OMP_WEB_NO_UPDATE", "1");
+        cmd.env("OMP_WEB_DESKTOP_TOKEN", token).env("OMP_WEB_NO_CLI_UPDATE", "1");
     }
     cmd.arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // A GUI app has no console; without this flag Windows opens one for Bun.

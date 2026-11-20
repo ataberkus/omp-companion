@@ -31,8 +31,15 @@ export function compareVersions(a, b) {
  return 0;
 }
 
+/** Whether the CLI is newer than the SDK sessions run, and that release has not already failed to load here: an SDK to
+ *  install (and a restart to run sessions on it). A version that is not plain semver never counts as newer. */
+export function sdkDrift(cliVersion, sdkVersion, skippedVersion) {
+ const semver = v => VERSION.test(String(v ?? ''));
+ return semver(cliVersion) && semver(sdkVersion) && skippedVersion !== cliVersion && compareVersions(cliVersion, sdkVersion) > 0;
+}
+
 const bundledSrc = () => path.dirname(fileURLToPath(import.meta.resolve(PACKAGE)));
-const versionAt = src => { try { return JSON.parse(readFileSync(path.join(src, '..', 'package.json'), 'utf8')).version; } catch { return undefined; } };
+export const versionAt = src => { try { return JSON.parse(readFileSync(path.join(src, '..', 'package.json'), 'utf8')).version; } catch { return undefined; } };
 const store = dataDir => path.join(dataDir, 'omp-sdk');
 const srcIn = dir => path.join(dir, 'node_modules', ...PACKAGE.split('/'), 'src');
 
@@ -64,6 +71,16 @@ export function cliEnv(entry, base = process.env) {
 
 const errorTail = e => String(e?.stderr || e?.message || e).trim().split('\n').slice(-3).join(' ').slice(0, 500);
 
+/** Reads the OMP CLI's semver (`omp/X.Y.Z`) without throwing: { version, raw?, error? }. */
+export async function readCliVersion(entry, { env = process.env, timeout = 15000 } = {}) {
+ let stdout;
+ try { stdout = (await exec(entry, ['--version'], { env: cliEnv(entry, env), timeout, windowsHide: true })).stdout; }
+ catch (e) { return { version: null, error: e }; }
+ // `omp --version` prints `omp/18.22.0`; anything else (a prerelease, another program) is not an SDK release to install.
+ const version = /^omp\/(\d+\.\d+\.\d+)\s*$/m.exec(String(stdout))?.[1] ?? null;
+ return { version, raw: String(stdout) };
+}
+
 let syncing;
 /**
  * Installs the OMP SDK release matching the OMP CLI's version (`entry --version`) when it is newer than the copy sessions
@@ -77,12 +94,10 @@ export function syncOmpSdk(options) {
 async function sync({ entry, dataDir, prune = () => false, timeout = 20 * 60 * 1000, env = process.env }) {
  const root = store(dataDir);
  try {
-  let cli;
-  try { cli = (await exec(entry, ['--version'], { env: cliEnv(entry, env), timeout: 30000, windowsHide: true })).stdout; }
-  catch (e) { return { status: 'skipped', output: `OMP SDK not updated: could not read the OMP CLI version (${errorTail(e)}).` }; }
-  // `omp --version` prints `omp/18.22.0`; anything else (a prerelease, another program) is not an SDK release to install.
-  const version = /^omp\/(\d+\.\d+\.\d+)\s*$/m.exec(String(cli))?.[1];
-  if (!version) return { status: 'skipped', output: `OMP SDK not updated: unrecognized OMP CLI version "${String(cli).trim().slice(0, 100)}".` };
+  const cli = await readCliVersion(entry, { env, timeout: 30000 });
+  if (cli.error) return { status: 'skipped', output: `OMP SDK not updated: could not read the OMP CLI version (${errorTail(cli.error)}).` };
+  const version = cli.version;
+  if (!version) return { status: 'skipped', output: `OMP SDK not updated: unrecognized OMP CLI version "${cli.raw.trim().slice(0, 100)}".` };
   const copy = newerCopies(dataDir)[0], active = versionAt(copy ?? bundledSrc());
   if (active && compareVersions(version, active) <= 0) {
    if (prune()) await pruneStore(root, copy ? active : undefined);
