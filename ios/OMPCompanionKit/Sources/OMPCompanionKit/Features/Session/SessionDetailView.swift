@@ -98,6 +98,9 @@ public struct SessionDetailView: View {
                 TerminalScreenView(store: store, session: liveSession)
             }
         }
+        // Pinned to the top and filling the screen: a tab whose content is shorter than the screen (Changes' empty state)
+        // otherwise centered the whole stack, tab strip included, leaving a gap under the navigation bar.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(palette.background)
         .navigationTitle(liveSession.title)
         .navigationBarTitleDisplayMode(.inline)
