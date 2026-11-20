@@ -54,10 +54,23 @@ public struct SubagentsView: View {
                 )
                 .listRowBackground(Color.clear)
             } else {
-                Section("Subagents & Tasks (\(jobs.count))") {
-                    ForEach(jobs) { job in
-                        jobRow(job)
-                            .listRowBackground(palette.card)
+                // Split as on the web: background bash jobs apart from subagents.
+                let agents = jobs.filter { $0.type != "bash" }
+                let tasks = jobs.filter { $0.type == "bash" }
+                if !agents.isEmpty {
+                    Section("Subagents (\(agents.count))") {
+                        ForEach(agents) { job in
+                            jobRow(job)
+                                .listRowBackground(palette.card)
+                        }
+                    }
+                }
+                if !tasks.isEmpty {
+                    Section("Background Tasks (\(tasks.count))") {
+                        ForEach(tasks) { job in
+                            jobRow(job)
+                                .listRowBackground(palette.card)
+                        }
                     }
                 }
             }
@@ -263,6 +276,7 @@ private struct SubagentTranscriptSheet: View {
     @State private var followUpText = ""
     @State private var isLoading = true
     @State private var errorMessage: String?
+    @State private var lightboxImage: LightboxImagePayload?
 
     var body: some View {
         NavigationStack {
@@ -281,20 +295,25 @@ private struct SubagentTranscriptSheet: View {
                                     .foregroundStyle(palette.muted)
                             } else {
                                 ForEach(transcript.messages) { msg in
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(msg.role.rawValue.uppercased())
-                                            .font(.caption2.weight(.bold))
-                                            .foregroundStyle(msg.role == .user ? palette.accent : palette.green)
-                                        if !msg.text.isEmpty {
-                                            MarkdownView(text: msg.text)
+                                    // Tool calls and thinking as the main chat shows them.
+                                    switch msg.role {
+                                    case .tool:
+                                        ToolExecutionCard(store: store, sessionCwd: transcript.cwd ?? session.cwd, message: msg) { data, title in
+                                            lightboxImage = LightboxImagePayload(title: title, data: data)
                                         }
-                                        if let tool = msg.tool {
-                                            Text("\(tool.name): \(tool.intent ?? tool.args ?? tool.status)")
-                                                .font(.caption2.monospaced())
-                                                .foregroundStyle(palette.muted)
+                                    case .thinking:
+                                        ThinkingTraceCard(message: msg)
+                                    default:
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            Text(msg.role.rawValue.uppercased())
+                                                .font(.caption2.weight(.bold))
+                                                .foregroundStyle(msg.role == .user ? palette.accent : palette.green)
+                                            if !msg.text.isEmpty {
+                                                MarkdownView(text: msg.text)
+                                            }
                                         }
+                                        .ompCard(palette)
                                     }
-                                    .ompCard(palette)
                                 }
                             }
                         }
@@ -317,6 +336,9 @@ private struct SubagentTranscriptSheet: View {
                 }
             }
             .background(palette.background)
+            .sheet(item: $lightboxImage) { payload in
+                ImageLightboxSheet(payload: payload)
+            }
             .navigationTitle(job.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
