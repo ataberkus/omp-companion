@@ -154,8 +154,15 @@ public struct TranscriptView: View {
                     Button {
                         isPinnedToBottom = true
                         unreadCount = 0
-                        withAnimation(.easeOut(duration: 0.24)) {
-                            proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                        tailLimit = Self.tailPageSize
+                        // No animation and repeated once rows settle: an animated scrollTo over a long distance stopped short
+                        // (rows above it re-measured mid-flight), so the button only worked near the bottom.
+                        proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                        for delay in [0.05, 0.25] {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                                guard isPinnedToBottom else { return }
+                                proxy.scrollTo("transcript-bottom", anchor: .bottom)
+                            }
                         }
                         store.notificationManager.triggerHaptic(.lightTap)
                     } label: {

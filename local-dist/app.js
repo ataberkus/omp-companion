@@ -985,10 +985,17 @@
   function jumpLatest() {
     const sc = $('#scroller');
     if (!sc) return;
-    // Far behind, a smooth scroll would take seconds through everything since: jump straight there instead.
-    const far = sc.scrollHeight - sc.scrollTop - sc.clientHeight > sc.clientHeight * 3;
     jumpUntil = Date.now() + 1500; setReading(false);
-    sc.scrollTo?.({ top: sc.scrollHeight, behavior: reduceMotion() || far ? 'auto' : 'smooth' });
+    // One scrollTo could stop short: a smooth scroll cut off by a poll re-rendering the thread, a flick's leftover momentum,
+    // or a height still settling (images, math). Jump straight there and re-apply each frame until it stays at the bottom.
+    let frames = 0, settled = 0;
+    const step = () => {
+      const d = sc.scrollHeight - sc.scrollTop - sc.clientHeight;
+      if (d > 2) { sc.scrollTop = sc.scrollHeight; settled = 0; } else settled++;
+      if (settled < 6 && ++frames < 90) requestAnimationFrame(step);
+      else { scrollStuck = true; syncReading(); }
+    };
+    step();
   }
   // The chat's box shrinks when the stack grows (composer opening, keyboard, a question arriving): one read at the bottom stays there.
   let scrollStuck = true;
