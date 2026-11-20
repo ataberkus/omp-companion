@@ -2100,6 +2100,7 @@ public enum EnhanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case full
     case notest
     case fast
+    case max
 
     public var id: String { rawValue }
 
@@ -2108,6 +2109,7 @@ public enum EnhanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
         case .full: return "Full spec"
         case .notest: return "No tests"
         case .fast: return "Fast"
+        case .max: return "Max"
         }
     }
 
@@ -2116,6 +2118,7 @@ public enum EnhanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
         case .full: return "Full repo grounding and verification spec"
         case .notest: return "Skip new tests and smoke checks"
         case .fast: return "Lean, quick specification"
+        case .max: return "Best-in-class: full product feature set, existing checks only"
         }
     }
 }
