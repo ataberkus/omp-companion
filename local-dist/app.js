@@ -3879,7 +3879,7 @@
     const view = S.view;
     try {
       const bitmap = await createImageBitmap(file);
-      let blob = file, mimeType = file.type, preview, width = bitmap.width, height = bitmap.height;
+      let blob = file, mimeType = file.type, preview, width = bitmap.width, height = bitmap.height, pw, ph;
       try {
         const canvas = document.createElement('canvas');
         const draw = max => {
@@ -3903,6 +3903,7 @@
         }
         draw(1024);
         preview = canvas.toDataURL('image/jpeg', .8);
+        pw = canvas.width; ph = canvas.height; // the strip reserves this box before the <img> decodes (see attachPreviewHtml)
       } finally { bitmap.close(); }
       if (blob.size > 5 * 1024 * 1024 || preview.length > 1024 * 1024) throw new Error('Image is too large to send.');
       const data = await new Promise((resolve, reject) => {
@@ -3921,7 +3922,7 @@
       const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }[mimeType];
       const stem = (file.name || 'pasted-image').replace(/\.[A-Za-z0-9]+$/, '') || 'pasted-image';
       const name = `${stem}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-      S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, name, tokens });
+      S.attachments.push({ view, image: { type: 'image', mimeType, data }, preview, pw, ph, name, tokens });
       update(); renderAttachments(); saveDraft(view);
     } catch (e) { toast(e.message || 'Could not attach this image.', 'err'); }
   }
@@ -5434,7 +5435,7 @@
   function renderHome() {
     const el = $('#home');
     if (!el) return;
-    const h = S.home, l = h.listing;
+    const h = S.home, l = h.listing, stripHtml = attachPreviewHtml(attached());
     const html = `
       <div><h2>Where do you want to <em>work</em>?</h2></div>
       <p class="sub">Pick a workspace, say what to do, press Enter.<span class="kbd-hint"> <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</span></p>
@@ -5456,7 +5457,7 @@
         <div class="composer home-composer">
           <div class="slash" id="slash" role="listbox" aria-label="Slash commands" hidden></div>
           <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf,video/*" multiple hidden>
-          <div class="attach-preview" id="imagePreview" hidden></div>
+          <div class="attach-preview" id="imagePreview"${stripHtml ? '' : ' hidden'}>${stripHtml}</div>
           <textarea id="homePrompt" rows="3" aria-label="Initial prompt" role="combobox" aria-expanded="false" aria-haspopup="listbox" aria-autocomplete="list" aria-controls="slash" placeholder="What should OMP do in ${esc(base(l.path))}? Type / for commands and skills (optional).">${esc(h.prompt)}</textarea>
           <div class="composer-bar">
             ${modelChip(h.model, h.thinking, defaultLabel())}${fastChip(h.model, h.fast)}
@@ -5470,12 +5471,29 @@
       </div>` : ''}
       <div id="homeRecent">${homeRecentHtml()}</div>`;
     // Late /browse or /models results re-render home: keep the typed path, the prompt's focus and its caret.
+    // The attachment strip is part of this markup, not filled in afterwards: fitComposer below reads layout, and with the strip
+    // empty for that moment .home's content is shorter, so the browser clamps its scrollTop and the page jumps up for good.
     keepFocus(el, () => { el.innerHTML = html; });
+    const strip = $('#imagePreview'); if (strip?.firstChild) strip._html = stripHtml; // already in place: renderAttachments must not rebuild its <img>s
     const prompt = $('#homePrompt'); if (prompt) fitComposer(prompt);
     renderAttachments();
     renderSlash();
     if (!S.advCfg) api('/advisor').then(cfg => { S.advCfg = cfg; const cb = $('#homeAdvisor'); if (cb && S.home.advisor === undefined) cb.checked = !!cfg.enabled; }, () => { });
   }
+  // The strip's markup. An image's box is reserved from its known size, so a rebuilt <img> never collapses the strip while it
+  // decodes (a collapsed strip shortens its scroll container and the browser clamps the user's scroll position).
+  function attachPreviewHtml(list) {
+    return list.map(a => a.image ? `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View ${esc(a.name)} full size"><img${a.pw && a.ph ? ` class="sized" style="--pw:${+a.pw};--ph:${+a.ph}"` : ''} src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"></button><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`
+      // A PDF: focusable, so Delete or Backspace removes it from the keyboard (see the keydown handler below).
+      : `<div class="attach-item attach-pdf${a.loading ? ' loading' : ''}" tabindex="0" role="group" data-pdfchip="${esc(a.name)}" aria-label="${esc(`${a.name}, ${a.video ? "video" : "PDF"}, ${pdfMeta(a)}. Press Delete to remove.`)}" title="${esc(a.title ? `${a.name}\n${a.title}` : a.name)}"${a.loading ? ' aria-busy="true"' : ''}>${a.loading ? '<span class="spinner" aria-hidden="true"></span>' : PDF_ICON}<span class="pdf-chip-text"><span class="pdf-chip-name">${esc(midTrunc(a.name))}</span><span class="pdf-chip-meta">${esc(pdfMeta(a))}</span></span><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join('');
+  }
+  // Drafts pulled from the companion carry no size: learn it when the first <img> loads, so the next rebuild reserves its box.
+  document.addEventListener('load', e => {
+    const img = e.target;
+    if (img.tagName !== 'IMG' || !img.closest?.('#imagePreview, .composer-wrap .attach-preview')) return;
+    const a = S.attachments.find(x => x.view === S.view && x.image && x.name === img.alt);
+    if (a && !(a.pw && a.ph) && img.naturalWidth && img.naturalHeight) { a.pw = img.naturalWidth; a.ph = img.naturalHeight; }
+  }, true);
   function renderAttachments() {
     // New session has no composer render; its ✨ follows the attachments here (an image alone is enhanceable).
     const he = $('#homeEnhance'); if (he && current().kind === 'home') setIfChanged(he, enhanceButton(S.view, S.home.prompt));
@@ -5483,10 +5501,7 @@
     if (!preview) return;
     const list = attached();
     preview.hidden = !list.length;
-    preview.classList.toggle('has-pdf', list.some(a => a.pdf || a.loading));
-    setIfChanged(preview, list.map(a => a.image ? `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View ${esc(a.name)} full size"><img src="${esc(a.preview)}" alt="${esc(a.name)}" title="${esc(a.name)}"></button><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`
-      // A PDF: focusable, so Delete or Backspace removes it from the keyboard (see the keydown handler below).
-      : `<div class="attach-item attach-pdf${a.loading ? ' loading' : ''}" tabindex="0" role="group" data-pdfchip="${esc(a.name)}" aria-label="${esc(`${a.name}, ${a.video ? "video" : "PDF"}, ${pdfMeta(a)}. Press Delete to remove.`)}" title="${esc(a.title ? `${a.name}\n${a.title}` : a.name)}"${a.loading ? ' aria-busy="true"' : ''}>${a.loading ? '<span class="spinner" aria-hidden="true"></span>' : PDF_ICON}<span class="pdf-chip-text"><span class="pdf-chip-name">${esc(midTrunc(a.name))}</span><span class="pdf-chip-meta">${esc(pdfMeta(a))}</span></span><button class="btn sm ghost" data-act="removeImage" data-name="${esc(a.name)}" type="button" aria-label="Remove ${esc(a.name)}">✕</button></div>`).join(''));
+    setIfChanged(preview, attachPreviewHtml(list));
     // New session's Start waits for PDFs still being read (its button is not re-rendered by update()).
     const start = current().kind === 'home' && $('[data-act="start"]');
     if (start) { const reading = attachLoading(list); start.disabled = S.sending.has(S.view) || reading; if (reading) start.title = 'Wait until the attachments finish loading'; else start.removeAttribute('title'); }
@@ -6342,7 +6357,7 @@
     document.body.appendChild(el);
     el.querySelector('[data-lb-close]').focus();
   }
-  const closeLightbox = () => { const el = $('#lightbox'); if (!el) return; el.remove(); if (el._returnFocus?.isConnected) el._returnFocus.focus(); };
+  const closeLightbox = () => { const el = $('#lightbox'); if (!el) return; el.remove(); if (el._returnFocus?.isConnected) el._returnFocus.focus({ preventScroll: true }); };
   document.addEventListener('click', e => {
     const lb = e.target.closest?.('#lightbox');
     if (lb) { if (e.target.tagName !== 'IMG' && !e.target.closest('a')) closeLightbox(); return; }
