@@ -8,7 +8,7 @@ import { chatPdfs } from '../pdfs.mjs';
 import { readSessionHead, lastContext, importMessages, cleanTitle } from '../transcript.mjs';
 import { launchOptions } from '../launch.mjs';
 export function sessionRoutes(ctx){
- const {command,start,lock,store,commands,refresh,digest,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,canAppUpdate,appVersion,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
+ const {command,start,lock,store,commands,refresh,persist,scheduleSave,runners,autoShutdownView,instance,canRestart,canAppUpdate,appVersion,stashImages,unread,readTranscript,discoverCommands,needsBackfill,backfillEntries,fileEntries,syncFromFile,fileMoved,providerUsage,modelChoice,sessionFileParam,ensureProject,refreshBranches,createSession,markOverlaps,transcriptDelta,storeDelta,readDraft,saveDraft}=ctx;
  const archiveOrPin=async({url,body,json})=>{
     const field=url.pathname==='/api/pin'?'pinned':'archived',other=field==='pinned'?'archived':'pinned',on=body[field]!==false;
     const key=typeof body.key==='string'?body.key:'';if(!/^[sf]:./.test(key)||key.length>4096)throw error('Invalid session key.');
@@ -23,7 +23,7 @@ export function sessionRoutes(ctx){
    // The activity log alone, for clients that show it without the whole store (polls leave it out, and /api/state
    // without ?session also carries every transcript).
    'GET /api/activity':async({json})=>{json({activity:store.activity||[]});return;},
-   'GET /api/state':async({req,res,url,send,json})=>{
+   'GET /api/state':async({req,res,url,send,json,tagged})=>{
     markOverlaps();refreshBranches();
     // Draft texts can be large: polls carry only their timestamps, and the dashboard fetches a changed draft by key.
     const drafts=Object.fromEntries(Object.entries(store.drafts).map(([k,v])=>[k,v.at]));
@@ -45,9 +45,7 @@ export function sessionRoutes(ctx){
     // Without store (a page loaded from an older companion): the whole list. With since, the viewed transcript as deltas.
     else{const tx=since!==null&&viewed?transcriptDelta(viewed,since,od):null;
      body=JSON.stringify({...top,...(tx?{tx:tx.tx}:{}),sessions:store.sessions.map(s=>s.id===id?(tx?.delta?{...s,messages:undefined}:{...s,messages:s.messages}):{...s,messages:undefined,_btw:undefined})});}
-    const tag=`"${digest(body)}"`;
-    if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
-    send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);return;
+    tagged(body);return;
    },
    // A view's draft with its images' data and previews; images named in ?have= (the dashboard has them) come without.
    'GET /api/draft':async({url,json})=>{json(await readDraft(url.searchParams.get('key'),new Set(url.searchParams.getAll('have'))));return;},

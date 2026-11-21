@@ -7,12 +7,10 @@ import { IMAGE_EXT } from '../images.mjs';
 import { attachmentDir, pdfName } from '../pdfs.mjs';
 import { readSessionHead, lastContext, importMessages } from '../transcript.mjs';
 export function historyRoutes(ctx){
- const {background,store,runners,subagentThoughts,toolImageDir,imageWrites,stashImages,ompBlob,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions,digest,dataDir}=ctx;
+ const {background,store,runners,subagentThoughts,toolImageDir,imageWrites,stashImages,ompBlob,sessionFileParam,ompSessionsDir,insideSessions,listNativeSessions,dataDir}=ctx;
  // Replies the dashboard polls with its last ETag (the session list every 20 s, a live session's background every 3 s, a
  // subagent's transcript every 4 s): one that has not changed is a 304 without a body.
- const tagged=({req,res,send},value)=>{const body=JSON.stringify(value),tag=`"${digest(body)}"`;
-  if(req.headers['if-none-match']===tag){res.writeHead(304,{ETag:tag,'Cache-Control':'no-store'});res.end();return;}
-  send(200,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY',ETag:tag},body);};
+ const tagged=({tagged},value)=>tagged(JSON.stringify(value));
  return {
    'GET /api/omp-sessions':async r=>{tagged(r,{dir:ompSessionsDir,sessions:await listNativeSessions()});return;},
    'GET /api/omp-sessions/preview':async({url,json})=>{const file=sessionFileParam(url.searchParams.get('file'));let head;try{head=await readSessionHead(file);}catch{throw error('Session file not found.',404);}json({...head,file,contextTokens:await lastContext(file).catch(()=>undefined),messages:await importMessages(file,150,stashImages)});return;},

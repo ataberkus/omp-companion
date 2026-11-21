@@ -88,7 +88,7 @@ function parseInto(parent, html) {
 
 // The real app.js in a vm, its page elements from the small DOM above. ros: ResizeObserver callbacks; ls: localStorage;
 // wrap: applied to every JSON body the app reads (the objects it then holds).
-function boot({ hash = '#/s/s1', respond, ls = {}, intl, now, wrap = b => b } = {}) {
+function boot({ hash = '#/s/s1', respond, ls = {}, intl, now, wrap = b => b, phone = false } = {}) {
   const timers = [], listeners = {}, winListeners = {}, ros = [], errors = [];
   const doc = { inserted: 0 };
   const els = new Map();
@@ -110,7 +110,7 @@ function boot({ hash = '#/s/s1', respond, ls = {}, intl, now, wrap = b => b } = 
   const FakeDate = class extends Date { constructor(...a) { super(...(a.length ? a : [Date.now() + clock.offset])); } static now() { return Date.now() + clock.offset; } };
   runInNewContext(source, {
     document, Element, window: { innerHeight: 900, addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); } }, addEventListener() {}, innerWidth: 1360, innerHeight: 900,
-    location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: () => ({ matches: false }), Date: now ? FakeDate : Date, console: { ...console, error: (...a) => errors.push(a) }, confirm: () => true,
+    location, history: { replaceState() {} }, URLSearchParams, AbortSignal, CSS: { escape: s => String(s) }, matchMedia: q => ({ matches: phone && q.includes('max-width: 820px') }), Date: now ? FakeDate : Date, console: { ...console, error: (...a) => errors.push(a) }, confirm: () => true,
     localStorage: { getItem: k => ls[k] ?? null, setItem() {} }, sessionStorage: { getItem: () => 'tok', setItem() {}, removeItem() {} }, URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {}, requestAnimationFrame: fn => fn(), ResizeObserver: class { constructor(fn) { ros.push(fn); } observe() {} disconnect() {} }, fetch,
     ...(intl ? { Intl: intl } : {}),
@@ -404,4 +404,42 @@ test('omp-debug-parts catches a part whose input is missing from its ctx (here: 
     assert.doesNotMatch(app.thread(), /edited in place/, 'the cached markup is what shows');
     assert.equal(app.errors.filter(e => e[0] === 'Stale thread part').length, debug ? 1 : 0);
   }
+});
+
+// Phones (html.lean): a long thread renders its last THREAD_WINDOW parts with "Show earlier" above them, and closed bodies
+// are built only when opened; what is shown reads exactly as the same parts of a desktop render.
+test('phone: a long thread renders a window of its latest parts, grows on "Show earlier", and builds closed bodies on open', async () => {
+  const messages = Array.from({ length: 120 }, (_, i) => i % 2 ? reply('a' + i, 'answer ' + i, i) : user('u' + i, 'question ' + i, i));
+  messages.push(think('k120', 'deep *thought*', 120), reply('a121', 'done', 121));
+  const st = store([session('s1', messages)]);
+  const desk = boot({ respond: stateOf(st) }), app = boot({ respond: stateOf(st), phone: true });
+  await flush();
+  const parts = n => n.els.get('thread').children;
+  assert.doesNotMatch(desk.thread(), /threadEarlier/, 'a desktop renders every part');
+  const all = parts(desk).length;
+  assert.ok(all > 100, `${all} parts`);
+  assert.match(app.thread(), /data-act="threadEarlier"/);
+  assert.equal(parts(app).length, 51, 'the window and its "Show earlier" row');
+  assert.equal(parts(app).at(-1).outerHTML, parts(desk).at(-1).outerHTML, 'the latest part reads as on a desktop');
+  app.click({ closest: sel => sel === '[data-act]' ? { dataset: { act: 'threadEarlier' }, closest: () => null } : null }); await flush();
+  assert.equal(parts(app).length, 101, 'Show earlier adds a window above');
+  app.click({ closest: sel => sel === '[data-act]' ? { dataset: { act: 'threadEarlier' }, closest: () => null } : null }); await flush();
+  assert.equal(parts(app).length, all, 'until the whole thread shows');
+  assert.doesNotMatch(app.thread(), /threadEarlier/);
+  // The settled, closed "Thought" group: its rows are not built until it opens, then read as a desktop builds them up front;
+  // the thinking row inside, closed too, gets its body on opening.
+  const group = n => n.els.get('thread').querySelector('details[data-gid="k120"]');
+  assert.ok(!group(app).open && !group(desk).open, 'the group is closed');
+  assert.doesNotMatch(group(app).innerHTML, /details/, 'its rows are not built yet');
+  app.toggle(group(app)); await flush();
+  // (This DOM serializes an element's opening tag as parsed: a filled body still shows its data-lazy there.)
+  const rows = n => n.querySelector('.rows').innerHTML.replace(/ data-lazy="[^"]*"/g, '');
+  const row = group(app).querySelector('details.row');
+  assert.ok(row && !row.open, 'opening builds its rows');
+  assert.doesNotMatch(row.innerHTML, /<em>thought<\/em>/, 'the closed row has no body yet');
+  app.toggle(row); await flush();
+  assert.match(group(app).querySelector('details.row').innerHTML, /<em>thought<\/em>/, 'opening the row builds its body');
+  desk.toggle(group(desk)); desk.toggle(group(desk).querySelector('details.row')); await flush();
+  assert.equal(rows(group(app)), rows(group(desk)), 'both opened read as on a desktop');
+  assert.deepEqual(app.errors, []);
 });

@@ -61,6 +61,9 @@
   // KaTeX 0.19.1, vendored in local-dist/vendor/katex (woff2 fonts only), loads the first time a message has math. Until it
   // has loaded, or when it can't (a missing file, the tests' vm), a formula shows its TeX source as text.
   const KATEX = '/vendor/katex/';
+  // The companion names each KaTeX file's version (meta omp-katex: css, js, copy-tex), so the files are cached for good.
+  const katexV = (document.querySelector?.('meta[name="omp-katex"]')?.content || '').split(' ');
+  const katexUrl = (name, i) => KATEX + name + (katexV[i] ? '?v=' + katexV[i] : '');
   // trust: false leaves \href, \url and \includegraphics inert; maxSize and maxExpand cap crafted input.
   const KATEX_OPTS = { throwOnError: false, trust: false, strict: 'ignore', output: 'htmlAndMathml', maxSize: 50, maxExpand: 1000 };
   const MATH_MAX = 20000; // longer TeX shows as source: KaTeX's own limits don't bound plain length
@@ -69,11 +72,11 @@
     if (katexLoad || globalThis.katex || !document.head || !document.createElement) return;
     const els = [];
     const add = (tag, attrs) => new Promise((ok, fail) => { const el = Object.assign(document.createElement(tag), attrs, { onload: ok, onerror: fail }); els.push(el); document.head.appendChild(el); });
-    katexLoad = Promise.all([add('link', { rel: 'stylesheet', href: KATEX + 'katex.min.css' }), add('script', { src: KATEX + 'katex.min.js' })])
+    katexLoad = Promise.all([add('link', { rel: 'stylesheet', href: katexUrl('katex.min.css', 0) }), add('script', { src: katexUrl('katex.min.js', 1) })])
       .then(() => { if (!globalThis.katex) throw new Error('KaTeX did not load'); })
       .then(() => {
         // Copying a selection with formulas puts their TeX on the clipboard, as $…$ and $$…$$.
-        add('script', { src: KATEX + 'contrib/copy-tex.min.js' }).catch(() => {});
+        add('script', { src: katexUrl('contrib/copy-tex.min.js', 2) }).catch(() => {});
         // Markup rendered while KaTeX was missing shows source: drop every cache holding it and render the view again.
         mathCache.clear(); mdCache.clear(); mdNew.length = 0; bodyCache.clear(); partSets.clear();
         S.lastSig = ''; update(); showMathPreview();
@@ -643,6 +646,9 @@
   function renderList() {
     const list = $('#list');
     if (S.groupDrag) return; // a header drag in progress: moving rows under the pointer would break it; dragend re-renders
+    // A phone's closed drawer is off screen: once it holds a list, the list waits (listStale) until the drawer opens (setNav).
+    if (phone() && !$('#app')?.classList?.contains('nav-open') && list.children?.length) { listStale = true; renderConn(); return; }
+    listStale = false;
     if (!S.store) { setKeyed(list, []); return; }
     // `in:<text>` words limit the search to workspaces whose name or folder contains <text>.
     const words = S.search.trim().toLowerCase().split(/\s+/).filter(Boolean), isIn = w => w.length > 3 && w.startsWith('in:');
@@ -696,6 +702,10 @@
       fc.hidden = !S.focus;
       setIfChanged(fc, S.focus ? `<span class="swatch" style="--pc:${esc(f?.color || p?.color || pathColor(S.focus))}" aria-hidden="true"></span><span class="fc-name" title="${esc(f?.cwd || p?.path || '')}">${esc(f?.folder || p?.name || base(S.focus))}</span><button type="button" class="btn-reset fc-x" data-focus="" aria-label="Show all workspaces" title="Show all workspaces">✕</button>` : '');
     }
+    renderConn();
+  }
+  let listStale = false;
+  function renderConn() {
     $('#conn').className = 'conn ' + (S.online ? 'on' : S.online === false ? 'off' : '');
     $('#conn').title = S.online ? 'Connected to the local companion' : 'Companion not reachable';
     $('#conn').setAttribute('aria-label', $('#conn').title);
@@ -874,6 +884,19 @@
   }
   class Drafts extends Map { set(k, v) { super.set(k, v); saveDraft(k); return this; } delete(k) { const had = super.delete(k); saveDraft(k); return had; } }
   const drafts = new Drafts();
+  // Drafts not yet confirmed by the companion, kept in this tab's sessionStorage while the page is away (hidden, or a
+  // reload over a dropped link): a discarded tab brings them back on load and saves them then. Images stay out (size).
+  const DRAFT_BACKUP = 'omp-draft-backup';
+  function backupDrafts() {
+    const out = {};
+    for (const view of new Set([...draftTimers.keys(), ...draftSaving.keys(), ...draftRetry])) { const t = Map.prototype.get.call(drafts, view); if (t) out[view] = t; }
+    try { Object.keys(out).length ? sessionStorage.setItem(DRAFT_BACKUP, JSON.stringify(out)) : sessionStorage.removeItem(DRAFT_BACKUP); } catch {}
+  }
+  try {
+    const kept = JSON.parse(sessionStorage.getItem(DRAFT_BACKUP) || '{}');
+    sessionStorage.removeItem(DRAFT_BACKUP);
+    if (kept && typeof kept === 'object') for (const [view, text] of Object.entries(kept)) if (draftKey(view) && typeof text === 'string' && text) drafts.set(view, text);
+  } catch {}
   // The composer grows with its text up to 40% of the window. On touch screens the cap is a third of what is visible,
   // which shrinks while the on-screen keyboard is up, so a long paste never covers the conversation and the toolbar.
   const composerMax = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches ? (window.visualViewport?.height || window.innerHeight) / 3 : window.innerHeight * 0.4;
@@ -882,6 +905,17 @@
   // the composer pinned at its bottom. The keyboard is up when the visible area is well short of the tallest seen at this width.
   const phoneMq = typeof matchMedia === 'function' ? matchMedia('(max-width: 820px), (pointer: coarse) and (max-height: 500px)') : null;
   const phone = () => !!phoneMq?.matches;
+  // ---------- lean mode: phones, touch screens, data saver and slow links ----------
+  // Fewer thread parts in the DOM at a time (windowParts), collapsed tool and thought bodies built only once opened
+  // (activityRow), slower polls while hidden, and html.lean / html.low-data for app.css to drop costly paint effects.
+  const coarseMq = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : null;
+  const netInfo = typeof navigator === 'object' ? navigator.connection || null : null;
+  const lowData = () => !!netInfo && (netInfo.saveData === true || /^(slow-2g|2g|3g)$/.test(netInfo.effectiveType || ''));
+  const lean = () => phone() || !!coarseMq?.matches || lowData();
+  function syncLean() { const r = document.documentElement?.classList; r?.toggle('lean', lean()); r?.toggle('low-data', lowData()); }
+  syncLean();
+  coarseMq?.addEventListener?.('change', () => { syncLean(); S.lastSig = ''; update(); });
+  netInfo?.addEventListener?.('change', syncLean);
   let vvTall = 0, vvWidth = 0;
   function stackBudget() {
     const vv = window.visualViewport, h = vv?.height || window.innerHeight, w = vv?.width || innerWidth;
@@ -906,7 +940,7 @@
   addEventListener('resize', refit);
   window.visualViewport?.addEventListener('resize', refit);
   // Crossing into or out of the phone layout changes the composer's buttons and the plugin strip's markup.
-  phoneMq?.addEventListener?.('change', () => { refit(); update(); });
+  phoneMq?.addEventListener?.('change', () => { refit(); syncLean(); S.lastSig = ''; update(); });
 
   // ---------- phone composer: one row while OMP works ----------
   // While a session runs, a phone shows the composer as one row (draft, send, stop) until it is used: focus, a draft or an
@@ -985,7 +1019,7 @@
   function jumpLatest() {
     const sc = $('#scroller');
     if (!sc) return;
-    jumpUntil = Date.now() + 1500; setReading(false);
+    jumpUntil = Date.now() + 1500; userUpAt = 0; setReading(false); threadWin.pinned = false; // the next render trims "Show earlier" again
     // One scrollTo could stop short: a smooth scroll cut off by a poll re-rendering the thread, a flick's leftover momentum,
     // or a height still settling (images, math). Jump straight there and re-apply each frame until it stays at the bottom.
     let frames = 0, settled = 0;
@@ -999,7 +1033,11 @@
   }
   // The chat's box shrinks when the stack grows (composer opening, keyboard, a question arriving): one read at the bottom stays there.
   let scrollStuck = true;
-  const stickObserver = new ResizeObserver(() => { const sc = $('#scroller'); if (sc && scrollStuck) sc.scrollTop = sc.scrollHeight; });
+  // The thumb wins: while a finger is on the chat, or just after a finger, a flick's momentum or a wheel moved it up, no
+  // render and no resize pulls it back to the bottom (userScrolling). Set by the touch, wheel and scroll listeners.
+  let thumbDown = false, userUpAt = 0, gestureAt = 0, lastTop = 0;
+  const userScrolling = () => thumbDown || Date.now() - userUpAt < 1200;
+  const stickObserver = new ResizeObserver(() => { const sc = $('#scroller'); if (sc && scrollStuck && !userScrolling()) sc.scrollTop = sc.scrollHeight; });
 
   const previewLoading = new Set();
   async function loadPreview(file) {
@@ -1058,6 +1096,15 @@
     if (c.kind === 'session') { const s = S.store?.sessions.find(x => x.id === c.id); if (s) renderComposer(s); }
     else if (c.kind === 'native') renderComposer(null, S.native.find(x => x.file === c.file) || S.previews.get(c.file));
     else if (c.kind === 'sub') renderSubComposer(c.file);
+  }
+  // Typing sizes the composer (a layout read) and rebuilds its buttons once per frame, however fast keys or an IME come,
+  // so a keystroke never waits on laying out the page.
+  let composerQueued = false;
+  function composerSoon(input) {
+    if (composerQueued) return;
+    const run = () => { composerQueued = false; if (input.isConnected !== false) autosize(input); updateComposer(); };
+    if (typeof requestAnimationFrame !== 'function' || document.hidden) return run();
+    composerQueued = true; requestAnimationFrame(run);
   }
 
   // ---------- ghost-text word completion (OMP predict_word, engine from spelling.autocomplete) ----------
@@ -1714,7 +1761,7 @@
     }
     if (t.result && !(files.length && t.status !== 'error')) out.push(`<div class="result ${t.status === 'error' ? 'bad' : ''}"><div class="bar"><span>${t.status === 'error' ? 'Error' : 'Output'}</span></div><pre>${looksDiff(t.result) ? highlight(t.result, 'diff') : esc(t.result)}</pre></div>`);
     if (t.result && files.length && t.status !== 'error') out.push(`<details class="raw"><summary>Tool output</summary><pre class="fd-raw">${esc(t.result)}</pre></details>`);
-    if (t.images?.length) out.push(`<div class="attach-preview tool-images">${t.images.map((img, i) => `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View image ${i + 1} full size"><img data-tool-image="${esc(img.id)}" alt="Image from ${esc(t.name || 'tool')} output"></button></div>`).join('')}</div>`);
+    if (t.images?.length) out.push(`<div class="attach-preview tool-images">${t.images.map((img, i) => `<div class="attach-item"><button type="button" class="btn-reset" data-lightbox aria-label="View image ${i + 1} full size"><img data-tool-image="${esc(img.id)}" loading="lazy" decoding="async" alt="Image from ${esc(t.name || 'tool')} output"></button></div>`).join('')}</div>`);
     return out.join('') || '<div class="muted" style="padding:4px 0">No details.</div>';
   }
   // Tool-result images come from /api/tool-image, which needs the Authorization header, so the <img> gets an object URL.
@@ -1753,9 +1800,25 @@
   }
   // Group state survives re-renders; values only exist when the user overrides the default.
   const groupOpen = new Map(), rowOpen = new Map(), bodyCache = new Map();
-  // ponytail: every row body is rendered eagerly, collapsed or not, so Chrome's find-in-page can search closed <details>; the
-  // body cache (1000) covers the server's 600-message cap. Ceiling: thread DOM/HTML size grows with tool output (MBs on long
-  // sessions). Upgrade path: render bodies lazily on the details toggle event if parse/layout time shows up on phones.
+  // Every row body is rendered eagerly, collapsed or not, so Chrome's find-in-page can search closed <details>; the body
+  // cache (1000) covers the server's 600-message cap. Lean screens (phones, touch, slow links) instead build a closed
+  // row's body, and a closed settled group's rows, only once it is opened (lazyHtml, filled by the toggle listener): on a
+  // long session the closed tool output and diffs were most of the thread's markup, parsed and laid out on every switch.
+  const lazyParts = new Map(); // data-lazy key → builder of the markup it stands for
+  const lazyHtml = (key, open, build) => {
+    if (open || !lean()) return ['', build()];
+    lazyParts.delete(key); lazyParts.set(key, build); trim(lazyParts, 2000);
+    return [` data-lazy="${esc(key)}"`, ''];
+  };
+  // A closed lean body opened: built now, in place. One whose builder is gone renders the view again (the toggle changed
+  // its part's ctx, so that part is rebuilt open).
+  function fillLazy(d) {
+    const box = [...(d.children || [])].find(c => c.dataset?.lazy);
+    if (!box) return;
+    const build = lazyParts.get(box.dataset.lazy);
+    if (!build) { S.lastSig = ''; update(); return; }
+    box.innerHTML = build(); box.removeAttribute('data-lazy');
+  }
   const thinkTitle = text => {
     const line = String(text).split('\n').map(l => l.replace(/[*_#`>]/g, '').trim()).find(Boolean) || 'Thinking';
     return line.length > 110 ? line.slice(0, 110) + '…' : line;
@@ -1767,9 +1830,10 @@
     if (m.role === 'thinking') {
       const def = live && lastInLive;
       const open = rowOpen.has(rid) ? rowOpen.get(rid) : def;
+      const [lazy, body] = lazyHtml('r:' + rid, open, () => md(m.text));
       return `<details class="row think" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
         <summary><span class="ln">Thought <span class="ds">${esc(thinkTitle(m.text))}</span></span>${def ? '<span class="spinner"></span>' : ''}</summary>
-        <div class="row-body md thought">${md(m.text)}</div></details>`;
+        <div class="row-body md thought"${lazy}>${body}</div></details>`;
     }
     const t = m.tool;
     const a = parseArgs(t.args);
@@ -1780,10 +1844,11 @@
     const open = rowOpen.has(rid) ? rowOpen.get(rid) : def;
     const bg = a?.async === true;
     const tip = [t.intent, t.ms ? fmtMs(t.ms) : ''].filter(Boolean).join(' · ');
+    const [lazy, body] = lazyHtml('r:' + rid, open, () => memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, t.result?.slice(-64), realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), t.images?.map(i => i.id).join(), diffMode()].join('|'), () => toolBody(t, a), 1000));
     return `<details class="row tool ${bad ? 'bad' : ''} ${edits ? 'edit' : ''}" data-rid="${esc(rid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>
       <summary title="${esc(tip)}"><span class="ln">${esc(L.v)}${L.b ? ` <b>${esc(L.b)}</b>` : ''}${L.d ? ` <span class="ds">${esc(L.d)}</span>` : ''}${L.c ? ` <code>${esc(L.c.slice(0, 120))}</code>` : ''}</span>
       ${bg ? '<span class="tag">background</span>' : ''}${edits ? `<span class="fd-stat"><span class="plus">+${edits.adds}</span> <span class="minus">−${edits.dels}</span></span>` : ''}${running ? '<span class="spinner"></span>' : bad ? '<span class="bad">✕<span class="sr-only">failed</span></span>' : ''}</summary>
-      <div class="row-body">${memo(bodyCache, [rid, t.status, t.args?.length, t.result?.length, t.result?.slice(-64), realFiles(t).map(f => f.path + ':' + (f.diff?.length || 0)).join(), t.images?.map(i => i.id).join(), diffMode()].join('|'), () => toolBody(t, a), 1000)}</div></details>`;
+      <div class="row-body"${lazy}>${body}</div></details>`;
   }
   function legacyTools(group) {
     // Pair legacy "call"/"result" text records into tool objects.
@@ -1822,7 +1887,7 @@
     return html;
   }
   // Every input of an activity row's markup besides its message (see cachedPart).
-  const rowCtx = (m, live, lastInLive) => [live ? 1 : 0, lastInLive ? 1 : 0, rowOpen.get(m.id), diffMode()].join('|');
+  const rowCtx = (m, live, lastInLive) => [live ? 1 : 0, lastInLive ? 1 : 0, rowOpen.get(m.id), diffMode(), lean() ? 1 : 0].join('|');
   // The group's markup, and its pieces as setKeyed's nest (the live group is patched in place, row by row).
   function activityParts(group, live) {
     const rows = legacyTools(group);
@@ -1837,15 +1902,77 @@
     const open = groupOpen.has(gid) ? groupOpen.get(gid) : def;
     const head = `<details class="activity ${live ? 'live' : ''}" data-gid="${esc(gid)}" data-def="${def ? 1 : 0}" ${open ? 'open' : ''}>`;
     const sum = `${live ? '<span class="spinner"></span>' : ''}<span class="lbl">${esc(groupPhrase(lines))}</span>${cst ? `<span class="fd-stat" title="${esc([...new Set(changed.map(f => f.path))].join('\n'))}"><span class="plus">+${cst.adds}</span> <span class="minus">−${cst.dels}</span></span>` : ''}${failed ? `<span class="bad">${failed} failed</span>` : ''}${live ? `<span class="now">${esc(now)}</span>` : ''}`;
-    const kids = rows.map((r, j) => [r.id, cachedPart(rowParts, [r], rowCtx(r, live, j === rows.length - 1), () => activityRow(r, live, j === rows.length - 1, lines[j]))]);
-    return { head, sum, kids, html: `${head}
+    const kids = () => rows.map((r, j) => [r.id, cachedPart(rowParts, [r], rowCtx(r, live, j === rows.length - 1), () => activityRow(r, live, j === rows.length - 1, lines[j]))]);
+    // The live group is open and patched row by row: its rows always go out. A closed settled one on a lean screen waits.
+    if (live) { const k = kids(); return { head, sum, kids: k, html: `${head}
       <summary>${sum}</summary>
-      <div class="rows">${kids.map(k => k[1]).join('')}</div></details>` };
+      <div class="rows">${k.map(x => x[1]).join('')}</div></details>` }; }
+    const [lazy, body] = lazyHtml('g:' + gid, open, () => kids().map(x => x[1]).join(''));
+    return { head, sum, html: `${head}
+      <summary>${sum}</summary>
+      <div class="rows"${lazy}>${body}</div></details>` };
   }
   const activityBlock = (group, live) => activityParts(group, live).html;
   // Every input of a settled group's markup besides its messages (see cachedPart); the live one is built on every render.
-  const groupCtx = group => [S.expandAll ? 1 : 0, diffMode(), groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
+  const groupCtx = group => [S.expandAll ? 1 : 0, diffMode(), lean() ? 1 : 0, groupOpen.get(group[0].id), ...group.map(m => rowOpen.get(m.id))].join('|');
 
+  // ---------- thread window: a lean screen keeps a long thread's latest parts in the DOM ----------
+  // The latest THREAD_WINDOW parts (fewer on a data-saving or slow link) show, with "Show earlier" above them; the parts
+  // above are not even built. While the user reads above the bottom, the first part shown stays put and new output only
+  // appends; back at the bottom the window shrinks to the latest again, unless the user asked for earlier ones (pinned).
+  // Per thread owner: another session starts at its latest. Wide screens with a fine pointer show every part.
+  const THREAD_WINDOW = 50;
+  const threadWin = { owner: null, start: '', pinned: false, keys: [] };
+  function windowParts(parts, owner, atBottom) {
+    const w = threadWin;
+    if (w.owner !== owner) Object.assign(w, { owner, start: '', pinned: false }, savedWindow(owner));
+    w.keys = parts.map(p => p[0]);
+    if (!lean() || parts.length <= THREAD_WINDOW) { w.start = ''; return parts; }
+    let from = w.start ? w.keys.indexOf(w.start) : -1;
+    if (from < 0 || (atBottom && !w.pinned)) { from = Math.max(0, parts.length - (lowData() ? 30 : THREAD_WINDOW)); w.pinned = false; }
+    w.start = w.keys[from];
+    if (!from) return parts;
+    return [['earlier', `<div class="thread-earlier"><button type="button" class="btn sm ghost" data-act="threadEarlier" aria-label="Show ${from} earlier ${from === 1 ? 'item' : 'items'} of this conversation">↑ Show earlier <span class="muted">(${from})</span></button></div>`], ...parts.slice(from)];
+  }
+  // "Show earlier": the window grows upward by another THREAD_WINDOW, and what was on screen stays where it was: the first
+  // part shown before keeps its place on screen, again over the next frames as the added parts take their real heights.
+  function threadEarlier() {
+    const w = threadWin, sc = $('#scroller'), from = w.keys.indexOf(w.start);
+    if (from <= 0) return;
+    const anchor = $('#thread [data-act="threadEarlier"]')?.closest?.('.thread-earlier')?.nextElementSibling, y = anchor?.getBoundingClientRect?.().top;
+    const back = sc ? sc.scrollHeight - sc.scrollTop : 0;
+    w.start = w.keys[Math.max(0, from - THREAD_WINDOW)]; w.pinned = true; userUpAt = Date.now();
+    S.lastSig = ''; update();
+    const keep = () => { if (sc && anchor?.isConnected && y !== undefined) sc.scrollTop += anchor.getBoundingClientRect().top - y; };
+    if (sc) sc.scrollTop = sc.scrollHeight - back;
+    // Parts skipped by content-visibility take their real heights over several frames: hold the anchor for about half a
+    // second (30 frames), or until a finger or wheel takes over.
+    const t0 = Date.now();
+    let frames = 0;
+    const settle = () => { if (thumbDown || gestureAt > t0) return; keep(); if (++frames < 30) requestAnimationFrame(settle); };
+    settle();
+    if (!$('#thread [data-act="threadEarlier"]')) $('#thread')?.firstElementChild?.querySelector?.('button, summary, [tabindex]')?.focus?.({ preventScroll: true });
+  }
+  // Scroll position and window across a suspended or discarded tab (a phone switching apps, a Tailscale reconnect that
+  // reloads the page): kept in sessionStorage when the page is hidden, applied by the first render of the same thread.
+  const SCROLL_KEY = 'omp-scroll';
+  let savedScroll = null;
+  try { const v = JSON.parse(sessionStorage.getItem(SCROLL_KEY)); if (v && typeof v.owner === 'string' && Date.now() - v.at < 3600e3) savedScroll = v; } catch {}
+  const savedWindow = owner => savedScroll?.owner === owner && typeof savedScroll.start === 'string' ? { start: savedScroll.start, pinned: !!savedScroll.pinned } : {};
+  function saveScroll() {
+    const sc = $('#scroller');
+    if (!sc || threadWin.owner == null || !$('#thread')?.children.length) return;
+    try { sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ owner: threadWin.owner, start: threadWin.start, pinned: threadWin.pinned, top: sc.scrollTop, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight < 160, at: Date.now() })); } catch {}
+  }
+  // True when it put the thread back where it was read (not at the bottom); only the first thread rendered may use it.
+  function restoreScroll(owner, sc) {
+    const v = savedScroll;
+    savedScroll = null;
+    if (!v || v.owner !== owner) return false;
+    if (v.bottom || !(v.top >= 0)) return false;
+    sc.scrollTop = v.top; userUpAt = Date.now();
+    return true;
+  }
   function renderThread(messages, status, ownerId, opts = {}) {
     heldDiffMode = diffMode(); useParts(ownerId);
     try { threadPass(messages, status, ownerId, opts); } finally { heldDiffMode = ''; }
@@ -1876,12 +2003,14 @@
       if (u && !u.steer && (u.entryId || u.ompAt)) { for (let i = lastUser + 1; i < messages.length; i++) if (messages[i].role === 'assistant') lastReply = i; }
       else lastUser = -1;
     }
-    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.pdfs?.length, last?.tool?.status, tail?.id, tail?.text?.length, tail?.text?.slice(-64), runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, pending?.pdfs?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : ''].join('|');
+    const sig = [ownerId, messages.length, last?.id, last?.text?.length, last?.text?.slice(-64), last?.pdfs?.length, last?.tool?.status, tail?.id, tail?.text?.length, tail?.text?.slice(-64), runningTools, toolImages, liveOutput, steers, S.editSteer?.id, status, opts.compacting, opts.retry?.attempt, opts.task, idle >= 20 ? Math.floor(idle / 10) : 0, pending?.text, pending?.imagePreview?.length, pending?.pdfs?.length, S.expandAll, diffMode(), S.advReviews, S.advImportant, S.advHidden, opts.extra || '', opts.history ? messages.filter(m => m.entryId).length + ':' + lastUser + ':' + lastReply : '', lean() ? 1 : 0].join('|');
     if (sig === S.lastSig) return;
     const scroller = $('#scroller');
-    const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 || !$('#thread').children.length;
+    // Near the bottom, the thread follows new output, unless the user's thumb or wheel is moving it (userScrolling).
+    const nearBottom = (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 160 && !userScrolling()) || !$('#thread').children.length;
     // [key, html] parts for setKeyed: a poll rebuilds only the parts whose markup changed (the streaming tail, mostly).
-    // A key repeats only for messages without unique IDs, which then key by position.
+    // A key repeats only for messages without unique IDs, which then key by position. html may be a builder, called only
+    // for the parts the thread window shows (windowParts); one that builds nothing is left out then.
     const parts = [], seen = new Map();
     const add = (key, html, nest) => { if (!html) return; const n = seen.get(key) || 0; seen.set(key, n + 1); parts.push([n ? key + '#' + n : key, html, nest]); };
     if (opts.head) add('head', opts.head);
@@ -1892,7 +2021,7 @@
         const group = [];
         while (i < messages.length && messages[i].adv) group.push(messages[i++]);
         i--;
-        add('adv:' + group[0].id, advisorReview(group));
+        add('adv:' + group[0].id, () => advisorReview(group));
         continue;
       }
       if (m.role === 'tool' || m.role === 'thinking') {
@@ -1902,7 +2031,7 @@
         const live = status === 'running' && i === mainEnd;
         // The live group changes on every poll: it goes to setKeyed with its rows as parts, to be patched in place.
         if (live) { const a = activityParts(group, true); add('act:' + group[0].id, a.html, a); }
-        else add('act:' + group[0].id, cachedPart(groupParts, group, groupCtx(group), () => activityBlock(group, false)));
+        else add('act:' + group[0].id, () => cachedPart(groupParts, group, groupCtx(group), () => activityBlock(group, false)));
         continue;
       }
       if (m.role === 'system') {
@@ -1914,12 +2043,12 @@
         const shown = (m.notes || []).filter(n => !S.advImportant || n.severity === 'concern' || n.severity === 'blocker');
         shown.forEach((note, j) => {
           const level = ['nit', 'concern', 'blocker'].includes(note.severity) ? note.severity : 'nit';
-          add('note:' + m.id + ':' + j, `<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
+          add('note:' + m.id + ':' + j, () => `<div class="msg advisor ${level}"><div class="who">Advisor${note.advisor ? ' · ' + esc(note.advisor) : ''}<span class="severity">${esc(level)}</span><time>${esc(clock(m.at))}</time></div><div class="bubble md">${md(note.note)}</div></div>`);
         });
         continue;
       }
       if (m.role === 'advisor-update') {
-        add('upd:' + m.id, `<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
+        add('upd:' + m.id, () => `<details class="advisor-update" data-key="upd:${esc(m.id)}"><summary>Session update <time>${esc(clock(m.at))}</time></summary><div class="md">${md(m.text)}</div></details>`);
         continue;
       }
       const user = m.role === 'user';
@@ -1933,7 +2062,7 @@
         : user && m.entryId ? `<button class="steer-btn" data-msgact="branch" data-entry="${esc(m.entryId)}" title="Continue in a new OMP session file from just before this message; it goes back in the composer">Branch from here</button>` : '';
       // Every input of the message's markup besides the message itself (see cachedPart).
       const ctx = [steer, history, editing ? S.editSteer.text : '\u0002', opts.speaker || '', !user && m.model ? modelName(m.model) : ''].join('\u0001');
-      add('msg:' + m.id, cachedPart(msgParts, [m], ctx, () => {
+      add('msg:' + m.id, () => cachedPart(msgParts, [m], ctx, () => {
         const image = m.imagePreview ? images(m.imagePreview) : m.hasImage ? '<span class="msg-image-label">Image attached</span>' : '';
         // PDFs as chips that open the stored file; one with no stored details (an older message) gets the label instead.
         const docs = m.pdfs?.length ? pdfChips(m.pdfs, true) : user && m.text === 'PDF attached' ? '<span class="msg-image-label">PDF attached</span>' : '';
@@ -1961,12 +2090,13 @@
     // Keep the in-progress steer edit across re-renders triggered by live events.
     const draft = $('#thread [data-steerinput]'), focused = draft && document.activeElement === draft;
     if (draft && S.editSteer) S.editSteer.text = draft.value;
-    setKeyed($('#thread'), parts);
+    const shown = windowParts(parts, ownerId, nearBottom).map(([k, h, x]) => [k, typeof h === 'function' ? h() : h, x]).filter(p => p[1]);
+    setKeyed($('#thread'), shown);
     S.lastSig = sig; // only once rendered: a throwing render retries on the next poll instead of claiming it is done
     showThreadImages($('#thread'));
     const fresh = $('#thread [data-steerinput]');
     if (fresh && S.editSteer) { if (fresh !== draft) fresh.value = S.editSteer.text; if (focused || S.editSteer.focus) { fresh.focus(); if (S.editSteer.focus) fresh.setSelectionRange(fresh.value.length, fresh.value.length); S.editSteer.focus = false; } }
-    if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+    if (!restoreScroll(ownerId, scroller) && nearBottom) scroller.scrollTop = scroller.scrollHeight;
     syncReading();
   }
 
@@ -2902,7 +3032,7 @@
       return `<div class="ul-row" title="${esc(l.summary + (l.notes.length ? '\n' + l.notes.join('\n') : ''))}">
         <div class="ul-line"><span class="ul-name">${esc(l.label)}${l.detail ? ` <small>${esc(l.detail)}</small>` : ''}</span>
         <span class="ul-meta">${l.resetsAt !== undefined ? esc(usageReset(l.resetsAt)) + ' ' : ''}<b>${pct === undefined ? esc(l.summary) : Math.round(pct) + '%'}</b></span></div>
-        <div class="ul-bar"><i class="${pct >= 90 ? 'hot' : ''}" style="width:${Math.min(100, pct || 0)}%"></i></div></div>`;
+        <div class="ul-bar"><i class="${pct >= 90 ? 'hot' : ''}" style="--w:${Math.min(100, Math.max(0, pct || 0)) / 100}"></i></div></div>`;
     };
     const acct = a => `<section class="ul-acct"><div class="ul-head">${esc(a.name)}</div>${a.notes.map(n => `<div class="ul-note">${esc(n)}</div>`).join('')}
         ${a.unavailable ? `<div class="ul-note">Remaining quota unavailable: ${esc(a.unavailable)}.</div>` : a.limits.map(row).join('')}</section>`;
@@ -3108,7 +3238,7 @@
         return `<div class="queued-item"><span class="queued-number">${i + 1}</span><div class="queued-content">
           ${editing ? `<textarea data-qinput="${esc(q.id)}" rows="3" aria-label="Edit queued message">${esc(q.text)}</textarea>
             <div class="queued-edit-actions"><button class="btn sm primary" data-qsave="${esc(q.id)}">Save</button><button class="btn sm ghost" data-qclose>Cancel</button></div>`
-          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : q.pdfs?.length ? 'PDF attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<button type="button" class="btn-reset" data-lightbox aria-label="View queued image full size"><img src="${esc(src)}" alt="Queued image"></button>`).join('')}<span>Image attached</span></div>` : ''}${pdfChips(q.pdfs, true)}`}</div>
+          : `<div class="queued-text">${esc(q.text || (q.hasImage ? 'Image attached' : q.pdfs?.length ? 'PDF attached' : ''))}</div>${q.hasImage ? `<div class="queued-image">${[].concat(q.imagePreview || []).map(src => `<button type="button" class="btn-reset" data-lightbox aria-label="View queued image full size"><img src="${esc(src)}" decoding="async" alt="Queued image"></button>`).join('')}<span>Image attached</span></div>` : ''}${pdfChips(q.pdfs, true)}`}</div>
           ${queuedActions(q, waiting)}</div>`;
       }).join(''));
   }
@@ -3674,7 +3804,8 @@
   // ---------- actions ----------
   // Message previews: one data URL (older saved messages) or a list.
   const safeImg = src => /^(data:image\/|blob:|https?:|\/)/i.test(String(src || ''));
-  const images = list => [].concat(list || []).filter(safeImg).map(src => `<button type="button" class="msg-image-btn" aria-label="View attached image full size"><img class="msg-image" src="${esc(src)}" alt="Attached image"></button>`).join('');
+  // Off-screen thread images are decoded only as they scroll near (loading="lazy"), and off the main thread (decoding).
+  const images = list => [].concat(list || []).filter(safeImg).map(src => `<button type="button" class="msg-image-btn" aria-label="View attached image full size"><img class="msg-image" src="${esc(src)}" loading="lazy" decoding="async" alt="Attached image"></button>`).join('');
   const attached = () => S.attachments.filter(a => a.view === S.view);
   // Images as images and previews, PDFs as {data,name}; a list without one kind sends none of its keys.
   const imagePayload = list => {
@@ -5669,6 +5800,21 @@
       checkAttention();
       if ([...attn.unseen.keys()].join() === unseen) return;
     }
+    await renderFrame();
+  }
+  // One render per frame: refreshes that land together (a poll, a send's own refresh, the page shown again, the network
+  // back) render once, at the next frame, from the newest state then, instead of each laying the page out in turn. A
+  // hidden page gets no frames: it renders at once.
+  let frameRender = null;
+  function renderFrame() {
+    if (frameRender) return frameRender;
+    if (document.hidden || typeof requestAnimationFrame !== 'function') { renderNow(); return Promise.resolve(); }
+    let done = false;
+    const p = new Promise((ok, fail) => requestAnimationFrame(() => { done = true; frameRender = null; try { renderNow(); ok(); } catch (e) { fail(e); } }));
+    if (!done) frameRender = p;
+    return p;
+  }
+  function renderNow() {
     syncUi();
     checkAttention(); // first: the sidebar marks what checkAttention finds new
     const home = current().kind === 'home';
@@ -5685,14 +5831,29 @@
   const refreshNative = () => { S.nativeAt = 0; return refresh(); };
   // Something works: polls come every 1.2 s and each renders.
   const busyNow = () => panelSessions().some(s => s.status === 'running' || s.status === 'queued' || s._btw?.some(r => btwLatest(r).status === 'running') || s.uiRequests?.some(q => q.method === 'custom'));
+  // loopTimer: the next poll's timer, so the network coming back (resync) can bring a long offline backoff forward.
+  let loopTimer = 0, looping = false;
   async function loop() {
+    looping = true;
     try {
       if (S.token) { await refresh(true); if (current().kind === 'settings' && S.ompUpdate.status === 'running') await refreshUpdater(); if (current().kind === 'tools' && S.tools.jobs.some(j => j.status === 'running')) await refreshJobs(); }
     } catch (e) { console.error('Refresh failed:', e); } finally { // a render that throws must not end polling for good
+      looping = false;
       const busy = busyNow();
-      // Back off while the companion is unreachable instead of hammering it every second.
-      setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? 8000 : busy ? 1200 : 3500);
+      // Back off while the companion is unreachable instead of hammering it every second. Hidden: every 8 s for the title
+      // badge and notifications; a lean screen (a phone) 30 s, which shows neither while hidden and resyncs when shown.
+      loopTimer = setTimeout(loop, S.online === false ? Math.min(30000, 1000 * 2 ** S.fails) : document.hidden ? (lean() ? 30000 : 8000) : busy ? 1200 : 3500);
     }
+  }
+  // The page shown again, the network back (Wi-Fi ↔ cellular, Tailscale reconnecting) or restored from the back/forward
+  // cache: one refresh, a delta against what is held (since=, store=, ETags); events that fire together while it runs add
+  // nothing. A poll waiting out an offline backoff runs now instead, and its timer then follows the usual cadence.
+  let resyncing = null;
+  function resync() {
+    if (!S.token || document.hidden || resyncing) return;
+    if (S.online === false && !looping) { clearTimeout(loopTimer); S.fails = 0; resyncing = loop(); }
+    else resyncing = refresh();
+    resyncing.catch(() => {}).finally(() => { resyncing = null; });
   }
   // ---------- attention: notifications + title badge ----------
   // A session needs you when it settles for review, fails, or asks a question. It counts in the title badge until you open
@@ -5735,11 +5896,19 @@
     Promise.resolve(Notification.requestPermission()).then(p => { toast(p === 'granted' ? 'Notifications on' : 'Notifications are blocked for this page', p === 'granted' ? '' : 'err'); if (current().kind === 'settings') renderSettings(); }).catch(() => {});
   }
   window.addEventListener('focus', checkAttention);
-  // Hidden tabs (and the desktop app in the tray) poll every 8 s; catch up at once when shown again.
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && S.token) refresh(); usagePoll(); });
-  // A phone switching apps or a closing tab may never run the 700 ms draft debounce (frozen or gone): save pending drafts now.
-  document.addEventListener('visibilitychange', () => { if (document.hidden) void flushDrafts({ keepalive: true }); });
-  window.addEventListener('pagehide', () => void flushDrafts({ keepalive: true }));
+  // Hidden tabs (and the desktop app in the tray) poll every 8 s (a phone 30 s); catch up at once when shown again.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resync(); usagePoll(); });
+  // Wi-Fi ↔ cellular, a Tailscale reconnect, or the page back from the back/forward cache: catch up at once. Gone offline:
+  // the dot and the topbar say so now, instead of at the next failed poll; what is on screen stays as it is.
+  addEventListener('online', resync);
+  addEventListener('offline', () => { if (S.token && S.online !== false) { S.online = false; renderList(); update(); } });
+  addEventListener('pageshow', e => { if (e.persisted) resync(); });
+  // A phone switching apps or a closing tab may never run the 700 ms draft debounce (frozen or gone): save pending drafts
+  // now. Drafts the companion has not confirmed (offline, a save under way) are also kept in this tab (backupDrafts), and
+  // where the thread was read (saveScroll), for a page the phone discards or reloads meanwhile.
+  const away = () => { backupDrafts(); saveScroll(); void flushDrafts({ keepalive: true }); };
+  document.addEventListener('visibilitychange', () => { if (document.hidden) away(); });
+  window.addEventListener('pagehide', away);
 
   // ---------- events ----------
   const closeMenu = m => {
@@ -5758,6 +5927,7 @@
     document.querySelectorAll('[data-act="nav"]').forEach(b => b.setAttribute('aria-expanded', String(open)));
     // Back to the ☰ that is showing: on a landscape phone's Screen page that's the toolbar's, not the hidden header's.
     if (moveFocus) (open ? $('#newBtn') : [...(m?.querySelectorAll('[data-act="nav"]') || [])].find(b => b.getClientRects().length))?.focus();
+    if (open && listStale) renderList();
   }
   function pickerCtx() {
     const c = current();
@@ -6059,6 +6229,7 @@
     else if (act === 'interrupt') { closeMenu(a.closest('.menu')); send('interrupt'); }
     else if (act === 'composerToggle') toggleComposer();
     else if (act === 'jumpLatest') jumpLatest();
+    else if (act === 'threadEarlier') threadEarlier();
     else if (act === 'compactPref') { closeMenu(a.closest('.menu')); S.compactComposer = !S.compactComposer; try { localStorage.setItem('omp-compact-composer', S.compactComposer ? '1' : '0'); } catch {} composerHold = false; update(); }
     else if (act === 'plugins') openPlugins('', a);
     else if (act === 'homeLaunch') openLaunch('home');
@@ -6390,20 +6561,34 @@
   document.addEventListener('toggle', e => {
     const d = e.target;
     const remember = (map, key) => { if (!key) return; if (d.open === (d.dataset.def === '1')) map.delete(key); else map.set(key, d.open); };
-    if (d.open) showToolImages(d);
     if (d.classList?.contains('activity')) remember(groupOpen, d.dataset.gid);
     else if (d.classList?.contains('row')) remember(rowOpen, d.dataset.rid);
     else if (d.classList?.contains('disk-group')) remember(S.disk.open, d.dataset.key);
     else if (d.hasAttribute?.('data-finished')) S.finishedOpen = d.open;
     else if (d.dataset?.remember) remember(rowOpen, d.dataset.remember);
     else if (d.tagName === 'DETAILS') { touched.add(d); const p = d.open && d.matches('.job-thought') && d.querySelector('pre'); if (p && !touched.has(p)) p.scrollTop = p.scrollHeight; }
+    // After the open state is remembered: a lazy body whose builder is gone renders the view again, which must keep it open.
+    if (d.open) { fillLazy(d); showToolImages(d); }
   }, true);
   document.addEventListener('scroll', e => {
     if (e.target instanceof Element) touched.add(e.target);
-    if (e.target.id === 'scroller') { const sc = e.target; scrollStuck = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 48; markPromptRail(); syncReading(); }
+    if (e.target.id === 'scroller') {
+      const sc = e.target;
+      // Moved up by a finger, its momentum or a wheel (not by a render trimming or growing the thread): the user's.
+      if (sc.scrollTop < lastTop - 1 && (thumbDown || Date.now() - gestureAt < 1000)) userUpAt = Date.now();
+      lastTop = sc.scrollTop;
+      scrollStuck = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 48; markPromptRail(); syncReading();
+    }
     else if (e.target.classList?.contains('composer-wrap')) { const w = e.target; w._scrolled = w.scrollHeight - w.scrollTop - w.clientHeight > 4; }
     else if (e.target.id === 'input' && ghost) renderGhost();
   }, true);
+  // userScrolling's inputs: a finger on the chat, and when a finger, a flick or a wheel last moved it.
+  const onScroller = e => !!e.target?.closest?.('#scroller');
+  document.addEventListener('touchstart', e => { if (onScroller(e)) { thumbDown = true; gestureAt = Date.now(); } }, { passive: true, capture: true });
+  const lift = () => { if (thumbDown) { thumbDown = false; gestureAt = Date.now(); } };
+  document.addEventListener('touchend', lift, { passive: true, capture: true });
+  document.addEventListener('touchcancel', lift, { passive: true, capture: true });
+  document.addEventListener('wheel', e => { if (onScroller(e)) { gestureAt = Date.now(); if (e.deltaY < 0) userUpAt = gestureAt; } }, { passive: true, capture: true });
   // Moving the caret off the end hides the suggestion; returning brings it back.
   document.addEventListener('selectionchange', () => { if (ghost) renderGhost(); });
   document.addEventListener('input', e => {
@@ -6412,7 +6597,7 @@
       // A hand edit makes a restored draft's Redo, and an unapplied offer, stale; Undo of the result itself still applies.
       const u = S.enhanceUndo.get(S.view);
       if (u && u.mode !== 'undo') S.enhanceUndo.delete(S.view);
-      drafts.set(S.view, t.value); autosize(t); S.slash = null; renderSlash(); updateComposer(); predictWord(t);
+      drafts.set(S.view, t.value); S.slash = null; renderSlash(); composerSoon(t); predictWord(t);
     }
     else if (t.id === 'search') { S.search = t.value; renderList(); }
     else if (t.id === 'setSearch') { S.set.q = t.value; renderSettings(); }
