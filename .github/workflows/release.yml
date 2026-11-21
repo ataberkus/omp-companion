@@ -1,10 +1,11 @@
 # Every push to main (and a manual run of this workflow on main) builds the Windows NSIS installer and publishes it
 # as GitHub release v<version>; then the macOS apps (Apple silicon, then Intel) are built and added to the same release.
 # Pushes that only touch README.md, docs/ or .github/ files other than this workflow don't release.
-# The version is <major>.<minor> from src-tauri/tauri.conf.json plus this workflow's run number as the patch, e.g.
-# 1.0.57. It is written into tauri.conf.json, package.json and src-tauri/Cargo.toml in the runner's checkout only;
-# nothing is committed back. To change major or minor, commit the new X.Y.0 in those three files. The job fails
-# instead of publishing when an existing v* tag is already higher.
+# The version is <major>.<minor> from src-tauri/tauri.conf.json plus a patch that counts releases of that major.minor:
+# the first is X.Y.0, then X.Y.1, X.Y.2… (one more than the highest existing vX.Y.* tag). It is written into
+# tauri.conf.json, package.json and src-tauri/Cargo.toml in the runner's checkout only; nothing is committed back. To
+# change major or minor, commit the new X.Y.0 in those three files. The job fails instead of publishing when an
+# existing v* tag is already higher.
 # The build uses src-tauri/tauri.release.conf.json, so the installer is also the signed update package: the release
 # carries OMP Control Room_<version>_x64-setup.exe, its .sig and latest.json, the file installed apps check
 # (plugins.updater.endpoints) to find and install the newest release from the tray. The macOS jobs add each Mac's .dmg
@@ -77,8 +78,6 @@ jobs:
       - name: Set the release version
         id: version
         shell: pwsh
-        env:
-          RUN_NUMBER: ${{ github.run_number }}
         run: |
           $ErrorActionPreference = 'Stop'
           $confPath = 'src-tauri/tauri.conf.json'
@@ -86,9 +85,8 @@ jobs:
           $cargoPath = 'src-tauri/Cargo.toml'
 
           $base = [version](Get-Content $confPath -Raw | ConvertFrom-Json).version
-          $version = "$($base.Major).$($base.Minor).$env:RUN_NUMBER"
 
-          # Highest existing v* tag and the commit it points at (peeled ^{} lines win for annotated tags).
+          # Existing v* tags and the commits they point at (peeled ^{} lines win for annotated tags).
           $remote = git ls-remote --tags origin 'refs/tags/v*'
           if ($LASTEXITCODE -ne 0) { Write-Error 'git ls-remote --tags origin failed'; exit 1 }
           $tags = @{}
@@ -96,10 +94,17 @@ jobs:
             if ($line -notmatch '^([0-9a-f]+)\s+refs/tags/v(\d+\.\d+\.\d+)(\^\{\})?$') { continue }
             if ($Matches[3] -or -not $tags.ContainsKey($Matches[2])) { $tags[$Matches[2]] = $Matches[1] }
           }
+          # Patch: releases of this major.minor so far. A re-run on a commit already released reuses its version.
+          $same = @($tags.Keys | Where-Object { ([version]$_).Major -eq $base.Major -and ([version]$_).Minor -eq $base.Minor })
+          $mine = $same | Where-Object { $tags[$_] -eq $env:GITHUB_SHA } | Sort-Object { [version]$_ } | Select-Object -Last 1
+          if ($mine) { $version = $mine }
+          elseif ($same.Count) { $version = "$($base.Major).$($base.Minor).$((($same | ForEach-Object { ([version]$_).Build } | Measure-Object -Maximum).Maximum) + 1)" }
+          else { $version = "$($base.Major).$($base.Minor).0" }
+
           $latest = $tags.Keys | Sort-Object { [version]$_ } | Select-Object -Last 1
           if ($latest) {
             $cmp = ([version]$latest).CompareTo([version]$version)
-            # Equal is only a re-run of this same run on the same commit; anything else would not be newer.
+            # Equal is only a re-run on the commit that tag points at; anything else would not be newer.
             if ($cmp -gt 0 -or ($cmp -eq 0 -and $tags[$latest] -ne $env:GITHUB_SHA)) {
               Write-Error "Release v$version would not be newer than the existing tag v$latest. Raise major/minor in $confPath, $cargoPath and $pkgPath."
               exit 1
