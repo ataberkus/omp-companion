@@ -953,7 +953,7 @@ details.raw>*:not(summary){margin-top:6px}
 .ul-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ul-name small{font-weight:400;color:var(--faint)}
 .ul-meta{min-width:0;margin-left:auto;text-align:right;overflow-wrap:anywhere;color:var(--muted);font-variant-numeric:tabular-nums}.ul-meta b{font-weight:500;margin-left:4px}
 .ul-bar{height:4px;margin-top:5px;border-radius:2px;background:var(--hover);overflow:hidden}
-.ul-bar i{display:block;height:100%;background:var(--cyan);transition:width .3s}.ul-bar i.hot{background:var(--red)}
+.ul-bar i{display:block;height:100%;background:var(--cyan);transform:scaleX(var(--w,0));transform-origin:left;transition:transform .3s}.ul-bar i.hot{background:var(--red)}
 .ul-note{color:var(--faint);font-size:12px;padding:3px 0}
 .ul-err{margin-top:8px;color:var(--red);font-size:12px}
 .ul-foot{display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--faint);font-size:11.5px}
@@ -1467,3 +1467,28 @@ img.msg-image,.attach-preview img,.queued-image img{cursor:zoom-in}
   .plugins-sheet .modal-head{flex-shrink:0}
   .plugins-sheet .modal-body{overscroll-behavior:contain}
 }
+
+/* ---------- rendering cost: long threads and lists, phones, slow links ----------
+   Thread parts and sidebar rows off screen skip style, layout and paint (content-visibility), keeping their last laid-out
+   size (contain-intrinsic-size: auto) so the scrollbar and the reading position hold; find-in-page still searches them.
+   The thread's last parts (the streaming tail, the working line) always render. Only where the browser anchors scrolling
+   (overflow-anchor): elsewhere (Safari) a part rendering at its real height above the viewport would move what is read;
+   there the phone thread window (app.js windowParts) keeps long threads short instead. */
+@supports (overflow-anchor:auto){
+  .thread>*:not(:nth-last-child(-n+3)){content-visibility:auto;contain-intrinsic-size:auto 160px}
+  .session-list>.item-row{content-visibility:auto;contain-intrinsic-size:auto 52px}
+}
+.thread-earlier{display:flex;justify-content:center}
+.thread-earlier .btn{min-height:40px;padding:0 16px}
+/* Taps act at once (no double-tap-zoom wait), and a flick inside the chat or a panel never scrolls the page under it. */
+button,summary,a,[data-act],.item{touch-action:manipulation}
+.scroller{overscroll-behavior-y:contain}
+/* html.lean (app.js: phones, touch screens, data saver, slow links): no big blurred shadows on surfaces that repaint while
+   the page scrolls or streams, and a queued session's pulse fades instead of animating a shadow every frame. */
+html.lean .composer{box-shadow:none}
+html.lean .composer:focus-within{box-shadow:0 0 0 3px var(--accent-soft)}
+html.lean .toast{box-shadow:0 4px 12px var(--shadow-toast)}
+html.lean .jump-latest{box-shadow:0 2px 8px -2px var(--shadow)}
+html.lean .dot.queued{animation:pulse-fade 1.4s infinite}
+@keyframes pulse-fade{50%{opacity:.35}}
+html.low-data .msg.user.flash .bubble{animation:none}
