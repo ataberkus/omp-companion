@@ -22,6 +22,7 @@ public struct SessionDetailView: View {
     @State private var showUsageSheet = false
     @State private var showFormulaSizeSheet = false
     @State private var showRenameAlert = false
+    @State private var showShutdownConfirm = false
     @State private var renameDraft = ""
     public init(store: AppStore, session: SessionSummary) {
         self.store = store
@@ -57,6 +58,9 @@ public struct SessionDetailView: View {
         case .terminal: Task { await store.openTerminalOnHost(path: session.cwd) }
         case .markDone: Task { await store.completeSession(session) }
         case .toggleArchive: Task { await store.toggleArchive(for: session) }
+        case .shutdownPC: showShutdownConfirm = true
+        case .toggleAutoShutdown:
+            Task { await store.setAutoShutdown(on: !(store.snapshot.autoShutdown?.on == true)) }
         case .hide: Task { await store.hideSession(session) }
         }
     }
@@ -128,6 +132,7 @@ public struct SessionDetailView: View {
                         isWorking: liveSession.isWorking,
                         isDone: liveSession.status == .done,
                         isRunning: liveSession.status == .running,
+                        isAutoShutdownOn: store.snapshot.autoShutdown?.on == true,
                         canMutate: store.canPerformMutatingActions
                     ),
                     perform: performMenuAction
@@ -193,6 +198,14 @@ public struct SessionDetailView: View {
                 }
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .alert("Shut Down Host Computer?", isPresented: $showShutdownConfirm) {
+            Button("Shut Down Now", role: .destructive) {
+                Task { await store.shutdownCompanionHost() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will power off the remote companion computer over Tailscale after pausing active sessions.")
         }
     }
 
@@ -485,11 +498,13 @@ struct SessionActionsMenu: View, Equatable {
         let isWorking: Bool
         let isDone: Bool
         let isRunning: Bool
+        let isAutoShutdownOn: Bool
         let canMutate: Bool
     }
 
     enum Action {
-        case modes, btw, togglePin, rename, rewind, tree, stats, usage, formulaSize, terminal, markDone, toggleArchive, hide
+        case modes, btw, togglePin, rename, rewind, tree, stats, usage, formulaSize, terminal, markDone, toggleArchive,
+             shutdownPC, toggleAutoShutdown, hide
     }
 
     let state: MenuState
@@ -560,6 +575,20 @@ struct SessionActionsMenu: View, Equatable {
                 }
                 .disabled(!state.canMutate)
             }
+
+            Button(role: .destructive) { perform(.shutdownPC) } label: {
+                Label("Shut down PC…", systemImage: "power")
+            }
+            .disabled(!state.canMutate)
+
+            Button { perform(.toggleAutoShutdown) } label: {
+                if state.isAutoShutdownOn {
+                    Label("Shut down PC when finished", systemImage: "checkmark")
+                } else {
+                    Text("Shut down PC when finished")
+                }
+            }
+            .disabled(!state.canMutate)
 
             Button(role: .destructive) { perform(.hide) } label: {
                 Label("Hide from Sidebar", systemImage: "eye.slash")
