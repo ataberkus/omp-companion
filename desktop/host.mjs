@@ -189,8 +189,8 @@ const shutdown = onProgress => { clearTimeout(tailnetRetry); return (closing ??=
 // The resume note: an app update (the tray's Install update, or a newer installer asking the app to quit) or a restart
 // (Restart companion) writes {at, resume} here, and the next host resumes those sessions. Tray Quit, sign-out and crash
 // recovery send a plain quit and leave none, so their sessions come back paused. Its own file: restart.json belongs to
-// start.bat's companion, which may share the data dir, and the two never read each other's note. No token: an update gets
-// a new one at launch, and a restart keeps the window's through the shell (OMP_WEB_DESKTOP_TOKEN).
+// start.bat's companion, which may share the data dir, and the two never read each other's note. No token: the companion
+// keeps its own in the data dir (connection-token), and a restart also carries the window's through the shell (OMP_WEB_DESKTOP_TOKEN).
 const updateNote = path.join(defaultDataDir(), 'update-resume.json');
 // Long enough for an installer that replaces node_modules; a note left by an install that failed goes stale after it.
 const UPDATE_NOTE_MAX_AGE = 10 * 60 * 1000;
