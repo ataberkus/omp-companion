@@ -48,7 +48,10 @@ export async function createCompanion(options={}){
  // OMP_WEB_PASSWORD: a password you choose becomes the connection token, so the same Bearer check enforces it. It is never served in the page.
  const password=options.password??process.env.OMP_WEB_PASSWORD??'';
  if(password&&!/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(password))throw new Error('OMP_WEB_PASSWORD must be printable ASCII without leading or trailing spaces (browsers cannot send other characters in the Authorization header).');
- const token=options.token||password||randomBytes(32).toString('hex');
+ // The connection token: options.token (a restart hands its token over), else the password, else the one saved in
+ // dataDir/connection-token, created once. Kept across launches so a paired phone keeps working after the PC reboots or the
+ // app updates or quits; delete the file to revoke every paired device (the next launch makes a new one).
+ let token=options.token||password;
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control. A password turns it off.
  const exposeToken=!password&&(options.exposeToken??process.env.OMP_WEB_NO_TOKEN==='1');
  // OMP_WEB_PUBLIC_HOSTS: extra host names (a Tailscale MagicDNS name, say) accepted in Host and Origin by exact match on the port.
@@ -63,6 +66,7 @@ export async function createCompanion(options={}){
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
  const omp=options.omp||ompHost(ompEntry,{dataDir});omp.warm?.();
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
+ if(!token)token=await savedToken(dataDir);
  // One system prompt file per Enhance mode (enhance-system.md is `full`).
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceGuard=path.join(dataDir,'enhance-guard.mjs');
  const enhanceSystems=Object.fromEntries(Object.keys(ENHANCE_MODES).map(m=>[m,path.join(dataDir,m==='full'?'enhance-system.md':`enhance-system-${m}.md`)]));
@@ -132,6 +136,15 @@ export async function createCompanion(options={}){
 // closeScreen: the desktop host rebinds a listener (LAN toggle, tailnet), and a device that lost access must not keep watching; the viewer reconnects if still allowed.
 // flush: runs any batched save now and resolves once everything changed so far is on disk.
 await persist();return {server,serve,closeServer,unserve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
+}
+// The token saved in dataDir, or a new one written there. A file that does not hold one (empty, edited) is replaced.
+async function savedToken(dataDir){
+ const file=path.join(dataDir,'connection-token');
+ const saved=(await fs.readFile(file,'utf8').catch(()=>'')).trim();
+ if(/^[0-9a-f]{64}$/.test(saved))return saved;
+ const token=randomBytes(32).toString('hex');
+ await fs.writeFile(file,token,{mode:0o600});
+ return token;
 }
 const mainEntry=process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url);
 // Sessions run OMP's SDK, which needs Bun: started by Node, the companion runs itself under Bun with the same arguments
