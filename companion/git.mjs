@@ -1,8 +1,9 @@
 // Git for sessions and workspaces: git runs, diffs in OMP's line-numbered format, branch reads, worktree add/remove,
 // and the Changes views (working tree, commits). Stateless: every function takes the folder it works on.
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { exec, error, samePath } from './util.mjs';
+import { exec, error } from './util.mjs';
 export async function git(cwd,args){return (await exec('git',['-C',cwd,...args],{timeout:15000,maxBuffer:1024*1024,windowsHide:true})).stdout.trim();}
 // Git runs for the Changes working-tree view and worktree finishing: errors carry git's own stderr.
 export async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
@@ -75,7 +76,6 @@ export const currentBranch=async dir=>{
 };
 // Checking out a whole repo can outlast git()'s 15 s on Windows: the same 746-file checkout measured 1-20 s from run to run.
 // A timeout kills only the git.exe wrapper, so git finished the worktree anyway while the session reported it as skipped.
-// Deleting one (worktree remove) can take as long.
 const WORKTREE_TIMEOUT=10*60000;
 // Errors are user-facing sentences: why this folder can't get a worktree, or git's own error.
 export async function addWorktree(root,wt,b){
@@ -97,24 +97,36 @@ export async function removeWorktree(s,root){
  await git(root,['branch','-D',s.branch]).catch(()=>{});return true;
 }
 // Removes a worktree folder of the repository at root (git's record too), leaving every branch; false when Windows still holds it.
-// A folder with a Rust target/ or node_modules can hold 100k+ files, which takes git far longer than git()'s 15 s to delete.
 export async function removeWorktreeFolder(dir,root){
- for(let i=0;i<20;i++){
-  try{await gitRun(root,['worktree','remove','--force',dir],{timeout:WORKTREE_TIMEOUT});return true;}
-  // On Windows `remove` can drop git's record and the files yet fail on the empty folder a dying process still holds;
-  // retries then say "not a working tree". Once git no longer lists it, only the leftover folder remains.
-  // git also refuses a folder no longer linked to root's repository: the repository moved, its .git/worktrees record or
-  // the folder's .git file is gone, or root stopped being a repository. Then the folder is deleted directly and the
-  // stale record (now pointing at nothing) pruned.
-  catch(e){
-   if(e.status===504)throw error(`git worktree remove did not finish within ${WORKTREE_TIMEOUT/60000} minutes.`,504);
-   if(!await worktreeListed(root,dir)||!await linkedWorkTree(dir)){await fs.rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});await git(root,['worktree','prune']).catch(()=>{});return true;}
-   if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
- }
- return false;
+ if(!await discardFolder(dir))return false;
+ await git(root,['worktree','prune']).catch(()=>{});return true;
 }
-// Whether git can still read dir through its own .git file (not just as part of some enclosing repository).
-const linkedWorkTree=dir=>fs.access(path.join(dir,'.git')).then(()=>git(dir,['rev-parse','--git-dir'])).then(()=>true,()=>false);
+// Deleting a worktree in place took minutes: git deletes file by file, 25k files of node_modules took it 29 s on Windows
+// and a Rust target/ far longer, past the dashboard's 150 s wait, so the page reported a timeout while the delete went on.
+// The folder is instead renamed into .deleting/ beside it, which is instant on one volume and fails, as deleting would,
+// while a process still holds a file in it; its files are then deleted by a separate process that outlives the companion
+// (purgeDeleted finishes what one left on the next start). False when Windows still holds the folder.
+const DELETING='.deleting';
+export async function discardFolder(dir){
+ const bin=path.join(path.dirname(dir),DELETING);
+ await fs.mkdir(bin,{recursive:true}).catch(()=>{});
+ const to=path.join(bin,`${path.basename(dir)}-${Date.now().toString(36)}`);
+ for(let i=0;;i++){
+  try{await fs.rename(dir,to);break;}
+  catch(e){if(e.code==='ENOENT'&&!await fs.stat(dir).then(()=>true,()=>false))return true;if(i===19)return false;await new Promise(r=>setTimeout(r,50*(i+1)));}
+ }
+ purge(to);return true;
+}
+// The companion's own runtime (Bun or Node) deletes the folder; its rmSync handles Windows paths past 260 characters.
+function purge(dir){
+ const c=spawn(process.execPath,['-e','require("fs").rmSync(process.env.OMP_PURGE_DIR,{recursive:true,force:true,maxRetries:10})'],{env:{...process.env,OMP_PURGE_DIR:dir},stdio:'ignore',windowsHide:true,detached:true});
+ c.on('error',e=>console.error(`Could not delete ${dir}:`,e.message));c.unref();
+}
+// Deletes what discardFolder moved into parent's .deleting/ and the companion stopped before deleting.
+export async function purgeDeleted(parent){
+ const bin=path.join(parent,DELETING);
+ for(const name of await fs.readdir(bin).catch(()=>[]))purge(path.join(bin,name));
+}
 // Changes › Working tree: the real `git diff` of the session's folder against the commit it started from (or HEAD),
 // plus untracked files, in OMP's diff format with absolute paths.
 export async function worktreeChanges(s,which){
@@ -167,5 +179,3 @@ export async function gitCommit(s,sha){
  const [full,author,date,message]=meta.split('\x1f');
  return {cwd,top,sha:full.trim(),author,date,message:(message||'').trim(),files:gitDiffFiles(diff).map(f=>({...f,path:path.join(top,f.path)}))};
 }
-// Unknown (git failed) counts as still listed, so the worktree is retried rather than abandoned.
-async function worktreeListed(root,dir){try{return (await git(root,['worktree','list','--porcelain'])).split(/\r?\n/).some(l=>l.startsWith('worktree ')&&samePath(l.slice(9),dir));}catch{return true;}}

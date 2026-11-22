@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { exists, now, error, samePath } from './util.mjs';
-import { git, gitRun, removeWorktreeFolder } from './git.mjs';
+import { git, gitRun, discardFolder, purgeDeleted } from './git.mjs';
 import { VIDEO_FILE } from './videos.mjs';
 const CLEAN_TIMEOUT=10*60000;
 export function createStorage(ctx){
@@ -18,6 +18,7 @@ export function createStorage(ctx){
  const worktreeStatus=(...args)=>ctx.worktreeStatus(...args);
  const deleteWorktree=(...args)=>ctx.deleteWorktree(...args);
  const worktreesDir=path.join(dataDir,'worktrees');
+ void purgeDeleted(worktreesDir);
  const state={scannedAt:null,worktrees:[],orphans:[],locations:[],results:[],error:''};
  let job=null,run=null;
  const busy=s=>['running','queued'].includes(s.status)||!!s._task||!!s._bash;
@@ -107,7 +108,7 @@ export function createStorage(ctx){
   return {dir,name:path.basename(dir),kind:s?'removed':'unknown',...(s?{sessionId:s.id,title:s.title}:{}),root:root&&await exists(root)?root:null,branch:repo.branch,dirty};
  }
  const orphanDirs=async()=>{
-  const under=(await fs.readdir(worktreesDir,{withFileTypes:true}).catch(()=>[])).filter(e=>e.isDirectory()).map(e=>path.join(worktreesDir,e.name));
+  const under=(await fs.readdir(worktreesDir,{withFileTypes:true}).catch(()=>[])).filter(e=>e.isDirectory()&&e.name!=='.deleting').map(e=>path.join(worktreesDir,e.name));
   return [...under,...store.sessions.filter(s=>s.worktreeRemoved&&!under.some(d=>samePath(d,s.cwd))).map(s=>s.cwd)];
  };
  function start(kind,total,work){
@@ -144,11 +145,8 @@ export function createStorage(ctx){
   if(!o){if(!await exists(dir))return;throw error('A session uses this folder now.',409);}
   if(o.dirty&&!confirm)throw error(`${o.name} has ${o.dirty} uncommitted ${o.dirty===1?'change':'changes'}, which removing it would lose. Confirm to remove it anyway.`,409);
   // Branches stay: with no session to say which work they hold, deleting one could lose commits.
-  if(o.root){
-   if(!await removeWorktreeFolder(o.dir,o.root))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
-   await git(o.root,['worktree','prune']).catch(()=>{});
-  }else await fs.rm(o.dir,{recursive:true,force:true,maxRetries:10,retryDelay:100}).catch(()=>{});
-  if(await exists(o.dir))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
+  if(!await discardFolder(o.dir))throw error('Windows still holds the worktree folder. Close programs using it and try again.',409);
+  if(o.root)await git(o.root,['worktree','prune']).catch(()=>{});
  }
  const list=(v,what)=>{if(v===undefined)return [];if(!Array.isArray(v)||v.length>1000||v.some(x=>typeof x!=='string'||!x||x.length>4096))throw error(`${what} must be a list of strings.`);return [...new Set(v)];};
  // sessions: session IDs whose worktree and omp-web/ branch go; orphans: folder paths from the scan's orphans;
