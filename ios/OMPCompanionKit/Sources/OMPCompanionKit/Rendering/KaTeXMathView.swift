@@ -187,7 +187,7 @@ struct KaTeXTypography: Equatable {
         )
     }
 
-    static func heading(level: Int, palette: OMPPalette) -> KaTeXTypography {
+    static func heading(level: Int, palette: OMPPalette, muted: Bool = false) -> KaTeXTypography {
         let style: FontStyleToken
         switch level {
         case 1: style = .title3
@@ -199,7 +199,7 @@ struct KaTeXTypography: Equatable {
             fontSize: preferredPointSize(style, fallback: level == 1 ? 20 : 17),
             fontWeight: 600,
             lineHeight: 1.32,
-            foreground: palette.foreground
+            foreground: muted ? palette.muted : palette.foreground
         )
     }
 

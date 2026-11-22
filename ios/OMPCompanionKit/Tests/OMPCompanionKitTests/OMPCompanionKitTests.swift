@@ -585,7 +585,7 @@ final class OMPCompanionKitTests: XCTestCase {
         | $|x| + \\alpha | \\beta$ | $1$ |
         """
         let blocks = MarkdownParser.parse(table)
-        guard case .table(_, let headers, let rows) = blocks.first else {
+        guard case .table(_, let headers, let rows, _) = blocks.first else {
             return XCTFail("Expected table block")
         }
         XCTAssertEqual(headers, ["Expr", "Value"])

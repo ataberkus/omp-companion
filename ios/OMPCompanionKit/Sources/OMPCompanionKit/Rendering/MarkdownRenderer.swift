@@ -12,9 +12,11 @@ public enum MarkdownBlock: Identifiable, Equatable, Sendable {
     case paragraph(id: Int, text: String)
     case codeBlock(id: Int, language: String, code: String)
     case mathBlock(id: Int, tex: String)
-    case blockquote(id: Int, text: String)
+    /// Quotes hold blocks: a quote can carry lists, headings, code and nested quotes.
+    case blockquote(id: Int, blocks: [MarkdownBlock])
+    /// Each item holds blocks, so `- a` followed by an indented `- b` nests instead of flattening.
     case list(id: Int, ordered: Bool, items: [MarkdownListItem])
-    case table(id: Int, headers: [String], rows: [[String]])
+    case table(id: Int, headers: [String], rows: [[String]], alignments: [MarkdownTableAlignment])
     case thematicBreak(id: Int)
 
     public var id: Int {
@@ -25,30 +27,50 @@ public enum MarkdownBlock: Identifiable, Equatable, Sendable {
              .mathBlock(let id, _),
              .blockquote(let id, _),
              .list(let id, _, _),
-             .table(let id, _, _),
+             .table(let id, _, _, _),
              .thematicBreak(let id):
             return id
         }
     }
 }
 
+/// Column alignment from a GFM separator row: `:--` leading, `:-:` center, `--:` trailing.
+public enum MarkdownTableAlignment: Equatable, Sendable {
+    case leading
+    case center
+    case trailing
+}
+
 public struct MarkdownListItem: Equatable, Sendable {
     public let indexLabel: String?
     public let checked: Bool?
-    public let text: String
+    public let blocks: [MarkdownBlock]
 }
 
 // MARK: - Linear O(N) Parser & Math Formatter
 
 public enum MarkdownParser {
     public static func parse(_ raw: String) -> [MarkdownBlock] {
+        parseBlocks(raw, depth: 0)
+    }
+
+    /// Quotes and list items are parsed as blocks, so nesting recurses. Past 20 levels (crafted
+    /// `- - - …` or `>>>>…`) the rest reads as one paragraph, as the web client caps it.
+    private static let maxNestingDepth = 20
+
+    private static func parseBlocks(_ raw: String, depth: Int) -> [MarkdownBlock] {
         guard !raw.isEmpty else { return [] }
         let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var blocks: [MarkdownBlock] = []
         var nextId = 0
         func makeId() -> Int { defer { nextId += 1 }; return nextId }
 
+        if depth > maxNestingDepth {
+            let joined = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+            return joined.isEmpty ? [] : [.paragraph(id: makeId(), text: joined)]
+        }
+
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var i = 0
         var paraBuffer: [String] = []
         var unclosedDisplayDelimiters: Set<String> = []
@@ -106,15 +128,7 @@ public enum MarkdownParser {
                 continue
             }
 
-            // 4. Thematic break
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                flushParagraph()
-                blocks.append(.thematicBreak(id: makeId()))
-                i += 1
-                continue
-            }
-
-            // 5. ATX Heading
+            // 4. ATX Heading (closing `#`s are decoration)
             if let heading = parseHeading(trimmed) {
                 flushParagraph()
                 blocks.append(.heading(id: makeId(), level: heading.level, text: heading.text))
@@ -122,31 +136,19 @@ public enum MarkdownParser {
                 continue
             }
 
-            // 6. Blockquote
-            if trimmed.hasPrefix(">") {
+            // 5. Thematic break: `---`, `***`, `___`, `- - -`, `****` …
+            if isThematicBreak(trimmed) {
                 flushParagraph()
-                var quoteLines: [String] = []
-                while i < lines.count {
-                    let qt = lines[i].trimmingCharacters(in: .whitespaces)
-                    if qt.hasPrefix(">") {
-                        var body = String(qt.dropFirst())
-                        if body.hasPrefix(" ") { body.removeFirst() }
-                        quoteLines.append(body)
-                        i += 1
-                    } else if qt.isEmpty {
-                        break
-                    } else {
-                        break
-                    }
-                }
-                blocks.append(.blockquote(id: makeId(), text: quoteLines.joined(separator: "\n")))
+                blocks.append(.thematicBreak(id: makeId()))
+                i += 1
                 continue
             }
 
-            // 7. GFM Table
+            // 6. GFM Table
             if i + 1 < lines.count, trimmed.contains("|"), isTableSeparator(lines[i + 1]) {
                 flushParagraph()
                 let headers = splitTableRow(trimmed)
+                let alignments = tableAlignments(lines[i + 1])
                 i += 2
                 var rows: [[String]] = []
                 while i < lines.count {
@@ -155,34 +157,73 @@ public enum MarkdownParser {
                     rows.append(splitTableRow(rt))
                     i += 1
                 }
-                blocks.append(.table(id: makeId(), headers: headers, rows: rows))
+                blocks.append(.table(id: makeId(), headers: headers, rows: rows, alignments: alignments))
                 continue
             }
 
-            // 8. Bullet / Ordered / Task Lists
-            if let firstList = parseListItem(line) {
+            // 7. Blockquote, with lazy continuation lines and nested blocks
+            if trimmed.hasPrefix(">") {
                 flushParagraph()
-                let ordered = firstList.indexLabel != nil
-                var items: [MarkdownListItem] = [firstList]
-                i += 1
+                var quoteLines: [String] = []
                 while i < lines.count {
-                    let cur = lines[i]
-                    if let nextItem = parseListItem(cur), (nextItem.indexLabel != nil) == ordered {
-                        items.append(nextItem)
+                    let quoteLine = lines[i]
+                    let qt = quoteLine.trimmingCharacters(in: .whitespaces)
+                    if qt.isEmpty {
+                        // A blank line keeps the quote going while the next one is still quoted.
+                        guard i + 1 < lines.count,
+                              lines[i + 1].trimmingCharacters(in: .whitespaces).hasPrefix(">") else { break }
+                        quoteLines.append("")
                         i += 1
-                    } else if cur.hasPrefix("  ") && !cur.trimmingCharacters(in: .whitespaces).isEmpty {
-                        let last = items.removeLast()
-                        items.append(MarkdownListItem(
-                            indexLabel: last.indexLabel,
-                            checked: last.checked,
-                            text: last.text + " " + cur.trimmingCharacters(in: .whitespaces)
-                        ))
+                        continue
+                    }
+                    if qt.hasPrefix(">") {
+                        quoteLines.append(stripQuoteMarker(quoteLine))
                         i += 1
-                    } else {
+                        continue
+                    }
+                    // Lazy continuation: an unquoted line that does not start another block stays in the quote.
+                    guard !isBlockStart(quoteLine) else { break }
+                    quoteLines.append(quoteLine)
+                    i += 1
+                }
+                blocks.append(.blockquote(id: makeId(), blocks: parseBlocks(quoteLines.joined(separator: "\n"), depth: depth + 1)))
+                continue
+            }
+
+            // 8. Bullet / Ordered / Task Lists, with nested blocks
+            if let marker = parseListMarker(line) {
+                flushParagraph()
+                let baseIndent = indentWidth(line)
+                let ordered = marker.ordered
+                var listLines: [String] = []
+                while i < lines.count {
+                    let current = lines[i]
+                    if current.trimmingCharacters(in: .whitespaces).isEmpty {
+                        // A blank line stays in the list before a deeper block or another item.
+                        guard i + 1 < lines.count else { break }
+                        let next = lines[i + 1]
+                        let nextIndent = indentWidth(next)
+                        let nextKind = parseListMarker(next)?.ordered
+                        if nextIndent > baseIndent || (nextKind == ordered && nextIndent == baseIndent) {
+                            listLines.append("")
+                            i += 1
+                            continue
+                        }
                         break
                     }
+                    let indent = indentWidth(current)
+                    if indent < baseIndent { break }
+                    if indent == baseIndent {
+                        if let nextMarker = parseListMarker(current) {
+                            if nextMarker.ordered != ordered { break }
+                        } else if isBlockStart(current) {
+                            break
+                        }
+                    }
+                    listLines.append(current)
+                    i += 1
                 }
-                blocks.append(.list(id: makeId(), ordered: ordered, items: items))
+                blocks.append(.list(id: makeId(), ordered: ordered, items: parseListItems(listLines, baseIndent: baseIndent, depth: depth)))
                 continue
             }
 
@@ -256,8 +297,22 @@ public enum MarkdownParser {
         }
         guard (1...6).contains(count) else { return nil }
         let rest = line.dropFirst(count)
-        guard rest.first == " " else { return nil }
-        return (count, String(rest.dropFirst()).trimmingCharacters(in: .whitespaces))
+        guard rest.first?.isWhitespace == true else { return nil }
+        let text = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces)
+        return (count, stripClosingHashes(text))
+    }
+
+    /// `## Title ##` is a heading titled `Title`; `# C#` keeps its `#`.
+    private static func stripClosingHashes(_ text: String) -> String {
+        var body = text
+        var hashes = 0
+        while body.hasSuffix("#") {
+            body.removeLast()
+            hashes += 1
+        }
+        guard hashes > 0 else { return text }
+        guard body.isEmpty || body.last?.isWhitespace == true else { return text }
+        return body.trimmingCharacters(in: .whitespaces)
     }
 
     private static func isTableSeparator(_ line: String) -> Bool {
@@ -265,6 +320,14 @@ public enum MarkdownParser {
         guard t.contains("-") && t.contains("|") else { return false }
         let allowed = CharacterSet(charactersIn: "|-: ")
         return t.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func tableAlignments(_ line: String) -> [MarkdownTableAlignment] {
+        splitTableRow(line).map { cell in
+            if cell.hasPrefix(":") && cell.hasSuffix(":") { return .center }
+            if cell.hasSuffix(":") { return .trailing }
+            return .leading
+        }
     }
 
     private static func splitTableRow(_ line: String) -> [String] {
@@ -339,31 +402,134 @@ public enum MarkdownParser {
         cells.append(current.trimmingCharacters(in: .whitespaces))
         return cells
     }
-    private static func parseListItem(_ line: String) -> MarkdownListItem? {
-        let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
-        // Unordered `- `, `* `, `+ `
-        if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-            let body = String(trimmed.dropFirst(2))
-            if body.hasPrefix("[ ] ") {
-                return MarkdownListItem(indexLabel: nil, checked: false, text: String(body.dropFirst(4)))
-            }
-            if body.hasPrefix("[x] ") || body.hasPrefix("[X] ") {
-                return MarkdownListItem(indexLabel: nil, checked: true, text: String(body.dropFirst(4)))
-            }
-            return MarkdownListItem(indexLabel: nil, checked: nil, text: body)
+
+    private struct ListMarker {
+        let ordered: Bool
+        let indexLabel: String?
+        let markerLength: Int
+        let text: String
+    }
+
+    /// Bullet `- `, `* `, `+ ` or ordered `1. `, `12) ` at any indentation; nil when the line is not an item.
+    private static func parseListMarker(_ line: String) -> ListMarker? {
+        var rest = Substring(line)
+        while let first = rest.first, first == " " || first == "\t" { rest.removeFirst() }
+        guard let first = rest.first else { return nil }
+
+        if first == "-" || first == "*" || first == "+" {
+            let after = rest.dropFirst()
+            guard let space = after.first, space == " " || space == "\t" else { return nil }
+            return ListMarker(
+                ordered: false,
+                indexLabel: nil,
+                markerLength: 1,
+                text: String(after.drop(while: { $0 == " " || $0 == "\t" }))
+            )
         }
-        // Ordered `1. ` or `12) `
+
         var digits = ""
-        for ch in trimmed {
-            if ch.isNumber { digits.append(ch) } else { break }
+        for ch in rest {
+            if ch.isASCII && ch.isNumber { digits.append(ch) } else { break }
         }
-        if !digits.isEmpty && digits.count <= 4 {
-            let afterDigits = trimmed.dropFirst(digits.count)
-            if afterDigits.hasPrefix(". ") || afterDigits.hasPrefix(") ") {
-                return MarkdownListItem(indexLabel: "\(digits).", checked: nil, text: String(afterDigits.dropFirst(2)))
+        guard (1...9).contains(digits.count) else { return nil }
+        let afterDigits = rest.dropFirst(digits.count)
+        guard let delimiter = afterDigits.first, delimiter == "." || delimiter == ")" else { return nil }
+        let afterDelimiter = afterDigits.dropFirst()
+        guard let space = afterDelimiter.first, space == " " || space == "\t" else { return nil }
+        return ListMarker(
+            ordered: true,
+            indexLabel: "\(digits).",
+            markerLength: digits.count + 1,
+            text: String(afterDelimiter.drop(while: { $0 == " " || $0 == "\t" }))
+        )
+    }
+
+    /// Groups a list's lines into items: a marker at the list's indentation starts an item, anything else
+    /// continues the previous one (indentation up to the marker width stripped, so nested lists keep their own).
+    private static func parseListItems(_ lines: [String], baseIndent: Int, depth: Int) -> [MarkdownListItem] {
+        var items: [(label: String?, body: [String], width: Int)] = []
+        for line in lines {
+            if let marker = parseListMarker(line), indentWidth(line) <= baseIndent + 1 {
+                items.append((marker.indexLabel, [marker.text], indentWidth(line) + marker.markerLength + 1))
+            } else if !items.isEmpty {
+                let width = items[items.count - 1].width
+                items[items.count - 1].body.append(stripLeadingIndent(line, maximum: width))
             }
         }
-        return nil
+        return items.map { item in
+            var body = item.body
+            var checked: Bool?
+            if let first = body.first {
+                if first.hasPrefix("[ ] ") {
+                    checked = false
+                    body[0] = String(first.dropFirst(4))
+                } else if first.hasPrefix("[x] ") || first.hasPrefix("[X] ") {
+                    checked = true
+                    body[0] = String(first.dropFirst(4))
+                }
+            }
+            return MarkdownListItem(
+                indexLabel: item.label,
+                checked: checked,
+                blocks: parseBlocks(body.joined(separator: "\n"), depth: depth + 1)
+            )
+        }
+    }
+
+    /// Indentation in columns, tabs counted as four, as the web client measures it.
+    private static func indentWidth(_ line: String) -> Int {
+        var width = 0
+        for ch in line {
+            if ch == " " { width += 1 }
+            else if ch == "\t" { width += 4 }
+            else { break }
+        }
+        return width
+    }
+
+    private static func stripLeadingIndent(_ line: String, maximum: Int) -> String {
+        var index = line.startIndex
+        var removed = 0
+        while index < line.endIndex, removed < maximum, line[index] == " " || line[index] == "\t" {
+            index = line.index(after: index)
+            removed += 1
+        }
+        return String(line[index...])
+    }
+
+    /// Drops the leading whitespace, `>` and its optional space from a quoted line.
+    private static func stripQuoteMarker(_ line: String) -> String {
+        var rest = Substring(line)
+        while let first = rest.first, first.isWhitespace { rest.removeFirst() }
+        guard rest.first == ">" else { return line }
+        rest.removeFirst()
+        if rest.first == " " { rest.removeFirst() }
+        return String(rest)
+    }
+
+    /// `- - -`, `***`, `___`, `**** …` — three or more of one marker, spaces allowed between them.
+    private static func isThematicBreak(_ line: String) -> Bool {
+        let body = line.trimmingCharacters(in: .whitespaces)
+        guard let marker = body.first, marker == "-" || marker == "*" || marker == "_" else { return false }
+        var count = 0
+        for ch in body {
+            if ch == marker { count += 1 }
+            else if ch.isWhitespace { continue }
+            else { return false }
+        }
+        return count >= 3
+    }
+
+    /// A line that starts a block, and so ends a blockquote's lazy continuation or a list item's run of lines.
+    private static func isBlockStart(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return false }
+        if parseFenceOpen(trimmed) != nil { return true }
+        if trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[") { return true }
+        if parseHeading(trimmed) != nil { return true }
+        if trimmed.hasPrefix(">") { return true }
+        if parseListMarker(line) != nil { return true }
+        return isThematicBreak(trimmed)
     }
 
     // MARK: - Inline Formatting & Inline Math ($...$ / \(...\))
@@ -756,16 +922,19 @@ public enum CodeHighlighter {
         "true", "false", "nil", "null", "None", "self", "Self", "this", "super", "guard", "defer",
     ]
 
+    /// Fence languages that hold output rather than code: colouring them is noise, as the web client agrees.
+    private static let plainTextLanguages: Set<String> = ["text", "txt", "plain", "plaintext", "console", "log", "output"]
+
     public static func highlight(_ code: String, language: String, palette: OMPPalette) -> AttributedString {
+        let lang = language.lowercased()
         // Bound highlighting on ultra-huge blocks to keep scrolling 60fps
-        if code.count > 20_000 {
+        if code.count > 20_000 || plainTextLanguages.contains(lang) {
             var plain = AttributedString(code)
             plain.font = OMPTypography.monoSmall
             plain.foregroundColor = palette.foreground
             return plain
         }
 
-        let lang = language.lowercased()
         let isDiff = lang == "diff" || lang == "patch"
         var out = AttributedString()
         let lines = code.split(separator: "\n", omittingEmptySubsequences: false)
@@ -869,42 +1038,54 @@ public enum CodeHighlighter {
 // MARK: - SwiftUI Markdown View
 
 public struct MarkdownView: View {
-    @Environment(\.ompPalette) private var palette
     public let text: String
 
     public init(text: String) {
         self.text = text
     }
 
-    private var blocks: [MarkdownBlock] {
-        MarkdownParser.parse(text)
-    }
-
     public var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        MarkdownBlockList(blocks: MarkdownParser.parse(text), muted: false, spacing: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Nested quote and list content recurses through this view: a struct, not a function returning
+/// `some View`, which Swift cannot make recursive.
+private struct MarkdownBlockList: View {
+    let blocks: [MarkdownBlock]
+    let muted: Bool
+    let spacing: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: spacing) {
             ForEach(blocks) { block in
-                blockView(block)
+                MarkdownBlockRow(block: block, muted: muted)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    @ViewBuilder
-    private func blockView(_ block: MarkdownBlock) -> some View {
+private struct MarkdownBlockRow: View {
+    @Environment(\.ompPalette) private var palette
+    let block: MarkdownBlock
+    let muted: Bool
+
+    var body: some View {
         switch block {
         case .heading(_, let level, let content):
             if MarkdownParser.containsMath(content) {
                 KaTeXInlineView(
                     rawMarkdown: content,
                     htmlBody: MarkdownParser.renderInlineHTML(content),
-                    typography: .heading(level: level, palette: palette)
+                    typography: .heading(level: level, palette: palette, muted: muted)
                 )
                 .padding(.top, level <= 2 ? 4 : 2)
             } else {
                 Text(MarkdownParser.renderInline(content, palette: palette))
                     .font(headingFont(level))
                     .fontWeight(.semibold)
-                    .foregroundStyle(palette.foreground)
+                    .foregroundStyle(muted ? palette.muted : palette.foreground)
                     .padding(.top, level <= 2 ? 4 : 2)
             }
 
@@ -913,12 +1094,12 @@ public struct MarkdownView: View {
                 KaTeXInlineView(
                     rawMarkdown: content,
                     htmlBody: MarkdownParser.renderInlineHTML(content),
-                    typography: .paragraph(palette: palette)
+                    typography: muted ? .blockquote(palette: palette) : .paragraph(palette: palette)
                 )
             } else {
                 Text(MarkdownParser.renderInline(content, palette: palette))
                     .font(.body)
-                    .foregroundStyle(palette.foreground)
+                    .foregroundStyle(muted ? palette.muted : palette.foreground)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
@@ -929,23 +1110,12 @@ public struct MarkdownView: View {
         case .mathBlock(_, let tex):
             KaTeXBlockMathView(tex: tex)
 
-        case .blockquote(_, let content):
+        case .blockquote(_, let children):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
                     .fill(palette.accentLine)
                     .frame(width: 3)
-                if MarkdownParser.containsMath(content) {
-                    KaTeXInlineView(
-                        rawMarkdown: content,
-                        htmlBody: MarkdownParser.renderInlineHTML(content),
-                        typography: .blockquote(palette: palette)
-                    )
-                } else {
-                    Text(MarkdownParser.renderInline(content, palette: palette))
-                        .font(.body)
-                        .foregroundStyle(palette.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                MarkdownBlockList(blocks: children, muted: true, spacing: 6)
             }
             .padding(.vertical, 2)
 
@@ -968,40 +1138,17 @@ public struct MarkdownView: View {
                                 .foregroundStyle(palette.accent)
                                 .bold()
                         }
-                        if MarkdownParser.containsMath(item.text) {
-                            KaTeXInlineView(
-                                rawMarkdown: item.text,
-                                htmlBody: MarkdownParser.renderInlineHTML(item.text),
-                                typography: .paragraph(palette: palette)
-                            )
-                        } else {
-                            Text(MarkdownParser.renderInline(item.text, palette: palette))
-                                .font(.body)
-                                .foregroundStyle(palette.foreground)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                        }
+                        MarkdownBlockList(blocks: item.blocks, muted: muted, spacing: 4)
                     }
                 }
             }
 
-        case .table(_, let headers, let rows):
+        case .table(_, let headers, let rows, let alignments):
             ScrollView(.horizontal, showsIndicators: true) {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
                     GridRow {
-                        ForEach(Array(headers.enumerated()), id: \.offset) { _, h in
-                            if MarkdownParser.containsMath(h) {
-                                KaTeXInlineView(
-                                    rawMarkdown: h,
-                                    htmlBody: MarkdownParser.renderInlineHTML(h),
-                                    typography: .tableCell(isHeader: true, palette: palette),
-                                    intrinsicWidth: true
-                                )
-                            } else {
-                                Text(MarkdownParser.renderInline(h, palette: palette))
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(palette.foreground)
-                            }
+                        ForEach(Array(headers.enumerated()), id: \.offset) { cIdx, h in
+                            tableCell(h, column: cIdx, alignments: alignments, isHeader: true)
                         }
                     }
                     Divider()
@@ -1009,18 +1156,7 @@ public struct MarkdownView: View {
                         GridRow {
                             ForEach(Array(0..<max(headers.count, row.count)), id: \.self) { cIdx in
                                 let cell = cIdx < row.count ? row[cIdx] : ""
-                                if MarkdownParser.containsMath(cell) {
-                                    KaTeXInlineView(
-                                        rawMarkdown: cell,
-                                        htmlBody: MarkdownParser.renderInlineHTML(cell),
-                                        typography: .tableCell(isHeader: false, palette: palette),
-                                        intrinsicWidth: true
-                                    )
-                                } else {
-                                    Text(MarkdownParser.renderInline(cell, palette: palette))
-                                        .font(.caption)
-                                        .foregroundStyle(palette.foreground)
-                                }
+                                tableCell(cell, column: cIdx, alignments: alignments, isHeader: false)
                             }
                         }
                     }
@@ -1032,6 +1168,41 @@ public struct MarkdownView: View {
 
         case .thematicBreak:
             Divider().overlay(palette.borderStrong)
+        }
+    }
+
+    @ViewBuilder
+    private func tableCell(_ content: String, column: Int, alignments: [MarkdownTableAlignment], isHeader: Bool) -> some View {
+        if MarkdownParser.containsMath(content) {
+            KaTeXInlineView(
+                rawMarkdown: content,
+                htmlBody: MarkdownParser.renderInlineHTML(content),
+                typography: .tableCell(isHeader: isHeader, palette: palette),
+                intrinsicWidth: true
+            )
+            .gridColumnAlignment(columnAlignment(alignments, column))
+        } else {
+            Text(MarkdownParser.renderInline(content, palette: palette))
+                .font(isHeader ? .caption.weight(.semibold) : .caption)
+                .foregroundStyle(palette.foreground)
+                .multilineTextAlignment(textAlignment(alignments, column))
+                .gridColumnAlignment(columnAlignment(alignments, column))
+        }
+    }
+
+    private func columnAlignment(_ alignments: [MarkdownTableAlignment], _ column: Int) -> Alignment {
+        switch column < alignments.count ? alignments[column] : .leading {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
+    }
+
+    private func textAlignment(_ alignments: [MarkdownTableAlignment], _ column: Int) -> TextAlignment {
+        switch column < alignments.count ? alignments[column] : .leading {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
         }
     }
 
