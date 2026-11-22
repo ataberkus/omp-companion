@@ -1210,7 +1210,12 @@
       + `<select class="enhance-mode" data-enhmode aria-label="Enhance mode" title="Enhance mode">${ENHANCE_MODES.map(([v, t, d]) => `<option value="${v}" title="${esc(d)}" ${v === mode ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`
       + enhanceUndoControl(view);
   }
-  const refreshComposer = () => current().kind === 'home' ? renderHome() : updateComposer();
+  const refreshComposer = () => {
+    if (current().kind !== 'home') return updateComposer();
+    const he = $('#homeEnhance');
+    if (he) setIfChanged(he, enhanceButton(S.view, S.home.prompt));
+    else renderHome();
+  };
   // An enhance counts as running from here (✕, read-only composer, no draft pull or discard), before its request goes out.
   function enhanceJob(view, original) {
     const job = { id: null, original, model: '', mode: S.store?.enhanceMode, step: '' };
@@ -1528,8 +1533,43 @@
       : a?.on ? `<span title="Waits until no session is running or queued and no compaction, handoff or shell command is in progress. Queued messages of a stopped session wait for your next message and don't hold it.">PC shuts down when all work is done${n ? ` · ${n} ${n === 1 ? 'session' : 'sessions'} working` : ''}</span><button type="button" class="link" data-act="autoShutdownOff">Cancel</button>` : '');
     el.hidden = !a?.on && !a?.firing;
   }
+  // Rebuilding a container via innerHTML detaches a native <select>, which immediately closes its open popup even when
+  // keepFocus() focuses the replacement. When the new markup still holds the same direct-child <select> with the same
+  // options, patch its siblings around the live node and sync its value/attributes in place instead.
+  function patchAroundSelect(el, sel, html) {
+    if (!sel || sel.parentElement !== el) return false;
+    const key = attrSel(sel);
+    if (!key || key === 'select') return false;
+    const t = document.createElement('template');
+    if (!t.content) return false;
+    t.innerHTML = html;
+    const match = t.content.querySelector(key);
+    if (!match || match.parentNode !== t.content) return false;
+    const sameOpts = sel.options && match.options && sel.options.length === match.options.length
+      && [...sel.options].every((o, i) => o.value === match.options[i].value && o.textContent === match.options[i].textContent);
+    if (!sameOpts) return false;
+    const keep = uiState(el, false);
+    while (sel.previousSibling) sel.previousSibling.remove();
+    while (sel.nextSibling) sel.nextSibling.remove();
+    while (t.content.firstChild && t.content.firstChild !== match) el.insertBefore(t.content.firstChild, sel);
+    match.remove();
+    el.appendChild(t.content);
+    if (sel.disabled !== match.disabled) sel.disabled = match.disabled;
+    for (const a of ['title', 'aria-label']) {
+      const v = match.getAttribute(a);
+      if (v == null) sel.removeAttribute(a);
+      else if (sel.getAttribute(a) !== v) sel.setAttribute(a, v);
+    }
+    const want = match.querySelector('option[selected]')?.value ?? match.options?.[0]?.value;
+    if (want != null && sel.value !== want) sel.value = want;
+    restoreUi(el, keep);
+    return true;
+  }
   function setIfChanged(el, html) {
     if (el._html === html) return;
+    const active = document.activeElement;
+    const sel = (active?.tagName === 'SELECT' && el.contains(active) ? active : null) || el.querySelector('select.enhance-mode[data-enhmode]');
+    if (sel && patchAroundSelect(el, sel, html)) { el._html = html; return; }
     const open = el.querySelector('.menu.open'), top = open?.querySelector('.menu-pop')?.scrollTop;
     swapHtml(el, html); el._html = html;
     const menu = open && el.querySelector('.menu');
@@ -5566,7 +5606,21 @@
   function renderHome() {
     const el = $('#home');
     if (!el) return;
-    const h = S.home, l = h.listing, stripHtml = attachPreviewHtml(attached());
+    const h = S.home, l = h.listing;
+    const active = document.activeElement, heCur = $('#homeEnhance');
+    if (l && active?.tagName === 'SELECT' && el.contains(active) && heCur?.contains(active)) {
+      renderHomeRecent();
+      setIfChanged(heCur, enhanceButton(S.view, h.prompt));
+      if (!active._homeDeferred) {
+        active._homeDeferred = true;
+        active.addEventListener('blur', () => {
+          active._homeDeferred = false;
+          if (current().kind === 'home') setTimeout(() => { if (current().kind === 'home') renderHome(); }, 0);
+        }, { once: true });
+      }
+      return;
+    }
+    const stripHtml = attachPreviewHtml(attached()), enhanceHtml = enhanceButton(S.view, h.prompt);
     const html = `
       <div><h2>Where do you want to <em>work</em>?</h2></div>
       <p class="sub">Pick a workspace, say what to do, press Enter.<span class="kbd-hint"> <kbd>Ctrl</kbd> <kbd>K</kbd> jumps to any session or folder.</span></p>
@@ -5595,7 +5649,7 @@
             <button class="btn sm ghost attach-btn" data-act="attach" type="button" aria-label="Attach images, PDFs or videos" title="Attach images, PDFs or videos">＋ Attach</button>
             <button class="btn sm ghost${launchCount(h.launch) ? ' on' : ''}" data-act="homeLaunch" type="button" title="OMP launch options: approvals, tools, extra folders, model roles…"><span aria-hidden="true">⚙</span> Options${launchCount(h.launch) ? ` · ${launchCount(h.launch)}` : ''}</button>
             <span class="hint"><label class="check" title="Advisor: a second model that reviews each turn"><input type="checkbox" id="homeAdvisor" ${(h.advisor ?? S.advCfg?.enabled) ? 'checked' : ''}> Advisor</label><label class="check" title="Auto-approve: answer OMP's tool-approval and computer-control prompts with Approve from the first turn. Questions and provider safety checks still ask you."><input type="checkbox" id="homeAutoApprove" ${h.autoApprove ? 'checked' : ''}> Auto-approve</label>${l.isGit ? `<label class="check"><input type="checkbox" id="isolate" ${h.isolate ? 'checked' : ''}> Isolated git worktree</label>` : ''}</span>
-            <span id="homeEnhance">${enhanceButton(S.view, h.prompt)}</span>
+            <span id="homeEnhance">${enhanceHtml}</span>
             <button class="btn primary" data-act="start" ${S.sending.has(S.view) || attachLoading(attached()) ? 'disabled' : ''}${attachLoading(attached()) ? ' title="Wait until the attachments finish loading"' : ''}>${S.sending.has(S.view) ? 'Starting…' : 'Start session ↵'}</button>
           </div>
         </div>
@@ -5606,6 +5660,7 @@
     // empty for that moment .home's content is shorter, so the browser clamps its scrollTop and the page jumps up for good.
     keepFocus(el, () => { el.innerHTML = html; });
     const strip = $('#imagePreview'); if (strip?.firstChild) strip._html = stripHtml; // already in place: renderAttachments must not rebuild its <img>s
+    const he = $('#homeEnhance'); if (he) he._html = enhanceHtml;
     const prompt = $('#homePrompt'); if (prompt) fitComposer(prompt);
     renderAttachments();
     renderSlash();
