@@ -51,6 +51,11 @@ public struct HostProfile: Codable, Identifiable, Hashable, Sendable {
     public var magicDNS: String?
     public var tailscaleIPv4: String?
     public var tailscaleIPv6: String?
+    /// Other base URLs the companion said it answers on (`/api/tailscale`: its MagicDNS name and tailnet addresses, then
+    /// its LAN addresses), recorded while connected. When `baseURL` stops answering (the PC rebooted with its network
+    /// access or address changed), the store tries these with the same credential instead of asking to pair again.
+    /// Optional so profiles saved before it decode unchanged.
+    public var alternateURLs: [String]?
     public var lastConnectedAt: Date?
     public var lastLatencyMs: Int?
     public var sortOrder: Int

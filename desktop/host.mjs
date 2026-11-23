@@ -1,5 +1,5 @@
 // Companion host for the Tauri shell: runs the companion and talks line-delimited JSON over stdin/stdout.
-// Events: {"event":"ready","port","token"} | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something)
+// Events: {"event":"ready","port","token","lan"} (lan: network access restored from the last launch) | {"event":"fatal","message"} | {"event":"attention","title","body"} (a session finished, failed or asks something)
 //   | {"event":"screen","address"} (a device started viewing and controlling this PC; address null when it stopped)
 //   | {"event":"restart"} (Restart companion, or the restart after an OMP SDK update: the host exits next, and the shell starts a new one)
 //   | {"event":"quit-progress","done","total"} (an update quit stopping the sessions, before its reply).
@@ -209,9 +209,24 @@ async function takeUpdateNote() {
   return restartHandoff(text, Date.now(), UPDATE_NOTE_MAX_AGE)?.resume ?? [];
 }
 
+// "Allow phones on my network" is remembered across launches: a phone paired over the LAN (192.168.x.x) must reach the PC
+// again after a reboot, an app update or a quit without anyone opening the tray first. Only the tray changes it (the lan
+// command); crash recovery and Restart companion start the new host with it already applied.
+const networkFile = path.join(defaultDataDir(), 'desktop-network.json');
+const savedLan = async () => (await fs.readFile(networkFile, 'utf8').then(JSON.parse).catch(() => null))?.lan === true;
+async function saveLan(on) {
+  await fs.mkdir(path.dirname(networkFile), { recursive: true, mode: 0o700 });
+  await fs.writeFile(networkFile, JSON.stringify({ lan: on }), { mode: 0o600 });
+}
+
 const commands = {
   busy: () => ({ busy: busySessions(companion.store.sessions) }),
-  lan: msg => setLan(Boolean(msg.on)),
+  // The choice is saved once it took effect; one that failed (setLan threw) leaves the saved choice as it was.
+  lan: async msg => {
+    const result = await setLan(Boolean(msg.on));
+    await saveLan(result.lan).catch(e => console.error(`Could not save the network access setting: ${e.message}`));
+    return result;
+  },
   screen: msg => ({ screen: companion.setScreen(Boolean(msg.on)) }),
   links: async () => ({ links: phoneLinks(os.networkInterfaces(), port, companion.password ? '' : companion.token, await tailscaleSelf()) }),
 };
@@ -275,10 +290,11 @@ async function main() {
   // Attention events become native notifications in the shell; it skips them while the main window has focus.
   const verbs = { review: 'is ready for review', error: 'failed', question: 'is asking a question' };
   const onAttention = a => send({ event: 'attention', title: `${a.title} ${verbs[a.kind] || 'needs you'}`.slice(0, 200), body: a.detail || 'Open OMP Control Room to continue.' });
-  // Screen sharing starts off at every launch, like network access; only the tray turns it on (OMP_WEB_SCREEN doesn't apply here).
+  // Screen sharing starts off at every launch; only the tray turns it on (OMP_WEB_SCREEN doesn't apply here).
   const onScreen = v => send({ event: 'screen', address: v?.address ?? null });
-  // A host the shell restarts after a crash keeps the window's token (unless a password is the token). Removed from the
-  // environment at once, so OMP's tools and CLI runs never inherit it.
+  // A host the shell restarts after a crash, or the first one after an app update, keeps the window's token (unless a
+  // password is the token); createCompanion saves it as this PC's token. Removed from the environment at once, so OMP's
+  // tools and CLI runs never inherit it.
   const token = process.env.OMP_WEB_DESKTOP_TOKEN;
   delete process.env.OMP_WEB_DESKTOP_TOKEN;
   // Restart companion: the sessions are paused and saved already; the working ones go to the resume note, the shell is told
@@ -299,10 +315,13 @@ async function main() {
   const { server } = companion;
   const onStartError = e => fatal(e.code === 'EADDRINUSE' ? alreadyRunning : `The companion could not start: ${e.message}`);
   server.once('error', onStartError);
-  server.listen(port, '127.0.0.1', () => {
+  // Network access comes back as it was left (savedLan), before ready, so the tray shows the state the host is in.
+  server.listen(port, '127.0.0.1', async () => {
     server.off('error', onStartError);
-    send({ event: 'ready', port, token: companion.token });
-    openTailnet();
+    // setLan opens the tailnet listener itself when the LAN bind fails; with the LAN open, 0.0.0.0 covers the tailnet.
+    if (await savedLan()) await setLan(true).catch(e => console.error(`Could not allow phones on the network again: ${e.message}`));
+    else openTailnet();
+    send({ event: 'ready', port, token: companion.token, lan });
   });
 }
 

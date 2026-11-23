@@ -48,9 +48,10 @@ export async function createCompanion(options={}){
  // OMP_WEB_PASSWORD: a password you choose becomes the connection token, so the same Bearer check enforces it. It is never served in the page.
  const password=options.password??process.env.OMP_WEB_PASSWORD??'';
  if(password&&!/^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/.test(password))throw new Error('OMP_WEB_PASSWORD must be printable ASCII without leading or trailing spaces (browsers cannot send other characters in the Authorization header).');
- // The connection token: options.token (a restart hands its token over), else the password, else the one saved in
- // dataDir/connection-token, created once. Kept across launches so a paired phone keeps working after the PC reboots or the
- // app updates or quits; delete the file to revoke every paired device (the next launch makes a new one).
+ // The connection token: options.token (a restart or app update hands its token over), else the password, else the one
+ // saved in dataDir/connection-token, created once. Kept across launches so a paired phone keeps working after the PC
+ // reboots or the app updates or quits; with the app closed, delete the file to revoke every paired device (the next launch
+ // makes a new one). A handed-over token is saved there too: phones paired with it must still get in after the next reboot.
  let token=options.token||password;
  // OMP_WEB_NO_TOKEN=1 embeds the token in the served page: any device that can reach the port gets full control. A password turns it off.
  const exposeToken=!password&&(options.exposeToken??process.env.OMP_WEB_NO_TOKEN==='1');
@@ -66,7 +67,7 @@ export async function createCompanion(options={}){
  const execOmp=(args,opts)=>exec(ompExecutable,[...ompPrefix,...args],opts);
  const omp=options.omp||ompHost(ompEntry,{dataDir});omp.warm?.();
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
- if(!token)token=await savedToken(dataDir);
+ if(!password)token=await savedToken(dataDir,token);
  // One system prompt file per Enhance mode (enhance-system.md is `full`).
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceGuard=path.join(dataDir,'enhance-guard.mjs');
  const enhanceSystems=Object.fromEntries(Object.keys(ENHANCE_MODES).map(m=>[m,path.join(dataDir,m==='full'?'enhance-system.md':`enhance-system-${m}.md`)]));
@@ -138,12 +139,15 @@ export async function createCompanion(options={}){
 await persist();return {server,serve,closeServer,unserve,store,token,password:Boolean(password),close,flush:saveNow,setScreen,restartWhenIdle,closeScreen:()=>dropViewer(1001,'The companion changed its network access.')};
 }
 // The token saved in dataDir, or a new one written there. A file that does not hold one (empty, edited) is replaced.
-async function savedToken(dataDir){
- const file=path.join(dataDir,'connection-token');
+// handed: the token a restart or app update carried over. It is the one every open window and paired phone uses, so it
+// replaces the saved one: a version that predates the file, or a file deleted while the app ran, would otherwise give the
+// next cold start (a reboot) a token no paired phone knows.
+async function savedToken(dataDir,handed){
+ const file=path.join(dataDir,'connection-token'),valid=t=>/^[0-9a-f]{64}$/.test(t);
  const saved=(await fs.readFile(file,'utf8').catch(()=>'')).trim();
- if(/^[0-9a-f]{64}$/.test(saved))return saved;
- const token=randomBytes(32).toString('hex');
- await fs.writeFile(file,token,{mode:0o600});
+ if(handed&&!valid(handed))return handed;
+ const token=handed||(valid(saved)?saved:randomBytes(32).toString('hex'));
+ if(token!==saved)await fs.writeFile(file,token,{mode:0o600});
  return token;
 }
 const mainEntry=process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url);
@@ -172,7 +176,7 @@ if(mainEntry&&process.versions.bun){
   // Sessions that were working when the restart began; createCompanion resumes those it still has.
   ...(handoff?.resume?{resume:handoff.resume}:{}),
   ...(restartExit?{restart:async resume=>{
-   // A password is the token, so only a random per-launch token is handed over; it never outlives the restart.
+   // A password is the token, so only the generated token is handed over (createCompanion keeps it in connection-token too).
    await fs.mkdir(path.dirname(handoffFile),{recursive:true,mode:0o700});
    await fs.writeFile(handoffFile,JSON.stringify({at:Date.now(),...(app.password?{}:{token:app.token}),...(resume?.length?{resume}:{})}),{mode:0o600});
    // Exit with the restart code even if close() fails, so start.bat still starts the companion again.

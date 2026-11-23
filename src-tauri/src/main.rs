@@ -227,7 +227,7 @@ fn boot(app: AppHandle) {
         host: Mutex::new(Arc::new(host)),
         port: ready.port,
         token: ready.token,
-        lan: Mutex::new(false),
+        lan: Mutex::new(ready.lan),
         screen: Mutex::new(false),
         viewer: Mutex::new(None),
         links: Mutex::new(links),
@@ -272,7 +272,7 @@ fn restart(app: &AppHandle) {
         return;
     }
     match spawn_host(app, Some(&shell.token)) {
-        Ok((host, ready)) if ready.port == shell.port => adopt(app, host, None),
+        Ok((host, ready)) if ready.port == shell.port => adopt(app, host, ready.lan, None),
         Ok((host, ready)) => {
             host.send_quit();
             host.wait_exit(Duration::from_secs(10));
@@ -321,7 +321,7 @@ fn recover(app: &AppHandle, mut reason: String) {
             Ok((host, ready)) if ready.port == shell.port => {
                 let log = log.map(|p| format!(" Details: {}", p.display())).unwrap_or_default();
                 let notice = format!("The companion stopped unexpectedly and was restarted. Sessions that were running are paused; send them a message to continue.{log}");
-                return adopt(app, host, Some(notice));
+                return adopt(app, host, ready.lan, Some(notice));
             }
             Ok((host, ready)) => {
                 host.send_quit();
@@ -336,7 +336,7 @@ fn recover(app: &AppHandle, mut reason: String) {
 // `crash_notice`: after a crash, the window is reloaded and a notification says what happened. A requested restart does
 // neither: the dashboard that asked reloads itself once the new companion answers and says it worked, other panels keep
 // their page (the token is the same) as under start.bat.
-fn adopt(app: &AppHandle, host: Host, crash_notice: Option<String>) {
+fn adopt(app: &AppHandle, host: Host, lan: bool, crash_notice: Option<String>) {
     let shell = app.state::<Shell>();
     let host = Arc::new(host);
     let old = std::mem::replace(&mut *shell.host.lock(), host.clone());
@@ -347,11 +347,9 @@ fn adopt(app: &AppHandle, host: Host, crash_notice: Option<String>) {
         host.wait_exit(Duration::from_secs(10));
         return;
     }
-    // Network access survives the restart. Screen sharing does not: like at every launch, it needs a new OK on this PC.
-    if *shell.lan.lock() {
-        let on = host.request(json!({ "cmd": "lan", "on": true }), Duration::from_secs(15)).ok().and_then(|r| r["lan"].as_bool());
-        *shell.lan.lock() = on.unwrap_or(false);
-    }
+    // Network access survives the restart: the host saves the tray's choice and the new one reopened it before it was
+    // ready (`lan`). Screen sharing does not: like at every launch, it needs a new OK on this PC.
+    *shell.lan.lock() = lan;
     *shell.screen.lock() = false;
     *shell.viewer.lock() = None;
     *shell.links.lock() = fetch_links(&host);
@@ -785,7 +783,7 @@ fn toggle_lan(app: &AppHandle) {
     refresh_menu(app);
 }
 
-// Off at every launch, like network access. Turning it off ends a running view at once.
+// Off at every launch, unlike network access. Turning it off ends a running view at once.
 fn toggle_screen(app: &AppHandle) {
     let shell = app.state::<Shell>();
     let on = !*shell.screen.lock();

@@ -1296,7 +1296,7 @@ fn reopen(app: &AppHandle) {
     match spawn_host(app, Some(&shell.token)) {
         Ok((host, ready)) if ready.port == shell.port => {
             shell.host_closed.store(false, Ordering::SeqCst);
-            adopt(app, host, None);
+            adopt(app, host, ready.lan, None);
             let handle = app.clone();
             let url = main_url(&shell);
             let _ = app.run_on_main_thread(move || {

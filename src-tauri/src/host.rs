@@ -102,6 +102,8 @@ impl Tree {
 pub struct Ready {
     pub port: u16,
     pub token: String,
+    /// Network access ("Allow phones on my network") as the host restored it from the last launch.
+    pub lan: bool,
 }
 
 fn tail(buf: &Mutex<String>) -> String {
@@ -186,7 +188,7 @@ pub fn spawn(
                             let port = msg["port"].as_u64().and_then(|p| u16::try_from(p).ok());
                             let token = msg["token"].as_str().map(str::to_owned);
                             let _ = tx.send(match (port, token) {
-                                (Some(port), Some(token)) => Ok(Ready { port, token }),
+                                (Some(port), Some(token)) => Ok(Ready { port, token, lan: msg["lan"].as_bool().unwrap_or(false) }),
                                 _ => Err(format!("The companion sent an invalid ready message: {line}")),
                             });
                             ready_tx = None;
