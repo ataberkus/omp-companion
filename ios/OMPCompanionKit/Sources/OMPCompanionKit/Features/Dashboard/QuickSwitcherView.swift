@@ -194,7 +194,7 @@ public struct QuickSwitcherView: View {
                                         do {
                                             let updated = try await client.sendSessionPrompt(sessionId: sid, type: "prompt", message: "/\(cmd.name)")
                                             store.integrateSession(updated)
-                                            store.showToast("Ran /\(cmd.name)")
+                                            store.showToast(String(localized: "Ran /\(cmd.name)", bundle: .main))
                                         } catch {
                                             store.showToast(error.localizedDescription, isError: true)
                                         }

@@ -1,0 +1,39 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "NSCameraUsageDescription": {
+      "extractionState": "extracted_with_value",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OMP Control Room'daki QR eşleştirme kodlarını taramak ve istemlere eklenecek fotoğrafları çekmek için."
+          }
+        }
+      }
+    },
+    "NSFaceIDUsageDescription": {
+      "extractionState": "extracted_with_value",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OMP Control Room'un kilidini açmak ve companion ana bilgisayar token'larını korumak için."
+          }
+        }
+      }
+    },
+    "NSPhotoLibraryUsageDescription": {
+      "extractionState": "extracted_with_value",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OMP istemlerine eklenecek ekran görüntülerini ve fotoğrafları seçmek için."
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

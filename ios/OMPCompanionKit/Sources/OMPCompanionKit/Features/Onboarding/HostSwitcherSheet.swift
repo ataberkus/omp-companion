@@ -20,9 +20,9 @@ public struct HostSwitcherSheet: View {
                     Section {
                         OMPEmptyStateView(
                             systemImage: "network.badge.shield.half.filled",
-                            title: "No Companion Hosts Saved",
-                            message: "Add your desktop or workstation running OMP Control Room over Tailscale.",
-                            actionTitle: "Add Companion Host"
+                            title: String(localized: "No Companion Hosts Saved", bundle: .main),
+                            message: String(localized: "Add your desktop or workstation running OMP Control Room over Tailscale.", bundle: .main),
+                            actionTitle: String(localized: "Add Companion Host", bundle: .main)
                         ) {
                             showAddHost = true
                         }
@@ -151,12 +151,14 @@ public struct HostSwitcherSheet: View {
                 if isActive {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(palette.accent)
+                        .accessibilityHidden(true)
                 }
             }
             .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isActive ? .isSelected : [])
         .minTouchTarget()
         .listRowBackground(palette.card)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {

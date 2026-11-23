@@ -8,11 +8,13 @@ import UIKit
 
 public struct ComposerView: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var store: AppStore
     public let session: SessionSummary
 
     @Binding public var text: String
     @Binding public var attachments: [PendingImageAttachment]
+    @Binding public var pdfAttachments: [PendingPdfAttachment]
 
     public var onOpenModes: () -> Void
     public var onOpenBtw: () -> Void
@@ -33,6 +35,9 @@ public struct ComposerView: View {
     /// Text last pulled from or saved to the host; a `text` change equal to it is sync, not a local edit.
     @State private var lastSyncedText: String = ""
     @State private var draftSaveTask: Task<Void, Never>?
+    /// Attachments (by local ID) the host's draft is known to hold; a save while they are unchanged leaves them out, so
+    /// a text edit does not upload every image and PDF again. nil: unknown, the next save sends them all.
+    @State private var lastSyncedAttachmentIDs: Set<UUID>?
 
     // Autocomplete states
     @State private var fileMatches: [FileMatch] = []
@@ -51,6 +56,7 @@ public struct ComposerView: View {
         session: SessionSummary,
         text: Binding<String>,
         attachments: Binding<[PendingImageAttachment]>,
+        pdfAttachments: Binding<[PendingPdfAttachment]>,
         onOpenModes: @escaping () -> Void,
         onOpenBtw: @escaping () -> Void
     ) {
@@ -58,6 +64,7 @@ public struct ComposerView: View {
         self.session = session
         self._text = text
         self._attachments = attachments
+        self._pdfAttachments = pdfAttachments
         self.onOpenModes = onOpenModes
         self.onOpenBtw = onOpenBtw
     }
@@ -115,19 +122,44 @@ public struct ComposerView: View {
         return (atIdx..<text.endIndex, token)
     }
 
+    /// While the PC is unreachable a message still goes: into the outbox, sent once the PC answers.
     private var canSend: Bool {
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return (hasText || !attachments.isEmpty) && !isSending && videoUploader.uploads.isEmpty && store.canPerformMutatingActions
+        return (hasText || hasAttachments) && !isSending && videoUploader.uploads.isEmpty && store.canComposePrompts
     }
 
+    private var placeholder: String {
+        if !store.canPerformMutatingActions, store.connectionStatus != .connecting {
+            return String(localized: "PC unreachable: messages wait on this phone…", bundle: .main)
+        }
+        return session.isWorking
+            ? String(localized: "Steer mid-turn or queue follow-up…", bundle: .main)
+            : String(localized: "Message OMP (/ commands, @ files)…", bundle: .main)
+    }
+
+    private var hasAttachments: Bool {
+        !attachments.isEmpty || !pdfAttachments.isEmpty
+    }
+
+    /// Base64 the composer holds, images and PDFs together (the host's 45 MB `DRAFT_ATTACH_MAX`).
     private var totalAttachmentsBytes: Int {
-        attachments.reduce(0) { $0 + $1.base64Data.utf8.count }
+        attachments.reduce(0) { $0 + $1.base64Data.utf8.count } + pdfAttachments.reduce(0) { $0 + $1.base64Data.utf8.count }
+    }
+
+    /// Names drafts tell attachments apart by; each must be unique across images and PDFs.
+    private var attachmentNames: Set<String> {
+        Set(attachments.map(\.name) + pdfAttachments.map(\.name))
+    }
+
+    private var attachmentIDs: Set<UUID> {
+        Set(attachments.map(\.id) + pdfAttachments.map(\.id))
     }
 
     private var estimatedPromptTokens: Int {
         let imgTokens = attachments.reduce(0) { $0 + $1.estimatedTokens }
+        let pdfTokens = pdfAttachments.reduce(0) { $0 + $1.estimatedTokens }
         let txtTokens = max(0, (text.utf8.count + 3) / 4)
-        return imgTokens + txtTokens
+        return imgTokens + pdfTokens + txtTokens
     }
 
     public var body: some View {
@@ -166,7 +198,7 @@ public struct ComposerView: View {
             }
 
             // Attachments strip
-            if !attachments.isEmpty {
+            if hasAttachments {
                 attachmentsStrip
             }
             if !videoUploader.uploads.isEmpty {
@@ -282,7 +314,7 @@ public struct ComposerView: View {
                 // Text editor + action strip
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField(
-                        session.isWorking ? "Steer mid-turn or queue follow-up…" : "Message OMP (/ commands, @ files)…",
+                        placeholder,
                         text: $text,
                         axis: .vertical
                     )
@@ -293,7 +325,7 @@ public struct ComposerView: View {
                     .padding(.vertical, 8)
                     .background(palette.raised, in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(isInputFocused ? palette.accentLine : palette.border, lineWidth: 1))
-                    .disabled(!store.canPerformMutatingActions)
+                    .disabled(!store.canComposePrompts)
                     .onChange(of: text) { _, next in
                         if next != lastSyncedText {
                             hasLocalUnpushedEdits = true
@@ -371,7 +403,7 @@ public struct ComposerView: View {
                             .font(.subheadline)
                             .foregroundStyle(palette.muted)
                     }
-                    .disabled(!store.canPerformMutatingActions)
+                    .disabled(!store.canComposePrompts)
                     .onChange(of: photoItems) { _, items in
                         Task { await loadPickedPhotos(items) }
                     }
@@ -384,7 +416,7 @@ public struct ComposerView: View {
                             .font(.subheadline)
                             .foregroundStyle(palette.muted)
                     }
-                    .disabled(!store.canPerformMutatingActions)
+                    .disabled(!store.canComposePrompts)
                     .accessibilityLabel("Take photo")
 
                     Button {
@@ -394,19 +426,19 @@ public struct ComposerView: View {
                             .font(.subheadline)
                             .foregroundStyle(palette.muted)
                     }
-                    .disabled(!store.canPerformMutatingActions)
-                    .accessibilityLabel("Attach image file")
+                    .disabled(!store.canComposePrompts)
+                    .accessibilityLabel("Attach image or PDF file")
 
                     #if canImport(UIKit)
                     Button {
-                        pasteClipboardImage()
+                        pasteClipboardAttachment()
                     } label: {
                         Image(systemName: "doc.on.clipboard")
                             .font(.subheadline)
                             .foregroundStyle(palette.muted)
                     }
-                    .disabled(!store.canPerformMutatingActions)
-                    .accessibilityLabel("Paste image from clipboard")
+                    .disabled(!store.canComposePrompts)
+                    .accessibilityLabel("Paste image or PDF from clipboard")
                     #endif
 
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -497,9 +529,9 @@ public struct ComposerView: View {
             }
         }
         #endif
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.image, .pdf], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result {
-                Task { await loadImageFiles(urls) }
+                Task { await loadFiles(urls) }
             }
         }
         .alert("Edit Queued Follow-Up", isPresented: Binding(
@@ -524,6 +556,8 @@ public struct ComposerView: View {
             await applyEditorTextIfNeeded()
         }
         .onChange(of: sessionDraftTimestamp) { oldAt, newAt in
+            // A change this composer did not save: the host's attachments are no longer known.
+            if newAt != lastAppliedDraftAt { lastSyncedAttachmentIDs = nil }
             guard !hasLocalUnpushedEdits, !isSending else { return }
             if let newAt {
                 if newAt > lastAppliedDraftAt { Task { await pullDraftFromHost(force: false) } }
@@ -532,11 +566,16 @@ public struct ComposerView: View {
                 lastSyncedText = ""
                 text = ""
                 attachments = []
+                pdfAttachments = []
                 lastAppliedDraftAt = 0
             }
         }
         .onChange(of: session._editorText?.id) { _, _ in
             Task { await applyEditorTextIfNeeded() }
+        }
+        .onChange(of: store.canPerformMutatingActions) { _, online in
+            // Edits made while the PC was unreachable (or a message queued then) go up as soon as it answers.
+            if online, hasLocalUnpushedEdits { scheduleDraftSave() }
         }
     }
 
@@ -558,7 +597,7 @@ public struct ComposerView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
                         isQueueExpanded.toggle()
                     }
                 } label: {
@@ -566,11 +605,11 @@ public struct ComposerView: View {
                         Image(systemName: "text.line.first.and.arrowtriangle.forward")
                             .font(.caption)
                             .foregroundStyle(palette.amber)
-                        Text("\(items.count) \(items.count == 1 ? "message" : "messages") queued")
+                        Text(items.count == 1 ? "1 message queued" : "\(items.count) messages queued")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(palette.foreground)
                         if !isQueueExpanded, let first = items.first {
-                            Text("· \(first.text.isEmpty ? "[Image]" : first.text)")
+                            Text("· \(queuedPreview(first))")
                                 .font(.caption)
                                 .foregroundStyle(palette.muted)
                                 .lineLimit(1)
@@ -578,25 +617,27 @@ public struct ComposerView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityValue(isQueueExpanded ? "Expanded" : "Collapsed")
 
                 Spacer()
 
                 if items.count > 1 {
                     Button {
-                        withAnimation { isQueueExpanded.toggle() }
+                        withAnimation(reduceMotion ? nil : .default) { isQueueExpanded.toggle() }
                     } label: {
                         Image(systemName: isQueueExpanded ? "chevron.down" : "chevron.up")
                             .font(.caption)
                             .foregroundStyle(palette.muted)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(isQueueExpanded ? "Collapse queued messages" : "Expand queued messages")
                 }
             }
 
             let visibleItems = isQueueExpanded ? items : Array(items.prefix(1))
             ForEach(visibleItems) { q in
                 HStack(spacing: 8) {
-                    Text(q.text.isEmpty ? "Image attached" : q.text)
+                    Text(queuedPreview(q))
                         .font(.caption)
                         .foregroundStyle(palette.foreground)
                         .lineLimit(isQueueExpanded ? 4 : 1)
@@ -777,6 +818,47 @@ public struct ComposerView: View {
                         .accessibilityLabel("Remove image \(att.name)")
                     }
                 }
+                ForEach(pdfAttachments) { pdf in
+                    ZStack(alignment: .topTrailing) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.richtext.fill")
+                                .font(.title2)
+                                .foregroundStyle(palette.red)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(pdf.name)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(palette.foreground)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Text(pdf.detail)
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(palette.muted)
+                                    .lineLimit(1)
+                                Text("~\(CompanionFormatters.formatTokens(pdf.estimatedTokens)) tok")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(palette.muted)
+                            }
+                        }
+                        .frame(maxWidth: 190, minHeight: 54, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(palette.raised, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.border, lineWidth: 1))
+                        .accessibilityElement(children: .combine)
+
+                        Button {
+                            pdfAttachments.removeAll { $0.id == pdf.id }
+                            hasLocalUnpushedEdits = true
+                            scheduleDraftSave()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.white, palette.red)
+                        }
+                        .offset(x: 5, y: -5)
+                        .accessibilityLabel("Remove PDF \(pdf.name)")
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -789,8 +871,12 @@ public struct ComposerView: View {
 
     private func pullDraftFromHost(force: Bool) async {
         guard let client = store.activeClient else { return }
-        let haveNames = attachments.map(\.name)
+        let haveNames = attachments.map(\.name) + pdfAttachments.map(\.name)
         guard let resp = try? await client.fetchDraft(key: session.draftKey, haveNames: force ? [] : haveNames) else {
+            // The PC cannot be read: the text this phone kept of the draft comes back instead (and goes up later).
+            if force, text.isEmpty, !hasAttachments, let local = store.localDraft(sessionID: session.id) {
+                text = local.text
+            }
             return
         }
         let remoteAt = resp.at ?? 0
@@ -807,7 +893,28 @@ public struct ComposerView: View {
             }
         }
         attachments = rebuilt
+        var rebuiltPdfs: [PendingPdfAttachment] = []
+        for entry in resp.pdfs ?? [] {
+            if let existing = pdfAttachments.first(where: { $0.name == entry.name }), entry.pdf == nil {
+                rebuiltPdfs.append(existing)
+            } else if let mapped = PendingPdfAttachment.fromDraftEntry(entry) {
+                rebuiltPdfs.append(mapped)
+            }
+        }
+        pdfAttachments = rebuiltPdfs
+        // Every host attachment is here: the next save can leave them out until they change.
+        let complete = rebuilt.count == resp.images.count && rebuiltPdfs.count == (resp.pdfs?.count ?? 0)
+        lastSyncedAttachmentIDs = complete ? attachmentIDs : nil
         hasLocalUnpushedEdits = false
+        // Text the phone kept while the PC could not store it wins when newer than the host's; it then goes up as an
+        // edit (the `text` change). An older copy is spent.
+        if force, let local = store.localDraft(sessionID: session.id) {
+            if local.savedAt.timeIntervalSince1970 * 1000 > remoteAt, local.text != resp.text {
+                text = local.text
+            } else {
+                store.setLocalDraft("", sessionID: session.id)
+            }
+        }
     }
 
     private func scheduleDraftSave() {
@@ -816,12 +923,21 @@ public struct ComposerView: View {
             try? await Task.sleep(nanoseconds: 650_000_000)
             guard !Task.isCancelled, let client = store.activeClient else { return }
             let currentText = text
-            let wireImages = attachments.map { $0.wireDraftImageEntry() }
-            if let saved = try? await client.saveDraft(key: session.draftKey, text: currentText, images: wireImages),
-               !Task.isCancelled {
+            let ids = attachmentIDs
+            let unchanged = ids == lastSyncedAttachmentIDs
+            let wireImages: [[String: Any]]? = unchanged ? nil : attachments.map { $0.wireDraftImageEntry() }
+            let wirePdfs: [[String: Any]]? = unchanged ? nil : pdfAttachments.map { $0.wireDraftEntry() }
+            do {
+                let saved = try await client.saveDraft(key: session.draftKey, text: currentText, images: wireImages, pdfs: wirePdfs)
+                guard !Task.isCancelled else { return }
                 lastAppliedDraftAt = saved.at ?? lastAppliedDraftAt
                 lastSyncedText = currentText
+                lastSyncedAttachmentIDs = ids
                 if text == currentText { hasLocalUnpushedEdits = false }
+                store.setLocalDraft("", sessionID: session.id)
+            } catch {
+                // The PC could not store it: the phone keeps the text until it can.
+                if !Task.isCancelled { store.setLocalDraft(currentText, sessionID: session.id) }
             }
         }
     }
@@ -904,18 +1020,37 @@ public struct ComposerView: View {
     private func dispatch(type: String) async {
         guard let client = store.activeClient else { return }
         let bodyText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !bodyText.isEmpty || !attachments.isEmpty else { return }
+        guard !bodyText.isEmpty || hasAttachments else { return }
+
+        // "/btw …" goes to OMP's side-question channel, which takes text only; the host refuses attachments with it.
+        if isSideQuestion(bodyText), hasAttachments {
+            store.showToast(pdfAttachments.isEmpty
+                ? String(localized: "Side questions cannot include images. Remove them, or send the message without /btw.", bundle: .main)
+                : String(localized: "Side questions cannot include PDFs. Remove them, or send the message without /btw.", bundle: .main), isError: true)
+            return
+        }
 
         let totalWireBytes = totalAttachmentsBytes + bodyText.utf8.count
         guard totalWireBytes < CompanionClient.largeBodyLimit - 65_536 else {
-            store.showToast("Payload exceeds 48 MB companion upload limit. Remove an image.", isError: true)
+            store.showToast(String(localized: "Payload exceeds 48 MB companion upload limit. Remove an image or PDF.", bundle: .main), isError: true)
             return
         }
 
         let currentText = text
         let currentAttachments = attachments
+        let currentPdfs = pdfAttachments
+
+        // The PC is unreachable, or earlier messages of this session still wait for it: this one waits behind them.
+        if !store.canPerformMutatingActions || store.hasUnsentOutboxItems(sessionID: session.id) {
+            isSending = true
+            defer { isSending = false }
+            await queueForLater(text: currentText, images: currentAttachments, pdfs: currentPdfs, state: .pending, lastError: nil)
+            return
+        }
+
         let previews = currentAttachments.compactMap(\.previewDataURL)
         let wireImages = currentAttachments.map(\.wireImagePart)
+        let wirePdfs = currentPdfs.map(\.wirePromptEntry)
 
         isSending = true
         defer { isSending = false }
@@ -923,6 +1058,7 @@ public struct ComposerView: View {
         lastSyncedText = ""
         text = ""
         attachments = []
+        pdfAttachments = []
         hasLocalUnpushedEdits = false
         isInputFocused = false
 
@@ -932,7 +1068,9 @@ public struct ComposerView: View {
         draftSaveTask = nil
         pendingSave?.cancel()
         await pendingSave?.value
-        _ = try? await client.saveDraft(key: session.draftKey, text: "", images: [])
+        if (try? await client.saveDraft(key: session.draftKey, text: "", images: [], pdfs: [])) != nil {
+            lastSyncedAttachmentIDs = []
+        }
 
         do {
             let updated = try await client.sendSessionPrompt(
@@ -940,18 +1078,88 @@ public struct ComposerView: View {
                 type: type,
                 message: currentText,
                 images: wireImages,
-                preview: previews.isEmpty ? nil : previews
+                preview: previews.isEmpty ? nil : previews,
+                pdfs: wirePdfs
             )
             store.integrateSession(updated)
+            store.setLocalDraft("", sessionID: session.id)
             store.notificationManager.triggerHaptic(.lightTap)
         } catch {
-            text = currentText
-            attachments = currentAttachments
-            hasLocalUnpushedEdits = true
-            scheduleDraftSave()
+            if let apiError = error as? CompanionAPIError, apiError.kind.isConnectivityFailure {
+                // Kept on the phone, not lost: one that certainly never reached the PC goes out on its own once it
+                // answers; one sent without an answer may have arrived, so it waits for the user to check and resend.
+                let mayHaveArrived = !apiError.definitelyNotDelivered
+                await queueForLater(
+                    text: currentText,
+                    images: currentAttachments,
+                    pdfs: currentPdfs,
+                    state: mayHaveArrived ? .failed : .pending,
+                    lastError: mayHaveArrived ? PromptOutbox.uncertainDeliveryMessage(apiError) : apiError.localizedDescription
+                )
+                return
+            }
+            restoreComposer(text: currentText, images: currentAttachments, pdfs: currentPdfs)
             store.showToast(error.localizedDescription, isError: true)
             store.notificationManager.triggerHaptic(.error)
         }
+    }
+
+    /// Holds the message in the outbox and clears the composer as if it was sent. When the outbox cannot take it (full,
+    /// or not saved), the message comes back to the composer and its text is also kept on the phone.
+    private func queueForLater(
+        text message: String,
+        images: [PendingImageAttachment],
+        pdfs: [PendingPdfAttachment],
+        state: OutboxItem.State,
+        lastError: String?
+    ) async {
+        do {
+            try await store.queuePrompt(session: session, text: message, images: images, pdfs: pdfs, state: state, lastError: lastError)
+        } catch {
+            restoreComposer(text: message, images: images, pdfs: pdfs)
+            store.setLocalDraft(message, sessionID: session.id)
+            store.showToast(error.localizedDescription, isError: true)
+            store.notificationManager.triggerHaptic(.error)
+            return
+        }
+        predictedSuffix = nil
+        lastSyncedText = ""
+        text = ""
+        attachments = []
+        pdfAttachments = []
+        isInputFocused = false
+        // The host draft may still hold this message: it is not pulled back here, and is cleared once the PC answers.
+        hasLocalUnpushedEdits = true
+        scheduleDraftSave()
+        store.setLocalDraft("", sessionID: session.id)
+        if state == .pending {
+            store.showToast(String(localized: "Saved on this phone. It will be sent when the PC is reachable.", bundle: .main))
+            store.notificationManager.triggerHaptic(.lightTap)
+        } else {
+            store.showToast(String(localized: "No answer from the PC. The message is kept above the composer: check the transcript before sending it again.", bundle: .main), isError: true)
+            store.notificationManager.triggerHaptic(.warning)
+        }
+        store.scheduleOutboxFlush()
+    }
+
+    private func restoreComposer(text message: String, images: [PendingImageAttachment], pdfs: [PendingPdfAttachment]) {
+        text = message
+        attachments = images
+        pdfAttachments = pdfs
+        hasLocalUnpushedEdits = true
+        scheduleDraftSave()
+    }
+
+    /// The host's test for a side question (`/^\/btw(\s|$)/` on the trimmed message).
+    private func isSideQuestion(_ text: String) -> Bool {
+        guard text.hasPrefix("/btw") else { return false }
+        return text.dropFirst(4).first.map(\.isWhitespace) ?? true
+    }
+
+    private func queuedPreview(_ item: QueuedMessage) -> String {
+        if !item.text.isEmpty { return item.text }
+        if item.hasImage != true, !(item.pdfs ?? []).isEmpty { return "PDF attached" }
+        return "Image attached"
     }
 
     private func sendQueuedNow(_ item: QueuedMessage) async {
@@ -1020,10 +1228,33 @@ public struct ComposerView: View {
         })
     }
 
-    private func loadImageFiles(_ urls: [URL]) async {
+    /// Files from the importer: PDFs are attached whole, anything else is read as an image.
+    private func loadFiles(_ urls: [URL]) async {
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            if PdfAttachmentProcessor.isPdf(url: url) {
+                let existing = pdfAttachments
+                let taken = attachmentNames
+                let used = totalAttachmentsBytes
+                do {
+                    // Reading, encoding and counting pages of up to 20 MB stays off the main thread.
+                    let pdf = try await Task.detached(priority: .userInitiated) {
+                        try PdfAttachmentProcessor.process(
+                            PdfAttachmentProcessor.readFile(url),
+                            suggestedName: url.lastPathComponent,
+                            existing: existing,
+                            takenNames: taken,
+                            existingBase64Bytes: used
+                        )
+                    }.value
+                    pdfAttachments.append(pdf)
+                    hasLocalUnpushedEdits = true
+                } catch {
+                    store.showToast(error.localizedDescription, isError: true)
+                }
+                continue
+            }
             if let data = try? Data(contentsOf: url) {
                 do {
                     let att = try ImageAttachmentProcessor.processRawImageData(data, suggestedName: url.lastPathComponent, existingBase64Bytes: totalAttachmentsBytes)
@@ -1038,19 +1269,31 @@ public struct ComposerView: View {
     }
 
     #if canImport(UIKit)
-    private func pasteClipboardImage() {
-        if let image = UIPasteboard.general.image {
-            do {
+    /// A PDF on the clipboard (copied from Files or a PDF viewer) is attached as one; otherwise its image.
+    private func pasteClipboardAttachment() {
+        let board = UIPasteboard.general
+        do {
+            if let data = board.data(forPasteboardType: UTType.pdf.identifier) {
+                let pdf = try PdfAttachmentProcessor.process(
+                    data,
+                    suggestedName: "clipboard.pdf",
+                    existing: pdfAttachments,
+                    takenNames: attachmentNames,
+                    existingBase64Bytes: totalAttachmentsBytes
+                )
+                pdfAttachments.append(pdf)
+            } else if let image = board.image {
                 let att = try ImageAttachmentProcessor.processUIImage(image, suggestedName: "clipboard.jpg", existingBase64Bytes: totalAttachmentsBytes)
                 attachments.append(att)
-                hasLocalUnpushedEdits = true
-                scheduleDraftSave()
-                store.notificationManager.triggerHaptic(.lightTap)
-            } catch {
-                store.showToast(error.localizedDescription, isError: true)
+            } else {
+                store.showToast(String(localized: "No image or PDF found in clipboard", bundle: .main), isError: true)
+                return
             }
-        } else {
-            store.showToast("No image found in clipboard", isError: true)
+            hasLocalUnpushedEdits = true
+            scheduleDraftSave()
+            store.notificationManager.triggerHaptic(.lightTap)
+        } catch {
+            store.showToast(error.localizedDescription, isError: true)
         }
     }
     #endif

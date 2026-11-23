@@ -12,9 +12,9 @@ public enum ToolRunStatus: String, Hashable, Sendable {
 
     public var label: String {
         switch self {
-        case .running: return "Running"
-        case .done: return "Done"
-        case .error: return "Error"
+        case .running: return String(localized: "Running", bundle: .main)
+        case .done: return String(localized: "Done", bundle: .main)
+        case .error: return String(localized: "Error", bundle: .main)
         }
     }
 }

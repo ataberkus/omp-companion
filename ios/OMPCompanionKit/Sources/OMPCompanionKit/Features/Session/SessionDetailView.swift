@@ -12,6 +12,7 @@ public struct SessionDetailView: View {
 
     @State private var composerText: String = ""
     @State private var composerAttachments: [PendingImageAttachment] = []
+    @State private var composerPdfs: [PendingPdfAttachment] = []
 
     @State private var showModesSheet = false
     @State private var showBtwSheet = false
@@ -74,8 +75,16 @@ public struct SessionDetailView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "wifi.slash")
                         .font(.caption)
-                    Text("Offline cache mode — transcript & diffs readable; actions disabled until reconnected.")
+                    Text("Offline cache mode — transcript & diffs readable; messages you send wait on this phone until the PC answers.")
                         .font(.caption2)
+                    if store.outboxCount > 0 {
+                        Text("\(store.outboxCount)")
+                            .font(.caption2.monospacedDigit().weight(.bold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(palette.amber.opacity(0.25), in: Capsule())
+                            .accessibilityLabel("\(store.outboxCount) waiting to send")
+                    }
                     Spacer()
                     Button("Retry") {
                         Task { await store.forceSync() }
@@ -242,6 +251,7 @@ public struct SessionDetailView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 12)
@@ -300,11 +310,16 @@ public struct SessionDetailView: View {
                 .overlay(alignment: .top) { Divider().overlay(palette.amber.opacity(0.5)) }
             }
 
+            OutboxQueueBar(store: store, sessionID: liveSession.id) { item in
+                Task { await editOutboxItem(item) }
+            }
+
             ComposerView(
                 store: store,
                 session: liveSession,
                 text: $composerText,
                 attachments: $composerAttachments,
+                pdfAttachments: $composerPdfs,
                 onOpenModes: { showModesSheet = true },
                 onOpenBtw: { showBtwSheet = true }
             )
@@ -440,13 +455,39 @@ public struct SessionDetailView: View {
 
     // MARK: - Transcript Action Callbacks
 
+    /// Edit on a waiting message: it leaves the outbox and goes back into the composer, which must be empty so nothing
+    /// written there is replaced.
+    private func editOutboxItem(_ item: OutboxItem) async {
+        let composerBusy = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !composerAttachments.isEmpty || !composerPdfs.isEmpty
+        guard !composerBusy else {
+            store.showToast(String(localized: "Send or clear the message in the composer first, then edit this one.", bundle: .main), isError: true)
+            return
+        }
+        guard let taken = await store.takeOutboxItem(item.id) else { return }
+        composerText = taken.text
+        composerAttachments = taken.images
+        composerPdfs = taken.pdfs
+    }
+
     private func resendDroppedSteer(_ msg: TranscriptMessage) async {
         guard let client = store.activeClient else { return }
         let type = liveSession.isWorking ? "steer" : "prompt"
+        // A steer's PDFs go again as their reference lines, so OMP reads the stored files; without stored paths they
+        // must be attached again.
+        let own = msg.textAndPdfs
+        var message = own.text
+        if !own.pdfs.isEmpty {
+            guard own.pdfs.allSatisfy({ $0.path?.isEmpty == false }) else {
+                store.showToast(String(localized: "Reattach the PDF before resending.", bundle: .main), isError: true)
+                return
+            }
+            message = PdfAttachmentProcessor.withPdfRefs(own.text == "PDF attached" ? "" : own.text, pdfs: own.pdfs)
+        }
         do {
-            let updated = try await client.sendSessionPrompt(sessionId: liveSession.id, type: type, message: msg.text)
+            let updated = try await client.sendSessionPrompt(sessionId: liveSession.id, type: type, message: message)
             store.integrateSession(updated)
-            store.showToast("Resent dropped steer")
+            store.showToast(String(localized: "Resent dropped steer", bundle: .main))
             store.notificationManager.triggerHaptic(.success)
         } catch {
             store.showToast(error.localizedDescription, isError: true)
@@ -459,7 +500,7 @@ public struct SessionDetailView: View {
             let res = try await client.branchSession(sessionId: liveSession.id, entryId: entryId)
             store.integrateSession(res.session)
             if !res.text.isEmpty { composerText = res.text }
-            store.showToast("Branched from turn")
+            store.showToast(String(localized: "Branched from turn", bundle: .main))
         } catch {
             store.showToast(error.localizedDescription, isError: true)
         }
@@ -471,7 +512,7 @@ public struct SessionDetailView: View {
             let res = try await client.editLastMessage(sessionId: liveSession.id)
             store.integrateSession(res.session)
             if !res.text.isEmpty { composerText = res.text }
-            store.showToast("Rewound prompt into composer")
+            store.showToast(String(localized: "Rewound prompt into composer", bundle: .main))
         } catch {
             store.showToast(error.localizedDescription, isError: true)
         }
@@ -482,7 +523,7 @@ public struct SessionDetailView: View {
         do {
             let updated = try await client.regenerateLastMessage(sessionId: liveSession.id)
             store.integrateSession(updated)
-            store.showToast("Regenerating last turn")
+            store.showToast(String(localized: "Regenerating last turn", bundle: .main))
         } catch {
             store.showToast(error.localizedDescription, isError: true)
         }

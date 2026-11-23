@@ -141,6 +141,8 @@ public struct SettingsAdminView: View {
                             }
                         }
                         .contentShape(Rectangle())
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(.isButton)
                         .onTapGesture {
                             if host.id != store.activeHostID {
                                 Task { await store.selectHost(host.id) }

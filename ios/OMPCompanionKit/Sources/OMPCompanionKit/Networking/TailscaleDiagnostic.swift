@@ -21,62 +21,62 @@ public enum TailscaleErrorKind: Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .tailscaleInactiveOrUnreachable: return "Host unreachable over Tailscale"
-        case .atsOrTlsMismatch: return "TLS / HTTP transport blocked"
-        case .invalidToken: return "Invalid connection token"
-        case .wrongPassword: return "Wrong remote password"
-        case .hostHeaderRejected: return "Host header rejected (403)"
-        case .originRejected: return "Origin rejected (403)"
-        case .payloadTooLarge(let limit): return "Upload exceeds \(limit) limit"
-        case .unsupportedMediaType: return "Unsupported request type"
-        case .conflict: return "Action conflict (409)"
-        case .rateLimited: return "Too many requests (429)"
-        case .companionRestarting: return "Companion restarting"
-        case .notFound: return "Route or item not found"
-        case .serverError(let status): return "Companion error (\(status))"
-        case .invalidURL: return "Invalid host URL"
-        case .decodingFailed: return "Unexpected server response"
-        case .cancelled: return "Request cancelled"
-        case .unknown: return "Connection error"
+        case .tailscaleInactiveOrUnreachable: return String(localized: "Host unreachable over Tailscale", bundle: .main)
+        case .atsOrTlsMismatch: return String(localized: "TLS / HTTP transport blocked", bundle: .main)
+        case .invalidToken: return String(localized: "Invalid connection token", bundle: .main)
+        case .wrongPassword: return String(localized: "Wrong remote password", bundle: .main)
+        case .hostHeaderRejected: return String(localized: "Host header rejected (403)", bundle: .main)
+        case .originRejected: return String(localized: "Origin rejected (403)", bundle: .main)
+        case .payloadTooLarge(let limit): return String(localized: "Upload exceeds \(limit) limit", bundle: .main)
+        case .unsupportedMediaType: return String(localized: "Unsupported request type", bundle: .main)
+        case .conflict: return String(localized: "Action conflict (409)", bundle: .main)
+        case .rateLimited: return String(localized: "Too many requests (429)", bundle: .main)
+        case .companionRestarting: return String(localized: "Companion restarting", bundle: .main)
+        case .notFound: return String(localized: "Route or item not found", bundle: .main)
+        case .serverError(let status): return String(localized: "Companion error (\(status))", bundle: .main)
+        case .invalidURL: return String(localized: "Invalid host URL", bundle: .main)
+        case .decodingFailed: return String(localized: "Unexpected server response", bundle: .main)
+        case .cancelled: return String(localized: "Request cancelled", bundle: .main)
+        case .unknown: return String(localized: "Connection error", bundle: .main)
         }
     }
 
     public var remediation: String {
         switch self {
         case .tailscaleInactiveOrUnreachable:
-            return "Verify the Tailscale app is connected on this iPhone/iPad and the host PC is online with OMP Control Room listening on its tailnet address."
+            return String(localized: "Verify the Tailscale app is connected on this iPhone/iPad and the host PC is online with OMP Control Room listening on its tailnet address.", bundle: .main)
         case .atsOrTlsMismatch:
-            return "Check whether the companion uses plain HTTP on port 4545 or HTTPS via `tailscale serve`, and confirm the port and scheme match."
+            return String(localized: "Check whether the companion uses plain HTTP on port 4545 or HTTPS via `tailscale serve`, and confirm the port and scheme match.", bundle: .main)
         case .invalidToken:
-            return "Update the bearer token in Host Settings or scan a fresh QR code from the desktop dashboard."
+            return String(localized: "Update the bearer token in Host Settings or scan a fresh QR code from the desktop dashboard.", bundle: .main)
         case .wrongPassword:
-            return "Enter the exact remote password configured in OMP_WEB_PASSWORD on the companion host."
+            return String(localized: "Enter the exact remote password configured in OMP_WEB_PASSWORD on the companion host.", bundle: .main)
         case .hostHeaderRejected:
-            return "Companion rejected the HTTP Host header. Connect via its MagicDNS name, tailnet IP, or add the host to OMP_WEB_PUBLIC_HOSTS."
+            return String(localized: "Companion rejected the HTTP Host header. Connect via its MagicDNS name, tailnet IP, or add the host to OMP_WEB_PUBLIC_HOSTS.", bundle: .main)
         case .originRejected:
-            return "Companion rejected the request Origin. Native iOS requests omit Origin; check proxy headers if using a custom reverse proxy."
+            return String(localized: "Companion rejected the request Origin. Native iOS requests omit Origin; check proxy headers if using a custom reverse proxy.", bundle: .main)
         case .payloadTooLarge(let limit):
-            return "Reduce text or remove/compress attached images so the request stays under \(limit)."
+            return String(localized: "Reduce text or remove/compress attached images so the request stays under \(limit).", bundle: .main)
         case .unsupportedMediaType:
-            return "Ensure JSON request content-type headers are intact."
+            return String(localized: "Ensure JSON request content-type headers are intact.", bundle: .main)
         case .conflict:
-            return "Another action or turn is currently active on this session."
+            return String(localized: "Another action or turn is currently active on this session.", bundle: .main)
         case .rateLimited:
-            return "Wait a few seconds before retrying."
+            return String(localized: "Wait a few seconds before retrying.", bundle: .main)
         case .companionRestarting:
-            return "The companion host is shutting down or restarting; syncing will resume automatically once back up."
+            return String(localized: "The companion host is shutting down or restarting; syncing will resume automatically once back up.", bundle: .main)
         case .notFound:
-            return "This resource may have been removed or your companion version may not expose this endpoint."
+            return String(localized: "This resource may have been removed or your companion version may not expose this endpoint.", bundle: .main)
         case .serverError:
-            return "Check the companion console or desktop log on the host machine."
+            return String(localized: "Check the companion console or desktop log on the host machine.", bundle: .main)
         case .invalidURL:
-            return "Enter a valid MagicDNS hostname (e.g. pc.tail.ts.net:4545), tailnet IP, or HTTPS URL."
+            return String(localized: "Enter a valid MagicDNS hostname (e.g. pc.tail.ts.net:4545), tailnet IP, or HTTPS URL.", bundle: .main)
         case .decodingFailed:
-            return "Update OMP Control Room on the host or verify the URL points to the companion server."
+            return String(localized: "Update OMP Control Room on the host or verify the URL points to the companion server.", bundle: .main)
         case .cancelled:
-            return "Cancelled."
+            return String(localized: "Cancelled.", bundle: .main)
         case .unknown:
-            return "Check Tailscale connectivity and try again."
+            return String(localized: "Check Tailscale connectivity and try again.", bundle: .main)
         }
     }
 
@@ -98,11 +98,30 @@ public struct CompanionAPIError: LocalizedError, Sendable {
     public let kind: TailscaleErrorKind
     public let statusCode: Int?
     public let serverMessage: String?
+    /// The `NSURLErrorDomain` code of a transport failure; nil for HTTP replies and errors raised here.
+    public let transportCode: Int?
 
-    public init(kind: TailscaleErrorKind, statusCode: Int? = nil, serverMessage: String? = nil) {
+    public init(kind: TailscaleErrorKind, statusCode: Int? = nil, serverMessage: String? = nil, transportCode: Int? = nil) {
         self.kind = kind
         self.statusCode = statusCode
         self.serverMessage = serverMessage
+        self.transportCode = transportCode
+    }
+
+    /// The request certainly never reached the companion, so sending it again cannot repeat it: no connection was made
+    /// (refused, no route or network, DNS, a failed TLS handshake), or the companion's Host/Origin gate turned it away
+    /// before reading it. A timeout or a connection lost mid-request is not: the PC may have acted on it.
+    public var definitelyNotDelivered: Bool {
+        switch kind {
+        case .atsOrTlsMismatch, .hostHeaderRejected, .originRejected:
+            return true
+        case .tailscaleInactiveOrUnreachable:
+            guard let transportCode else { return false }
+            return [NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet]
+                .contains(transportCode)
+        default:
+            return false
+        }
     }
 
     public var errorDescription: String? {
@@ -121,16 +140,16 @@ public enum TailscaleDiagnostic {
         switch status {
         case 401:
             if lower.contains("password") {
-                return CompanionAPIError(kind: .wrongPassword, statusCode: 401, serverMessage: msg.isEmpty ? "Wrong password." : msg)
+                return CompanionAPIError(kind: .wrongPassword, statusCode: 401, serverMessage: msg.isEmpty ? String(localized: "Wrong password.", bundle: .main) : msg)
             }
-            return CompanionAPIError(kind: .invalidToken, statusCode: 401, serverMessage: msg.isEmpty ? "Invalid connection token." : msg)
+            return CompanionAPIError(kind: .invalidToken, statusCode: 401, serverMessage: msg.isEmpty ? String(localized: "Invalid connection token.", bundle: .main) : msg)
         case 403:
             if lower.contains("origin") {
-                return CompanionAPIError(kind: .originRejected, statusCode: 403, serverMessage: msg.isEmpty ? "Origin not allowed." : msg)
+                return CompanionAPIError(kind: .originRejected, statusCode: 403, serverMessage: msg.isEmpty ? String(localized: "Origin not allowed.", bundle: .main) : msg)
             }
-            return CompanionAPIError(kind: .hostHeaderRejected, statusCode: 403, serverMessage: msg.isEmpty ? "Invalid Host header." : msg)
+            return CompanionAPIError(kind: .hostHeaderRejected, statusCode: 403, serverMessage: msg.isEmpty ? String(localized: "Invalid Host header.", bundle: .main) : msg)
         case 404:
-            return CompanionAPIError(kind: .notFound, statusCode: 404, serverMessage: msg.isEmpty ? "Route not found." : msg)
+            return CompanionAPIError(kind: .notFound, statusCode: 404, serverMessage: msg.isEmpty ? String(localized: "Route not found.", bundle: .main) : msg)
         case 409:
             return CompanionAPIError(kind: .conflict, statusCode: 409, serverMessage: msg)
         case 413:
@@ -172,7 +191,7 @@ public enum TailscaleDiagnostic {
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorCancelled:
-                return CompanionAPIError(kind: .cancelled, serverMessage: "Cancelled")
+                return CompanionAPIError(kind: .cancelled, serverMessage: String(localized: "Cancelled", bundle: .main))
             case NSURLErrorAppTransportSecurityRequiresSecureConnection,
                  NSURLErrorSecureConnectionFailed,
                  NSURLErrorServerCertificateHasBadDate,
@@ -180,7 +199,7 @@ public enum TailscaleDiagnostic {
                  NSURLErrorServerCertificateHasUnknownRoot,
                  NSURLErrorServerCertificateNotYetValid,
                  NSURLErrorClientCertificateRejected:
-                return CompanionAPIError(kind: .atsOrTlsMismatch, serverMessage: nsError.localizedDescription)
+                return CompanionAPIError(kind: .atsOrTlsMismatch, serverMessage: nsError.localizedDescription, transportCode: nsError.code)
             case NSURLErrorTimedOut,
                  NSURLErrorCannotFindHost,
                  NSURLErrorCannotConnectToHost,
@@ -188,8 +207,8 @@ public enum TailscaleDiagnostic {
                  NSURLErrorNotConnectedToInternet,
                  NSURLErrorNetworkConnectionLost:
                 let kindLabel = host?.endpointKind.badge ?? "Tailscale"
-                let detail = "Cannot reach \(host?.hostDisplay ?? "companion") over \(kindLabel): \(nsError.localizedDescription)"
-                return CompanionAPIError(kind: .tailscaleInactiveOrUnreachable, serverMessage: detail)
+                let detail = String(localized: "Cannot reach \(host?.hostDisplay ?? "companion") over \(kindLabel): \(nsError.localizedDescription)", bundle: .main)
+                return CompanionAPIError(kind: .tailscaleInactiveOrUnreachable, serverMessage: detail, transportCode: nsError.code)
             default:
                 break
             }

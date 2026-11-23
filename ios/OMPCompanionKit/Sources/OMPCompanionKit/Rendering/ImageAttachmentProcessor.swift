@@ -6,7 +6,7 @@ import ImageIO
 import UIKit
 #endif
 
-public struct PendingImageAttachment: Identifiable, Hashable, Sendable {
+public struct PendingImageAttachment: Identifiable, Hashable, Sendable, Codable {
     public let id: UUID
     public var name: String
     public var mimeType: String
@@ -88,7 +88,7 @@ public enum ImageAttachmentError: LocalizedError, Sendable {
         case .exceedsSingleImageLimit:
             return "Image still exceeds the 5 MB companion limit after compression."
         case .exceedsDraftPayloadLimit:
-            return "Total attached images exceed the 45 MB draft limit. Remove an image before attaching more."
+            return "Total attachments exceed the 45 MB draft limit. Remove an image or PDF before attaching more."
         }
     }
 }

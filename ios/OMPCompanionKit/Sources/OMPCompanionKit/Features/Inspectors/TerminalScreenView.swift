@@ -6,6 +6,7 @@ import UIKit
 
 public struct TerminalScreenView: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var store: AppStore
     public let session: SessionSummary
 
@@ -101,10 +102,10 @@ public struct TerminalScreenView: View {
                     if let info = screenInfo, !info.supported || !info.enabled {
                         OMPEmptyStateView(
                             systemImage: "display.trianglebadge.exclamationmark",
-                            title: info.supported ? "Screen Sharing Disabled" : "Screen Sharing Unavailable",
+                            title: info.supported ? String(localized: "Screen Sharing Disabled", bundle: .main) : String(localized: "Screen Sharing Unavailable", bundle: .main),
                             message: info.supported
-                                ? "Enable \"Allow screen sharing and control\" from the OMP Control Room tray menu on the host, or start the companion with OMP_WEB_SCREEN=1."
-                                : "Host remote desktop streaming requires a Windows companion host with screen sharing support."
+                                ? String(localized: "Enable \"Allow screen sharing and control\" from the OMP Control Room tray menu on the host, or start the companion with OMP_WEB_SCREEN=1.", bundle: .main)
+                                : String(localized: "Host remote desktop streaming requires a Windows companion host with screen sharing support.", bundle: .main)
                         )
                     } else {
                         screenControlsBar
@@ -240,7 +241,7 @@ public struct TerminalScreenView: View {
                     .gesture(
                         SpatialTapGesture(count: 2)
                             .onEnded { _ in
-                                withAnimation(.easeInOut(duration: 0.18)) {
+                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                                     zoomScale = 1.0
                                     baseZoomScale = 1.0
                                 }

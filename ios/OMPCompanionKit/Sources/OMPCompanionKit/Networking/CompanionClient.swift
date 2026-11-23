@@ -95,7 +95,7 @@ public struct CompanionClient: Sendable {
                     kind: .payloadTooLarge(limitLabel: label),
                     statusCode: 413,
                     serverMessage: cap > Self.smallBodyLimit
-                        ? "This message is too large to upload: text and images together must stay under 48 MB. Remove some images and try again."
+                        ? "This message is too large to upload: text and attachments together must stay under 48 MB. Remove some images or PDFs and try again."
                         : "Request body exceeds the \(label) limit."
                 )
             }
@@ -272,10 +272,14 @@ public struct CompanionClient: Sendable {
         return try await get("/api/draft", query: items)
     }
 
-    public func saveDraft(key: String, text: String, images: [[String: Any]]? = nil) async throws -> DraftSaveResponse {
+    /// `images` / `pdfs`, when given, replace the draft's attached images / PDFs (`[]` removes them); left out, they stay.
+    public func saveDraft(key: String, text: String, images: [[String: Any]]? = nil, pdfs: [[String: Any]]? = nil) async throws -> DraftSaveResponse {
         var body: [String: Any] = ["key": key, "text": text]
         if let images {
             body["images"] = images
+        }
+        if let pdfs {
+            body["pdfs"] = pdfs
         }
         return try await post("/api/draft", jsonObject: body)
     }
@@ -468,11 +472,14 @@ public struct CompanionClient: Sendable {
         message: String,
         images: [[String: Any]] = [],
         preview: [String]? = nil,
+        pdfs: [[String: Any]] = [],
         lean: Bool = true
     ) async throws -> SessionSummary {
         var payload: [String: Any] = ["type": type, "message": message]
         if !images.isEmpty { payload["images"] = images }
         if let preview, !preview.isEmpty { payload["preview"] = preview }
+        // `[{data: base64, name}]`; the host stores each and adds the line naming it to the message.
+        if !pdfs.isEmpty { payload["pdfs"] = pdfs }
         return try await sessionCommand(sessionId: sessionId, payload: payload, lean: lean, timeout: 60)
     }
 
@@ -815,6 +822,17 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// A stored PDF a message carries (`GET /api/attachment`), as raw bytes. 404: the host no longer stores it.
+    public func fetchAttachment(id: String, name: String) async throws -> Data {
+        let (data, _) = try await sendRaw(
+            method: "GET",
+            path: "/api/attachment",
+            query: [URLQueryItem(name: "id", value: id), URLQueryItem(name: "name", value: name)],
+            timeout: 60
+        )
+        return data
+    }
+
     // MARK: - Enhance Prompt
 
     public func startEnhance(
@@ -975,6 +993,44 @@ public struct CompanionClient: Sendable {
     public func restartHost() async throws -> OkResponse {
         try await post("/api/restart", jsonObject: [:])
     }
+
+    public func fetchInstance() async throws -> InstanceResponse {
+        try await get("/api/instance", timeout: 5)
+    }
+
+    /// The desktop app checks for its own update and, when it finds one, downloads, installs and restarts without
+    /// asking; the check can take a while (the web waits 90 s too).
+    public func startAppUpdate() async throws -> AppUpdateResponse {
+        try await post("/api/app-update", jsonObject: [:], timeout: 90)
+    }
+
+    public func clearAttachments() async throws -> StorageResponse {
+        try await post("/api/storage/clear-attachments", jsonObject: [:])
+    }
+
+    // MARK: - Apple Push
+
+    /// Registers this phone's APNs device token with the host, which then pushes "needs input" and "plan ready" while
+    /// the app is not running (when it has an APNs key: `configured`). `hostRef` comes back in each push as `hostID`, so
+    /// a tap opens the session on the right host; `redact` keeps session titles off the lock screen.
+    @discardableResult
+    public func registerPush(token: String, environment: String, hostRef: String, redact: Bool, name: String?) async throws -> PushRegisterResponse {
+        var body: [String: Any] = ["token": token, "environment": environment, "hostRef": hostRef, "redact": redact]
+        if let name, !name.isEmpty { body["name"] = name }
+        return try await post("/api/push/register", jsonObject: body, timeout: 15)
+    }
+
+    /// Stops the host's pushes to this phone.
+    @discardableResult
+    public func unregisterPush(token: String) async throws -> PushRegisterResponse {
+        try await post("/api/push/register", jsonObject: ["token": token, "remove": true], timeout: 15)
+    }
+}
+
+public struct PushRegisterResponse: Decodable, Sendable {
+    public let ok: Bool?
+    /// The host has an APNs key; without one it keeps the registration but cannot push.
+    public let configured: Bool?
 }
 
 public struct VideoUploadResponse: Decodable, Sendable {

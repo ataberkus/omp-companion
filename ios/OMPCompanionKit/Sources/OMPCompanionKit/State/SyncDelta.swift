@@ -67,6 +67,8 @@ public final class SyncDeltaReducer: @unchecked Sendable {
                 next.accountChoices = top.accountChoices
                 next.instance = top.instance
                 next.canRestart = top.canRestart
+                next.canAppUpdate = top.canAppUpdate
+                next.appVersion = top.appVersion
                 next.autoShutdown = top.autoShutdown
             }
 
@@ -115,6 +117,8 @@ public final class SyncDeltaReducer: @unchecked Sendable {
             if let activity = poll.activity { next.activity = activity }
             if let instance = poll.instance { next.instance = instance }
             if let canRestart = poll.canRestart { next.canRestart = canRestart }
+            if let canAppUpdate = poll.canAppUpdate { next.canAppUpdate = canAppUpdate }
+            if let appVersion = poll.appVersion { next.appVersion = appVersion }
             if let autoShutdown = poll.autoShutdown { next.autoShutdown = autoShutdown }
 
             next.sessions = fullSessions.map { incoming in

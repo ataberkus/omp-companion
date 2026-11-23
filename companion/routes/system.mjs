@@ -1,10 +1,10 @@
-// HTTP routes for this PC: screen sharing status and tickets, shutdown, automatic shutdown and restart.
+// HTTP routes for this PC: screen sharing status and tickets, shutdown, automatic shutdown and restart, Apple push registration.
 import { randomBytes } from 'node:crypto';
 import * as os from 'node:os';
 import { tailnetAddress } from '../network.mjs';
 import { now, error } from '../util.mjs';
 export function systemRoutes(ctx){
- const {options,autoShutdown,autoShutdownView,checkAutoShutdown,screenSupported,screenTickets,screenOff,shutdownPc,pauseSessions,instance,appVersion}=ctx;
+ const {options,autoShutdown,autoShutdownView,checkAutoShutdown,screenSupported,screenTickets,screenOff,shutdownPc,pauseSessions,instance,appVersion,push}=ctx;
  return {
    // A dashboard waiting out a restart or an app update polls this instead of the whole state: the instance id changes
    // with a new companion, and appVersion says whether an update changed the version.
@@ -58,5 +58,8 @@ export function systemRoutes(ctx){
     if(!options.restart)throw error('Restart works when the companion runs from start.bat or the desktop app, which start it again. Stop it and start it yourself.',409);
     const resume=await pauseSessions();const relaunch=await options.restart(resume);json({ok:true});if(relaunch)res.once('finish',()=>void relaunch());return;
    },
+   // The iPhone app registers its APNs device token here (push.mjs): {token, environment, hostRef, redact, name}, or
+   // {token, remove:true} to stop. configured says whether this companion has an APNs key and can push at all.
+   'POST /api/push/register':async({body,json})=>{json(await push.register(body));return;},
  };
 }

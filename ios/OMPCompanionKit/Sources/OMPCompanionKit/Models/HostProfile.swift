@@ -6,8 +6,8 @@ public enum HostAuthKind: String, Codable, CaseIterable, Hashable, Sendable {
 
     public var label: String {
         switch self {
-        case .connectionToken: return "Connection token"
-        case .remotePassword: return "Remote password (OMP_WEB_PASSWORD)"
+        case .connectionToken: return String(localized: "Connection token", bundle: .main)
+        case .remotePassword: return String(localized: "Remote password (OMP_WEB_PASSWORD)", bundle: .main)
         }
     }
 }
@@ -132,6 +132,15 @@ public struct HostProfile: Codable, Identifiable, Hashable, Sendable {
             return .lan
         }
         return scheme == "https" && host.contains(".ts.net") ? .tailscaleServeHTTPS : .other
+    }
+
+    /// True when a request to this URL would carry the token or password as plain HTTP outside the tailnet (a LAN or
+    /// public address): WireGuard encrypts tailnet traffic only, so anyone on that network could read the credential.
+    /// Tailnet addresses, MagicDNS names, HTTPS and loopback return false.
+    public static func sendsCredentialInClear(_ raw: String) -> Bool {
+        guard let url = URL(string: normalizeBaseURL(raw)), url.scheme?.lowercased() == "http" else { return false }
+        let kind = classifyURL(raw)
+        return !kind.isTailscale && kind != .loopback
     }
 
     /// Normalizes a user-typed host or URL (`my-pc.tail.ts.net`, `100.64.0.5:4545`, `[fd7a:...]:4545`, `https://...`)

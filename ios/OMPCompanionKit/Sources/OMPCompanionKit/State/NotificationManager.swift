@@ -50,6 +50,7 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
     public var notificationsEnabled: Bool {
         didSet {
             UserDefaults.standard.set(notificationsEnabled, forKey: Self.enabledDefaultsKey)
+            if oldValue != notificationsEnabled { onEnabledChanged?() }
         }
     }
     public var hapticsEnabled: Bool {
@@ -64,6 +65,16 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
     private var priorAttentionFingerprints: [String: String] = [:]
     private var dismissTask: Task<Void, Never>?
     private var delegateInstalled = false
+    /// True when notifications must not show session titles or details (the store wires this to the Face ID lock).
+    @ObservationIgnored public var redactsContent: () -> Bool = { false }
+    /// Called once iOS reports notifications allowed: the app registers for Apple push then (the Kit never touches
+    /// UIApplication, so its tests run without a host app).
+    @ObservationIgnored public var onAuthorized: (() -> Void)?
+    /// Called when the in-app notifications switch changes: the store registers or withdraws push with its hosts.
+    @ObservationIgnored public var onEnabledChanged: (() -> Void)?
+    /// True when the app itself already reports this host's attention in the foreground (it polls the host and shows the
+    /// in-app banner and local notification): a remote push from it is then not presented again.
+    @ObservationIgnored public var coversRemoteNotifications: (UUID) -> Bool = { _ in false }
 
     private static let enabledDefaultsKey = "omp.notifications.enabled"
     private static let hapticsDefaultsKey = "omp.haptics.enabled"
@@ -89,6 +100,9 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
     public func refreshAuthorizationStatus() async {
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         authorizationStatus = settings.authorizationStatus
+        if authorizationStatus == .authorized || authorizationStatus == .provisional {
+            onAuthorized?()
+        }
     }
 
     @discardableResult
@@ -150,19 +164,19 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
             if let req = session.uiRequests?.first {
                 currentFingerprint = "ui:\(reqFingerprint)"
                 eventKind = "question"
-                detail = req.title ?? "Waiting for your answer"
+                detail = req.title ?? String(localized: "Waiting for your answer", bundle: .main)
             } else if !planFingerprint.isEmpty {
                 currentFingerprint = "plan:\(planFingerprint)"
                 eventKind = "plan"
-                detail = session._planReview?.title ?? "Plan ready for review"
+                detail = session._planReview?.title ?? String(localized: "Plan ready for review", bundle: .main)
             } else if session.status == .error {
                 currentFingerprint = "error:\(session.error ?? "")"
                 eventKind = "error"
-                detail = session.error ?? "Session failed"
+                detail = session.error ?? String(localized: "Session failed", bundle: .main)
             } else if session.status == .review {
                 currentFingerprint = "review:\(session.workFinishedAt ?? session.updatedAt)"
                 eventKind = "review"
-                detail = "Turn finished and ready for review"
+                detail = String(localized: "Turn finished and ready for review", bundle: .main)
             } else {
                 currentFingerprint = "idle:\(session.status.rawValue)"
                 eventKind = nil
@@ -237,18 +251,29 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
 
     public func scheduleLocalNotification(for banner: AttentionBannerItem) {
         let content = UNMutableNotificationContent()
-        switch banner.kind {
-        case "question":
-            content.title = "\(banner.sessionTitle) needs input"
-        case "plan":
-            content.title = "Plan review: \(banner.sessionTitle)"
-        case "error":
-            content.title = "Error in \(banner.sessionTitle)"
-        default:
-            content.title = "Ready: \(banner.sessionTitle)"
+        if redactsContent() {
+            // Face ID lock on: the lock screen must not show what the session is about.
+            switch banner.kind {
+            case "question": content.title = String(localized: "A session needs input", bundle: .main)
+            case "plan": content.title = String(localized: "A plan is ready for review", bundle: .main)
+            case "error": content.title = String(localized: "A session failed", bundle: .main)
+            default: content.title = String(localized: "A session is ready", bundle: .main)
+            }
+            content.body = String(localized: "Unlock OMP Control to view.", bundle: .main)
+        } else {
+            switch banner.kind {
+            case "question":
+                content.title = String(localized: "\(banner.sessionTitle) needs input", bundle: .main)
+            case "plan":
+                content.title = String(localized: "Plan review: \(banner.sessionTitle)", bundle: .main)
+            case "error":
+                content.title = String(localized: "Error in \(banner.sessionTitle)", bundle: .main)
+            default:
+                content.title = String(localized: "Ready: \(banner.sessionTitle)", bundle: .main)
+            }
+            content.subtitle = banner.hostName
+            content.body = banner.detail
         }
-        content.subtitle = banner.hostName
-        content.body = banner.detail
         content.sound = .default
         content.userInfo = [
             "hostID": banner.hostID.uuidString,
@@ -268,7 +293,14 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        return [.banner, .sound, .list]
+        // A push from the host the app is polling right now repeats what evaluateTransitions already showed.
+        guard notification.request.trigger is UNPushNotificationTrigger,
+              let hostStr = notification.request.content.userInfo["hostID"] as? String,
+              let hostID = UUID(uuidString: hostStr) else {
+            return [.banner, .sound, .list]
+        }
+        let covered = await MainActor.run { self.coversRemoteNotifications(hostID) }
+        return covered ? [] : [.banner, .sound, .list]
     }
 
     nonisolated public func userNotificationCenter(

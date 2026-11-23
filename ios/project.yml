@@ -1,6 +1,8 @@
 name: OMPCompanion
 options:
   bundleIdPrefix: dev.omp
+  # String catalogs (OMPCompanion/*.xcstrings) add their locales (tr) to knownRegions.
+  developmentLanguage: en
   deploymentTarget:
     iOS: "17.0"
   xcodeVersion: "15.4"
@@ -16,6 +18,7 @@ targets:
       - path: OMPCompanion
         excludes:
           - Info.plist
+          - OMPCompanion.entitlements
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.omp.companion
@@ -27,6 +30,14 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_PREVIEWS: YES
         INFOPLIST_FILE: OMPCompanion/Info.plist
+        CODE_SIGN_ENTITLEMENTS: OMPCompanion/OMPCompanion.entitlements
+      # The push environment the app's device token belongs to (OMPCompanion.entitlements, aps-environment):
+      # Xcode-run debug builds talk to the APNs sandbox, archives (TestFlight, App Store) to production.
+      configs:
+        Debug:
+          APS_ENVIRONMENT: development
+        Release:
+          APS_ENVIRONMENT: production
     dependencies:
       - package: OMPCompanionKit
 schemes:

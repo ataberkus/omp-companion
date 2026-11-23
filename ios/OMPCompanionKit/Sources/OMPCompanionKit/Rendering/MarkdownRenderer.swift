@@ -1128,6 +1128,7 @@ private struct MarkdownBlockRow: View {
                                 .foregroundStyle(checked ? palette.green : palette.muted)
                                 .font(.callout)
                                 .padding(.top, 2)
+                                .accessibilityLabel(checked ? "Done" : "Not done")
                         } else if ordered, let idxLabel = item.indexLabel {
                             Text(idxLabel)
                                 .font(.callout.monospacedDigit())

@@ -113,6 +113,9 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
     public var activity: [ActivityItem]?
     public var instance: String?
     public var canRestart: Bool?
+    /// The desktop app can install its own update (POST /api/app-update); its version, empty from start.bat.
+    public var canAppUpdate: Bool?
+    public var appVersion: String?
     public var autoShutdown: AutoShutdownState?
 
     public init(
@@ -128,6 +131,8 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         activity: [ActivityItem]? = nil,
         instance: String? = nil,
         canRestart: Bool? = nil,
+        canAppUpdate: Bool? = nil,
+        appVersion: String? = nil,
         autoShutdown: AutoShutdownState? = nil
     ) {
         self.projects = projects
@@ -142,6 +147,8 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         self.activity = activity
         self.instance = instance
         self.canRestart = canRestart
+        self.canAppUpdate = canAppUpdate
+        self.appVersion = appVersion
         self.autoShutdown = autoShutdown
     }
 
@@ -159,6 +166,8 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         activity = c.lossyArray(ActivityItem.self, forKey: .activity)
         instance = c.lenient(String.self, forKey: .instance)
         canRestart = c.lenientFlag(forKey: .canRestart)
+        canAppUpdate = c.lenientFlag(forKey: .canAppUpdate)
+        appVersion = c.lenient(String.self, forKey: .appVersion)
         autoShutdown = c.lenient(AutoShutdownState.self, forKey: .autoShutdown)
     }
 }
@@ -180,6 +189,8 @@ public struct StatePollResponse: Codable, Sendable {
     public var activity: [ActivityItem]?
     public var instance: String?
     public var canRestart: Bool?
+    public var canAppUpdate: Bool?
+    public var appVersion: String?
     public var autoShutdown: AutoShutdownState?
 
     // `sx` and `tx` stay strict at their own level (a store delta without its epoch/rev cannot be applied); everything
@@ -201,6 +212,8 @@ public struct StatePollResponse: Codable, Sendable {
         activity = c.lossyArray(ActivityItem.self, forKey: .activity)
         instance = c.lenient(String.self, forKey: .instance)
         canRestart = c.lenientFlag(forKey: .canRestart)
+        canAppUpdate = c.lenientFlag(forKey: .canAppUpdate)
+        appVersion = c.lenient(String.self, forKey: .appVersion)
         autoShutdown = c.lenient(AutoShutdownState.self, forKey: .autoShutdown)
     }
 }
@@ -216,6 +229,8 @@ public struct StoreTop: Codable, Hashable, Sendable {
     public var accountChoices: [String: String]?
     public var instance: String?
     public var canRestart: Bool?
+    public var canAppUpdate: Bool?
+    public var appVersion: String?
     public var autoShutdown: AutoShutdownState?
 
     public init(from decoder: Decoder) throws {
@@ -230,6 +245,8 @@ public struct StoreTop: Codable, Hashable, Sendable {
         accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
         instance = c.lenient(String.self, forKey: .instance)
         canRestart = c.lenientFlag(forKey: .canRestart)
+        canAppUpdate = c.lenientFlag(forKey: .canAppUpdate)
+        appVersion = c.lenient(String.self, forKey: .appVersion)
         autoShutdown = c.lenient(AutoShutdownState.self, forKey: .autoShutdown)
     }
 }
@@ -373,12 +390,12 @@ public enum SessionStatus: String, Codable, Hashable, Sendable {
 
     public var label: String {
         switch self {
-        case .running: return "Working"
-        case .queued: return "Queued"
-        case .review: return "Ready"
-        case .paused: return "Paused"
-        case .done: return "Done"
-        case .error: return "Error"
+        case .running: return String(localized: "Working", bundle: .main)
+        case .queued: return String(localized: "Queued", bundle: .main)
+        case .review: return String(localized: "Ready", bundle: .main)
+        case .paused: return String(localized: "Paused", bundle: .main)
+        case .done: return String(localized: "Done", bundle: .main)
+        case .error: return String(localized: "Error", bundle: .main)
         }
     }
 }
@@ -755,9 +772,11 @@ public struct TranscriptMessage: Codable, Identifiable, Hashable, Sendable {
     public var tool: ToolRecord?
     public var notes: [AdvisorNote]?
     public var sourceTimestamp: Double?
+    /// PDFs a user message carries (the companion stores them and keeps their "Attached PDF:" lines out of `text`).
+    public var pdfs: [MessagePdf]?
 
     enum CodingKeys: String, CodingKey {
-        case id, role, text, at, startedAt, model, from, adv, hasImage, imagePreview, steer, entryId, ompAt, tool, notes, sourceTimestamp
+        case id, role, text, at, startedAt, model, from, adv, hasImage, imagePreview, steer, entryId, ompAt, tool, notes, sourceTimestamp, pdfs
     }
 
     public init(
@@ -776,7 +795,8 @@ public struct TranscriptMessage: Codable, Identifiable, Hashable, Sendable {
         ompAt: Double? = nil,
         tool: ToolRecord? = nil,
         notes: [AdvisorNote]? = nil,
-        sourceTimestamp: Double? = nil
+        sourceTimestamp: Double? = nil,
+        pdfs: [MessagePdf]? = nil
     ) {
         self.id = id
         self.role = role
@@ -794,6 +814,7 @@ public struct TranscriptMessage: Codable, Identifiable, Hashable, Sendable {
         self.tool = tool
         self.notes = notes
         self.sourceTimestamp = sourceTimestamp
+        self.pdfs = pdfs
     }
 
     public init(from decoder: Decoder) throws {
@@ -821,6 +842,54 @@ public struct TranscriptMessage: Codable, Identifiable, Hashable, Sendable {
         tool = c.lenient(ToolRecord.self, forKey: .tool)
         notes = c.lossyArray(AdvisorNote.self, forKey: .notes)
         sourceTimestamp = c.lenient(Double.self, forKey: .sourceTimestamp)
+        pdfs = c.lossyArray(MessagePdf.self, forKey: .pdfs)
+    }
+
+    /// A user message's own text and its PDFs: the companion's `pdfs` when it sent them, otherwise the trailing
+    /// "Attached PDF:" lines parsed out of the text (an older companion, or a message imported from a file).
+    public var textAndPdfs: (text: String, pdfs: [MessagePdf]) {
+        if let pdfs, !pdfs.isEmpty { return (text, pdfs) }
+        return PdfAttachmentProcessor.splitPdfRefs(text)
+    }
+}
+
+/// One PDF a sent or queued message carries (`companion/pdfs.mjs` storePdfs/splitPdfRefs): `id` is the SHA-256 the
+/// host stores it under (`GET /api/attachment?id=`), `path` the stored file the agent reads.
+public struct MessagePdf: Codable, Hashable, Sendable {
+    public var id: String?
+    public var name: String
+    public var pages: Int?
+    public var bytes: Int?
+    public var title: String?
+    public var path: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, pages, bytes, title, path
+    }
+
+    public init(id: String?, name: String, pages: Int?, bytes: Int?, title: String? = nil, path: String?) {
+        self.id = id
+        self.name = name
+        self.pages = pages
+        self.bytes = bytes
+        self.title = title
+        self.path = path
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        id = c.lenient(String.self, forKey: .id)
+        pages = c.lenient(Int.self, forKey: .pages)
+        bytes = c.lenient(Int.self, forKey: .bytes)
+        title = c.lenient(String.self, forKey: .title)
+        path = c.lenient(String.self, forKey: .path)
+    }
+
+    /// Opens from the host only with a stored content ID.
+    public var storedID: String? {
+        guard let id, id.count == 64, id.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else { return nil }
+        return id
     }
 }
 
@@ -938,10 +1007,11 @@ public struct QueuedMessage: Codable, Identifiable, Hashable, Sendable {
     public var text: String
     public var hasImage: Bool?
     public var imagePreview: [String]?
+    public var pdfs: [MessagePdf]?
     public var at: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, text, hasImage, imagePreview, at
+        case id, text, hasImage, imagePreview, pdfs, at
     }
 
     public init(from decoder: Decoder) throws {
@@ -949,6 +1019,7 @@ public struct QueuedMessage: Codable, Identifiable, Hashable, Sendable {
         id = try c.decode(String.self, forKey: .id)
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         hasImage = try c.decodeIfPresent(Bool.self, forKey: .hasImage)
+        pdfs = c.lossyArray(MessagePdf.self, forKey: .pdfs)
         if let arr = try? c.decodeIfPresent([String].self, forKey: .imagePreview) {
             imagePreview = arr
         } else if let single = try? c.decodeIfPresent(String.self, forKey: .imagePreview) {
@@ -1317,11 +1388,11 @@ public enum TodoStatus: String, Codable, Hashable, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .pending: return "Pending"
-        case .inProgress: return "In Progress"
-        case .completed: return "Completed"
-        case .abandoned: return "Abandoned"
-        case .blocked: return "Blocked"
+        case .pending: return String(localized: "Pending", bundle: .main)
+        case .inProgress: return String(localized: "In Progress", bundle: .main)
+        case .completed: return String(localized: "Completed", bundle: .main)
+        case .abandoned: return String(localized: "Abandoned", bundle: .main)
+        case .blocked: return String(localized: "Blocked", bundle: .main)
         }
     }
 }
@@ -2073,6 +2144,8 @@ public struct DraftReadResponse: Codable, Hashable, Sendable {
     public var text: String
     public var at: Double?
     public var images: [DraftImageEntry]
+    /// Present only when the draft holds PDFs.
+    public var pdfs: [DraftPdfEntry]?
 }
 
 public struct DraftImageEntry: Codable, Hashable, Identifiable, Sendable {
@@ -2090,10 +2163,23 @@ public struct ImagePart: Codable, Hashable, Sendable {
     public var data: String
 }
 
+/// A PDF in a composer draft (`companion/pdfs.mjs` draftPdfs): `pdf` (`{type: "pdf", mimeType, data}`) is left out for
+/// names the reader said it already has.
+public struct DraftPdfEntry: Codable, Hashable, Identifiable, Sendable {
+    public var id: String { name }
+    public var name: String
+    public var tokens: Int
+    public var pages: Int?
+    public var bytes: Int?
+    public var title: String?
+    public var pdf: ImagePart?
+}
+
 public struct DraftSaveResponse: Codable, Hashable, Sendable {
     public var key: String
     public var at: Double?
     public var images: [String]
+    public var pdfs: [String]?
 }
 
 public enum EnhanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -2106,10 +2192,10 @@ public enum EnhanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .full: return "Full spec"
-        case .notest: return "No tests"
-        case .fast: return "Fast"
-        case .max: return "Max"
+        case .full: return String(localized: "Full spec", bundle: .main)
+        case .notest: return String(localized: "No tests", bundle: .main)
+        case .fast: return String(localized: "Fast", bundle: .main)
+        case .max: return String(localized: "Max", bundle: .main)
         }
     }
 
@@ -2382,6 +2468,27 @@ public struct ProviderAccountGroup: Codable, Identifiable, Hashable, Sendable {
     public var selected: String?
 }
 
+/// GET /api/instance: the companion's id for this run (a new one after a restart or an app update) and the desktop
+/// app's version (empty when the companion runs from start.bat).
+public struct InstanceResponse: Codable, Hashable, Sendable {
+    public var instance: String
+    public var appVersion: String?
+}
+
+/// POST /api/app-update: what the desktop app's update check found. `downloading`/`installing` means the app restarts
+/// into `version`; `up-to-date` names the `current` one; `error` carries the shell's title and advice.
+public struct AppUpdateResponse: Codable, Hashable, Sendable {
+    public var state: String
+    public var version: String?
+    public var current: String?
+    public var error: AppUpdateError?
+}
+
+public struct AppUpdateError: Codable, Hashable, Sendable {
+    public var title: String?
+    public var advice: String?
+}
+
 public struct UpdateStateResponse: Codable, Hashable, Sendable {
     public var status: String // idle | running | done | error
     public var startedAt: String?
@@ -2463,6 +2570,13 @@ public struct StorageResponse: Codable, Hashable, Sendable {
     public var locations: [StorageLocation]
     public var results: [StorageActionResult]
     public var error: String?
+    /// POST /api/storage/clear-attachments only: how many PDF/video attachments it deleted and the bytes freed.
+    public var cleared: StorageCleared?
+}
+
+public struct StorageCleared: Codable, Hashable, Sendable {
+    public var count: Int
+    public var freed: Int64
 }
 
 public struct StorageJob: Codable, Hashable, Sendable {
@@ -2521,6 +2635,8 @@ public struct StorageLocation: Codable, Identifiable, Hashable, Sendable {
     public var tracked: Int64?
     public var linked: Int64?
     public var missing: Bool?
+    /// The attachments folder: POST /api/storage/clear-attachments empties it.
+    public var clearable: Bool?
 }
 
 public struct StorageActionResult: Codable, Identifiable, Hashable, Sendable {

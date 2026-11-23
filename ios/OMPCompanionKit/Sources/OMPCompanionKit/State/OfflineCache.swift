@@ -88,11 +88,23 @@ public actor OfflineCache {
 
         do {
             try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+            try excludeFromBackup(baseDirectory)
             let data = try encoder.encode(payload)
-            try data.write(to: fileURL(for: hostID), options: .atomic)
+            // Transcripts and diffs can hold code and secrets: encrypted while the device is locked, and never in
+            // iCloud or computer backups (they are a cache of what the companion already has).
+            let url = fileURL(for: hostID)
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            try excludeFromBackup(url)
         } catch {
             // Non-fatal offline cache persistence failure
         }
+    }
+
+    private func excludeFromBackup(_ url: URL) throws {
+        var target = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try target.setResourceValues(values)
     }
 
     public func clear(hostID: UUID) {

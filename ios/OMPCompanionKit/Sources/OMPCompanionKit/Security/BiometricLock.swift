@@ -16,9 +16,17 @@ public final class BiometricLock {
                 isLocked = false
                 lastError = nil
             }
+            if oldValue != isEnabled { onEnabledChanged?(isEnabled) }
         }
     }
-    public private(set) var isLocked: Bool = false
+    public private(set) var isLocked: Bool = false {
+        didSet { if oldValue != isLocked { onLockChanged?(isLocked) } }
+    }
+    /// Called on every lock/unlock (not for the initial value): the store stops polling while locked and resumes after.
+    @ObservationIgnored public var onLockChanged: ((Bool) -> Void)?
+    /// Called when the lock is switched on or off (not for the initial value): the store re-registers Apple push, whose
+    /// alerts are generic while the lock is on.
+    @ObservationIgnored public var onEnabledChanged: ((Bool) -> Void)?
     public private(set) var isAuthenticating: Bool = false
     public private(set) var lastError: String?
     public var gracePeriodSeconds: TimeInterval = 30
@@ -41,7 +49,7 @@ public final class BiometricLock {
         case .faceID: return "Face ID"
         case .touchID: return "Touch ID"
         case .opticID: return "Optic ID"
-        default: return "Passcode"
+        default: return String(localized: "Passcode", bundle: .main)
         }
     }
 
@@ -89,7 +97,7 @@ public final class BiometricLock {
     }
 
     @discardableResult
-    public func unlock(reason: String = "Unlock OMP Control Room") async -> Bool {
+    public func unlock(reason: String = String(localized: "Unlock OMP Control Room", bundle: .main)) async -> Bool {
         guard isEnabled else {
             isLocked = false
             return true
@@ -100,10 +108,10 @@ public final class BiometricLock {
         guard !isAuthenticating else { return false }
 
         let context = LAContext()
-        context.localizedCancelTitle = "Cancel"
+        context.localizedCancelTitle = String(localized: "Cancel", bundle: .main)
         var authError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
-            lastError = authError?.localizedDescription ?? "Device authentication is unavailable."
+            lastError = authError?.localizedDescription ?? String(localized: "Device authentication is unavailable.", bundle: .main)
             return false
         }
 
@@ -221,6 +229,7 @@ struct PrivacyShieldView: View {
                     Image(systemName: "lock.shield.fill")
                         .font(.system(size: 42, weight: .semibold))
                         .foregroundStyle(palette.brandGradient)
+                        .accessibilityHidden(true)
                     Text("OMP Control Room")
                         .font(.headline)
                         .foregroundStyle(palette.foreground)

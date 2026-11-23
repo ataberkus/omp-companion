@@ -1,4 +1,5 @@
 import SwiftUI
+import QuickLook
 
 #if canImport(UIKit)
 import UIKit
@@ -8,6 +9,7 @@ import UIKit
 
 public struct TranscriptView: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var store: AppStore
     public let session: SessionSummary
     public var onResendDroppedSteer: ((TranscriptMessage) -> Void)?
@@ -19,6 +21,9 @@ public struct TranscriptView: View {
     @State private var unreadCount = 0
     @State private var lastObservedCount = 0
     @State private var lightboxImage: LightboxImagePayload?
+    /// A downloaded PDF shown in QuickLook; `openingPdfID` is the one being fetched.
+    @State private var pdfPreviewURL: URL?
+    @State private var openingPdfID: String?
     @State private var editingSteerMessage: TranscriptMessage?
     /// How many of the newest messages are rendered; "Show earlier messages" raises it by `tailPageSize`.
     @State private var tailLimit = TranscriptView.tailPageSize
@@ -69,8 +74,8 @@ public struct TranscriptView: View {
                         if messages.isEmpty {
                             OMPEmptyStateView(
                                 systemImage: "text.bubble",
-                                title: session.draft == true ? "Draft Session Ready" : "No Messages Yet",
-                                message: "Type a prompt below, attach screenshots, or pick a /slash command to start."
+                                title: session.draft == true ? String(localized: "Draft Session Ready", bundle: .main) : String(localized: "No Messages Yet", bundle: .main),
+                                message: String(localized: "Type a prompt below, attach screenshots, or pick a /slash command to start.", bundle: .main)
                             )
                             .padding(.top, 36)
                         } else {
@@ -141,7 +146,7 @@ public struct TranscriptView: View {
                     }
                     lastObservedCount = messages.count
                     if isPinnedToBottom {
-                        withAnimation(.easeOut(duration: 0.18)) {
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                             proxy.scrollTo("transcript-bottom", anchor: .bottom)
                         }
                     }
@@ -180,7 +185,7 @@ public struct TranscriptView: View {
                     .padding(.trailing, 14)
                     .padding(.bottom, 12)
                     .minTouchTarget()
-                    .transition(.scale.combined(with: .opacity))
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.scale.combined(with: .opacity))
                     .accessibilityLabel("Jump to latest transcript messages")
                 }
             }
@@ -188,6 +193,7 @@ public struct TranscriptView: View {
         .sheet(item: $lightboxImage) { payload in
             ImageLightboxSheet(payload: payload)
         }
+        .quickLookPreview($pdfPreviewURL)
         .alert("Edit Queued Steer", isPresented: Binding(
             get: { editingSteerMessage != nil },
             set: { if !$0 { editingSteerMessage = nil } }
@@ -263,6 +269,9 @@ public struct TranscriptView: View {
 
     @ViewBuilder
     private func userCard(_ msg: TranscriptMessage) -> some View {
+        // The companion's "PDF attached" stands in for a message of PDFs alone: the chips (or the label) show it instead.
+        let own = msg.textAndPdfs
+        let pdfOnly = own.text == "PDF attached"
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Label("You", systemImage: "person.fill")
@@ -306,6 +315,7 @@ public struct TranscriptView: View {
                                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.borderStrong, lineWidth: 1))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("View attachment \(idx + 1)")
                         }
                     }
                 }
@@ -315,8 +325,16 @@ public struct TranscriptView: View {
                     .foregroundStyle(palette.muted)
             }
 
-            if !msg.text.isEmpty {
-                Text(msg.text)
+            if !own.pdfs.isEmpty {
+                pdfChips(own.pdfs)
+            } else if pdfOnly {
+                Label("PDF attached", systemImage: "doc.richtext")
+                    .font(.caption)
+                    .foregroundStyle(palette.muted)
+            }
+
+            if !own.text.isEmpty && !pdfOnly {
+                Text(own.text)
                     .font(.body)
                     .foregroundStyle(palette.foreground)
                     .textSelection(.enabled)
@@ -325,7 +343,8 @@ public struct TranscriptView: View {
             // Steer actions (`pending` edit/cancel, `dropped` one-tap Resend)
             if msg.steer == .pending {
                 HStack(spacing: 10) {
-                    if msg.hasImage != true {
+                    // Steers with images are not edited here, and the host refuses edit_steer for ones with PDFs.
+                    if msg.hasImage != true && own.pdfs.isEmpty {
                         Button("Edit Steer") {
                             steerEditDraft = msg.text
                             editingSteerMessage = msg
@@ -371,8 +390,8 @@ public struct TranscriptView: View {
         .contextMenu {
             #if canImport(UIKit)
             Button {
-                UIPasteboard.general.string = msg.text
-                store.showToast("Copied message")
+                UIPasteboard.general.string = own.text
+                store.showToast(String(localized: "Copied message", bundle: .main))
             } label: {
                 Label("Copy Text", systemImage: "doc.on.doc")
             }
@@ -391,6 +410,85 @@ public struct TranscriptView: View {
                     Label(msg.id == editableLastPromptID ? "Branch / Fork From Here" : "Edit & Resend (Branch From Here)", systemImage: "arrow.triangle.branch")
                 }
             }
+        }
+    }
+
+    // MARK: - PDF Chips
+
+    private func pdfChips(_ pdfs: [MessagePdf]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(pdfs.enumerated()), id: \.offset) { _, pdf in
+                    pdfChip(pdf)
+                }
+            }
+        }
+    }
+
+    /// One PDF the message carries; one with a stored ID opens in QuickLook, one without (an older message) only shows.
+    private func pdfChip(_ pdf: MessagePdf) -> some View {
+        let detail = PdfAttachmentProcessor.detail(pages: pdf.pages, bytes: pdf.bytes)
+        let isOpening = pdf.storedID != nil && openingPdfID == pdf.storedID
+        return Button {
+            Task { await openPdf(pdf) }
+        } label: {
+            HStack(spacing: 8) {
+                if isOpening {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "doc.richtext.fill")
+                        .font(.title3)
+                        .foregroundStyle(palette.red)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pdf.name)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.foreground)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if isOpening || !detail.isEmpty {
+                        Text(isOpening ? "Downloading…" : detail)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(palette.muted)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .frame(maxWidth: 240, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(palette.raised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.border, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(pdf.storedID == nil || openingPdfID != nil)
+        .accessibilityLabel("Open \(pdf.name)\(detail.isEmpty ? "" : ", \(detail)")")
+    }
+
+    /// Downloads a stored PDF (`GET /api/attachment`) to a temporary file named after it and shows it in QuickLook.
+    private func openPdf(_ pdf: MessagePdf) async {
+        guard let id = pdf.storedID, openingPdfID == nil, let client = store.activeClient else { return }
+        let base = PdfAttachmentProcessor.sanitizeName(pdf.name)
+        let fileName = base.lowercased().hasSuffix(".pdf") ? base : base + ".pdf"
+        // One folder per content ID: the same ID is the same bytes, so a file already downloaded is shown again as is.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("attachments/\(id)", isDirectory: true)
+        let file = dir.appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: file.path) {
+            pdfPreviewURL = file
+            return
+        }
+        openingPdfID = id
+        defer { openingPdfID = nil }
+        do {
+            let data = try await client.fetchAttachment(id: id, name: pdf.name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: file, options: .atomic)
+            pdfPreviewURL = file
+        } catch let error as CompanionAPIError where error.statusCode == 404 {
+            store.showToast(String(localized: "\(pdf.name) is no longer stored on the host: it was cleared from Tools › Disk space.", bundle: .main), isError: true)
+        } catch {
+            store.showToast(error.localizedDescription, isError: true)
         }
     }
 
@@ -452,7 +550,7 @@ public struct TranscriptView: View {
             #if canImport(UIKit)
             Button {
                 UIPasteboard.general.string = msg.text
-                store.showToast("Copied reply")
+                store.showToast(String(localized: "Copied reply", bundle: .main))
             } label: {
                 Label("Copy Reply", systemImage: "doc.on.doc")
             }
@@ -565,13 +663,14 @@ public struct TranscriptView: View {
 
 struct ThinkingTraceCard: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: TranscriptMessage
     @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                     isExpanded.toggle()
                 }
             } label: {
@@ -579,6 +678,7 @@ struct ThinkingTraceCard: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(palette.muted)
+                        .accessibilityHidden(true)
                     Label("Reasoning Trace", systemImage: "brain.head.profile")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(palette.muted)
@@ -590,6 +690,7 @@ struct ThinkingTraceCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
 
             if isExpanded {
                 Text(message.text)
@@ -617,6 +718,7 @@ public struct LightboxImagePayload: Identifiable, Sendable {
 public struct ImageLightboxSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public let payload: LightboxImagePayload
 
     @State private var scale: CGFloat = 1.0
@@ -638,12 +740,18 @@ public struct ImageLightboxSheet: View {
                             }
                             .onEnded { val in
                                 if val.magnification < 1.05 {
-                                    withAnimation { scale = 1.0 }
+                                    withAnimation(reduceMotion ? nil : .default) { scale = 1.0 }
                                 }
                             }
                     )
                     .onTapGesture(count: 2) {
-                        withAnimation { scale = scale > 1.2 ? 1.0 : 2.2 }
+                        withAnimation(reduceMotion ? nil : .default) { scale = scale > 1.2 ? 1.0 : 2.2 }
+                    }
+                    .accessibilityElement()
+                    .accessibilityLabel(payload.title)
+                    .accessibilityAddTraits(.isImage)
+                    .accessibilityAction(named: scale > 1.2 ? "Zoom out" : "Zoom in") {
+                        withAnimation(reduceMotion ? nil : .default) { scale = scale > 1.2 ? 1.0 : 2.2 }
                     }
             }
             .navigationTitle(payload.title)
@@ -710,8 +818,8 @@ public struct BtwSideSheet: View {
                         if records.isEmpty {
                             OMPEmptyStateView(
                                 systemImage: "bubble.left.and.text.bubble.right",
-                                title: "Side Questions (/btw)",
-                                message: "Ask out-of-band questions about the current session without interrupting or polluting the main agent transcript."
+                                title: String(localized: "Side Questions (/btw)", bundle: .main),
+                                message: String(localized: "Ask out-of-band questions about the current session without interrupting or polluting the main agent transcript.", bundle: .main)
                             )
                             .padding(.top, 32)
                         } else {
@@ -782,6 +890,7 @@ public struct BtwSideSheet: View {
                             }
                         }
                         .disabled(isSending || questionInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.canPerformMutatingActions)
+                        .accessibilityLabel("Send side question")
                     }
                 }
                 .padding()

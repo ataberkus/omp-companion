@@ -3,6 +3,7 @@ import SwiftUI
 public struct RootContainerView: View {
     @Environment(\.colorScheme) private var systemColorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var store: AppStore
 
     public init(store: AppStore) {
@@ -31,7 +32,7 @@ public struct RootContainerView: View {
                 attentionBannerOverlay(banner)
                     .padding(.horizontal)
                     .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.move(edge: .top).combined(with: .opacity))
             }
         }
         .overlay(alignment: .bottom) {
@@ -39,11 +40,11 @@ public struct RootContainerView: View {
                 toastOverlay(toast)
                     .padding(.horizontal)
                     .padding(.bottom, 16)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? AnyTransition.opacity : AnyTransition.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: store.notificationManager.activeBanner?.id)
-        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: store.toast?.id)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: store.notificationManager.activeBanner?.id)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88), value: store.toast?.id)
         .sheet(isPresented: $store.isQuickStartPresented) {
             QuickStartSheet(store: store)
                 .environment(\.ompPalette, palette)
@@ -102,9 +103,9 @@ public struct RootContainerView: View {
             } else {
                 OMPEmptyStateView(
                     systemImage: "sparkles.rectangle.stack",
-                    title: "Select or Start a Session",
-                    message: "Pick a session from the sidebar, press Cmd+K to jump anywhere, or start a new session.",
-                    actionTitle: store.canPerformMutatingActions ? "New Session" : nil
+                    title: String(localized: "Select or Start a Session", bundle: .main),
+                    message: String(localized: "Pick a session from the sidebar, press Cmd+K to jump anywhere, or start a new session.", bundle: .main),
+                    actionTitle: store.canPerformMutatingActions ? String(localized: "New Session", bundle: .main) : nil
                 ) {
                     store.presentQuickStart()
                 }
@@ -128,8 +129,8 @@ public struct RootContainerView: View {
                     } else {
                         OMPEmptyStateView(
                             systemImage: "bubble.left.and.bubble.right",
-                            title: "Session Unavailable",
-                            message: "This session was hidden or closed on the companion host."
+                            title: String(localized: "Session Unavailable", bundle: .main),
+                            message: String(localized: "This session was hidden or closed on the companion host.", bundle: .main)
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(palette.background)
@@ -153,6 +154,7 @@ public struct RootContainerView: View {
                             .font(.system(size: 44, weight: .semibold))
                             .foregroundStyle(palette.brandGradient)
                     }
+                    .accessibilityHidden(true)
 
                     VStack(spacing: 10) {
                         Text("OMP Control Room")
@@ -212,6 +214,7 @@ public struct RootContainerView: View {
                 Image(systemName: banner.kind == "error" ? "exclamationmark.triangle.fill" : "bell.badge.fill")
                     .foregroundStyle(banner.kind == "error" ? palette.red : palette.amber)
                     .font(.title3)
+                    .accessibilityLabel(banner.kind == "error" ? "Error" : "Needs attention")
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(banner.hostName) · \(banner.sessionTitle)")
@@ -235,6 +238,7 @@ public struct RootContainerView: View {
                         .padding(6)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss notification")
             }
             .padding(12)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -252,6 +256,7 @@ public struct RootContainerView: View {
         HStack(spacing: 8) {
             Image(systemName: toast.isError ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(toast.isError ? palette.red : palette.green)
+                .accessibilityLabel(toast.isError ? "Error" : "Success")
             Text(toast.message)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(palette.foreground)
@@ -262,6 +267,9 @@ public struct RootContainerView: View {
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().stroke(toast.isError ? palette.red.opacity(0.35) : palette.borderStrong, lineWidth: 1))
         .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Double tap to dismiss")
         .onTapGesture {
             store.toast = nil
         }

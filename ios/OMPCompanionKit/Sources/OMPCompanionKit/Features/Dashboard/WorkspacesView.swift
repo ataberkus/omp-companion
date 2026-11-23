@@ -43,9 +43,9 @@ public struct WorkspacesView: View {
                     Section {
                         OMPEmptyStateView(
                             systemImage: "folder.badge.plus",
-                            title: "No Workspaces Registered",
-                            message: "Add any folder on your companion computer to track git branches, browse files, and launch sessions.",
-                            actionTitle: "Add Workspace Folder"
+                            title: String(localized: "No Workspaces Registered", bundle: .main),
+                            message: String(localized: "Add any folder on your companion computer to track git branches, browse files, and launch sessions.", bundle: .main),
+                            actionTitle: String(localized: "Add Workspace Folder", bundle: .main)
                         ) {
                             showAddFolderPicker = true
                         }
@@ -164,7 +164,7 @@ public struct WorkspacesView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    Text("\(count) session\(count == 1 ? "" : "s")")
+                    Text(count == 1 ? "1 session" : "\(count) sessions")
                         .font(.caption2)
                         .foregroundStyle(palette.muted)
                 }
@@ -216,6 +216,7 @@ public struct WorkspacesView: View {
                     .foregroundStyle(palette.muted)
                     .minTouchTarget()
             }
+            .accessibilityLabel("Workspace actions")
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -305,7 +306,7 @@ public struct WorkspacesView: View {
         guard let client = store.activeClient else { return }
         do {
             let proj = try await client.addProject(path: path)
-            store.showToast("Added workspace \(proj.name)")
+            store.showToast(String(localized: "Added workspace \(proj.name)", bundle: .main))
             await store.forceSync()
         } catch {
             store.showToast(error.localizedDescription, isError: true)
@@ -349,6 +350,10 @@ private struct ProjectEditSheet: View {
     private let colorPresets: [String] = [
         "#6366f1", "#ec4899", "#10b981", "#f59e0b", "#06b6d4", "#a855f7", "#ef4444", "#84cc16"
     ]
+    private let colorPresetNames: [String: String] = [
+        "#6366f1": "Indigo", "#ec4899": "Pink", "#10b981": "Green", "#f59e0b": "Amber",
+        "#06b6d4": "Cyan", "#a855f7": "Purple", "#ef4444": "Red", "#84cc16": "Lime"
+    ]
 
     init(store: AppStore, project: WorkspaceProject) {
         self.store = store
@@ -383,6 +388,8 @@ private struct ProjectEditSheet: View {
                                     }
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(colorPresetNames[preset] ?? preset)
+                            .accessibilityAddTraits(color.lowercased() == preset.lowercased() ? .isSelected : [])
                         }
                     }
                     .padding(.vertical, 4)
@@ -565,7 +572,7 @@ private struct WorkspaceFileBrowserSheet: View {
                 Button {
                     #if canImport(UIKit)
                     UIPasteboard.general.string = fullPath
-                    store.showToast("Copied path")
+                    store.showToast(String(localized: "Copied path", bundle: .main))
                     #endif
                 } label: {
                     Label("Copy Path", systemImage: "doc.on.doc")
@@ -575,6 +582,7 @@ private struct WorkspaceFileBrowserSheet: View {
                     .foregroundStyle(palette.muted)
                     .minTouchTarget()
             }
+            .accessibilityLabel("File actions")
         }
     }
 
