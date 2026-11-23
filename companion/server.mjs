@@ -26,6 +26,7 @@ import { createWorkspaces } from './workspaces.mjs';
 import { createStorage } from './storage.mjs';
 import { openStore } from './store.mjs';
 import { createDrafts } from './drafts.mjs';
+import { createPush } from './push.mjs';
 import { createMessages } from './messages.mjs';
 import { createSlashCommands } from './slash-commands.mjs';
 import { createAccounts } from './accounts.mjs';
@@ -79,6 +80,7 @@ export async function createCompanion(options={}){
  const use=api=>Object.defineProperties(ctx,Object.getOwnPropertyDescriptors(api));
  use(await openStore(ctx));
  use(await createDrafts(ctx));
+ use(await createPush(ctx));
  const allowedOrigins=new Set(options.allowedOrigins||String(process.env.OMP_ALLOWED_ORIGINS||'').split(',').filter(Boolean));
  const runners=new Map();const launches=new Map();const locks=new Map();ctx.closing=false;ctx.pausing=0;
  // A new id per process: a dashboard that asked for a restart knows the new companion answers once this changes.

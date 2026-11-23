@@ -28,6 +28,7 @@ public struct QRScannerView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 48))
                             .foregroundStyle(palette.accent)
+                            .accessibilityHidden(true)
                         Text(permissionDenied ? "Camera access is disabled" : "Camera is unavailable on this device")
                             .font(.headline)
                             .foregroundStyle(palette.foreground)

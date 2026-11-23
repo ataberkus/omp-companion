@@ -146,6 +146,7 @@ public struct HostDirectoryPickerSheet: View {
                         } label: {
                             Image(systemName: "arrow.clockwise")
                         }
+                        .accessibilityLabel("Refresh folder")
                     }
                 }
             }

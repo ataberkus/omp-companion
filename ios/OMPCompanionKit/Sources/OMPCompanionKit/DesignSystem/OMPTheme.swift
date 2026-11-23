@@ -13,10 +13,10 @@ public enum ThemePreference: String, CaseIterable, Codable, Identifiable, Sendab
 
     public var label: String {
         switch self {
-        case .dark: return "Dark"
-        case .light: return "Light"
-        case .oled: return "OLED Black"
-        case .system: return "System"
+        case .dark: return String(localized: "Dark", bundle: .main)
+        case .light: return String(localized: "Light", bundle: .main)
+        case .oled: return String(localized: "OLED Black", bundle: .main)
+        case .system: return String(localized: "System", bundle: .main)
         }
     }
 

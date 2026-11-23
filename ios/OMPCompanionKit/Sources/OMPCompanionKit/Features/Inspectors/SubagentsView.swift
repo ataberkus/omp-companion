@@ -49,8 +49,8 @@ public struct SubagentsView: View {
             } else if jobs.isEmpty {
                 OMPEmptyStateView(
                     systemImage: "cpu",
-                    title: "No Subagents or Background Jobs",
-                    message: "Spawned subagents, background tasks, and async logs for this session appear here."
+                    title: String(localized: "No Subagents or Background Jobs", bundle: .main),
+                    message: String(localized: "Spawned subagents, background tasks, and async logs for this session appear here.", bundle: .main)
                 )
                 .listRowBackground(Color.clear)
             } else {
@@ -241,7 +241,7 @@ public struct SubagentsView: View {
         guard let client = store.activeClient else { return }
         do {
             _ = try await client.cancelSubagent(sessionId: session.id, subagentId: job.id)
-            store.showToast("Cancelled subagent \(job.title)")
+            store.showToast(String(localized: "Cancelled subagent \(job.title)", bundle: .main))
             await loadBackground(force: true)
         } catch {
             store.showToast(error.localizedDescription, isError: true)
@@ -253,10 +253,10 @@ public struct SubagentsView: View {
         do {
             if job.isRunning {
                 _ = try await client.steerSubagent(sessionId: session.id, subagentId: job.id, message: message)
-                store.showToast("Steered subagent")
+                store.showToast(String(localized: "Steered subagent", bundle: .main))
             } else if let file = job.transcript {
                 _ = try await client.messageSubagent(sessionId: session.id, file: file, message: message)
-                store.showToast("Sent message to subagent")
+                store.showToast(String(localized: "Sent message to subagent", bundle: .main))
             }
         } catch {
             store.showToast(error.localizedDescription, isError: true)
@@ -428,6 +428,7 @@ private struct BackgroundLogSheet: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .accessibilityLabel("Refresh log")
                 }
             }
             .task {

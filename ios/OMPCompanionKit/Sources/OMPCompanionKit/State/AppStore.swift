@@ -1,6 +1,11 @@
 import Foundation
+import Network
 import Observation
+import os
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public enum HostReachability: Equatable, Sendable {
     case unknown
@@ -62,10 +67,14 @@ public final class AppStore {
     private let credentialStore: CredentialStore
     private let offlineCache: OfflineCache
     private let urlSession: URLSession
+    /// Where hosts, the active host and the theme persist; tests pass an isolated suite.
+    private let defaults: UserDefaults
     private let syncReducer = SyncDeltaReducer()
 
     public let biometricLock = BiometricLock()
     public let notificationManager = NotificationManager()
+    /// Messages written while the PC was unreachable, sent by `flushOutbox` once it answers.
+    public let promptOutbox: PromptOutbox
 
     // MARK: - Host & Connection State
     public private(set) var hosts: [HostProfile] = []
@@ -115,7 +124,7 @@ public final class AppStore {
 
     public var themePreference: ThemePreference {
         didSet {
-            UserDefaults.standard.set(themePreference.rawValue, forKey: Self.themeDefaultsKey)
+            defaults.set(themePreference.rawValue, forKey: Self.themeDefaultsKey)
         }
     }
 
@@ -123,6 +132,8 @@ public final class AppStore {
     private var scenePhase: ScenePhase = .active
     private var wasBackgrounded = false
     private var pollTask: Task<Void, Never>?
+    /// Waits for a restarted or updated companion on GET /api/instance (waitForNewInstance).
+    private var instanceWaitTask: Task<Void, Never>?
     private var lastEtag: String?
     private var nativeSessionsEtag: String?
     /// Incremented by every poll and every local change to the store; a poll reply is applied only if it is still the newest.
@@ -142,20 +153,37 @@ public final class AppStore {
     private var toastDismissTask: Task<Void, Never>?
     /// When failOver last tried a host's other addresses.
     private var lastFailoverAt: [UUID: Date] = [:]
+    /// bootstrap() is running, or found the app Face ID–locked and waits for the unlock to run again.
+    private var bootstrapInProgress = false
+    private var bootstrapAwaitingUnlock = false
+    /// Polls in a row that failed (reset by any reply, a 304 included): the poll loop backs off on them like the web
+    /// dashboard, min(30 s, 2^failures s), instead of hitting an unreachable PC every 1.2–4.5 s.
+    private var consecutivePollFailures = 0
+    /// `flushOutbox` is sending; another trigger meanwhile is a no-op.
+    private var isFlushingOutbox = false
+    /// Reports network changes (NWPathMonitor); the last path seen, nil before the first report.
+    private let pathMonitor = NWPathMonitor()
+    private var lastNetworkPath: (satisfied: Bool, interfaces: [String])?
 
-    private static let hostsDefaultsKey = "omp.hosts.v1"
-    private static let activeHostDefaultsKey = "omp.activeHostID.v1"
-    private static let themeDefaultsKey = "omp.themePreference.v1"
+    static let hostsDefaultsKey = "omp.hosts.v1"
+    static let activeHostDefaultsKey = "omp.activeHostID.v1"
+    static let themeDefaultsKey = "omp.themePreference.v1"
+    /// Prefix of a local composer draft's key, followed by `<hostID>.<sessionID>` (`LocalComposerDraft`).
+    static let localDraftDefaultsPrefix = "omp.localDraft.v1."
 
     public init(
         credentialStore: CredentialStore = KeychainStore(),
         offlineCache: OfflineCache = OfflineCache(),
-        urlSession: URLSession = CompanionClient.defaultURLSession()
+        urlSession: URLSession = CompanionClient.defaultURLSession(),
+        defaults: UserDefaults = .standard,
+        outboxDirectory: URL? = nil
     ) {
         self.credentialStore = credentialStore
         self.offlineCache = offlineCache
         self.urlSession = urlSession
-        if let rawTheme = UserDefaults.standard.string(forKey: Self.themeDefaultsKey),
+        self.defaults = defaults
+        self.promptOutbox = PromptOutbox(directory: outboxDirectory)
+        if let rawTheme = defaults.string(forKey: Self.themeDefaultsKey),
            let pref = ThemePreference(rawValue: rawTheme) {
             self.themePreference = pref
         } else {
@@ -173,6 +201,44 @@ public final class AppStore {
                 await self.selectSession(sessionID)
             }
         }
+
+        // Face ID lock: nothing is fetched while locked. Unlocking runs a bootstrap that waited on it, or resumes polling.
+        biometricLock.onLockChanged = { [weak self] locked in
+            guard let self else { return }
+            if locked {
+                self.stopPolling()
+            } else if self.bootstrapInProgress {
+                // bootstrap() unlocked it and carries on itself (hydrating the cache before the first poll).
+            } else if self.bootstrapAwaitingUnlock {
+                self.bootstrapAwaitingUnlock = false
+                Task { await self.bootstrap() }
+            } else if self.activeHost != nil, self.scenePhase == .active {
+                self.startPolling()
+            }
+        }
+        // Local notifications show no session title or detail while the Face ID lock is on.
+        notificationManager.redactsContent = { [weak self] in self?.biometricLock.isEnabled ?? false }
+        // Apple push: registrations follow the in-app notifications switch and the Face ID lock (generic alerts while on).
+        notificationManager.onEnabledChanged = { [weak self] in self?.syncPushRegistration() }
+        biometricLock.onEnabledChanged = { [weak self] _ in self?.syncPushRegistration() }
+        // In the foreground the active host is polled, and evaluateTransitions already reported its sessions.
+        notificationManager.coversRemoteNotifications = { [weak self] hostID in
+            guard let self else { return false }
+            return self.scenePhase == .active && self.activeHost?.id == hostID && self.pollTask != nil
+        }
+
+        // The network came back or changed (Wi-Fi ↔ cellular, a VPN such as Tailscale up): sync at once rather than at
+        // the end of a backoff, and let failOver try the other addresses right away.
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            let interfaces = path.availableInterfaces.map(\.name)
+            Task { @MainActor in self?.networkPathChanged(satisfied: satisfied, interfaces: interfaces) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "dev.omp.companion.network"))
+    }
+
+    deinit {
+        pathMonitor.cancel()
     }
 
     // MARK: - Derived Accessors
@@ -194,6 +260,21 @@ public final class AppStore {
         connectionStatus.isOnline
     }
 
+    /// The composer takes a message: sent at once while connected, otherwise held in `promptOutbox` until the PC answers.
+    /// Not while the PC refuses this phone (wrong token or password) or answers with errors: nothing queued would go through.
+    public var canComposePrompts: Bool {
+        guard activeHost != nil else { return false }
+        switch connectionStatus {
+        case .connected, .connecting:
+            return true
+        case .offline(_, _, let kind):
+            return !kind.isAuthFailure
+        case .error(_, let kind):
+            return kind.isConnectivityFailure
+        case .disconnected:
+            return false
+        }
+    }
 
     public var activeClient: CompanionClient? {
         guard let host = activeHost else { return nil }
@@ -289,12 +370,25 @@ public final class AppStore {
     }
     // MARK: - Lifecycle & Scene Handling
 
+    /// True while Face ID locks the app: no polling, no cache hydration, until `biometricLock` unlocks.
+    private var isLockedOut: Bool {
+        biometricLock.isEnabled && biometricLock.isLocked
+    }
+
     public func bootstrap() async {
-        if biometricLock.isEnabled && biometricLock.isLocked {
+        bootstrapInProgress = true
+        defer { bootstrapInProgress = false }
+        if isLockedOut {
             _ = await biometricLock.unlock()
+        }
+        // Still locked (cancelled, or no passcode): the lock screen's unlock runs this again through onLockChanged.
+        guard !isLockedOut else {
+            bootstrapAwaitingUnlock = true
+            return
         }
         if let host = activeHost {
             await hydrateOfflineCache(for: host.id)
+            await promptOutbox.load(hostID: host.id)
             startPolling()
             Task { await refreshModelsAndActivity() }
             Task { await probeAllHosts() }
@@ -309,12 +403,14 @@ public final class AppStore {
             // re-prompt forever after a cancel; prompt once per return from background (the lock screen has a button).
             let resumed = wasBackgrounded
             wasBackgrounded = false
-            if resumed && biometricLock.isEnabled && biometricLock.isLocked {
+            if resumed && isLockedOut {
                 _ = await biometricLock.unlock()
             }
-            if activeHost != nil {
+            if activeHost != nil, !isLockedOut {
                 startPolling()
                 await forceSync()
+                // Messages written while away go out now if that poll reached the PC (it schedules this too).
+                scheduleOutboxFlush()
                 Task { await probeAllHosts() }
             }
         } else if phase == .background {
@@ -326,7 +422,7 @@ public final class AppStore {
 
     public func handleIncomingURL(_ url: URL) {
         guard let parsed = PairingPayload.parse(url.absoluteString) else {
-            showToast("Unsupported link format.", isError: true)
+            showToast(String(localized: "Unsupported link format.", bundle: .main), isError: true)
             return
         }
         pendingPairingPayload = parsed
@@ -351,11 +447,11 @@ public final class AppStore {
     // MARK: - Host Management (Keychain + UserDefaults)
 
     private func loadSavedHosts() {
-        if let data = UserDefaults.standard.data(forKey: Self.hostsDefaultsKey),
+        if let data = defaults.data(forKey: Self.hostsDefaultsKey),
            let decoded = try? JSONDecoder().decode([HostProfile].self, from: data) {
             hosts = decoded.sorted { $0.sortOrder < $1.sortOrder }
         }
-        if let rawID = UserDefaults.standard.string(forKey: Self.activeHostDefaultsKey),
+        if let rawID = defaults.string(forKey: Self.activeHostDefaultsKey),
            let id = UUID(uuidString: rawID),
            hosts.contains(where: { $0.id == id }) {
             activeHostID = id
@@ -366,12 +462,12 @@ public final class AppStore {
 
     private func persistHostMetadata() {
         if let data = try? JSONEncoder().encode(hosts) {
-            UserDefaults.standard.set(data, forKey: Self.hostsDefaultsKey)
+            defaults.set(data, forKey: Self.hostsDefaultsKey)
         }
         if let activeHostID {
-            UserDefaults.standard.set(activeHostID.uuidString, forKey: Self.activeHostDefaultsKey)
+            defaults.set(activeHostID.uuidString, forKey: Self.activeHostDefaultsKey)
         } else {
-            UserDefaults.standard.removeObject(forKey: Self.activeHostDefaultsKey)
+            defaults.removeObject(forKey: Self.activeHostDefaultsKey)
         }
     }
 
@@ -390,7 +486,7 @@ public final class AppStore {
         }
         let trimmedSecret = secret.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSecret.isEmpty else {
-            throw CompanionAPIError(kind: authKind == .remotePassword ? .wrongPassword : .invalidToken, serverMessage: "Enter a token or password.")
+            throw CompanionAPIError(kind: authKind == .remotePassword ? .wrongPassword : .invalidToken, serverMessage: String(localized: "Enter a token or password.", bundle: .main))
         }
 
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -415,6 +511,7 @@ public final class AppStore {
 
         try credentialStore.saveSecret(trimmedSecret, for: profile.id)
         persistHostMetadata()
+        syncPushRegistration(only: [profile.id])
 
         if selectAsActive {
             await selectHost(profile.id)
@@ -425,8 +522,21 @@ public final class AppStore {
     }
 
     public func deleteHost(_ id: UUID) async {
+        // Withdraw this phone's push registration while the host's token is still in the Keychain.
+        if let token = pushToken, let client = client(for: id) {
+            Task {
+                do { try await client.unregisterPush(token: token) } catch {
+                    Self.pushLog.error("Push unregistration failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
         try? credentialStore.deleteSecret(for: id)
         await offlineCache.clear(hostID: id)
+        await promptOutbox.clear(hostID: id)
+        let draftPrefix = Self.localDraftDefaultsPrefix + id.uuidString + "."
+        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(draftPrefix) {
+            defaults.removeObject(forKey: key)
+        }
         hosts.removeAll { $0.id == id }
         reachabilityByHost.removeValue(forKey: id)
         notificationManager.resetTracking(for: id)
@@ -451,8 +561,11 @@ public final class AppStore {
 
     public func selectHost(_ hostID: UUID) async {
         guard hosts.contains(where: { $0.id == hostID }) else { return }
+        // Also retries a registration the host missed while it was offline.
+        syncPushRegistration(only: [hostID])
         if activeHostID == hostID, pollTask != nil {
             await forceSync()
+            scheduleOutboxFlush()
             return
         }
         await persistOfflineCacheNow()
@@ -463,9 +576,73 @@ public final class AppStore {
 
         await hydrateOfflineCache(for: hostID)
         guard activeHostID == hostID else { return }
+        await promptOutbox.load(hostID: hostID)
+        guard activeHostID == hostID else { return }
         startPolling()
         await forceSync()
+        // This host's waiting messages go out if that poll reached it (pollOnce schedules this too).
+        scheduleOutboxFlush()
         Task { await refreshModelsAndActivity() }
+    }
+
+    // MARK: - Apple Push
+
+    private static let pushLog = Logger(subsystem: "dev.omp.companion", category: "push")
+    /// The APNs device token (hex) iOS handed over this launch; nil until then (and on a simulator without push).
+    public private(set) var pushToken: String?
+
+    /// From the app delegate. A new token replaces the old one at every host (the old one would only fail at Apple).
+    public func didRegisterForRemoteNotifications(deviceToken: Data) {
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        guard hex != pushToken else { return }
+        if let old = pushToken {
+            for host in hosts {
+                guard let client = client(for: host.id) else { continue }
+                Task { _ = try? await client.unregisterPush(token: old) }
+            }
+        }
+        pushToken = hex
+        syncPushRegistration()
+    }
+
+    /// From the app delegate: no push this launch (simulator, no network, missing entitlement); local notifications still work.
+    public func didFailToRegisterForRemoteNotifications(_ error: Error) {
+        Self.pushLog.notice("Push registration unavailable: \(error.localizedDescription, privacy: .public)")
+    }
+
+    /// Registers the push token with every saved host (or those in `only`), so each companion can push "needs input" and
+    /// "plan ready" while the app is not running; withdraws it while the in-app notifications switch is off. `hostRef`
+    /// is the host's id here, which the push carries back as `hostID` for tap routing. Failures are logged only: a host
+    /// that was offline gets it the next time it is selected.
+    func syncPushRegistration(only hostIDs: [UUID]? = nil) {
+        guard let token = pushToken else { return }
+        let enabled = notificationManager.notificationsEnabled
+        let redact = biometricLock.isEnabled
+        #if DEBUG
+        let environment = "development"
+        #else
+        let environment = "production"
+        #endif
+        #if canImport(UIKit)
+        let name: String? = UIDevice.current.name
+        #else
+        let name: String? = nil
+        #endif
+        for host in hosts where hostIDs?.contains(host.id) ?? true {
+            guard let client = client(for: host.id) else { continue }
+            let hostRef = host.id.uuidString
+            Task {
+                do {
+                    if enabled {
+                        try await client.registerPush(token: token, environment: environment, hostRef: hostRef, redact: redact, name: name)
+                    } else {
+                        try await client.unregisterPush(token: token)
+                    }
+                } catch {
+                    Self.pushLog.error("Push registration with \(hostRef, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
     }
 
     public func testHostConnection(baseURL: String, secret: String) async -> Result<(latencyMs: Int, tailscale: TailscaleInfoResponse), CompanionAPIError> {
@@ -527,7 +704,7 @@ public final class AppStore {
             cachedDiffsBySession = cached.diffs
             connectionStatus = .offline(
                 cachedAt: cached.savedAt,
-                errorMessage: "Showing cached snapshot until connected",
+                errorMessage: String(localized: "Showing cached snapshot until connected", bundle: .main),
                 errorKind: .tailscaleInactiveOrUnreachable
             )
         } else {
@@ -571,6 +748,9 @@ public final class AppStore {
         unseenSessionIDs = []
         priorSessionAttention = [:]
         lastTailscaleInfo = nil
+        consecutivePollFailures = 0
+        instanceWaitTask?.cancel()
+        instanceWaitTask = nil
     }
 
     private func persistOfflineCacheNow() async {
@@ -586,16 +766,36 @@ public final class AppStore {
 
     public func startPolling() {
         pollTask?.cancel()
-        guard activeHost != nil, scenePhase == .active else { return }
+        guard activeHost != nil, scenePhase == .active, !isLockedOut else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.pollOnce()
                 let anyWorking = self.snapshot.sessions.contains { $0.isWorking || !(self.selectedSession?.uiRequests?.isEmpty ?? true) }
-                let delayNs: UInt64 = anyWorking ? 1_200_000_000 : 4_500_000_000
-                try? await Task.sleep(nanoseconds: delayNs)
+                try? await Task.sleep(nanoseconds: Self.pollDelay(failures: self.consecutivePollFailures, anyWorking: anyWorking))
             }
         }
+    }
+
+    /// The poll loop's pause: 1.2 s while something works or asks, 4.5 s idle; after failed polls
+    /// min(30 s, 2^failures s), as the web dashboard backs off.
+    nonisolated static func pollDelay(failures: Int, anyWorking: Bool) -> UInt64 {
+        if failures > 0 {
+            return UInt64(min(30, 1 << min(failures, 5))) * 1_000_000_000
+        }
+        return anyWorking ? 1_200_000_000 : 4_500_000_000
+    }
+
+    /// A path that became usable, or moved to other interfaces, restarts the poll loop (it polls at once) with the
+    /// backoff cleared. The first report is the state at launch, not a change. The outbox is flushed by that poll once it
+    /// reaches the PC, not here: a send over a path that does not reach it yet could time out and leave its fate unknown.
+    private func networkPathChanged(satisfied: Bool, interfaces: [String]) {
+        let previous = lastNetworkPath
+        lastNetworkPath = (satisfied, interfaces)
+        guard let previous, satisfied, !previous.satisfied || previous.interfaces != interfaces else { return }
+        consecutivePollFailures = 0
+        lastFailoverAt.removeAll()
+        startPolling()
     }
 
     public func stopPolling() {
@@ -666,6 +866,7 @@ public final class AppStore {
                 etag: etag
             )
             guard isCurrent(), sid == selectedSessionID else { return }
+            consecutivePollFailures = 0
 
             switch result {
             case .notModified:
@@ -680,7 +881,16 @@ public final class AppStore {
                 )
                 let wasInitial = !hasReceivedLiveSnapshotForHost
                 hasReceivedLiveSnapshotForHost = true
+                // A new instance id: the companion restarted (or the desktop app updated) since the last poll. The
+                // delta cursors and ETag belong to the old process, so drop them and take a whole state.
+                let restarted = !wasInitial && snapshot.instance != nil && nextSnapshot.instance != nil
+                    && snapshot.instance != nextSnapshot.instance
                 snapshot = nextSnapshot
+                if restarted {
+                    companionInstanceChanged()
+                    await pollOnce()
+                    return
+                }
                 reconcileLocalUIOverrides()
                 connectionStatus = .connected
                 reachabilityByHost[host.id] = .reachable(latencyMs: host.lastLatencyMs ?? 15)
@@ -722,6 +932,9 @@ public final class AppStore {
                 }
             }
 
+            // The PC answered: messages written while it could not be reached go out now, in order.
+            scheduleOutboxFlush()
+
             if Date().timeIntervalSince(lastNativeSessionsFetchAt) > 20 {
                 Task { await refreshNativeSessions() }
             }
@@ -738,6 +951,7 @@ public final class AppStore {
             }
             guard isCurrent() else { return }
             reachabilityByHost[host.id] = .unreachable(apiError.localizedDescription)
+            consecutivePollFailures += 1
             if hasReceivedLiveSnapshotForHost || !snapshot.sessions.isEmpty {
                 let cachedAt = await offlineCache.load(hostID: host.id)?.savedAt
                 guard isCurrent() else { return }
@@ -823,13 +1037,15 @@ public final class AppStore {
     /// When the paired address stops answering, tries the other addresses this companion reported (`alternateURLs`) with
     /// the same credential, all at once with a short timeout, and moves the host to the first one, in the companion's
     /// order, that accepts it. A PC that rebooted answers on its tailnet even when its LAN listener or LAN address
-    /// changed, so the phone stays paired. At most once every 20 s per host, so an offline PC is not probed every poll.
+    /// changed, so the phone stays paired. Plain-HTTP LAN or public addresses are never tried: this runs unattended, and
+    /// the credential would cross that network unencrypted (`HostProfile.sendsCredentialInClear`). At most once every
+    /// 20 s per host, so an offline PC is not probed every poll.
     private func failOver(from host: HostProfile) async -> Bool {
         let now = Date()
         if let last = lastFailoverAt[host.id], now.timeIntervalSince(last) < 20 { return false }
         lastFailoverAt[host.id] = now
         let current = HostProfile.normalizeBaseURL(host.baseURL)
-        let candidates = (host.alternateURLs ?? []).filter { $0 != current }
+        let candidates = (host.alternateURLs ?? []).filter { $0 != current && !HostProfile.sendsCredentialInClear($0) }
         guard !candidates.isEmpty, let token = try? credentialStore.loadSecret(for: host.id), !token.isEmpty else { return false }
         let session = urlSession
         let answered = await withTaskGroup(of: (Int, Int?).self) { group -> [Int: Int] in
@@ -922,7 +1138,7 @@ public final class AppStore {
         } catch {
             guard hostID == activeHostID else { return }
             if let apiError = error as? CompanionAPIError, apiError.kind == .cancelled { return }
-            showToast("Activity: \(error.localizedDescription)", isError: true)
+            showToast(String(localized: "Activity: \(error.localizedDescription)", bundle: .main), isError: true)
         }
     }
     public func refreshCommandsIfNeeded(for sessionId: String, force: Bool = false) async {
@@ -965,6 +1181,214 @@ public final class AppStore {
         lastEtag = nil
         // A poll sent before this reply could carry the session's older state: drop it.
         pollGeneration &+= 1
+    }
+
+    // MARK: - Offline Outbox & Local Drafts
+
+    /// What became of one outbox message's send.
+    private enum OutboxDelivery {
+        case sent
+        /// The PC could not be reached: the message stays pending, or is failed when it may have arrived.
+        case unreachable(String)
+        /// The PC answered with an error: the message is failed.
+        case refused(String)
+        /// Gone, or already on the wire.
+        case skipped
+    }
+
+    /// The active host's waiting messages for a session, oldest first.
+    public func outboxItems(sessionID: String) -> [OutboxItem] {
+        guard let hostID = activeHost?.id else { return [] }
+        return promptOutbox.items(hostID: hostID, sessionID: sessionID)
+    }
+
+    /// The active host's waiting messages, every session.
+    public var outboxCount: Int {
+        guard let hostID = activeHost?.id else { return 0 }
+        return promptOutbox.items(hostID: hostID).count
+    }
+
+    /// Messages of this session still to go out on their own: a new one must wait behind them.
+    public func hasUnsentOutboxItems(sessionID: String) -> Bool {
+        guard let hostID = activeHost?.id else { return false }
+        return promptOutbox.hasUnsent(hostID: hostID, sessionID: sessionID)
+    }
+
+    /// Reads the active host's outbox for display; not while Face ID locks the app.
+    public func loadOutbox() async {
+        guard !isLockedOut, let hostID = activeHost?.id else { return }
+        await promptOutbox.load(hostID: hostID)
+    }
+
+    /// Holds a message for the active host behind the session's earlier ones: a `pending` one goes out on its own once the
+    /// PC answers, a `failed` one (sent without an answer, so it may have arrived) waits for the user. Throws, holding
+    /// nothing, when the outbox is full or cannot be saved.
+    public func queuePrompt(
+        session: SessionSummary,
+        text: String,
+        images: [PendingImageAttachment],
+        pdfs: [PendingPdfAttachment],
+        state: OutboxItem.State = .pending,
+        lastError: String? = nil
+    ) async throws {
+        guard let hostID = activeHost?.id else { throw PromptOutboxError.notSaved("No PC is selected.") }
+        try await promptOutbox.enqueue(OutboxItem(
+            hostID: hostID,
+            sessionID: session.id,
+            draftKey: session.draftKey,
+            text: text,
+            images: images,
+            pdfs: pdfs,
+            lastError: lastError,
+            state: state
+        ))
+    }
+
+    /// Starts `flushOutbox` when the last poll reached the active host and it has messages waiting (or its outbox is not
+    /// read yet).
+    func scheduleOutboxFlush() {
+        guard !isFlushingOutbox, !isLockedOut, connectionStatus.isOnline, let hostID = activeHost?.id,
+              !promptOutbox.isLoaded(hostID: hostID) || promptOutbox.hasPending(hostID: hostID) else { return }
+        Task { await flushOutbox() }
+    }
+
+    /// Sends the active host's `pending` messages one at a time, oldest first, so each session gets them in order. Only
+    /// right after a poll reached the PC, and never while Face ID locks the app. Stops at the first that cannot reach the
+    /// PC; one the PC refuses is marked failed and the rest go on.
+    public func flushOutbox() async {
+        guard !isFlushingOutbox, !isLockedOut, connectionStatus.isOnline,
+              let hostID = activeHost?.id, let client = activeClient else { return }
+        isFlushingOutbox = true
+        defer { isFlushingOutbox = false }
+        guard await promptOutbox.load(hostID: hostID) else { return }
+        var sent = 0, refused = 0
+        sending: while !isLockedOut, activeHost?.id == hostID,
+                       let next = promptOutbox.items(hostID: hostID).first(where: { $0.state == .pending }) {
+            switch await deliverOutboxItem(next.id, hostID: hostID, client: client) {
+            case .sent: sent += 1
+            case .refused: refused += 1
+            case .unreachable, .skipped: break sending
+            }
+        }
+        if refused > 0 {
+            showToast(refused == 1
+                ? String(localized: "A message written offline was refused by the PC. It is kept above the composer.", bundle: .main)
+                : String(localized: "\(refused) messages written offline were refused by the PC. They are kept above the composer.", bundle: .main), isError: true)
+        } else if sent > 0 {
+            showToast(sent == 1
+                ? String(localized: "Sent the message written while the PC was unreachable.", bundle: .main)
+                : String(localized: "Sent \(sent) messages written while the PC was unreachable.", bundle: .main))
+        }
+    }
+
+    /// Send now on one waiting message, whatever its state: the user's own resend, so a failed one (which may have
+    /// arrived) goes again too.
+    public func sendOutboxItemNow(_ id: UUID) async {
+        guard !isLockedOut, let hostID = activeHost?.id, let client = activeClient else { return }
+        switch await deliverOutboxItem(id, hostID: hostID, client: client) {
+        case .sent:
+            notificationManager.triggerHaptic(.lightTap)
+            scheduleOutboxFlush()
+        case .unreachable(let message), .refused(let message):
+            showToast(message, isError: true)
+            notificationManager.triggerHaptic(.error)
+        case .skipped:
+            break
+        }
+    }
+
+    public func deleteOutboxItem(_ id: UUID) async {
+        guard let hostID = activeHost?.id, let item = promptOutbox.item(id, hostID: hostID), item.state != .sending else { return }
+        await promptOutbox.remove(id, hostID: hostID)
+    }
+
+    /// Takes a waiting message out of the outbox to edit it in the composer; nil while it is being sent.
+    public func takeOutboxItem(_ id: UUID) async -> OutboxItem? {
+        guard let hostID = activeHost?.id, let item = promptOutbox.item(id, hostID: hostID), item.state != .sending else { return nil }
+        await promptOutbox.remove(id, hostID: hostID)
+        return item
+    }
+
+    private func deliverOutboxItem(_ id: UUID, hostID: UUID, client: CompanionClient) async -> OutboxDelivery {
+        guard let item = promptOutbox.item(id, hostID: hostID), item.state != .sending else { return .skipped }
+        do {
+            // On disk as sending before it is on the wire: if the app ends mid-send, it is never resent on its own.
+            try await promptOutbox.update(id, hostID: hostID, state: .sending, lastError: item.lastError)
+        } catch {
+            let message = String(localized: "The outbox could not be saved on this phone: \(error.localizedDescription)", bundle: .main)
+            try? await promptOutbox.update(id, hostID: hostID, state: item.state, lastError: message)
+            return .unreachable(message)
+        }
+        // As the composer decides: a working session queues it as a follow-up, an idle one takes it as a prompt. A
+        // session this phone does not know goes as a follow-up, which the PC runs as a prompt when the session is idle.
+        let working = snapshot.sessions.first(where: { $0.id == item.sessionID })?.isWorking ?? true
+        let previews = item.images.compactMap(\.previewDataURL)
+        do {
+            let updated = try await client.sendSessionPrompt(
+                sessionId: item.sessionID,
+                type: working ? "follow_up" : "prompt",
+                message: item.text,
+                images: item.images.map(\.wireImagePart),
+                preview: previews.isEmpty ? nil : previews,
+                pdfs: item.pdfs.map(\.wirePromptEntry)
+            )
+            await promptOutbox.remove(id, hostID: hostID)
+            if activeHost?.id == hostID { integrateSession(updated) }
+            await clearDeliveredDraft(item, client: client)
+            return .sent
+        } catch {
+            let apiError = (error as? CompanionAPIError) ?? TailscaleDiagnostic.classifyTransport(error, host: activeHost)
+            if apiError.kind == .decodingFailed {
+                // The PC took it (a 2xx reply) but the reply did not decode: delivered, so it is not kept to send again.
+                await promptOutbox.remove(id, hostID: hostID)
+                await clearDeliveredDraft(item, client: client)
+                if activeHost?.id == hostID { await forceSync() }
+                return .sent
+            }
+            if apiError.definitelyNotDelivered {
+                try? await promptOutbox.update(id, hostID: hostID, state: .pending, lastError: apiError.localizedDescription)
+                return .unreachable(apiError.localizedDescription)
+            }
+            if apiError.kind.isConnectivityFailure || apiError.kind == .cancelled {
+                let message = PromptOutbox.uncertainDeliveryMessage(apiError)
+                try? await promptOutbox.update(id, hostID: hostID, state: .failed, lastError: message)
+                return .unreachable(message)
+            }
+            try? await promptOutbox.update(id, hostID: hostID, state: .failed, lastError: apiError.localizedDescription)
+            return .refused(apiError.localizedDescription)
+        }
+    }
+
+    /// After a delivery, clears the session's host draft while it still holds that message: the same text, or saved
+    /// before the message was queued (the phone could not clear it then). A draft written later, elsewhere, stays.
+    private func clearDeliveredDraft(_ item: OutboxItem, client: CompanionClient) async {
+        let names = item.images.map(\.name) + item.pdfs.map(\.name)
+        guard let draft = try? await client.fetchDraft(key: item.draftKey, haveNames: names) else { return }
+        guard !draft.text.isEmpty || !draft.images.isEmpty || !(draft.pdfs ?? []).isEmpty else { return }
+        let savedBefore = (draft.at ?? 0) <= item.createdAt.timeIntervalSince1970 * 1000
+        guard draft.text == item.text || savedBefore else { return }
+        _ = try? await client.saveDraft(key: item.draftKey, text: "", images: [], pdfs: [])
+    }
+
+    private func localDraftKey(sessionID: String) -> String? {
+        guard let hostID = activeHost?.id else { return nil }
+        return Self.localDraftDefaultsPrefix + hostID.uuidString + "." + sessionID
+    }
+
+    /// The draft text the composer kept on the phone for this session when the PC could not store it.
+    public func localDraft(sessionID: String) -> LocalComposerDraft? {
+        guard let key = localDraftKey(sessionID: sessionID), let data = defaults.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(LocalComposerDraft.self, from: data)
+    }
+
+    /// Keeps a draft's text on the phone; empty text removes it.
+    public func setLocalDraft(_ text: String, sessionID: String) {
+        guard let key = localDraftKey(sessionID: sessionID) else { return }
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            defaults.removeObject(forKey: key)
+        } else if let data = try? JSONEncoder().encode(LocalComposerDraft(text: text)) {
+            defaults.set(data, forKey: key)
+        }
     }
 
     // MARK: - OMP History Preview Cache
@@ -1152,7 +1576,7 @@ public final class AppStore {
     public func saveUILayout(groupOrder: [String]? = nil, collapsed: [String]? = nil, revertOnFailure: Bool = true) async {
         guard let client = activeClient else {
             if revertOnFailure {
-                showToast("Not connected to companion host.", isError: true)
+                showToast(String(localized: "Not connected to companion host.", bundle: .main), isError: true)
             }
             return
         }
@@ -1302,7 +1726,7 @@ public final class AppStore {
         guard let client = activeClient else { return }
         do {
             let res = try await client.openFile(path: path, cwd: cwd, line: line)
-            showToast("Opened \(URL(fileURLWithPath: res.path).lastPathComponent) in \(res.editor)")
+            showToast(String(localized: "Opened \(URL(fileURLWithPath: res.path).lastPathComponent) in \(res.editor)", bundle: .main))
         } catch {
             showToast(error.localizedDescription, isError: true)
         }
@@ -1312,7 +1736,7 @@ public final class AppStore {
         guard let client = activeClient else { return }
         do {
             let res = try await client.openTerminal(path: path)
-            showToast("Opened terminal in \(res.path)")
+            showToast(String(localized: "Opened terminal in \(res.path)", bundle: .main))
         } catch {
             showToast(error.localizedDescription, isError: true)
         }
@@ -1323,7 +1747,7 @@ public final class AppStore {
         do {
             let saved = try await client.setEditor(editor)
             snapshot.editor = saved
-            showToast("Saved editor")
+            showToast(String(localized: "Saved editor", bundle: .main))
         } catch {
             showToast(error.localizedDescription, isError: true)
         }
@@ -1355,20 +1779,94 @@ public final class AppStore {
 
     public func restartCompanionHost() async {
         guard let client = activeClient else { return }
+        let previous = snapshot.instance
         do {
             _ = try await client.restartHost()
-            showToast("Companion host restarting…")
+            showToast(String(localized: "Companion host restarting…", bundle: .main))
             notificationManager.triggerHaptic(.warning)
+            waitForNewInstance(after: previous, upTo: 5 * 60) { [weak self] _ in
+                self?.showToast(String(localized: "Companion restarted", bundle: .main))
+            }
         } catch {
             showToast(error.localizedDescription, isError: true)
         }
+    }
+
+    /// The desktop app checks for its own update (Updates & Host Power ▸ Update Desktop App, the web's ⋯ ▸ Update app):
+    /// when it finds one it downloads, installs and restarts without asking, and this waits for the new companion.
+    public func updateDesktopApp() async {
+        guard let client = activeClient else { return }
+        let previous = snapshot.instance, previousVersion = snapshot.appVersion ?? ""
+        showToast(String(localized: "Checking for updates…", bundle: .main))
+        let reply: AppUpdateResponse
+        do {
+            reply = try await client.startAppUpdate()
+        } catch {
+            showToast(error.localizedDescription, isError: true)
+            return
+        }
+        switch reply.state {
+        case "up-to-date":
+            showToast(reply.current.map { String(localized: "OMP Control Room \($0) is up to date.", bundle: .main) }
+                ?? String(localized: "OMP Control Room is up to date.", bundle: .main))
+        case "error":
+            let detail = [reply.error?.title.map { "\($0)." }, reply.error?.advice].compactMap { $0 }.joined(separator: " ")
+            showToast(detail.isEmpty ? String(localized: "The update check failed.", bundle: .main) : detail, isError: true)
+        case "downloading", "installing":
+            showToast(reply.version.map { String(localized: "Updating to \($0). The app restarts when it is ready.", bundle: .main) }
+                ?? String(localized: "Updating to the new version. The app restarts when it is ready.", bundle: .main))
+            notificationManager.triggerHaptic(.success)
+            // The runtime download can be large: up to an hour, as on the web.
+            waitForNewInstance(after: previous, upTo: 60 * 60) { [weak self] next in
+                let version = next.appVersion ?? ""
+                self?.showToast(!version.isEmpty && version != previousVersion
+                    ? String(localized: "OMP Control Room updated to \(version)", bundle: .main)
+                    : String(localized: "OMP Control Room restarted", bundle: .main))
+            }
+        default:
+            showToast(String(localized: "The update check gave no answer. Try again.", bundle: .main), isError: true)
+        }
+    }
+
+    /// Polls the tiny GET /api/instance every 3 s (not the whole state) until a companion with another instance id
+    /// answers on the active host, then resyncs from scratch at once instead of at the end of the poll backoff.
+    private func waitForNewInstance(after previous: String?, upTo seconds: TimeInterval, then done: @escaping (InstanceResponse) -> Void) {
+        guard let hostID = activeHostID else { return }
+        instanceWaitTask?.cancel()
+        instanceWaitTask = Task { [weak self] in
+            let end = Date().addingTimeInterval(seconds)
+            while Date() < end, !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, !Task.isCancelled, self.activeHostID == hostID, let client = self.activeClient else { return }
+                guard let reply = try? await client.fetchInstance() else { continue }
+                guard reply.instance != previous, self.activeHostID == hostID else { continue }
+                self.companionInstanceChanged()
+                self.snapshot.instance = reply.instance
+                self.snapshot.appVersion = reply.appVersion
+                done(reply)
+                self.startPolling()
+                return
+            }
+            if !Task.isCancelled, let self, self.activeHostID == hostID {
+                self.showToast(String(localized: "The companion did not come back. Check it on that computer.", bundle: .main), isError: true)
+            }
+        }
+    }
+
+    /// A new companion process: forget the old one's delta cursors, ETag and backoff.
+    private func companionInstanceChanged() {
+        syncReducer.reset()
+        lastEtag = nil
+        consecutivePollFailures = 0
+        lastActivityFetchAt = .distantPast
+        lastNativeSessionsFetchAt = .distantPast
     }
 
     public func shutdownCompanionHost() async {
         guard let client = activeClient else { return }
         do {
             _ = try await client.shutdownHost()
-            showToast("Shutdown command sent to host")
+            showToast(String(localized: "Shutdown command sent to host", bundle: .main))
             notificationManager.triggerHaptic(.warning)
         } catch {
             showToast(error.localizedDescription, isError: true)

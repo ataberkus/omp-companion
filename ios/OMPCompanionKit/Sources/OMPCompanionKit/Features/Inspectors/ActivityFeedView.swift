@@ -70,8 +70,8 @@ public struct ActivityFeedView: View {
                     Section {
                         OMPEmptyStateView(
                             systemImage: "bell.slash",
-                            title: "No Activity Recorded",
-                            message: "Completions, errors, and workspace alerts appear here."
+                            title: String(localized: "No Activity Recorded", bundle: .main),
+                            message: String(localized: "Completions, errors, and workspace alerts appear here.", bundle: .main)
                         )
                         .listRowBackground(Color.clear)
                     }
@@ -142,6 +142,7 @@ public struct ActivityFeedView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .accessibilityLabel("Refresh activity")
                 }
             }
             .task {

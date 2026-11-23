@@ -328,6 +328,7 @@ public struct InteractivePromptCard: View {
                             if isChecked {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(palette.green)
+                                    .accessibilityHidden(true)
                             }
                             Text(option)
                                 .font(.subheadline.weight(.medium))
@@ -350,6 +351,7 @@ public struct InteractivePromptCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.border, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(isChecked ? .isSelected : [])
                 .disabled(isSubmitting || !store.canPerformMutatingActions)
                 .minTouchTarget()
             }
@@ -666,6 +668,7 @@ public struct CustomTerminalPanelView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(active.wrappedValue ? palette.accentLine : palette.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(active.wrappedValue ? .isSelected : [])
     }
 
     private func sendBufferedText(appendEnter: Bool) async {
@@ -831,6 +834,7 @@ public struct PlanReviewSheet: View {
                                     HStack(alignment: .top, spacing: 10) {
                                         Image(systemName: selectedAction == act ? "largecircle.fill.circle" : "circle")
                                             .foregroundStyle(selectedAction == act ? palette.accent : palette.muted)
+                                            .accessibilityHidden(true)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(act.title)
                                                 .font(.subheadline.weight(.semibold))
@@ -846,6 +850,7 @@ public struct PlanReviewSheet: View {
                                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(selectedAction == act ? palette.accentLine : palette.border, lineWidth: 1))
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityAddTraits(selectedAction == act ? .isSelected : [])
                             }
 
                             if selectedAction == .refine {
@@ -872,8 +877,8 @@ public struct PlanReviewSheet: View {
                     } else {
                         OMPEmptyStateView(
                             systemImage: "doc.plaintext",
-                            title: "No Plan Proposal Pending",
-                            message: "When OMP finishes drafting a plan in Plan Mode, it appears here for review and approval."
+                            title: String(localized: "No Plan Proposal Pending", bundle: .main),
+                            message: String(localized: "When OMP finishes drafting a plan in Plan Mode, it appears here for review and approval.", bundle: .main)
                         )
                     }
                 }

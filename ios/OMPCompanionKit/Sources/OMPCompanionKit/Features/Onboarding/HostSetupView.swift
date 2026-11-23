@@ -20,6 +20,14 @@ public struct HostSetupView: View {
     @State private var isSaving = false
     @State private var testStatus: TestResultBanner?
     @State private var showScanner = false
+    /// The action waiting on the user's consent to send the credential unencrypted, and the URL they already accepted.
+    @State private var pendingInsecureAction: InsecureAction?
+    @State private var acceptedInsecureURL: String?
+
+    private enum InsecureAction: Identifiable {
+        case test, save
+        var id: Self { self }
+    }
 
     private enum TestResultBanner {
         case success(latencyMs: Int, hostName: String?, urls: [String])
@@ -129,7 +137,7 @@ public struct HostSetupView: View {
 
                 Section {
                     Button {
-                        Task { await runConnectionTest() }
+                        guardCleartext(.test)
                     } label: {
                         HStack {
                             if isTesting {
@@ -186,7 +194,7 @@ public struct HostSetupView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isSaving ? "Saving…" : "Save") {
-                        Task { await save() }
+                        guardCleartext(.save)
                     }
                     .disabled(normalizedPreview.isEmpty || secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
                 }
@@ -195,6 +203,21 @@ public struct HostSetupView: View {
                 QRScannerView { scanned in
                     applyPairingText(scanned)
                 }
+            }
+            .alert(
+                "Send credential unencrypted?",
+                isPresented: Binding(get: { pendingInsecureAction != nil }, set: { if !$0 { pendingInsecureAction = nil } }),
+                presenting: pendingInsecureAction
+            ) { action in
+                Button("Send over plain HTTP", role: .destructive) {
+                    acceptedInsecureURL = normalizedPreview
+                    perform(action)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text(authKind == .remotePassword
+                    ? "\(normalizedPreview) is not a Tailscale address, so the password would cross this network as plain HTTP that anyone on it can read. Use the PC's MagicDNS name, its 100.x Tailscale address or a tailscale serve https:// URL instead."
+                    : "\(normalizedPreview) is not a Tailscale address, so the token would cross this network as plain HTTP that anyone on it can read. Use the PC's MagicDNS name, its 100.x Tailscale address or a tailscale serve https:// URL instead.")
             }
             .onAppear {
                 if let host = editingHost {
@@ -213,7 +236,7 @@ public struct HostSetupView: View {
     private func pastePairingPayload() {
         #if canImport(UIKit)
         guard let text = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
-            store.showToast("Clipboard is empty.", isError: true)
+            store.showToast(String(localized: "Clipboard is empty.", bundle: .main), isError: true)
             return
         }
         applyPairingText(text)
@@ -222,7 +245,7 @@ public struct HostSetupView: View {
 
     private func applyPairingText(_ raw: String) {
         guard let parsed = PairingPayload.parse(raw) else {
-            store.showToast("Could not parse a companion URL from that code.", isError: true)
+            store.showToast(String(localized: "Could not parse a companion URL from that code.", bundle: .main), isError: true)
             return
         }
         applyParsedPayload(parsed)
@@ -237,7 +260,24 @@ public struct HostSetupView: View {
         if let tok = parsed.token, !tok.isEmpty {
             secret = tok
         }
-        Task { await runConnectionTest() }
+        guardCleartext(.test)
+    }
+
+    /// Runs `action` at once unless it would send the credential as plain HTTP off the tailnet to a URL the user has not
+    /// accepted yet; then asks first.
+    private func guardCleartext(_ action: InsecureAction) {
+        if HostProfile.sendsCredentialInClear(urlInput), acceptedInsecureURL != normalizedPreview {
+            pendingInsecureAction = action
+        } else {
+            perform(action)
+        }
+    }
+
+    private func perform(_ action: InsecureAction) {
+        switch action {
+        case .test: Task { await runConnectionTest() }
+        case .save: Task { await save() }
+        }
     }
 
     private func runConnectionTest() async {

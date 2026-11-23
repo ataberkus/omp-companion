@@ -135,9 +135,9 @@ public struct TodoPlanView: View {
                 if phases.isEmpty {
                     OMPEmptyStateView(
                         systemImage: "checklist",
-                        title: "No Todo Phases",
-                        message: "When OMP creates a structured implementation plan or task list, phases and items update live here.",
-                        actionTitle: store.canPerformMutatingActions ? "Add Todo Item" : nil
+                        title: String(localized: "No Todo Phases", bundle: .main),
+                        message: String(localized: "When OMP creates a structured implementation plan or task list, phases and items update live here.", bundle: .main),
+                        actionTitle: store.canPerformMutatingActions ? String(localized: "Add Todo Item", bundle: .main) : nil
                     ) {
                         showAddTaskSheet = true
                     }
@@ -172,6 +172,7 @@ public struct TodoPlanView: View {
                                         Image(systemName: iconForTodo(task.status))
                                             .foregroundStyle(colorForTodo(task.status))
                                             .padding(.top, 2)
+                                            .accessibilityHidden(true)
 
                                         VStack(alignment: .leading, spacing: 3) {
                                             Text(task.content)
@@ -209,6 +210,7 @@ public struct TodoPlanView: View {
                                     .padding(.vertical, 3)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityHint("Double tap to change status")
                                 .disabled(isUpdatingTodos || !store.canPerformMutatingActions)
                                 .listRowBackground(palette.card)
                             }

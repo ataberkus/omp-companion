@@ -25,6 +25,18 @@ public enum SidebarTimeBucket: String, CaseIterable, Identifiable, Sendable {
 
     public var id: String { rawValue }
     public var title: String { rawValue }
+    /// `title` in the user's language; `title` itself stays English because it keys the persisted collapsed groups.
+    public var displayTitle: String {
+        switch self {
+        case .pinned: return String(localized: "Pinned", bundle: .main)
+        case .working: return String(localized: "Working now", bundle: .main)
+        case .review: return String(localized: "Needs your review", bundle: .main)
+        case .today: return String(localized: "Today", bundle: .main)
+        case .yesterday: return String(localized: "Yesterday", bundle: .main)
+        case .previous7Days: return String(localized: "Previous 7 days", bundle: .main)
+        case .older: return String(localized: "Older", bundle: .main)
+        }
+    }
 }
 
 public enum SidebarLayoutHelper {

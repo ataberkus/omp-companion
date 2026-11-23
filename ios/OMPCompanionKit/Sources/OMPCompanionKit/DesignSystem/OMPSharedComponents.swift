@@ -134,6 +134,7 @@ public struct DiagnosticErrorBanner: View {
 
 public struct SkeletonListPlaceholder: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public var count: Int = 5
     @State private var shimmer = false
 
@@ -158,10 +159,14 @@ public struct SkeletonListPlaceholder: View {
                 }
                 .padding(12)
                 .background(palette.card, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .opacity(shimmer ? 0.45 : 0.85)
+                .opacity(shimmer && !reduceMotion ? 0.45 : 0.85)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading")
         .onAppear {
+            // Reduce Motion: a static placeholder instead of the pulsing shimmer.
+            guard !reduceMotion else { return }
             withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
                 shimmer = true
             }
@@ -196,6 +201,7 @@ public struct OMPEmptyStateView: View {
             Image(systemName: systemImage)
                 .font(.system(size: 36, weight: .medium))
                 .foregroundStyle(palette.accent)
+                .accessibilityHidden(true)
             Text(title)
                 .font(.headline)
                 .foregroundStyle(palette.foreground)

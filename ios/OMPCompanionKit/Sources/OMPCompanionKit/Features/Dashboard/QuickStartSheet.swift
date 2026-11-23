@@ -89,6 +89,7 @@ public struct QuickStartSheet: View {
                                         .foregroundStyle(folderPath == project.path ? palette.accent : palette.foreground)
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityAddTraits(folderPath == project.path ? .isSelected : [])
                                 }
                             }
                             .padding(.vertical, 2)
@@ -190,6 +191,7 @@ public struct QuickStartSheet: View {
                                                 .foregroundStyle(.white, palette.red)
                                         }
                                         .offset(x: 5, y: -5)
+                                        .accessibilityLabel("Remove attachment")
                                     }
                                     .padding(.top, 6)
                                 }
@@ -403,7 +405,7 @@ public struct QuickStartSheet: View {
     #if canImport(UIKit)
     private func pasteClipboardImage() {
         guard let image = UIPasteboard.general.image else {
-            store.showToast("No image on clipboard.", isError: true)
+            store.showToast(String(localized: "No image on clipboard.", bundle: .main), isError: true)
             return
         }
         let existingBytes = attachments.reduce(0) { $0 + $1.base64Data.utf8.count }

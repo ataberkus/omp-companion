@@ -59,9 +59,9 @@ public struct NativeHistoryView: View {
                     Section {
                         OMPEmptyStateView(
                             systemImage: "exclamationmark.triangle",
-                            title: "Could Not Load History",
+                            title: String(localized: "Could Not Load History", bundle: .main),
                             message: error,
-                            actionTitle: "Retry"
+                            actionTitle: String(localized: "Retry", bundle: .main)
                         ) {
                             Task { await store.refreshNativeSessions(force: true) }
                         }
@@ -71,8 +71,8 @@ public struct NativeHistoryView: View {
                     Section {
                         OMPEmptyStateView(
                             systemImage: "clock.arrow.circlepath",
-                            title: showArchivedOnly ? "No Archived History" : "No OMP Sessions Found",
-                            message: store.nativeSessionsDir.map { "Checked \($0)" } ?? "OMP CLI session transcripts on this host will appear here."
+                            title: showArchivedOnly ? String(localized: "No Archived History", bundle: .main) : String(localized: "No OMP Sessions Found", bundle: .main),
+                            message: store.nativeSessionsDir.map { String(localized: "Checked \($0)", bundle: .main) } ?? String(localized: "OMP CLI session transcripts on this host will appear here.", bundle: .main)
                         )
                         .listRowBackground(Color.clear)
                     }
@@ -152,6 +152,7 @@ public struct NativeHistoryView: View {
                             .font(.caption2)
                             .foregroundStyle(palette.accent)
                             .padding(.top, 3)
+                            .accessibilityLabel("Pinned")
                     }
                     Text(item.title?.isEmpty == false ? (item.title ?? "") : (item.preview ?? URL(fileURLWithPath: item.file).lastPathComponent))
                         .font(.subheadline.weight(.semibold))
@@ -276,8 +277,8 @@ private struct NativeSessionPreviewSheet: View {
                             if preview.messages.isEmpty {
                                 OMPEmptyStateView(
                                     systemImage: "text.bubble",
-                                    title: "Empty Transcript",
-                                    message: "Resume this session below to send a prompt."
+                                    title: String(localized: "Empty Transcript", bundle: .main),
+                                    message: String(localized: "Resume this session below to send a prompt.", bundle: .main)
                                 )
                             } else {
                                 LazyVStack(alignment: .leading, spacing: 12) {

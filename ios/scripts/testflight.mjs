@@ -1,9 +1,10 @@
 // Gets App Store Connect ready for a TestFlight upload of OMP Control (ios/), run by .github/workflows/ios-testflight.yml
 // after the distribution certificate is in the keychain:
-//   - registers the App ID dev.omp.companion if it is missing;
+//   - registers the App ID dev.omp.companion if it is missing, with the Push Notifications capability (APNs);
 //   - checks the App Store Connect app exists (Apple's API cannot create one: App Store Connect → Apps → "+");
 //   - keeps an App Store provisioning profile "OMP Control App Store" for the App ID and the certificate whose serial
-//     is CERT_SERIAL (recreated when it is invalid or for another certificate), written to PROFILE_OUT;
+//     is CERT_SERIAL (recreated when it is invalid, for another certificate or without the push entitlement), written
+//     to PROFILE_OUT;
 //   - prints the build number: one above the highest App Store Connect has for VERSION, among its builds and its
 //     uploads still in flight (1 for a version without any). Run one at a time.
 // Prints KEY=value lines for $GITHUB_ENV: BUILD_NUMBER, PROFILE_NAME, PROFILE_UUID.
@@ -51,6 +52,19 @@ if (!bundle) {
   ).data;
 }
 
+// Push Notifications on the App ID (the profile carries aps-environment only from then on).
+const capabilities = (await get(`/v1/bundleIds/${bundle.id}/bundleIdCapabilities`)).data;
+if (!capabilities.some((c) => c.attributes.capabilityType === "PUSH_NOTIFICATIONS")) {
+  log("Enabling Push Notifications on the App ID");
+  await api("POST", "/v1/bundleIdCapabilities", {
+    data: {
+      type: "bundleIdCapabilities",
+      attributes: { capabilityType: "PUSH_NOTIFICATIONS" },
+      relationships: { bundleId: { data: { type: "bundleIds", id: bundle.id } } },
+    },
+  });
+}
+
 // App Store Connect app.
 const app = (await get(`/v1/apps?filter[bundleId]=${BUNDLE_ID}&fields[apps]=bundleId,name`)).data.find(
   (a) => a.attributes.bundleId === BUNDLE_ID,
@@ -77,7 +91,9 @@ for (const p of profiles.data) {
     p.attributes.profileType === "IOS_APP_STORE" &&
     p.attributes.profileState === "ACTIVE" &&
     p.relationships.bundleId.data?.id === bundle.id &&
-    p.relationships.certificates.data?.some((c) => c.id === cert.id);
+    p.relationships.certificates.data?.some((c) => c.id === cert.id) &&
+    // The signed profile is a CMS envelope around a plain XML plist.
+    Buffer.from(p.attributes.profileContent ?? "", "base64").includes("aps-environment");
   if (ok && !profile) profile = p;
   else if (p.attributes.name === PROFILE_NAME) {
     log(`Deleting the outdated profile ${p.id}`);

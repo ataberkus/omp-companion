@@ -660,11 +660,13 @@ public struct ModelPickerSheet: View {
                     if selectedModel == model.selector {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(palette.accent)
+                            .accessibilityHidden(true)
                     }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityAddTraits(selectedModel == model.selector ? .isSelected : [])
 
             Button {
                 toggleFavorite(model.selector)
@@ -676,6 +678,7 @@ public struct ModelPickerSheet: View {
             }
             .buttonStyle(.borderless)
             .accessibilityLabel(isFavorite ? "Remove \(model.name) from favorites" : "Add \(model.name) to favorites")
+            .accessibilityAddTraits(isFavorite ? .isSelected : [])
         }
         .listRowBackground(palette.card)
     }
@@ -884,7 +887,7 @@ public struct BranchRewindSheet: View {
                     _ = try? await client.saveDraft(key: session.draftKey, text: res.text)
                 }
             }
-            store.showToast("Branched session; message placed in composer")
+            store.showToast(String(localized: "Branched session; message placed in composer", bundle: .main))
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -900,7 +903,7 @@ public struct BranchRewindSheet: View {
                 onPrefillComposer?(res.text)
                 _ = try? await client.saveDraft(key: session.draftKey, text: res.text)
             }
-            store.showToast("Rewound before last prompt")
+            store.showToast(String(localized: "Rewound before last prompt", bundle: .main))
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -912,7 +915,7 @@ public struct BranchRewindSheet: View {
         do {
             let updated = try await client.regenerateLastMessage(sessionId: session.id)
             store.integrateSession(updated)
-            store.showToast("Regenerating last turn")
+            store.showToast(String(localized: "Regenerating last turn", bundle: .main))
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -951,8 +954,8 @@ public struct TreeViewerSheet: View {
                 } else if nodes.isEmpty {
                     OMPEmptyStateView(
                         systemImage: "point.3.connected.trianglepath.dotted",
-                        title: "No Tree Entries",
-                        message: "Conversation tree nodes appear once turns are recorded in this session."
+                        title: String(localized: "No Tree Entries", bundle: .main),
+                        message: String(localized: "Conversation tree nodes appear once turns are recorded in this session.", bundle: .main)
                     )
                 } else {
                     ForEach(nodes) { node in
@@ -1092,7 +1095,7 @@ public struct SessionStatsSheet: View {
                             #if canImport(UIKit)
                             Button {
                                 UIPasteboard.general.string = exportedHtml
-                                store.showToast("Copied HTML export")
+                                store.showToast(String(localized: "Copied HTML export", bundle: .main))
                             } label: {
                                 Label("Copy Raw HTML", systemImage: "doc.on.doc")
                             }
@@ -1412,7 +1415,7 @@ public struct LoginProvidersSheet: View {
                                     do {
                                         let updated = try await client.startLogin(sessionId: session.id, provider: p.id)
                                         store.integrateSession(updated)
-                                        store.showToast("Started \(p.name) login — check sign-in prompt in chat")
+                                        store.showToast(String(localized: "Started \(p.name) login — check sign-in prompt in chat", bundle: .main))
                                         dismiss()
                                     } catch {
                                         errorMessage = error.localizedDescription

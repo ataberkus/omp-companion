@@ -15,6 +15,11 @@ struct OMPCompanionApp: App {
                 .preferredColorScheme(store.themePreference.colorScheme)
                 .task {
                     appDelegate.store = store
+                    // Apple push: once notifications are allowed, ask iOS for this device's token (the delegate below
+                    // hands it to the store, which registers it with every saved host).
+                    store.notificationManager.onAuthorized = {
+                        UIApplication.shared.registerForRemoteNotifications()
+                    }
                     store.notificationManager.installDelegate()
                     await store.bootstrap()
                 }
@@ -67,7 +72,16 @@ struct OMPCompanionApp: App {
 
 final class OMPAppDelegate: NSObject, UIApplicationDelegate {
     static let refreshTaskId = "dev.omp.companion.refresh"
-    weak var store: AppStore?
+    weak var store: AppStore? {
+        didSet {
+            if let store, let token = pendingPushToken {
+                pendingPushToken = nil
+                Task { @MainActor in store.didRegisterForRemoteNotifications(deviceToken: token) }
+            }
+        }
+    }
+    /// A device token iOS delivered before the store was attached.
+    private var pendingPushToken: Data?
 
     func application(
         _ application: UIApplication,
@@ -81,6 +95,19 @@ final class OMPAppDelegate: NSObject, UIApplicationDelegate {
             self?.handleBackgroundRefresh(refreshTask)
         }
         return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        guard let store else {
+            pendingPushToken = deviceToken
+            return
+        }
+        Task { @MainActor in store.didRegisterForRemoteNotifications(deviceToken: deviceToken) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        let store = self.store
+        Task { @MainActor in store?.didFailToRegisterForRemoteNotifications(error) }
     }
 
     static func scheduleBackgroundRefresh() {

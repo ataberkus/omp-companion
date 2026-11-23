@@ -7,8 +7,12 @@ export function createMessages(ctx){
  const {options,store,scheduleSave}=ctx;
  const activity=(s,message,type='update')=>{store.activity.unshift({id:randomUUID(),projectId:s?.projectId,sessionId:s?.id,text:message,type,at:now()});store.activity=store.activity.slice(0,500);};
  // A session that needs the user (finished, failed, asked a question). The desktop host turns it into a Windows notification;
- // the dashboard derives its own notifications and title badge from /api/state.
- const attention=(s,kind,detail='')=>{if(ctx.closing||s.hidden)return;try{options.onAttention?.({id:s.id,title:s.title,kind,detail:String(detail||'').slice(0,300)});}catch(e){console.error('Attention hook failed:',e.message);}};
+ // the dashboard derives its own notifications and title badge from /api/state. Questions and plans awaiting review also
+ // go to the phones registered for Apple push (push.mjs), which wake the iPhone app even when it is not running.
+ const attention=(s,kind,detail='')=>{if(ctx.closing||s.hidden)return;const text=String(detail||'').slice(0,300);
+  try{options.onAttention?.({id:s.id,title:s.title,kind,detail:text});}catch(e){console.error('Attention hook failed:',e.message);}
+  const pushKind=kind==='question'?'question':kind==='review'&&(s._planReview||s.planMode?.reviewPending)?'plan':null;
+  if(pushKind)ctx.push?.notify({sessionId:s.id,title:s.title,kind:pushKind,detail:text});};
 // Steers OMP hasn't read stay at the end of the transcript: the turn's activity keeps arriving before them, so a steer sent
 // mid-thought doesn't split the live activity group, and its echo moves it to where OMP actually read it.
 const unreadSteer=m=>m.role==='user'&&(m.steer==='pending'||m.steer==='received');

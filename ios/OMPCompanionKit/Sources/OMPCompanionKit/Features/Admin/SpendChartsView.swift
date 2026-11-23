@@ -65,9 +65,9 @@ public struct SpendChartsView: View {
                 } else if let spendData, spendData.rows.isEmpty {
                     OMPEmptyStateView(
                         systemImage: "chart.bar.xaxis",
-                        title: "No Usage Recorded Yet",
-                        message: "Run OMP sessions to record token and cost rollups in stats.db, or tap Sync Stats to ingest recent transcripts.",
-                        actionTitle: store.canPerformMutatingActions ? "Sync Usage Stats" : nil
+                        title: String(localized: "No Usage Recorded Yet", bundle: .main),
+                        message: String(localized: "Run OMP sessions to record token and cost rollups in stats.db, or tap Sync Stats to ingest recent transcripts.", bundle: .main),
+                        actionTitle: store.canPerformMutatingActions ? String(localized: "Sync Usage Stats", bundle: .main) : nil
                     ) {
                         Task { await loadSpend(sync: true) }
                     }

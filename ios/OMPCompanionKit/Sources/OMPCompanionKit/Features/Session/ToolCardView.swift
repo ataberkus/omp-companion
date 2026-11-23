@@ -11,6 +11,7 @@ import UIKit
 /// its raw JSON arguments. Long values stay folded to three lines until tapped.
 struct ToolExecutionCard: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Bindable var store: AppStore
     let sessionCwd: String
     let message: TranscriptMessage
@@ -38,7 +39,7 @@ struct ToolExecutionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                     isExpanded.toggle()
                 }
             } label: {
@@ -255,7 +256,7 @@ struct ToolExecutionCard: View {
                 #if canImport(UIKit)
                 Button("Copy Output") {
                     UIPasteboard.general.string = clean
-                    store.showToast("Copied tool output")
+                    store.showToast(String(localized: "Copied tool output", bundle: .main))
                 }
                 .font(.caption2.weight(.semibold))
                 #endif
@@ -296,6 +297,7 @@ struct ToolExecutionCard: View {
 /// One remaining argument of a tool call: folded to three lines, the whole value on tap.
 private struct ToolArgumentRow: View {
     @Environment(\.ompPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let argument: ToolCallSummary.Argument
     @State private var isExpanded = false
 
@@ -316,7 +318,7 @@ private struct ToolArgumentRow: View {
                 .textSelection(.enabled)
             if isLong {
                 Button(isExpanded ? "Show Less" : "Show More") {
-                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { isExpanded.toggle() }
                 }
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(palette.accent)
