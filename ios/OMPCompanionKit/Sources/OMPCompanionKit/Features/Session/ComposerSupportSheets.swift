@@ -382,11 +382,6 @@ public struct PromptEnhanceSheet: View {
                     .background(.ultraThinMaterial)
                 }
             }
-            .task {
-                if enhancedText == nil && !isRunning {
-                    await runEnhance()
-                }
-            }
             .onDisappear {
                 pollTask?.cancel()
             }
