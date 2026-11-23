@@ -140,6 +140,8 @@ public final class AppStore {
     private var lastNativeSessionsFetchAt: Date = .distantPast
     private var priorDroppedSteerIds: Set<String> = []
     private var toastDismissTask: Task<Void, Never>?
+    /// When failOver last tried a host's other addresses.
+    private var lastFailoverAt: [UUID: Date] = [:]
 
     private static let hostsDefaultsKey = "omp.hosts.v1"
     private static let activeHostDefaultsKey = "omp.activeHostID.v1"
@@ -688,6 +690,11 @@ public final class AppStore {
                     persistHostMetadata()
                 }
 
+                // The addresses to fall back on are recorded from a live companion: bootstrap may have run while it was off.
+                if wasInitial {
+                    Task { await refreshTailscaleInfo() }
+                }
+
                 if let sid = selectedSessionID, !snapshot.sessions.contains(where: { $0.id == sid }) {
                     selectedSessionID = nil
                     isDetailActiveOnCompact = false
@@ -722,6 +729,14 @@ public final class AppStore {
             guard isCurrent() else { return }
             let apiError = (error as? CompanionAPIError) ?? TailscaleDiagnostic.classifyTransport(error, host: host)
             if apiError.kind == .cancelled { return }
+            // The paired address does not answer: the PC may have come back on another one it reported (its tailnet
+            // after a reboot that left the LAN closed or changed its LAN address). Same credential, no new pairing.
+            if apiError.kind.isConnectivityFailure, apiError.kind != .companionRestarting, await failOver(from: host) {
+                guard activeHost?.id == host.id else { return }
+                await pollOnce()
+                return
+            }
+            guard isCurrent() else { return }
             reachabilityByHost[host.id] = .unreachable(apiError.localizedDescription)
             if hasReceivedLiveSnapshotForHost || !snapshot.sessions.isEmpty {
                 let cachedAt = await offlineCache.load(hostID: host.id)?.savedAt
@@ -783,16 +798,63 @@ public final class AppStore {
     }
 
     private func refreshTailscaleInfo() async {
-        guard let client = activeClient else { return }
-        if let ts = try? await client.fetchTailscaleInfo() {
-            lastTailscaleInfo = ts
-            if let activeID = activeHostID, let idx = hosts.firstIndex(where: { $0.id == activeID }) {
-                hosts[idx].magicDNS = ts.tailscale?.name
-                hosts[idx].tailscaleIPv4 = ts.tailscale?.ips?.first(where: { !$0.contains(":") })
-                hosts[idx].tailscaleIPv6 = ts.tailscale?.ips?.first(where: { $0.contains(":") })
-                persistHostMetadata()
-            }
+        guard let client = activeClient, let hostID = activeHostID else { return }
+        guard let ts = try? await client.fetchTailscaleInfo(), hostID == activeHostID else { return }
+        lastTailscaleInfo = ts
+        guard let idx = hosts.firstIndex(where: { $0.id == hostID }) else { return }
+        // A companion whose Tailscale is down for the moment reports no tailnet: keep what an earlier answer recorded,
+        // since those are the addresses a reboot that changed the LAN side still answers on.
+        if let tailscale = ts.tailscale {
+            hosts[idx].magicDNS = tailscale.name
+            hosts[idx].tailscaleIPv4 = tailscale.ips?.first(where: { !$0.contains(":") })
+            hosts[idx].tailscaleIPv6 = tailscale.ips?.first(where: { $0.contains(":") })
         }
+        let reported = (ts.tailnetUrls + ts.lanUrls).map { HostProfile.normalizeBaseURL($0) }.filter { !$0.isEmpty }
+        if !reported.isEmpty {
+            var merged: [String] = []
+            for url in reported + (hosts[idx].alternateURLs ?? []) where !merged.contains(url) {
+                merged.append(url)
+            }
+            hosts[idx].alternateURLs = Array(merged.prefix(12))
+        }
+        persistHostMetadata()
+    }
+
+    /// When the paired address stops answering, tries the other addresses this companion reported (`alternateURLs`) with
+    /// the same credential, all at once with a short timeout, and moves the host to the first one, in the companion's
+    /// order, that accepts it. A PC that rebooted answers on its tailnet even when its LAN listener or LAN address
+    /// changed, so the phone stays paired. At most once every 20 s per host, so an offline PC is not probed every poll.
+    private func failOver(from host: HostProfile) async -> Bool {
+        let now = Date()
+        if let last = lastFailoverAt[host.id], now.timeIntervalSince(last) < 20 { return false }
+        lastFailoverAt[host.id] = now
+        let current = HostProfile.normalizeBaseURL(host.baseURL)
+        let candidates = (host.alternateURLs ?? []).filter { $0 != current }
+        guard !candidates.isEmpty, let token = try? credentialStore.loadSecret(for: host.id), !token.isEmpty else { return false }
+        let session = urlSession
+        let answered = await withTaskGroup(of: (Int, Int?).self) { group -> [Int: Int] in
+            for (order, url) in candidates.enumerated() {
+                var moved = host
+                moved.baseURL = url
+                let probe = moved
+                group.addTask {
+                    let ms = try? await CompanionClient(host: probe, token: token, session: session).probeReachability()
+                    return (order, ms)
+                }
+            }
+            var latency: [Int: Int] = [:]
+            for await (order, ms) in group {
+                if let ms { latency[order] = ms }
+            }
+            return latency
+        }
+        guard let best = answered.keys.min(),
+              let idx = hosts.firstIndex(where: { $0.id == host.id }),
+              HostProfile.normalizeBaseURL(hosts[idx].baseURL) == current else { return false }
+        hosts[idx].baseURL = candidates[best]
+        hosts[idx].lastLatencyMs = answered[best]
+        persistHostMetadata()
+        return true
     }
 
     public func refreshModels() async {
