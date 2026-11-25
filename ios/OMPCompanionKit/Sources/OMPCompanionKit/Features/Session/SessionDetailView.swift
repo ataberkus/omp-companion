@@ -24,6 +24,7 @@ public struct SessionDetailView: View {
     @State private var showFormulaSizeSheet = false
     @State private var showRenameAlert = false
     @State private var showShutdownConfirm = false
+    @State private var showRestartConfirm = false
     @State private var renameDraft = ""
     public init(store: AppStore, session: SessionSummary) {
         self.store = store
@@ -59,6 +60,7 @@ public struct SessionDetailView: View {
         case .terminal: Task { await store.openTerminalOnHost(path: session.cwd) }
         case .markDone: Task { await store.completeSession(session) }
         case .toggleArchive: Task { await store.toggleArchive(for: session) }
+        case .restartCompanion: showRestartConfirm = true
         case .shutdownPC: showShutdownConfirm = true
         case .toggleAutoShutdown:
             Task { await store.setAutoShutdown(on: !(store.snapshot.autoShutdown?.on == true)) }
@@ -142,6 +144,7 @@ public struct SessionDetailView: View {
                         isDone: liveSession.status == .done,
                         isRunning: liveSession.status == .running,
                         isAutoShutdownOn: store.snapshot.autoShutdown?.on == true,
+                        canRestart: store.snapshot.canRestart == true,
                         canMutate: store.canPerformMutatingActions
                     ),
                     perform: performMenuAction
@@ -207,6 +210,14 @@ public struct SessionDetailView: View {
                 }
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .alert("Restart Companion?", isPresented: $showRestartConfirm) {
+            Button("Restart Companion", role: .destructive) {
+                Task { await store.restartCompanionHost() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Active turns will be paused cleanly and automatically resumed once the companion relaunches.")
         }
         .alert("Shut Down Host Computer?", isPresented: $showShutdownConfirm) {
             Button("Shut Down Now", role: .destructive) {
@@ -546,12 +557,14 @@ struct SessionActionsMenu: View, Equatable {
         let isDone: Bool
         let isRunning: Bool
         let isAutoShutdownOn: Bool
+        /// The companion runs under a wrapper that relaunches it (desktop app or start script); the web hides the item otherwise.
+        let canRestart: Bool
         let canMutate: Bool
     }
 
     enum Action {
         case modes, btw, togglePin, rename, rewind, tree, stats, usage, formulaSize, terminal, markDone, toggleArchive,
-             shutdownPC, toggleAutoShutdown, hide
+             restartCompanion, shutdownPC, toggleAutoShutdown, hide
     }
 
     let state: MenuState
@@ -631,6 +644,10 @@ struct SessionActionsMenu: View, Equatable {
                              title: state.isArchived ? text("Restore from Archive") : text("Archive Session"),
                              systemImage: state.isArchived ? "tray.and.arrow.up" : "archivebox",
                              isDisabled: locked))
+        }
+        if state.canRestart {
+            host.append(Item(action: .restartCompanion, title: text("Restart companion…"),
+                             systemImage: "arrow.triangle.2.circlepath", isDisabled: locked))
         }
         host += [
             Item(action: .shutdownPC, title: text("Shut down PC…"), systemImage: "power",

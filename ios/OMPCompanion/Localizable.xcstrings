@@ -7558,6 +7558,17 @@
         }
       }
     },
+    "Restart companion…": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Companion'ı yeniden başlat…"
+          }
+        }
+      }
+    },
     "Restart requires launching the companion via the desktop app or start.bat/start.command wrapper.": {
       "extractionState": "manual",
       "localizations": {
