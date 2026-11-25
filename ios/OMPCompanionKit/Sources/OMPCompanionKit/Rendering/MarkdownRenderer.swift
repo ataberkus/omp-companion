@@ -1191,7 +1191,7 @@ private struct MarkdownBlockRow: View {
         }
     }
 
-    private func columnAlignment(_ alignments: [MarkdownTableAlignment], _ column: Int) -> Alignment {
+    private func columnAlignment(_ alignments: [MarkdownTableAlignment], _ column: Int) -> HorizontalAlignment {
         switch column < alignments.count ? alignments[column] : .leading {
         case .leading: return .leading
         case .center: return .center
