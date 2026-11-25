@@ -530,8 +530,14 @@ public struct SessionDetailView: View {
     }
 }
 
-/// The session's ⋯ menu. Equatable on `state` only, so SwiftUI skips rebuilding it (and the open menu keeps its scroll
-/// position) when a poll changes the session without changing anything the menu shows.
+/// The session's ⋯ menu. Equatable on `state` only, so SwiftUI skips rebuilding it when a poll changes the session
+/// without changing anything the menu shows.
+///
+/// On iOS the menu is a UIKit `UIButton` + `UIMenu` rather than a SwiftUI `Menu`: a toolbar `Menu` is bridged to a
+/// `UIMenu` that SwiftUI regenerates on every re-evaluation of the toolbar, and while a turn streams that happens
+/// several times a second. Replacing the presented `UIMenu` makes UIKit cross-fade the open menu into a fresh copy at
+/// a different scroll offset, so scrolling it showed doubled, overlapping rows (and earlier, a jump back to the top).
+/// The UIKit button only swaps its menu when `state` actually changes.
 struct SessionActionsMenu: View, Equatable {
     struct MenuState: Equatable {
         let isPinned: Bool
@@ -556,88 +562,147 @@ struct SessionActionsMenu: View, Equatable {
     }
 
     var body: some View {
+        #if canImport(UIKit)
+        SessionActionsMenuButton(state: state, perform: perform)
+            .fixedSize()
+            .accessibilityLabel(String(localized: "Session actions", bundle: .main))
+        #else
         Menu {
-            Button { perform(.modes) } label: {
-                Label("Modes, Model & Context Controls", systemImage: "slider.horizontal.3")
-            }
-            Button { perform(.btw) } label: {
-                Label("Side Questions (/btw)", systemImage: "bubble.left.and.text.bubble.right")
-            }
-
-            Divider()
-
-            Button { perform(.togglePin) } label: {
-                Label(state.isPinned ? "Unpin Session" : "Pin Session", systemImage: state.isPinned ? "pin.slash" : "pin")
-            }
-            .disabled(!state.canMutate)
-
-            Button { perform(.rename) } label: {
-                Label("Rename Session", systemImage: "pencil")
-            }
-            .disabled(!state.canMutate)
-
-            if !state.isWorking {
-                Button { perform(.rewind) } label: {
-                    Label("Rewind / Branch Turn…", systemImage: "arrow.uturn.backward.circle")
-                }
-                .disabled(!state.canMutate)
-            }
-
-            Button { perform(.tree) } label: {
-                Label("Conversation Tree", systemImage: "point.3.connected.trianglepath.dotted")
-            }
-            Button { perform(.stats) } label: {
-                Label("Stats & HTML Export", systemImage: "chart.bar.doc.horizontal")
-            }
-            Button { perform(.usage) } label: {
-                Label("Provider Quotas", systemImage: "gauge.with.needle")
-            }
-            Button { perform(.formulaSize) } label: {
-                Label("Formula Size…", systemImage: "x.squareroot")
-            }
-
-            Divider()
-
-            Button { perform(.terminal) } label: {
-                Label("Open Terminal on Host", systemImage: "terminal")
-            }
-            .disabled(!state.canMutate)
-
-            if !state.isWorking && !state.isDone {
-                Button { perform(.markDone) } label: {
-                    Label("Mark Done", systemImage: "checkmark.circle")
-                }
-                .disabled(!state.canMutate)
-            }
-
-            if !state.isWorking {
-                Button { perform(.toggleArchive) } label: {
-                    Label(state.isArchived ? "Restore from Archive" : "Archive Session", systemImage: state.isArchived ? "tray.and.arrow.up" : "archivebox")
-                }
-                .disabled(!state.canMutate)
-            }
-
-            Button(role: .destructive) { perform(.shutdownPC) } label: {
-                Label("Shut down PC…", systemImage: "power")
-            }
-            .disabled(!state.canMutate)
-
-            Button { perform(.toggleAutoShutdown) } label: {
-                if state.isAutoShutdownOn {
-                    Label("Shut down PC when finished", systemImage: "checkmark")
-                } else {
-                    Text("Shut down PC when finished")
+            ForEach(Self.sections(for: state).indices, id: \.self) { index in
+                if index > 0 { Divider() }
+                ForEach(Self.sections(for: state)[index], id: \.title) { item in
+                    Button(role: item.isDestructive ? .destructive : nil) { perform(item.action) } label: {
+                        if let symbol = item.systemImage {
+                            Label(item.title, systemImage: symbol)
+                        } else {
+                            Text(item.title)
+                        }
+                    }
+                    .disabled(item.isDisabled)
                 }
             }
-            .disabled(!state.canMutate)
-
-            Button(role: .destructive) { perform(.hide) } label: {
-                Label("Hide from Sidebar", systemImage: "eye.slash")
-            }
-            .disabled(!state.canMutate || state.isRunning)
         } label: {
             Image(systemName: "ellipsis.circle")
         }
         .accessibilityLabel("Session actions")
+        #endif
+    }
+
+    struct Item {
+        let action: Action
+        let title: String
+        let systemImage: String?
+        var isDisabled = false
+        var isDestructive = false
+        var isChecked = false
+    }
+
+    /// Menu content as data, shared by the UIKit and SwiftUI renderings. Each inner array is one divider-separated group.
+    static func sections(for state: MenuState) -> [[Item]] {
+        func text(_ key: String.LocalizationValue) -> String { String(localized: key, bundle: .main) }
+        let locked = !state.canMutate
+
+        var library: [Item] = [
+            Item(action: .togglePin,
+                 title: state.isPinned ? text("Unpin Session") : text("Pin Session"),
+                 systemImage: state.isPinned ? "pin.slash" : "pin",
+                 isDisabled: locked),
+            Item(action: .rename, title: text("Rename Session"), systemImage: "pencil", isDisabled: locked),
+        ]
+        if !state.isWorking {
+            library.append(Item(action: .rewind, title: text("Rewind / Branch Turn…"),
+                                systemImage: "arrow.uturn.backward.circle", isDisabled: locked))
+        }
+        library += [
+            Item(action: .tree, title: text("Conversation Tree"), systemImage: "point.3.connected.trianglepath.dotted"),
+            Item(action: .stats, title: text("Stats & HTML Export"), systemImage: "chart.bar.doc.horizontal"),
+            Item(action: .usage, title: text("Provider Quotas"), systemImage: "gauge.with.needle"),
+            Item(action: .formulaSize, title: text("Formula Size…"), systemImage: "x.squareroot"),
+        ]
+
+        var host: [Item] = [
+            Item(action: .terminal, title: text("Open Terminal on Host"), systemImage: "terminal", isDisabled: locked),
+        ]
+        if !state.isWorking && !state.isDone {
+            host.append(Item(action: .markDone, title: text("Mark Done"), systemImage: "checkmark.circle", isDisabled: locked))
+        }
+        if !state.isWorking {
+            host.append(Item(action: .toggleArchive,
+                             title: state.isArchived ? text("Restore from Archive") : text("Archive Session"),
+                             systemImage: state.isArchived ? "tray.and.arrow.up" : "archivebox",
+                             isDisabled: locked))
+        }
+        host += [
+            Item(action: .shutdownPC, title: text("Shut down PC…"), systemImage: "power",
+                 isDisabled: locked, isDestructive: true),
+            Item(action: .toggleAutoShutdown, title: text("Shut down PC when finished"),
+                 systemImage: state.isAutoShutdownOn ? "checkmark" : nil,
+                 isDisabled: locked, isChecked: state.isAutoShutdownOn),
+            Item(action: .hide, title: text("Hide from Sidebar"), systemImage: "eye.slash",
+                 isDisabled: locked || state.isRunning, isDestructive: true),
+        ]
+
+        return [
+            [
+                Item(action: .modes, title: text("Modes, Model & Context Controls"), systemImage: "slider.horizontal.3"),
+                Item(action: .btw, title: text("Side Questions (/btw)"), systemImage: "bubble.left.and.text.bubble.right"),
+            ],
+            library,
+            host,
+        ]
     }
 }
+
+#if canImport(UIKit)
+/// `UIButton` showing the session `UIMenu` on tap. The menu object is replaced only when `state` changes, so an open
+/// menu is never swapped out from under the user's finger by unrelated SwiftUI updates.
+private struct SessionActionsMenuButton: UIViewRepresentable {
+    let state: SessionActionsMenu.MenuState
+    let perform: (SessionActionsMenu.Action) -> Void
+
+    final class Coordinator {
+        var perform: (SessionActionsMenu.Action) -> Void
+        var builtState: SessionActionsMenu.MenuState?
+        init(perform: @escaping (SessionActionsMenu.Action) -> Void) { self.perform = perform }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(perform: perform) }
+
+    func makeUIView(context: Context) -> UIButton {
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "ellipsis.circle")
+        configuration.contentInsets = .zero
+        let button = UIButton(configuration: configuration)
+        button.showsMenuAsPrimaryAction = true
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentHuggingPriority(.required, for: .vertical)
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        let coordinator = context.coordinator
+        // Actions call through the coordinator, so a fresh closure never requires a new menu.
+        coordinator.perform = perform
+        guard coordinator.builtState != state else { return }
+        coordinator.builtState = state
+        button.menu = Self.makeMenu(state: state, coordinator: coordinator)
+    }
+
+    private static func makeMenu(state: SessionActionsMenu.MenuState, coordinator: Coordinator) -> UIMenu {
+        let groups = SessionActionsMenu.sections(for: state).map { items in
+            UIMenu(options: .displayInline, children: items.map { item in
+                var attributes: UIMenuElement.Attributes = []
+                if item.isDisabled { attributes.insert(.disabled) }
+                if item.isDestructive { attributes.insert(.destructive) }
+                // The checked state draws UIKit's own checkmark, so the toggle row carries no separate image.
+                let image = item.isChecked ? nil : item.systemImage.flatMap { UIImage(systemName: $0) }
+                return UIAction(title: item.title, image: image, attributes: attributes,
+                                state: item.isChecked ? .on : .off) { [weak coordinator] _ in
+                    coordinator?.perform(item.action)
+                }
+            })
+        }
+        return UIMenu(children: groups)
+    }
+}
+#endif
