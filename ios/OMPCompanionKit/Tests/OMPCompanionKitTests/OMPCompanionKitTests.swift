@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import OMPCompanionKit
 
@@ -379,7 +380,7 @@ final class OMPCompanionKitTests: XCTestCase {
         XCTAssertEqual(ImageAttachmentProcessor.estimateTokens(width: 4000, height: 3000), 1534)
     }
 
-    func testScreenBinaryPatchHeaderDecoding() {
+    @MainActor func testScreenBinaryPatchHeaderDecoding() {
         var bytes: [UInt8] = [1]
         func appendU16LE(_ v: UInt16) {
             bytes.append(UInt8(v & 0xFF))
