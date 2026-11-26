@@ -109,6 +109,9 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
     public var drafts: [String: Double]?
     public var editor: String?
     public var enhanceMode: String?
+    /// Settings › Enhance: the enhanced prompt asks for new tests / allows smoke runs (both off by default, every mode).
+    public var enhanceTests: Bool?
+    public var enhanceSmoke: Bool?
     public var accountChoices: [String: String]?
     public var activity: [ActivityItem]?
     public var instance: String?
@@ -127,6 +130,8 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         drafts: [String: Double]? = nil,
         editor: String? = nil,
         enhanceMode: String? = nil,
+        enhanceTests: Bool? = nil,
+        enhanceSmoke: Bool? = nil,
         accountChoices: [String: String]? = nil,
         activity: [ActivityItem]? = nil,
         instance: String? = nil,
@@ -143,6 +148,8 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         self.drafts = drafts
         self.editor = editor
         self.enhanceMode = enhanceMode
+        self.enhanceTests = enhanceTests
+        self.enhanceSmoke = enhanceSmoke
         self.accountChoices = accountChoices
         self.activity = activity
         self.instance = instance
@@ -162,6 +169,8 @@ public struct StoreSnapshot: Codable, Hashable, Sendable {
         drafts = c.lenient([String: Double].self, forKey: .drafts)
         editor = c.lenient(String.self, forKey: .editor)
         enhanceMode = c.lenient(String.self, forKey: .enhanceMode)
+        enhanceTests = c.lenientFlag(forKey: .enhanceTests)
+        enhanceSmoke = c.lenientFlag(forKey: .enhanceSmoke)
         accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
         activity = c.lossyArray(ActivityItem.self, forKey: .activity)
         instance = c.lenient(String.self, forKey: .instance)
@@ -185,6 +194,8 @@ public struct StatePollResponse: Codable, Sendable {
     public var drafts: [String: Double]?
     public var editor: String?
     public var enhanceMode: String?
+    public var enhanceTests: Bool?
+    public var enhanceSmoke: Bool?
     public var accountChoices: [String: String]?
     public var activity: [ActivityItem]?
     public var instance: String?
@@ -208,6 +219,8 @@ public struct StatePollResponse: Codable, Sendable {
         drafts = c.lenient([String: Double].self, forKey: .drafts)
         editor = c.lenient(String.self, forKey: .editor)
         enhanceMode = c.lenient(String.self, forKey: .enhanceMode)
+        enhanceTests = c.lenientFlag(forKey: .enhanceTests)
+        enhanceSmoke = c.lenientFlag(forKey: .enhanceSmoke)
         accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
         activity = c.lossyArray(ActivityItem.self, forKey: .activity)
         instance = c.lenient(String.self, forKey: .instance)
@@ -226,6 +239,8 @@ public struct StoreTop: Codable, Hashable, Sendable {
     public var drafts: [String: Double]?
     public var editor: String?
     public var enhanceMode: String?
+    public var enhanceTests: Bool?
+    public var enhanceSmoke: Bool?
     public var accountChoices: [String: String]?
     public var instance: String?
     public var canRestart: Bool?
@@ -242,6 +257,8 @@ public struct StoreTop: Codable, Hashable, Sendable {
         drafts = c.lenient([String: Double].self, forKey: .drafts)
         editor = c.lenient(String.self, forKey: .editor)
         enhanceMode = c.lenient(String.self, forKey: .enhanceMode)
+        enhanceTests = c.lenientFlag(forKey: .enhanceTests)
+        enhanceSmoke = c.lenientFlag(forKey: .enhanceSmoke)
         accountChoices = c.lenient([String: String].self, forKey: .accountChoices)
         instance = c.lenient(String.self, forKey: .instance)
         canRestart = c.lenientFlag(forKey: .canRestart)
@@ -2182,29 +2199,29 @@ public struct DraftSaveResponse: Codable, Hashable, Sendable {
     public var pdfs: [String]?
 }
 
+/// The companion's enhance modes, a ladder: each holds everything of the one before it. Writing new tests and smoke
+/// runs are separate settings (`enhanceTests`, `enhanceSmoke`) shared by every mode. An old companion's `notest` mode
+/// is `full` with tests off: `EnhanceMode(rawValue:) ?? .full` reads it as `.full`.
 public enum EnhanceMode: String, Codable, CaseIterable, Identifiable, Sendable {
-    case full
-    case notest
     case fast
+    case full
     case max
 
     public var id: String { rawValue }
 
     public var title: String {
         switch self {
-        case .full: return String(localized: "Full spec", bundle: .main)
-        case .notest: return String(localized: "No tests", bundle: .main)
         case .fast: return String(localized: "Fast", bundle: .main)
+        case .full: return String(localized: "Full spec", bundle: .main)
         case .max: return String(localized: "Max", bundle: .main)
         }
     }
 
     public var subtitle: String {
         switch self {
-        case .full: return "Full repo grounding and verification spec"
-        case .notest: return "Skip new tests and smoke checks"
-        case .fast: return "Lean, quick specification"
-        case .max: return "Best-in-class: full product feature set, existing checks only"
+        case .fast: return "The request, its must-haves and every place it must reach"
+        case .full: return "Fast plus a complete spec and added features"
+        case .max: return "Full spec plus the best-in-class feature set"
         }
     }
 }

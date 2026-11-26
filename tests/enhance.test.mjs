@@ -112,7 +112,7 @@ test('the composer mode picker switches the mode at once; a failed save puts the
   assert.match(d.elements.get('enhanceSlot').innerHTML, /title="Rewrite this draft with project context: Fast/);
   assert.match(d.elements.get('enhanceSlot').innerHTML, /<option value="fast" [^>]*selected/);
   refuse = true;
-  await pick('notest');
+  await pick('max');
   assert.match(d.elements.get('enhanceSlot').innerHTML, /<option value="fast" [^>]*selected/, 'back to the saved mode');
   await d.fire('click', { target: d.act('enhance') });
   assert.deepEqual(d.posts('/enhance'), [{ session: 'a', text: 'fix it', mode: 'fast' }]);

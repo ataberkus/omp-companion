@@ -1766,6 +1766,23 @@ public final class AppStore {
         }
     }
 
+    /// Write new tests / Allow smoke runs (Settings › Enhance): applied at once, a failed save puts the previous value back.
+    public func setHostEnhanceChecks(tests: Bool? = nil, smoke: Bool? = nil) async {
+        guard let client = activeClient else { return }
+        let prevTests = snapshot.enhanceTests, prevSmoke = snapshot.enhanceSmoke
+        if let tests { snapshot.enhanceTests = tests }
+        if let smoke { snapshot.enhanceSmoke = smoke }
+        do {
+            let saved = try await client.setEnhanceChecks(tests: tests, smoke: smoke)
+            snapshot.enhanceTests = saved.tests
+            snapshot.enhanceSmoke = saved.smoke
+        } catch {
+            snapshot.enhanceTests = prevTests
+            snapshot.enhanceSmoke = prevSmoke
+            showToast(error.localizedDescription, isError: true)
+        }
+    }
+
     public func setAutoShutdown(on: Bool) async {
         guard let client = activeClient else { return }
         do {

@@ -1177,14 +1177,15 @@
   // ---------- enhance prompt: a read-only OMP run rewrites the draft with project context ----------
   // Enhanceable: text that is not a slash or shell command, or no text with images attached (as Send accepts).
   const enhanceBlocked = (v, images) => v.trim() ? /^[/!]/.test(v.trim()) : !images;
-  // Enhance modes (companion/enhance-prompts.mjs ENHANCE_MODES); the one picked in Settings › Enhance is S.store.enhanceMode.
+  // Enhance modes (companion/enhance-prompts.mjs ENHANCE_MODES), a ladder: each holds everything of the one before it.
+  // The one picked in Settings › Enhance is S.store.enhanceMode; the Write new tests / Allow smoke runs settings
+  // (S.store.enhanceTests / enhanceSmoke) apply to every mode.
   const ENHANCE_MODES = [
-    ['full', 'Full spec', 'Complete architect spec: inferred requirements, added features the best products of the kind have, assumptions, and a Done when that adds tests for the new behaviour. Up to 12 lookups.'],
-    ['notest', 'No new tests', 'The same complete spec and added features, but the agent only runs the repo\'s existing typecheck, lint, tests or build: no new tests, no browser or dev-server smoke runs. Up to 12 lookups.'],
-    ['fast', 'Fast', 'Lean prompt: the request, at most 5 must-have notes, assumptions, and the same light checks. Up to 6 lookups.'],
-    ['max', 'Best-in-class', 'Reads the draft as a product brief: the full feature set the best products of its kind have, including the ones you didn\'t name, built with the repo\'s stack; the repo\'s existing checks, testing left to the agent. Up to 12 lookups.'],
+    ['fast', 'Fast', 'Lean prompt: the request, what the agent can\'t work without, and every place the change must reach (sibling screens, platforms, native folders). Up to 6 lookups.'],
+    ['full', 'Full spec', 'Everything in Fast plus a complete spec: the surfaces it touches, inferred requirements, and added features the best products of the kind have. Up to 12 lookups.'],
+    ['max', 'Best-in-class', 'Everything in Full spec, complete everywhere, plus the full feature set the best products of its kind have, including the ones you didn\'t name and where each one goes. Up to 16 lookups.'],
   ];
-  const enhanceModeLabel = mode => (ENHANCE_MODES.find(m => m[0] === mode) || ENHANCE_MODES[0])[1];
+  const enhanceModeLabel = mode => (ENHANCE_MODES.find(m => m[0] === mode) || ENHANCE_MODES[1])[1];
   // The composer's lasting enhance control: Undo restores the pre-enhance draft, Redo puts the result back, and an offer
   // applies a result that arrived after the draft changed. It sits in the toolbar (not a toast) until the draft is sent,
   // discarded, dismissed, or replaced by another enhance, and its state is kept per view.
@@ -5233,10 +5234,10 @@
   // without one it follows the composer's model and reasoning level.
   function enhanceSection() {
     const q = S.set.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (q.length && !q.every(w => 'enhance prompt enhancer model reasoning thinking level mode full spec tests notest fast'.includes(w))) return '';
+    if (q.length && !q.every(w => 'enhance prompt enhancer model reasoning thinking level mode full spec fast max best write new tests testing allow smoke runs browser app'.includes(w))) return '';
     const roles = S.set.data?.settings.find(s => s.key === 'modelRoles'), role = roles?.value?.enhance || '';
-    const mode = S.store?.enhanceMode || 'full';
-    if (S.set.changed && !role && mode === 'full') return '';
+    const mode = S.store?.enhanceMode || 'full', tests = !!S.store?.enhanceTests, smoke = !!S.store?.enhanceSmoke;
+    if (S.set.changed && !role && mode === 'full' && !tests && !smoke) return '';
     const r = splitSel(role), label = role ? modelLabel(r.sel, r.thinking) || role : "Composer's model";
     const levels = S.models?.thinkingLevels || ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
     // With a role, the row edits the role's `:level` suffix; no suffix means OMP's default level (shown, not offered).
@@ -5245,6 +5246,10 @@
     return `<section class="set-group" id="sg-enhance"><h2>✨ Enhance <small>prompt enhancer</small></h2>
       <div class="set-row ${mode !== 'full' ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-mode-name">Mode${mode !== 'full' ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">${esc(ENHANCE_MODES.find(m => m[0] === mode)?.[2] || '')} Used by ✨ and Ctrl+Shift+E, saved by the companion.</div>${mode !== 'full' ? '<div class="set-def">Default: <code>Full spec</code></div>' : ''}</div>
         <div class="set-ctl"><select data-enhmode aria-labelledby="enh-mode-name">${ENHANCE_MODES.map(([v, t]) => `<option value="${v}" ${v === mode ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div></div>
+      <div class="set-row ${tests ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-tests-name">Write new tests${tests ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">The enhanced prompt asks the agent to add tests for the new behaviour. Off: it only runs the repo's existing typecheck, lint, tests or build. Applies to every mode.</div>${tests ? '<div class="set-def">Default: <code>off</code></div>' : ''}</div>
+        <div class="set-ctl"><label class="switch"><input type="checkbox" data-enhtests aria-labelledby="enh-tests-name" ${tests ? 'checked' : ''}><span></span></label></div></div>
+      <div class="set-row ${smoke ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-smoke-name">Allow smoke runs${smoke ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">The enhanced prompt lets the agent start the app, a dev server or a browser once to check the change. These runs can freeze the computer. Off: no smoke runs. Applies to every mode.</div>${smoke ? '<div class="set-def">Default: <code>off</code></div>' : ''}</div>
+        <div class="set-ctl"><label class="switch"><input type="checkbox" data-enhsmoke aria-labelledby="enh-smoke-name" ${smoke ? 'checked' : ''}><span></span></label></div></div>
       <div class="set-row ${role ? 'mod' : ''}"><div class="set-info"><div class="set-name" id="enh-model-name">Model${role ? '<span class="tag mod">changed</span>' : ''}</div><div class="set-desc">Composer's model: the model of the session (or New session) you enhance in. A picked model is saved as OMP's <code>enhance</code> model role, together with its reasoning level.</div></div>
         <div class="set-ctl">${roles ? `<button class="model-chip" data-mmkey="modelRoles" data-mmname="enhance" title="${esc(role || "Composer's model")}" aria-label="Enhance model: ${esc(label)}"><span aria-hidden="true">◆</span> <span>${esc(label)}</span> <span aria-hidden="true">▾</span></button>${role ? `<button class="btn sm ghost" data-mmdel="modelRoles" data-mmname="enhance">Use composer's model</button>` : ''}` : '<span class="muted">Needs OMP settings</span>'}</div></div>
       <div class="set-row"><div class="set-info"><div class="set-name" id="enh-think-name">Reasoning level</div><div class="set-desc">${role ? `Saved with the <code>enhance</code> model role${lv ? '' : '. None set: OMP\'s default level applies, which may be slow. Pick one'}.` : "The composer's reasoning level: the level picked for the session (or New session) you enhance in."}</div></div>
@@ -5405,6 +5410,14 @@
     redraw();
     try { await api('/enhance-mode', { mode }); }
     catch (e) { if (S.store) S.store.enhanceMode = prev; toast(e.message, 'err'); redraw(); }
+  }
+  // Write new tests / Allow smoke runs: applied at once, then saved; a failed save puts the previous value back.
+  async function saveEnhanceCheck(key, on) {
+    const prop = key === 'tests' ? 'enhanceTests' : 'enhanceSmoke', prev = !!S.store?.[prop];
+    if (S.store) S.store[prop] = on;
+    renderSettings();
+    try { await api('/enhance-mode', { [key]: on }); }
+    catch (e) { if (S.store) S.store[prop] = prev; toast(e.message, 'err'); renderSettings(); }
   }
   function settingRow(x) {
     const id = setId(x.key), long = x.description?.length > 220, open = S.set.descOpen.has(x.key);
@@ -6685,6 +6698,8 @@
     else if (e.target.dataset?.set) settingInput(e.target);
     else if (e.target.matches?.('[data-enhthinking]')) saveEnhanceThinking(e.target.value);
     else if (e.target.matches?.('[data-enhmode]')) saveEnhanceMode(e.target.value);
+    else if (e.target.matches?.('[data-enhtests]')) saveEnhanceCheck('tests', e.target.checked);
+    else if (e.target.matches?.('[data-enhsmoke]')) saveEnhanceCheck('smoke', e.target.checked);
     else if (e.target.matches?.('[data-editor]')) saveEditor(e.target.value);
     else if (e.target.matches?.('[data-viewed]')) { const sec = e.target.closest('[data-cpath]'); if (sec) setViewed(current().parent, sec.dataset.cpath, e.target.dataset.viewed, e.target.checked); }
     else if (e.target.matches?.('[data-wtbase]')) { const id = current().parent.slice(2), w = S.wt.get(id) || {}; w.base = e.target.value === 'head' ? 'head' : 'start'; w.data = null; w.error = ''; S.wt.set(id, w); S.lastSig = ''; loadWorktree(id, true); }

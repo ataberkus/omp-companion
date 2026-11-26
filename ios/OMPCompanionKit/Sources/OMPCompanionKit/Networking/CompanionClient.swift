@@ -870,6 +870,16 @@ public struct CompanionClient: Sendable {
         return res.mode
     }
 
+    /// Settings › Enhance "Write new tests" / "Allow smoke runs": posts only the given setting; returns both as saved.
+    public func setEnhanceChecks(tests: Bool? = nil, smoke: Bool? = nil) async throws -> (tests: Bool, smoke: Bool) {
+        struct Resp: Decodable { let tests: Bool; let smoke: Bool }
+        var body: [String: Any] = [:]
+        if let tests { body["tests"] = tests }
+        if let smoke { body["smoke"] = smoke }
+        let res: Resp = try await post("/api/enhance-mode", jsonObject: body)
+        return (res.tests, res.smoke)
+    }
+
     // MARK: - Settings, Plugins, MCP, Accounts, Spend, CLI, Storage & System
 
     public func fetchSettings() async throws -> SettingsResponse {

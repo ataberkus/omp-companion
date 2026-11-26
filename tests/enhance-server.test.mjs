@@ -211,13 +211,19 @@ test('each mode runs its own system prompt and lookup budget; the saved mode is 
     const system = argv.find(a => a.startsWith('--system-prompt=')).slice('--system-prompt='.length);
     return { mode: start.body.mode, prompt: await readFile(system, 'utf8'), lookups: await readFile(join(dir, 'lookups.txt'), 'utf8') };
   };
-  for (const mode of ['full', 'notest', 'fast', 'max']) {
+  for (const mode of ['fast', 'full', 'max']) {
     const r = await run({ mode });
-    assert.deepEqual(r, { mode, prompt: internals.ENHANCE_MODES[mode].system, lookups: String(internals.ENHANCE_MODES[mode].lookups) });
+    assert.deepEqual(r, { mode, prompt: internals.ENHANCE_MODES[mode].system({}), lookups: String(internals.ENHANCE_MODES[mode].lookups) });
+    assert.equal((await run({ mode, tests: true, smoke: true })).prompt, internals.ENHANCE_MODES[mode].system({ tests: true, smoke: true }));
   }
+  assert.deepEqual(await run({ mode: 'notest' }), { mode: 'full', prompt: internals.ENHANCE_MODES.full.system({}), lookups: '12' }, 'the old notest mode runs full');
   assert.equal((await run({})).mode, 'full');
   assert.equal((await call('/enhance-mode', { mode: 'fast' })).status, 200);
   assert.equal((await run({})).mode, 'fast');
+  const saved = await call('/enhance-mode', { tests: true });
+  assert.deepEqual([saved.status, saved.body], [200, { mode: 'fast', tests: true, smoke: false }]);
+  assert.equal((await run({})).prompt, internals.ENHANCE_MODES.fast.system({ tests: true }), 'the saved tests setting is the default');
+  assert.equal((await call('/enhance-mode', { tests: 'yes' })).status, 400);
   assert.equal((await call('/enhance-mode', { mode: 'nope' })).status, 400);
   assert.equal((await call('/enhance', { session: 'session', text: 'x', mode: 'nope' })).status, 400);
 });

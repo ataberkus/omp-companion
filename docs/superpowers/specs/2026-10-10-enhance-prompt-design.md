@@ -41,8 +41,9 @@ Follows the existing CLI-job pattern (`runCli`, `cliJobs`, `cliProcs`).
 
 ### Routes
 
-- `POST /api/enhance` with `{ text, session? | path?, model?, thinking?, images?, preview?, mode? }` → `202 { id, model, mode }`.
-  - `mode`: `full` | `notest` | `fast` (`ENHANCE_MODES` in `companion/enhance-prompts.mjs`); omitted, the mode saved with `POST /api/enhance-mode` (`store.enhanceMode`, default `full`). Anything else is a 400.
+- `POST /api/enhance` with `{ text, session? | path?, model?, thinking?, images?, preview?, mode?, tests?, smoke? }` → `202 { id, model, mode }`.
+  - `mode`: `fast` | `full` | `max` (`ENHANCE_MODES` in `companion/enhance-prompts.mjs`); the old `notest` is an alias of `full` (`ENHANCE_MODE_ALIASES`). Omitted, the mode saved with `POST /api/enhance-mode` (`store.enhanceMode`, default `full`). Anything else is a 400.
+  - `tests`, `smoke`: booleans (anything else is a 400); omitted, the saved settings (`store.enhanceTests`, `store.enhanceSmoke`, both default `false`).
   - `text`: required, 1–20 000 characters.
   - `session`: a panel session id. The folder is the session's `cwd` (which may be an isolated worktree); the model is the session's current choice; the conversation tail comes from its messages.
   - `path`: a folder from the OMP-history view, validated with `resolveDir`. Used together with `model`/`thinking` from the client. No conversation tail.
@@ -51,18 +52,19 @@ Follows the existing CLI-job pattern (`runCli`, `cliJobs`, `cliProcs`).
 - `GET /api/enhance?id=` → `{ id, status: 'running'|'done'|'error'|'cancelled', step, model, mode, text?, error? }`.
 - `POST /api/enhance/stop` with `{ id }` → `{ status }`. Kills the process.
 - Jobs are kept in memory only. At most **3** can run at once (409 beyond that). A finished job is dropped 5 minutes after it finishes. Companion shutdown kills running enhance processes.
-- `POST /api/enhance-mode` with `{ mode }` → `{ mode }`. Saves the mode *Settings › Enhance › Mode* picked in `workspace.json`.
+- `POST /api/enhance-mode` with any of `{ mode?, tests?, smoke? }` → `{ mode, tests, smoke }`. Saves what *Settings › Enhance* picked (*Mode*, *Write new tests*, *Allow smoke runs*) in `workspace.json`.
 
 ### Modes
 
-Ported from [ataberkus/prompt-enhancer](https://github.com/ataberkus/prompt-enhancer). Each mode is its own system prompt file in `dataDir` (`enhance-system.md`, `enhance-system-notest.md`, `enhance-system-fast.md`, `enhance-system-max.md`) and its own lookup budget, passed to the guard as `OMP_ENHANCE_LOOKUP_LIMIT`:
+Ported from [ataberkus/prompt-enhancer](https://github.com/ataberkus/prompt-enhancer). The modes are a ladder, each holding everything of the one before it (fast ⊂ full ⊂ max). `full` and `max` include the *Reach* part (`ENHANCE_REACH`: sibling inventory across the repo including native folders, *Surfaces*, no escape hatches, list capacity, and layout by numbers: the box a UI renders in, ~360px width, short heights, 44px touch targets); `fast` asks only that the request is finished in every place it must reach. Each mode has its own lookup budget, passed to the guard as `OMP_ENHANCE_LOOKUP_LIMIT`:
 
 | mode | prompt | lookups |
 |---|---|---|
-| `full` (Full spec) | the system prompt below | 12 |
-| `notest` (No new tests) | the same, with the test and runnable-check lines of *Done when* swapped for light checks: only the repo's existing typecheck, lint, tests or build; no new tests, no browser or dev-server runs | 12 |
-| `fast` (Fast) | a lean prompt: the request, at most 5 must-have notes, assumptions and the same light checks | 6 |
-| `max` (Best-in-class) | the draft read as a product brief: a feature set of the best products of its kind (Core, Expected, Standout, Quality, and a Later line for what needs accounts, servers or paid APIs), an Implementation section grounded in the code, assumptions, and a *Done when* that runs the repo's existing checks and leaves testing to the agent (no test list, no new tests asked for) | 12 |
+| `fast` (Fast) | a lean prompt: the request, what the change cannot work without, and every place it must reach | 6 |
+| `full` (Full spec) | the system prompt below: everything in `fast`, plus *Surfaces*, inferred requirements, assumptions and added features | 12 |
+| `max` (Best-in-class) | everything in `full`, complete everywhere, plus the draft read as a product brief: a feature set of the best products of its kind (Core, Expected, Standout, Quality, and a Later line for what needs accounts, servers or paid APIs) with where each feature goes, and an Implementation section grounded in the code | 16 |
+
+Two settings apply to every mode, both off by default: `tests` (the *Done when* asks for new tests for the new behaviour; off, only the repo's existing typecheck, lint, tests or build) and `smoke` (the agent may start the app, a dev server or a browser once; off, none, since those runs can freeze the computer). `enhanceChecks({tests, smoke})` writes the matching *Done when* check lines, and `ENHANCE_MODES[mode].system({tests, smoke})` the prompt. Each mode and setting combination is its own system prompt file in `dataDir`: `enhance-system${mode === 'full' ? '' : '-' + mode}${tests ? '-tests' : ''}${smoke ? '-smoke' : ''}.md` (`enhance-system.md` is `full` with both off). The former `notest` mode is `full` with `tests` off; its old `enhance-system-notest.md` is removed at startup.
 
 ### Model resolution
 
@@ -199,6 +201,8 @@ It replaces OMP's coding-agent prompt, so the enhancer gets only these instructi
 > Output ONLY the rewritten prompt as plain Markdown. No preamble, no explanation, no code fence around the whole prompt.
 
 The **Added features** section (and the `max` mode) came later, from prompt-enhancer, and has not been measured with `scripts/enhance-outcome.mjs`. It asks for work beyond the draft on purpose, so that judge, which counts unasked work, will see more of it; the measurements below are of the prompt without it.
+
+The fast ⊂ full ⊂ max ladder, the *Reach* part, the 16-lookup `max` budget and the `tests` / `smoke` settings (which replaced the `notest` mode; both off, so the default `full` prompt no longer asks for new tests) came later still and are also unmeasured by `scripts/enhance-outcome.mjs`: the prompt quoted above and the tables below predate them.
 
 Why these rules: the rewrite is judged by what the agent that follows it delivers, measured with `scripts/enhance-outcome.mjs` (a real agent in a fresh clone, then the repo tests, hidden checks the agent never sees, and a blind judge against the user's draft). The original prompt (`7e6bb34`) had none of the language, verb, edge-case and "Done when" rules, only "Include acceptance criteria or a verification step only when the draft implies one". On 37 drafts in 5 repos, 2 runs each plus 2 more runs of the 16 drafts where any early run failed (106 runs per prompt; the last four rules above came later, see below):
 

@@ -980,6 +980,17 @@
         }
       }
     },
+    "Allow Smoke Runs": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Duman Testi Çalıştırmalarına İzin Ver"
+          }
+        }
+      }
+    },
     "Allowed tools (comma-separated)": {
       "extractionState": "manual",
       "localizations": {
@@ -3345,6 +3356,17 @@
         }
       }
     },
+    "Enhanced prompts ask the agent to add tests for new behaviour. Off: existing checks only.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geliştirilmiş istemler, ajandan yeni davranış için test eklemesini ister. Kapalı: yalnızca mevcut kontroller."
+          }
+        }
+      }
+    },
     "Enhancement Mode": {
       "extractionState": "manual",
       "localizations": {
@@ -5530,17 +5552,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Alt klasör yok"
-          }
-        }
-      }
-    },
-    "No tests": {
-      "extractionState": "manual",
-      "localizations": {
-        "tr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Testsiz"
           }
         }
       }
@@ -9736,6 +9747,17 @@
         }
       }
     },
+    "The agent may start the app, a dev server or a browser once. Can freeze the computer.": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajan uygulamayı, bir geliştirme sunucusunu veya bir tarayıcıyı bir kez başlatabilir. Bilgisayarı dondurabilir."
+          }
+        }
+      }
+    },
     "The companion did not come back. Check it on that computer.": {
       "extractionState": "manual",
       "localizations": {
@@ -10722,6 +10744,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Worktree silindi"
+          }
+        }
+      }
+    },
+    "Write New Tests": {
+      "extractionState": "manual",
+      "localizations": {
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yeni Testler Yaz"
           }
         }
       }

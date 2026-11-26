@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { now, replaceFile } from './util.mjs';
 import { finishWork } from './session-views.mjs';
 import { EDITOR_CHOICES } from './system.mjs';
-import { ENHANCE_MODES } from './enhance-prompts.mjs';
+import { ENHANCE_MODES, enhanceMode } from './enhance-prompts.mjs';
 import { colors, projectColor } from './workspaces.mjs';
 import { MESSAGE_LIMIT } from './transcript.mjs';
 export async function openStore(ctx){
@@ -59,8 +59,12 @@ export async function openStore(ctx){
  store.pinned=Array.isArray(store.pinned)?store.pinned.filter(k=>typeof k==='string'&&!store.archived.includes(k)):[];
  // Enhance follows the composer's reasoning level now; drop the old Settings-page level.
  delete store.enhanceThinking;
- // Enhance mode for ✨ and Ctrl+Shift+E (Settings › Enhance): a key of ENHANCE_MODES.
+ // Enhance mode for ✨ and Ctrl+Shift+E (Settings › Enhance): a key of ENHANCE_MODES (the old `notest` is `full`).
+ store.enhanceMode=enhanceMode(store.enhanceMode);
  if(!Object.hasOwn(ENHANCE_MODES,store.enhanceMode))store.enhanceMode='full';
+ // Enhance settings every mode shares (Settings › Enhance): the agent adds new tests; it may run the app once to look at it.
+ store.enhanceTests=store.enhanceTests===true;
+ store.enhanceSmoke=store.enhanceSmoke===true;
  // OAuth account the user chose per provider (provider id → OMP's account label); applied to sessions with /session pin.
  store.accountChoices=Object.fromEntries(Object.entries(store.accountChoices&&typeof store.accountChoices==='object'?store.accountChoices:{}).filter(([k,v])=>k&&typeof v==='string'&&v));
  // Where "Open in editor" opens files (Settings › Open in editor).

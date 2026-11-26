@@ -69,14 +69,16 @@ export async function createCompanion(options={}){
  const omp=options.omp||ompHost(ompEntry,{dataDir});omp.warm?.();
  await fs.mkdir(dataDir,{recursive:true,mode:0o700});
  if(!password)token=await savedToken(dataDir,token);
- // One system prompt file per Enhance mode (enhance-system.md is `full`).
+ // One system prompt file per Enhance mode and tests/smoke setting (enhance-system.md is `full` with both off).
  const enhanceOverlay=path.join(dataDir,'enhance-overlay.yml'),enhanceGuard=path.join(dataDir,'enhance-guard.mjs');
- const enhanceSystems=Object.fromEntries(Object.keys(ENHANCE_MODES).map(m=>[m,path.join(dataDir,m==='full'?'enhance-system.md':`enhance-system-${m}.md`)]));
+ const enhanceSystemFile=(m,{tests=false,smoke=false}={})=>path.join(dataDir,`enhance-system${m==='full'?'':`-${m}`}${tests?'-tests':''}${smoke?'-smoke':''}.md`);
  await syncFile(enhanceOverlay,ENHANCE_OVERLAY);await syncFile(enhanceGuard,ENHANCE_GUARD);
- for(const [m,file] of Object.entries(enhanceSystems))await syncFile(file,ENHANCE_MODES[m].system);
+ for(const m of Object.keys(ENHANCE_MODES))for(const tests of [false,true])for(const smoke of [false,true])await syncFile(enhanceSystemFile(m,{tests,smoke}),ENHANCE_MODES[m].system({tests,smoke}));
+ // The `notest` mode is `full` now; its old prompt file goes.
+ await fs.rm(path.join(dataDir,'enhance-system-notest.md'),{force:true});
  // Shared state of this companion. Each module below adds its functions (and getters for state it owns); a module
  // calls one created after it through ctx. Kept per companion: tests run several in one process.
- const ctx={options,password,token,exposeToken,publicHosts,dataDir,ompEntry,ompSource,ompExecutable,ompPrefix,execOmp,omp,enhanceOverlay,enhanceSystems,enhanceGuard};
+ const ctx={options,password,token,exposeToken,publicHosts,dataDir,ompEntry,ompSource,ompExecutable,ompPrefix,execOmp,omp,enhanceOverlay,enhanceSystemFile,enhanceGuard};
  const use=api=>Object.defineProperties(ctx,Object.getOwnPropertyDescriptors(api));
  use(await openStore(ctx));
  use(await createDrafts(ctx));

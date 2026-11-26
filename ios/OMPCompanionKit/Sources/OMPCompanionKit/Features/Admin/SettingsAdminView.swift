@@ -204,11 +204,39 @@ public struct SettingsAdminView: View {
                         .listRowBackground(palette.card)
 
                         Picker("Prompt Enhance Mode", selection: Binding(
-                            get: { store.snapshot.enhanceMode ?? "full" },
+                            get: { EnhanceMode(rawValue: store.snapshot.enhanceMode ?? "full")?.rawValue ?? EnhanceMode.full.rawValue },
                             set: { next in Task { await store.setHostEnhanceMode(next) } }
                         )) {
                             ForEach(EnhanceMode.allCases) { mode in
                                 Text(mode.title).tag(mode.rawValue)
+                            }
+                        }
+                        .disabled(!store.canPerformMutatingActions)
+                        .listRowBackground(palette.card)
+
+                        Toggle(isOn: Binding(
+                            get: { store.snapshot.enhanceTests ?? false },
+                            set: { next in Task { await store.setHostEnhanceChecks(tests: next) } }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Write New Tests")
+                                Text("Enhanced prompts ask the agent to add tests for new behaviour. Off: existing checks only.")
+                                    .font(.caption2)
+                                    .foregroundStyle(palette.muted)
+                            }
+                        }
+                        .disabled(!store.canPerformMutatingActions)
+                        .listRowBackground(palette.card)
+
+                        Toggle(isOn: Binding(
+                            get: { store.snapshot.enhanceSmoke ?? false },
+                            set: { next in Task { await store.setHostEnhanceChecks(smoke: next) } }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Allow Smoke Runs")
+                                Text("The agent may start the app, a dev server or a browser once. Can freeze the computer.")
+                                    .font(.caption2)
+                                    .foregroundStyle(palette.muted)
                             }
                         }
                         .disabled(!store.canPerformMutatingActions)

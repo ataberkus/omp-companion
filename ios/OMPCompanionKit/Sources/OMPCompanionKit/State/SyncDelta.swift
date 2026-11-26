@@ -64,6 +64,8 @@ public final class SyncDeltaReducer: @unchecked Sendable {
                 if let drafts = top.drafts { next.drafts = drafts }
                 next.editor = top.editor
                 next.enhanceMode = top.enhanceMode
+                next.enhanceTests = top.enhanceTests
+                next.enhanceSmoke = top.enhanceSmoke
                 next.accountChoices = top.accountChoices
                 next.instance = top.instance
                 next.canRestart = top.canRestart
@@ -113,6 +115,8 @@ public final class SyncDeltaReducer: @unchecked Sendable {
             if let drafts = poll.drafts { next.drafts = drafts }
             if let editor = poll.editor { next.editor = editor }
             if let enhanceMode = poll.enhanceMode { next.enhanceMode = enhanceMode }
+            if let enhanceTests = poll.enhanceTests { next.enhanceTests = enhanceTests }
+            if let enhanceSmoke = poll.enhanceSmoke { next.enhanceSmoke = enhanceSmoke }
             if let accountChoices = poll.accountChoices { next.accountChoices = accountChoices }
             if let activity = poll.activity { next.activity = activity }
             if let instance = poll.instance { next.instance = instance }
