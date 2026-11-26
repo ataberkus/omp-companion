@@ -255,7 +255,8 @@ final class OMPCompanionKitTests: XCTestCase {
             currentOrder: ["m0", "m1", "m2", "m3"],
             edit: OrderEdit(drop: 1, at: 1, del: 1, add: ["m2b", "m4"], n: 4)
         )
-        XCTAssertEqual(edited, ["m1", "m2b", "m3", "m4"])
+        // Drop m0, then replace the one at 1 (m2) with m2b, m4: the splice companion/sync.mjs and the web client's editOrder do.
+        XCTAssertEqual(edited, ["m1", "m2b", "m4", "m3"])
 
         let invalid = SyncDeltaReducer.applyOrderEdit(
             currentOrder: ["m0", "m1"],
