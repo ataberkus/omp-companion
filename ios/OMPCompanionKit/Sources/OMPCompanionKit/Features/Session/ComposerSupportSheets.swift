@@ -298,8 +298,7 @@ public struct PromptEnhanceSheet: View {
                                     Text("BEFORE")
                                         .font(.caption2.weight(.bold))
                                         .foregroundStyle(palette.muted)
-                                    Text(originalText)
-                                        .font(.caption)
+                                    draftSummary(font: .caption)
                                         .foregroundStyle(palette.muted)
                                         .padding(8)
                                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -322,8 +321,7 @@ public struct PromptEnhanceSheet: View {
                             Text("Original Draft")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(palette.muted)
-                            Text(originalText)
-                                .font(.subheadline)
+                            draftSummary(font: .subheadline)
                                 .foregroundStyle(palette.foreground)
                         }
                         .ompCard(palette)
@@ -353,7 +351,7 @@ public struct PromptEnhanceSheet: View {
                         Button("Enhance") {
                             Task { await runEnhance() }
                         }
-                        .disabled(isRunning || originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(isRunning || (!hasDraftText && images.isEmpty))
                     }
                 }
             }
@@ -386,6 +384,25 @@ public struct PromptEnhanceSheet: View {
             .onDisappear {
                 pollTask?.cancel()
             }
+        }
+    }
+
+    private var hasDraftText: Bool {
+        !originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The draft's text, or for a draft of only images how many are attached.
+    @ViewBuilder
+    private func draftSummary(font: Font) -> some View {
+        if hasDraftText {
+            Text(originalText)
+                .font(font)
+        } else {
+            Label(
+                images.count == 1 ? "1 image attached" : "\(images.count) images attached",
+                systemImage: "photo"
+            )
+            .font(font)
         }
     }
 

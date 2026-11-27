@@ -236,7 +236,8 @@ public struct QuickStartSheet: View {
 
                         Spacer()
 
-                        if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // A prompt of only images enhances too (as on the web).
+                        if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty {
                             Button {
                                 showEnhanceSheet = true
                             } label: {

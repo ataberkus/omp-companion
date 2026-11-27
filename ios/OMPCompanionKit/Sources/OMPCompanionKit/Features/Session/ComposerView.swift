@@ -533,7 +533,8 @@ public struct ComposerView: View {
                     .disabled(!store.canComposePrompts)
                     .accessibilityLabel("Paste image or PDF from clipboard")
 
-                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // A draft of only images enhances too (as on the web); PDFs alone do not, enhance takes images.
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty {
                         Button {
                             showEnhanceSheet = true
                         } label: {
