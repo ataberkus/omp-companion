@@ -51,6 +51,10 @@ public struct ComposerView: View {
     @State private var editingQueuedItem: QueuedMessage?
     @State private var queuedEditText: String = ""
 
+    /// Base branch of a session in a hidden workspace, keyed by session ID: the companion does not poll hidden
+    /// workspaces' folders, so their sessions ask `worktree_status` once (the web's `S.wtBase`). "" while unknown.
+    @State private var hiddenWorktreeBase: [String: String] = [:]
+
     public init(
         store: AppStore,
         session: SessionSummary,
@@ -160,6 +164,43 @@ public struct ComposerView: View {
         let pdfTokens = pdfAttachments.reduce(0) { $0 + $1.estimatedTokens }
         let txtTokens = max(0, (text.utf8.count + 3) / 4)
         return imgTokens + pdfTokens + txtTokens
+    }
+
+    /// The web's `COMMIT_RELATED`.
+    private static let commitRelatedPrompt = "Commit only the changes related to your work in this session. Leave unrelated changes in this folder uncommitted. Use a clear commit message and report the commit."
+
+    /// The web's `PUSH_TO_BASE`.
+    private static func pushToBasePrompt(branch: String, base: String) -> String {
+        "Commit this worktree's changes on its branch \(branch) with a clear commit message. Then merge \(branch) into \(base) in the project folder where \(base) is checked out (find it with `git worktree list`), and push \(base) to the remote. If the merge conflicts, resolve every conflict yourself, keeping the intent of both sides (read the conflicting changes on each side; don't just take one side wholesale), check the result still builds/passes the repo's existing checks where practical, then complete the merge commit. If the push is rejected because the remote \(base) moved ahead, pull it into \(base) (merge, resolving conflicts the same way) and push again. Only stop and tell me if a conflict can't be resolved without a decision from me. Report the commits, the merge (and any conflicts you resolved and how) and the push result."
+    }
+
+    /// The omp-web/ branch of an isolated session, which "Push to <base>" merges; nil hides the button (web `pushButton`).
+    private var pushableBranch: String? {
+        guard session.isolated == true, let branch = session.branch, branch.hasPrefix("omp-web/") else { return nil }
+        return branch
+    }
+
+    /// The session's project is hidden, so its base comes from `worktree_status` rather than the polled project branch.
+    private var needsWorktreeBaseLookup: Bool {
+        pushableBranch != nil && store.project(for: session)?.hidden == true
+    }
+
+    /// The branch checked out in the project folder (web `pushBase`); a detached HEAD or a folder outside git names none,
+    /// and then the button says main.
+    private var pushBase: String {
+        let base: String
+        if needsWorktreeBaseLookup {
+            base = hiddenWorktreeBase[session.id] ?? ""
+        } else {
+            let b = store.project(for: session)?.branch ?? ""
+            base = b == "detached" || b == "workspace" ? "" : b
+        }
+        return base.isEmpty ? "main" : base
+    }
+
+    /// "(queued until it finishes)" in the web's button titles: while OMP works the prompt goes as a follow-up.
+    private var quickPromptQueues: Bool {
+        session.status == .running || session.status == .queued
     }
 
     public var body: some View {
@@ -280,6 +321,52 @@ public struct ComposerView: View {
                         .buttonStyle(.plain)
 
                         Button {
+                            Task { await sendOrQueue(Self.commitRelatedPrompt) }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.seal")
+                                Text("Commit")
+                            }
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(palette.raised, in: Capsule())
+                            .foregroundStyle(palette.foreground)
+                            .overlay(Capsule().stroke(palette.border, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSending || !store.canComposePrompts)
+                        .accessibilityLabel("Commit related changes")
+                        .accessibilityHint(quickPromptQueues
+                            ? "Asks OMP to commit only the changes from its work in this session (queued until it finishes)"
+                            : "Asks OMP to commit only the changes from its work in this session")
+
+                        if let branch = pushableBranch {
+                            let base = pushBase
+                            Button {
+                                Task { await sendOrQueue(Self.pushToBasePrompt(branch: branch, base: base)) }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.triangle.merge")
+                                    Text("Push to \(base)")
+                                        .lineLimit(1)
+                                }
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(palette.raised, in: Capsule())
+                                .foregroundStyle(palette.foreground)
+                                .overlay(Capsule().stroke(palette.border, lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isSending || !store.canComposePrompts)
+                            .accessibilityLabel("Push to \(base)")
+                            .accessibilityHint(quickPromptQueues
+                                ? "Asks OMP to commit this worktree's changes on \(branch), merge it into \(base), resolving any conflicts, and push \(base) (queued until it finishes)"
+                                : "Asks OMP to commit this worktree's changes on \(branch), merge it into \(base), resolving any conflicts, and push \(base)")
+                        }
+
+                        Button {
                             showUsageSheet = true
                         } label: {
                             HStack(spacing: 4) {
@@ -309,6 +396,14 @@ public struct ComposerView: View {
                         }
                     }
                     .padding(.horizontal, 12)
+                }
+                .task(id: needsWorktreeBaseLookup ? session.id : nil) {
+                    guard needsWorktreeBaseLookup, hiddenWorktreeBase[session.id] == nil,
+                          let client = store.activeClient else { return }
+                    hiddenWorktreeBase[session.id] = ""
+                    if let status = try? await client.fetchWorktreeStatus(sessionId: session.id) {
+                        hiddenWorktreeBase[session.id] = status.base ?? ""
+                    }
                 }
 
                 // Text editor + action strip
@@ -1102,33 +1197,39 @@ public struct ComposerView: View {
     }
 
     /// Holds the message in the outbox and clears the composer as if it was sent. When the outbox cannot take it (full,
-    /// or not saved), the message comes back to the composer and its text is also kept on the phone.
+    /// or not saved), the message comes back to the composer and its text is also kept on the phone. `fromComposer`
+    /// false: a canned prompt (Commit / Push) that never was in the composer, so the composer is left as it is.
     private func queueForLater(
         text message: String,
         images: [PendingImageAttachment],
         pdfs: [PendingPdfAttachment],
         state: OutboxItem.State,
-        lastError: String?
+        lastError: String?,
+        fromComposer: Bool = true
     ) async {
         do {
             try await store.queuePrompt(session: session, text: message, images: images, pdfs: pdfs, state: state, lastError: lastError)
         } catch {
-            restoreComposer(text: message, images: images, pdfs: pdfs)
-            store.setLocalDraft(message, sessionID: session.id)
+            if fromComposer {
+                restoreComposer(text: message, images: images, pdfs: pdfs)
+                store.setLocalDraft(message, sessionID: session.id)
+            }
             store.showToast(error.localizedDescription, isError: true)
             store.notificationManager.triggerHaptic(.error)
             return
         }
-        predictedSuffix = nil
-        lastSyncedText = ""
-        text = ""
-        attachments = []
-        pdfAttachments = []
-        isInputFocused = false
-        // The host draft may still hold this message: it is not pulled back here, and is cleared once the PC answers.
-        hasLocalUnpushedEdits = true
-        scheduleDraftSave()
-        store.setLocalDraft("", sessionID: session.id)
+        if fromComposer {
+            predictedSuffix = nil
+            lastSyncedText = ""
+            text = ""
+            attachments = []
+            pdfAttachments = []
+            isInputFocused = false
+            // The host draft may still hold this message: it is not pulled back here, and is cleared once the PC answers.
+            hasLocalUnpushedEdits = true
+            scheduleDraftSave()
+            store.setLocalDraft("", sessionID: session.id)
+        }
         if state == .pending {
             store.showToast(String(localized: "Saved on this phone. It will be sent when the PC is reachable.", bundle: .main))
             store.notificationManager.triggerHaptic(.lightTap)
@@ -1137,6 +1238,48 @@ public struct ComposerView: View {
             store.notificationManager.triggerHaptic(.warning)
         }
         store.scheduleOutboxFlush()
+    }
+
+    /// Sends a canned prompt (Commit related changes, Push to <base>), or queues it as a follow-up while OMP is working
+    /// (the web's `sendOrQueue`). The composer's own text and attachments stay as they are.
+    private func sendOrQueue(_ message: String) async {
+        guard !isSending, let client = store.activeClient else { return }
+        isSending = true
+        defer { isSending = false }
+
+        // The PC is unreachable, or earlier messages of this session still wait for it: this one waits behind them.
+        if !store.canPerformMutatingActions || store.hasUnsentOutboxItems(sessionID: session.id) {
+            await queueForLater(text: message, images: [], pdfs: [], state: .pending, lastError: nil, fromComposer: false)
+            return
+        }
+
+        let queue = quickPromptQueues
+        let queuedBefore = session.queuedMessages?.count ?? 0
+        do {
+            let updated = try await client.sendSessionPrompt(sessionId: session.id, type: queue ? "follow_up" : "prompt", message: message)
+            store.integrateSession(updated)
+            store.notificationManager.triggerHaptic(.lightTap)
+            if queue {
+                store.showToast((updated.queuedMessages?.count ?? 0) > queuedBefore
+                    ? String(localized: "Queued. Sends when OMP finishes", bundle: .main)
+                    : String(localized: "OMP was already done, so this was sent now", bundle: .main))
+            }
+        } catch {
+            if let apiError = error as? CompanionAPIError, apiError.kind.isConnectivityFailure {
+                let mayHaveArrived = !apiError.definitelyNotDelivered
+                await queueForLater(
+                    text: message,
+                    images: [],
+                    pdfs: [],
+                    state: mayHaveArrived ? .failed : .pending,
+                    lastError: mayHaveArrived ? PromptOutbox.uncertainDeliveryMessage(apiError) : apiError.localizedDescription,
+                    fromComposer: false
+                )
+                return
+            }
+            store.showToast(error.localizedDescription, isError: true)
+            store.notificationManager.triggerHaptic(.error)
+        }
     }
 
     private func restoreComposer(text message: String, images: [PendingImageAttachment], pdfs: [PendingPdfAttachment]) {
