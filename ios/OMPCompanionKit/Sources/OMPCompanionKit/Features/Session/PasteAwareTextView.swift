@@ -77,7 +77,10 @@ private struct PasteAwareTextViewRepresentable: UIViewRepresentable {
         view.backgroundColor = .clear
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
-        view.isScrollEnabled = false
+        // Always scrolling, sized by `sizeThatFits`: switching a UITextView between scrolling and non-scrolling layout
+        // right after its text was replaced (Enhance's Replace Draft takes a one-line draft past `maxLines` at once)
+        // left TextKit showing the previous text while `text` held the new one.
+        view.isScrollEnabled = true
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         view.text = text
@@ -92,7 +95,6 @@ private struct PasteAwareTextViewRepresentable: UIViewRepresentable {
         context.coordinator.parent = self
         if view.text != text {
             view.text = text
-            view.invalidateIntrinsicContentSize()
         }
         let palette = context.environment.ompPalette
         view.textColor = UIColor(palette.foreground)
@@ -117,6 +119,8 @@ private struct PasteAwareTextViewRepresentable: UIViewRepresentable {
         }
     }
 
+    /// Measures only: SwiftUI calls this several times per layout with different proposals, so it must not change the
+    /// view (the text view keeps scrolling on; the height caps at `maxLines`).
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: PasteAwareUITextView, context: Context) -> CGSize? {
         let proposed = proposal.width ?? uiView.bounds.width
         let finiteWidth = proposed.isFinite && proposed > 0 ? proposed : nil
@@ -124,10 +128,6 @@ private struct PasteAwareTextViewRepresentable: UIViewRepresentable {
         let lineHeight = (uiView.font ?? .preferredFont(forTextStyle: .body)).lineHeight
         let minHeight = ceil(lineHeight)
         let maxHeight = ceil(lineHeight * CGFloat(maxLines))
-        let scrolls = fitting.height > maxHeight
-        if uiView.isScrollEnabled != scrolls {
-            uiView.isScrollEnabled = scrolls
-        }
         let height = min(max(ceil(fitting.height), minHeight), maxHeight)
         return CGSize(width: finiteWidth ?? fitting.width, height: height)
     }
@@ -143,9 +143,7 @@ private struct PasteAwareTextViewRepresentable: UIViewRepresentable {
             if parent.text != textView.text {
                 parent.text = textView.text
             }
-            if textView.isScrollEnabled {
-                textView.scrollRangeToVisible(textView.selectedRange)
-            }
+            textView.scrollRangeToVisible(textView.selectedRange)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
