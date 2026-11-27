@@ -1087,6 +1087,7 @@ private struct MarkdownBlockRow: View {
                     .fontWeight(.semibold)
                     .foregroundStyle(muted ? palette.muted : palette.foreground)
                     .padding(.top, level <= 2 ? 4 : 2)
+                    .textSelection(.enabled)
             }
 
         case .paragraph(_, let content):

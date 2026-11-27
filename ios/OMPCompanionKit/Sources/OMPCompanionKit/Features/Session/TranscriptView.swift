@@ -334,10 +334,7 @@ public struct TranscriptView: View {
             }
 
             if !own.text.isEmpty && !pdfOnly {
-                Text(own.text)
-                    .font(.body)
-                    .foregroundStyle(palette.foreground)
-                    .textSelection(.enabled)
+                MarkdownView(text: own.text)
             }
 
             // Steer actions (`pending` edit/cancel, `dropped` one-tap Resend)

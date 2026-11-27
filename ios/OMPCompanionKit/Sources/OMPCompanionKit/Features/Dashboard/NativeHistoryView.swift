@@ -381,7 +381,7 @@ private struct NativeSessionPreviewSheet: View {
                             .foregroundStyle(palette.muted)
                     }
                 }
-                if msg.role == .assistant {
+                if msg.role == .assistant || msg.role == .user {
                     MarkdownView(text: msg.text)
                 } else {
                     Text(msg.text)
