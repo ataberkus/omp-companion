@@ -4,22 +4,36 @@
 # ios/scripts/testflight.mjs registers the App ID dev.omp.companion, keeps the App Store profile "OMP Control App Store"
 # and picks the build number (one above App Store Connect's highest for the project's MARKETING_VERSION).
 # Logs are public: nothing prints the team's names.
+# Runs on its own once "iOS tests" passes for a push to main (a change under ios/), building the commit those tests ran
+# on; by hand:
 #   gh workflow run ios-testflight.yml --ref main
 name: iOS TestFlight
 
 on:
+  workflow_run:
+    workflows: [iOS tests]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  # One at a time: the build number is read from App Store Connect before the upload.
+  # One at a time: the build number is read from App Store Connect before the upload. A newer push waiting here
+  # replaces the older one still waiting, so a burst of pushes uploads the build running now and the latest one.
   group: ios-testflight
   cancel-in-progress: false
 
 jobs:
   testflight:
+    # Only a push to this repository's main whose tests passed; never a pull request or a fork.
+    if: >-
+      github.event_name == 'workflow_dispatch' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: macos-26
     timeout-minutes: 45
     environment: testflight
@@ -36,6 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # After "iOS tests": the commit they passed on, not whatever main holds by now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
       - name: Install XcodeGen
         run: |
