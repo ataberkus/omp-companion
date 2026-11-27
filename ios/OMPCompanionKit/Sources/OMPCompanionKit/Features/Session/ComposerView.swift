@@ -19,7 +19,7 @@ public struct ComposerView: View {
     public var onOpenModes: () -> Void
     public var onOpenBtw: () -> Void
 
-    @FocusState private var isInputFocused: Bool
+    @State private var isInputFocused = false
     @State private var isSending = false
     @State private var showModelPicker = false
     @State private var showEnhanceSheet = false
@@ -313,14 +313,13 @@ public struct ComposerView: View {
 
                 // Text editor + action strip
                 HStack(alignment: .bottom, spacing: 8) {
-                    TextField(
-                        placeholder,
+                    PasteAwareTextField(
+                        placeholder: placeholder,
                         text: $text,
-                        axis: .vertical
+                        isFocused: $isInputFocused,
+                        maxLines: 6,
+                        onPasteAttachment: attachClipboardContent
                     )
-                    .focused($isInputFocused)
-                    .lineLimit(1...6)
-                    .font(.body)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                     .background(palette.raised, in: RoundedRectangle(cornerRadius: 12))
@@ -429,7 +428,6 @@ public struct ComposerView: View {
                     .disabled(!store.canComposePrompts)
                     .accessibilityLabel("Attach image or PDF file")
 
-                    #if canImport(UIKit)
                     Button {
                         pasteClipboardAttachment()
                     } label: {
@@ -439,7 +437,6 @@ public struct ComposerView: View {
                     }
                     .disabled(!store.canComposePrompts)
                     .accessibilityLabel("Paste image or PDF from clipboard")
-                    #endif
 
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button {
@@ -1268,12 +1265,20 @@ public struct ComposerView: View {
         scheduleDraftSave()
     }
 
-    #if canImport(UIKit)
-    /// A PDF on the clipboard (copied from Files or a PDF viewer) is attached as one; otherwise its image.
+    /// The 📋 button: a PDF on the clipboard (copied from Files or a PDF viewer) is attached as one; otherwise its image.
     private func pasteClipboardAttachment() {
-        let board = UIPasteboard.general
+        guard let content = ClipboardAttachment.fromGeneralPasteboard() else {
+            store.showToast(String(localized: "No image or PDF found in clipboard", bundle: .main), isError: true)
+            return
+        }
+        attachClipboardContent(content)
+    }
+
+    /// Shared by the 📋 button and pastes into the input field.
+    private func attachClipboardContent(_ content: ClipboardAttachment) {
         do {
-            if let data = board.data(forPasteboardType: UTType.pdf.identifier) {
+            switch content {
+            case .pdf(let data):
                 let pdf = try PdfAttachmentProcessor.process(
                     data,
                     suggestedName: "clipboard.pdf",
@@ -1282,12 +1287,9 @@ public struct ComposerView: View {
                     existingBase64Bytes: totalAttachmentsBytes
                 )
                 pdfAttachments.append(pdf)
-            } else if let image = board.image {
+            case .image(let image):
                 let att = try ImageAttachmentProcessor.processUIImage(image, suggestedName: "clipboard.jpg", existingBase64Bytes: totalAttachmentsBytes)
                 attachments.append(att)
-            } else {
-                store.showToast(String(localized: "No image or PDF found in clipboard", bundle: .main), isError: true)
-                return
             }
             hasLocalUnpushedEdits = true
             scheduleDraftSave()
@@ -1296,5 +1298,4 @@ public struct ComposerView: View {
             store.showToast(error.localizedDescription, isError: true)
         }
     }
-    #endif
 }
