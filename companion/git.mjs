@@ -4,9 +4,12 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { exec, error } from './util.mjs';
-export async function git(cwd,args){return (await exec('git',['-C',cwd,...args],{timeout:15000,maxBuffer:1024*1024,windowsHide:true})).stdout.trim();}
+// Every run sets core.longPaths for that run only (the user's config is untouched): without it Git for Windows cannot
+// open paths past 260 characters, such as Gradle build/ output deep in a worktree, and `git clean` fails on them.
+const BASE=['-c','core.longPaths=true'];
+export async function git(cwd,args){return (await exec('git',['-C',cwd,...BASE,...args],{timeout:15000,maxBuffer:1024*1024,windowsHide:true})).stdout.trim();}
 // Git runs for the Changes working-tree view and worktree finishing: errors carry git's own stderr.
-export async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
+export async function gitRun(cwd,args,{timeout=30000,maxBuffer=16*1024*1024,env}={}){try{return (await exec('git',['-C',cwd,...BASE,...args],{timeout,maxBuffer,windowsHide:true,...(env?{env:{...process.env,...env}}:{})})).stdout;}catch(e){throw error(String(e.stderr||e.message).trim().split('\n').slice(-6).join('\n')||'git failed.',e.killed?504:400);}}
 // `git diff` output in OMP's line-numbered diff format (" N|ctx" old N, "-N|old", "+N|new"; blank lines between hunks),
 // so the dashboard renders it with the same diff view as edit-tool records. Paths are as git prints them (b/ side).
 const unquoteGitPath=p=>/^".*"$/.test(p)?p.slice(1,-1).replace(/\\(["\\])/g,'$1').replace(/\\t/g,'\t').replace(/\\n/g,'\n'):p;
